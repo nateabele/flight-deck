@@ -13,11 +13,11 @@ final class PortForwarder: @unchecked Sendable {
     private let lock = NSLock()
     private var owners: [UInt16: String] = [:]
     private let timeWaitRetries: Int
-    private let retryInterval: Duration
+    private let retryInterval: Swift.Duration
 
     /// `timeWaitRetries` × `retryInterval` should cover the kernel's TIME_WAIT (2 × MSL, 30 s
     /// on macOS); only tests shorten it.
-    init(timeWaitRetries: Int = 30, retryInterval: Duration = .seconds(1)) {
+    init(timeWaitRetries: Int = 30, retryInterval: Swift.Duration = .seconds(1)) {
         self.timeWaitRetries = timeWaitRetries
         self.retryInterval = retryInterval
     }

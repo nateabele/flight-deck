@@ -1,7 +1,8 @@
 import Foundation
 
-// `.flightdeck/delegate.toml` (spec §8), as parsed. The parser, validation and route matching
-// are track C4's; these are the values every other track reads.
+// `.flightdeck/delegate.toml` (spec §8), as parsed. Parsing and validation are
+// `DelegateConfigParser`'s and route matching `RouteMatcher`'s; these are the values the rest
+// of delegation reads.
 
 public struct DelegateConfig: Sendable, Equatable {
     public var defaultHost: String?
@@ -10,13 +11,16 @@ public struct DelegateConfig: Sendable, Equatable {
     public var recipes: [String: Recipe]
     /// In file order: the first match wins.
     public var routes: [Route]
+    /// `[infra.<name>]`: cloud machines this project can bring up.
+    public var infra: [String: InfraConfig]
 
     public init(defaultHost: String? = nil, include: [String] = [], recipes: [String: Recipe] = [:],
-                routes: [Route] = []) {
+                routes: [Route] = [], infra: [String: InfraConfig] = [:]) {
         self.defaultHost = defaultHost
         self.include = include
         self.recipes = recipes
         self.routes = routes
+        self.infra = infra
     }
 }
 

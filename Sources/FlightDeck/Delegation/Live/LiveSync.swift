@@ -46,7 +46,9 @@ enum LiveGitFailure {
 
     private static func nextStep(_ error: SyncError) -> String {
         switch error {
-        case .lfsUnsupported, .submodulesUnsupported: return "run it locally"
+        case .lfsUnsupported: return "run it locally"
+        // The description already names the submodule and the fix; this is the way around it.
+        case .submodule: return "or run it locally"
         case .unbornHead: return "commit once, then rerun"
         case .gitTooOld: return "update git on this Mac, then rerun"
         case .unsafePath: return "check the run's changes on the host; nothing here was touched"

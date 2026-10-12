@@ -11,6 +11,11 @@ import Foundation
 ///     fd-results/<run-id>                       "this run changed nothing", same lifetime
 ///     worktrees/<n>/flightdeck-excludes         the controller's excludes, per slot
 ///   checkouts/<wt-key>-<slot>/<worktree-name>/  one `git worktree` per pool slot
+///     <submodule path>/                         a `git worktree` of that submodule's cache
+///   checkouts/<wt-key>-<slot>/.fd-last-used     when a lease last took or gave back the slot
+/// <root>/submodules/<controller>/<name>-<hash>.git   one bare cache per submodule URL
+///     refs/fd/pins/<commit>                     every commit a slot has had checked out
+///     worktrees/<n>/                            one per slot and path it is placed at
 /// <root>/runs/<run-id>/artifacts.tar            captured artifacts
 /// ```
 ///
@@ -28,7 +33,16 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     public let poolSize: Int
     public let keep: Int
     public let resultTTL: TimeInterval
-    private let git: GitRunner
+    /// `gc` deletes a slot nobody has leased or released for this long (default 3 days). The
+    /// host cannot see the controller's worktrees, so this is also how a slot for a worktree
+    /// that no longer exists goes: it simply stops being used.
+    public let checkoutIdleTTL: TimeInterval
+    let git: GitRunner
+    /// Stamps each slot's `.fd-last-used`. Injected so tests can age a slot without waiting.
+    let clock: @Sendable () -> Date
+    /// Free and total bytes of the volume holding `root`, for `gc`'s high-water mark. Injected
+    /// so tests can drive it; nil (unreadable) skips the high-water pass.
+    let freeSpace: @Sendable (URL) -> VolumeSpace?
 
     private let lock = NSLock()
     private var pools: [PoolKey: [Int: Slot]] = [:]
@@ -45,14 +59,70 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         set { lock.withLock { _applyHook = newValue } }
     }
     private var _applyHook: (@Sendable () -> Void)?
+    /// Test seam: runs as each submodule's fetch starts, inside its cache lock (a slow remote),
+    /// with the submodule's path.
+    var submoduleFetchHook: (@Sendable (String) -> Void)? {
+        get { lock.withLock { _submoduleFetchHook } }
+        set { lock.withLock { _submoduleFetchHook = newValue } }
+    }
+    private var _submoduleFetchHook: (@Sendable (String) -> Void)?
+    /// Test seam: runs in `gc` as each slot directory is picked for eviction, before the lease
+    /// check, off every lock (a run leasing the slot right then).
+    var evictionHook: (@Sendable (URL) -> Void)? {
+        get { lock.withLock { _evictionHook } }
+        set { lock.withLock { _evictionHook = newValue } }
+    }
+    private var _evictionHook: (@Sendable (URL) -> Void)?
+    /// Test seam: runs as `usage`'s walk starts measuring each directory (a slow disk).
+    var usageWalkHook: (@Sendable (URL) -> Void)? {
+        get { lock.withLock { _usageWalkHook } }
+        set { lock.withLock { _usageWalkHook = newValue } }
+    }
+    private var _usageWalkHook: (@Sendable (URL) -> Void)?
+    /// How long `usage` waits for its walk before answering from the last finished one. The
+    /// controller would wait an hour (`LiveHostLink.bulkReplyTimeout`), and a person at
+    /// `host ls --disk` should not.
+    var usageBudget: TimeInterval {
+        get { lock.withLock { _usageBudget } }
+        set { lock.withLock { _usageBudget = newValue } }
+    }
+    private var _usageBudget: TimeInterval = 10
+    /// The walk measuring each controller's usage right now, joined by every `usage` call made
+    /// meanwhile, and the rows of the last one to finish.
+    private var usageWalks: [UUID: UsageWalk] = [:]
+    private var usageCache: [UUID: [WorkspaceUsage]] = [:]
 
     public init(root: URL, poolSize: Int = 2, keep: Int = 5, resultTTL: TimeInterval = 24 * 3600,
+                checkoutIdleTTL: TimeInterval = 3 * 24 * 3600,
+                clock: @escaping @Sendable () -> Date = { Date() },
+                freeSpace: @escaping @Sendable (URL) -> VolumeSpace? = { Workspace.volumeSpace(at: $0) },
                 git: GitRunner = GitRunner(isolated: true)) {
         self.root = root
         self.poolSize = poolSize
         self.keep = keep
         self.resultTTL = resultTTL
+        self.checkoutIdleTTL = checkoutIdleTTL
+        self.clock = clock
+        self.freeSpace = freeSpace
         self.git = git
+    }
+
+    /// Free and total bytes of the volume holding `url` (or its nearest existing ancestor: a
+    /// fresh host has not created the state root yet). Foundation only, so HostKit stays
+    /// Linux-clean: `statvfs` there, as `HostInfoProbe.diskFree` reads it; on macOS the volume
+    /// resource keys.
+    public static func volumeSpace(at url: URL) -> VolumeSpace? {
+        var url = url
+        while !FileManager.default.fileExists(atPath: url.path), url.path != "/" { url.deleteLastPathComponent() }
+        #if os(Linux)
+        var s = statvfs()
+        guard statvfs(url.path, &s) == 0 else { return nil }
+        return VolumeSpace(available: Int64(s.f_bavail) * Int64(s.f_frsize), total: Int64(s.f_blocks) * Int64(s.f_frsize))
+        #else
+        guard let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey]),
+              let available = v.volumeAvailableCapacity, let total = v.volumeTotalCapacity else { return nil }
+        return VolumeSpace(available: Int64(available), total: Int64(total))
+        #endif
     }
 
     public func storeURL(controller: UUID, repoRoot: String) -> URL {
@@ -153,6 +223,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             if dequeued { wake(key) }
             switch claim {
             case .shared(let lease):
+                touch(lease)
                 return lease
             case .wait:
                 try await waitForChange(key, since: seen)
@@ -160,9 +231,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 do {
                     try await GitRunner.offload { [self] in
                         applyHook?()
-                        return try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
-                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot), exclusive: true)
-                        }
+                        try apply(ref, at: path, controller: controller, exclusive: true)
                     }
                 } catch {
                     lock.withLock {
@@ -181,7 +250,9 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     pools[key]?[slot]?.lastApplied = Date()
                 }
                 wake(key)
-                return CheckoutLease(id: id, path: path, slot: slot, ref: ref)
+                let lease = CheckoutLease(id: id, path: path, slot: slot, ref: ref)
+                touch(lease)
+                return lease
             }
         }
     }
@@ -271,7 +342,22 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// rebuilt from scratch and the whole apply runs once more, rather than left wedged. A real
     /// tree mismatch fails again after the rebuild and is reported as such. With a sharer (an
     /// `exec` beside a service) its git may be live, so nothing is touched.
-    private func apply(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
+    ///
+    /// Submodules are placed after the superproject's tree is verified, and outside its
+    /// rebuild-and-retry: a submodule that cannot be fetched (a URL the host cannot reach) would
+    /// fail the same way after a rebuild, having paid for the fetch attempt twice.
+    ///
+    /// And outside the store lock. That lock serializes every sync, apply, gc and prune of the
+    /// repo; a submodule fetch can take minutes (a big repository, a slow remote), and held
+    /// there it stalled every other agent syncing the same repo. The slot is still ours (leased,
+    /// not `ready`, so nobody joins it half placed) and each cache has its own lock.
+    private func apply(_ ref: SnapshotRef, at path: URL, controller: UUID, exclusive: Bool) throws {
+        let store = storeURL(controller: controller, repoRoot: ref.repoRoot)
+        try withStore(store) { try applyTree(ref, at: path, store: store, exclusive: exclusive) }
+        try placeSubmodules(ref, in: path, controller: controller)
+    }
+
+    private func applyTree(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
         let fm = FileManager.default
         if let admin = Self.adminDir(path), fm.fileExists(atPath: admin.path) {
             if exclusive {
@@ -314,7 +400,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// A worktree's admin dir, from its `.git` file (`gitdir: …`), read without git so that it
     /// still works on a slot whose git state is broken.
-    private static func adminDir(_ path: URL) -> URL? {
+    static func adminDir(_ path: URL) -> URL? {
         guard let text = try? String(contentsOf: path.appendingPathComponent(".git"), encoding: .utf8),
               text.hasPrefix("gitdir: ") else { return nil }
         let dir = text.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -323,7 +409,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// Config for the commands that decide what is ignored (`clean`, the result's `add`): the
     /// controller's excludes, and no host-wide attributes file.
-    private static func ignoring(_ excludes: URL) -> [String] {
+    static func ignoring(_ excludes: URL) -> [String] {
         ["-c", "core.excludesFile=\(excludes.path)", "-c", "core.attributesFile=/dev/null"]
     }
 
@@ -332,7 +418,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     public func existingCheckout(controller: UUID, repoRoot: String, wtKey: String) async throws -> CheckoutLease {
         let key = PoolKey(controller: controller, repoRoot: try SyncName.objectID(repoRoot), wtKey: try SyncName.validate(wtKey))
         let id = UUID()
-        if let lease = lock.withLock({ joinExisting(key, id) }) { return lease }
+        if let lease = lock.withLock({ joinExisting(key, id) }) { touch(lease); return lease }
 
         // Nothing in memory (a fresh hostd): rediscover the checkouts from disk.
         let found = try await GitRunner.offload { [self] () -> [(Int, URL, SnapshotRef, Date)] in
@@ -340,7 +426,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             let dirs = (try? fm.contentsOfDirectory(atPath: checkoutsDir(key).path)) ?? []
             return dirs.compactMap { dir -> (Int, URL, SnapshotRef, Date)? in
                 guard dir.hasPrefix(key.wtKey + "-"), let slot = Int(dir.dropFirst(key.wtKey.count + 1)),
-                      let name = try? fm.contentsOfDirectory(atPath: checkoutsDir(key).appendingPathComponent(dir).path).first
+                      let name = Self.worktreeNames(in: checkoutsDir(key).appendingPathComponent(dir)).first
                 else { return nil }
                 let path = slotPath(key, slot, name)
                 guard let commit = try? git.text(["rev-parse", "HEAD"], in: path),
@@ -352,7 +438,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 return (slot, path, SnapshotRef(repoRoot: key.repoRoot, wtKey: key.wtKey, worktreeName: name, commit: commit, tree: tree), applied)
             }
         }
-        return try lock.withLock {
+        let lease = try lock.withLock { () -> CheckoutLease in
             if let lease = joinExisting(key, id) { return lease }
             // A slot this hostd is applying into right now is on disk too, half written; it
             // becomes ready (and joinable above) once its apply is done.
@@ -367,6 +453,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             leases[id] = (key, index)
             return CheckoutLease(id: id, path: path, slot: index, ref: ref)
         }
+        touch(lease)
+        return lease
     }
 
     /// Under `lock`.
@@ -385,8 +473,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             guard let (key, index) = leases[lease.id] else { return nil }
             return (key, index, pools[key]?[index]?.holders == [lease.id])
         }) else { throw SyncError.noCheckout }
-        let store = storeURL(controller: key.controller, repoRoot: key.repoRoot)
-        try await GitRunner.offload { [self] in try withStore(store) { try apply(ref, at: lease.path, store: store, exclusive: alone) } }
+        try await GitRunner.offload { [self] in try apply(ref, at: lease.path, controller: key.controller, exclusive: alone) }
+        touch(lease)
         lock.withLock {
             pools[key]?[index]?.ref = ref
             pools[key]?[index]?.lastApplied = Date()
@@ -396,7 +484,11 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// Releases one holder of the lease's slot; the slot is free once its last holder is gone.
     /// Releasing twice, or a lease this store never issued, does nothing.
+    ///
+    /// The slot's marker is stamped while the lease still holds it, so by the time `gc` can see
+    /// the slot free, the marker already says it was used just now.
     public func release(_ lease: CheckoutLease) async {
+        if lock.withLock({ leases[lease.id] != nil }) { touch(lease) }
         let key = lock.withLock { () -> PoolKey? in
             guard let (key, index) = leases.removeValue(forKey: lease.id), let slot = pools[key]?[index] else { return nil }
             slot.holders.remove(lease.id)
@@ -414,12 +506,13 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// that changed nothing records that too, so `resultBundle` can tell it from a lost result.
     public func resultCommit(lease: CheckoutLease, runID: String) async throws -> String? {
         let runID = try SyncName.validate(runID)
-        return try await GitRunner.offload { [git] () -> String? in
+        return try await GitRunner.offload { [self, git] () -> String? in
             let store = URL(fileURLWithPath: try git.text(["rev-parse", "--path-format=absolute", "--git-common-dir"], in: lease.path))
             let index = try TempIndex(git: git, top: lease.path, dir: FileManager.default.temporaryDirectory, seed: lease.ref.commit)
             defer { index.remove() }
             let ignoring = Self.adminDir(lease.path).map { Self.ignoring($0.appendingPathComponent("flightdeck-excludes")) } ?? []
-            try git.run(ignoring + ["add", "-A"], in: lease.path, env: index.env)
+            let pathspecs = try resultPathspecs(snapshot: lease.ref.commit, in: lease.path)
+            try git.run(ignoring + ["add", "-A"] + pathspecs, in: lease.path, env: index.env)
             let tree = try git.text(["write-tree"], in: lease.path, env: index.env)
             guard tree != lease.ref.tree else {
                 let marks = store.appendingPathComponent("fd-results")
@@ -480,7 +573,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     ///
     /// A glob that matches a *tracked* path throws: tracked files come back through the
     /// three-way-merged patch, and a tar would overwrite the user's concurrent edits instead.
-    /// Preflight refuses this earlier (C5); this is the backstop.
+    /// Preflight refuses this earlier (§7 step 3); this is the backstop.
     public func captureArtifacts(lease: CheckoutLease, runID: String, globs: [String]) async throws -> URL? {
         let runID = try SyncName.validate(runID)
         let out = root.appendingPathComponent("runs/\(runID)/artifacts.tar")
@@ -521,25 +614,101 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// One row per checked-out worktree (the sum of its slots, build output included) plus one
     /// per store with an empty `worktreeName` for the shared object store.
+    ///
+    /// The figure is a walk that stats every file of every checkout, and its cost is the file
+    /// count: on the jeeves hostd, 60 GB of build output, it ran for minutes while the CLI
+    /// waited (the controller allows an hour). So it is bounded. The walk runs on a global
+    /// queue, one per controller at a time (asking again joins it: a second walk on a struggling
+    /// disk only slows the first), and `usage` waits for it up to `usageBudget`. Past that it
+    /// answers with the rows of the last walk that finished, or, before any has, with every row
+    /// at what has been counted so far (lower bounds; the wire has no field to say so). The
+    /// walk carries on and its rows answer the next ask.
     public func usage(controller: UUID) async throws -> [WorkspaceUsage] {
-        let base = root.appendingPathComponent("workspaces/\(controller.uuidString)")
-        return try await GitRunner.offload { () -> [WorkspaceUsage] in
-            let fm = FileManager.default
-            var rows: [WorkspaceUsage] = []
-            for repoRoot in ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).sorted() {
-                let repo = base.appendingPathComponent(repoRoot)
-                rows.append(WorkspaceUsage(repoRoot: repoRoot, worktreeName: "", bytes: Self.bytes(repo.appendingPathComponent("store.git"))))
-                var byName: [String: Int64] = [:]
-                let checkouts = repo.appendingPathComponent("checkouts")
-                for slot in (try? fm.contentsOfDirectory(atPath: checkouts.path)) ?? [] {
-                    for name in (try? fm.contentsOfDirectory(atPath: checkouts.appendingPathComponent(slot).path)) ?? [] {
-                        byName[name, default: 0] += Self.bytes(checkouts.appendingPathComponent("\(slot)/\(name)"))
-                    }
-                }
-                rows += byName.sorted { $0.key < $1.key }.map { WorkspaceUsage(repoRoot: repoRoot, worktreeName: $0.key, bytes: $0.value) }
-            }
-            return rows
+        let (walk, budget, start) = lock.withLock { () -> (UsageWalk, TimeInterval, Bool) in
+            if let running = usageWalks[controller] { return (running, _usageBudget, false) }
+            let walk = UsageWalk()
+            usageWalks[controller] = walk
+            return (walk, _usageBudget, true)
         }
+        if start {
+            DispatchQueue.global().async { [self] in
+                let rows = measureUsage(controller: controller, into: walk)
+                lock.withLock {
+                    usageCache[controller] = rows
+                    usageWalks[controller] = nil
+                }
+                walk.finish(rows)
+            }
+        }
+        if let rows = try await GitRunner.offload({ walk.wait(budget) }) { return rows }
+        return lock.withLock { usageCache[controller] } ?? walk.partial
+    }
+
+    /// The walk itself. Every row is posted first, at zero, so an answer given mid-walk still
+    /// names every checkout; each is filled in as its directories are summed.
+    private func measureUsage(controller: UUID, into walk: UsageWalk) -> [WorkspaceUsage] {
+        let base = root.appendingPathComponent("workspaces/\(controller.uuidString)")
+        let caches = submoduleCaches(controller: controller)
+        let hook = usageWalkHook
+        let fm = FileManager.default
+        var targets: [(repoRoot: String, name: String, dirs: [URL])] = []
+        for repoRoot in ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).sorted() {
+            let repo = base.appendingPathComponent(repoRoot)
+            targets.append((repoRoot, "", [repo.appendingPathComponent("store.git")]))
+            var byName: [String: [URL]] = [:]
+            let checkouts = repo.appendingPathComponent("checkouts")
+            for slot in (try? fm.contentsOfDirectory(atPath: checkouts.path)) ?? [] {
+                for name in Self.worktreeNames(in: checkouts.appendingPathComponent(slot)) {
+                    byName[name, default: []].append(checkouts.appendingPathComponent("\(slot)/\(name)"))
+                }
+            }
+            targets += byName.sorted { $0.key < $1.key }.map { (repoRoot, $0.key, $0.value) }
+        }
+        // The submodule caches, one row each under the repo column `submodules` (never a
+        // root commit, so no row is mistaken for a repo's): a submodule fetched in full can
+        // be gigabytes, and they sit outside `workspaces/`.
+        for name in ((try? fm.contentsOfDirectory(atPath: caches.path)) ?? []).sorted() {
+            targets.append(("submodules", name, [caches.appendingPathComponent(name)]))
+        }
+        var rows = targets.map { WorkspaceUsage(repoRoot: $0.repoRoot, worktreeName: $0.name, bytes: 0) }
+        walk.progress(rows)
+        for (i, target) in targets.enumerated() {
+            var sum: Int64 = 0
+            for dir in target.dirs {
+                hook?(dir)
+                sum += Self.bytes(dir)
+            }
+            rows[i] = WorkspaceUsage(repoRoot: target.repoRoot, worktreeName: target.name, bytes: sum)
+            walk.progress(rows)
+        }
+        return rows
+    }
+
+    /// One controller's usage walk, as the `usage` calls waiting on it see it.
+    private final class UsageWalk: @unchecked Sendable {
+        private let lock = NSLock()
+        private var rows: [WorkspaceUsage] = []
+        private var finished: [WorkspaceUsage]?
+        private let done = DispatchSemaphore(value: 0)
+
+        func progress(_ rows: [WorkspaceUsage]) { lock.withLock { self.rows = rows } }
+
+        func finish(_ rows: [WorkspaceUsage]) {
+            lock.withLock { self.rows = rows; finished = rows }
+            done.signal()
+        }
+
+        /// The finished rows, or nil if the walk is still going after `seconds`. Blocks a
+        /// dispatch thread (callers are inside `offload`), and passes the signal on, so every
+        /// waiter wakes.
+        func wait(_ seconds: TimeInterval) -> [WorkspaceUsage]? {
+            guard done.wait(timeout: .now() + seconds) == .success else { return nil }
+            done.signal()
+            return lock.withLock { finished }
+        }
+
+        /// Every row, each at what has been counted so far.
+        var partial: [WorkspaceUsage] { lock.withLock { rows } }
     }
 
     /// Deletes the checkouts (and with them their build output) for one repo, or for all of
@@ -565,23 +734,191 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     if fm.fileExists(atPath: store.path) { try git.run(["worktree", "prune"], in: store) }
                 }
             }
+            try pruneUnusedSubmoduleCaches(controller: controller)
         }
     }
 
-    /// Expires results nobody acked within `resultTTL` (acked ones are already gone), prunes stale
-    /// worktree records, then `git gc --auto` (§4.7). The host calls it periodically.
-    public func gc(now: Date = Date()) async throws {
+    /// Evicts idle checkouts, then expires results nobody acked within `resultTTL` (acked ones
+    /// are already gone), prunes stale worktree records, and runs `git gc --auto` (§4.7). The
+    /// host calls it hourly (`DelegationHost.standard`).
+    ///
+    /// Eviction runs first, and one store's failure no longer stops the rest: on a full disk
+    /// git's own steps (`update-ref`, `gc --auto`) fail with ENOSPC, and when they ran first and
+    /// threw, nothing was ever deleted and the disk stayed full. The first error is rethrown
+    /// once every store has had its turn.
+    public func gc(now: Date? = nil) async throws {
+        let now = now ?? clock()
         let base = root.appendingPathComponent("workspaces")
         try await GitRunner.offload { [self] in
             let fm = FileManager.default
+            evictCheckouts(base, now: now)
+            var failure: Error?
             for controller in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
                 for repoRoot in (try? fm.contentsOfDirectory(atPath: base.appendingPathComponent(controller).path)) ?? [] {
                     let store = base.appendingPathComponent("\(controller)/\(repoRoot)/store.git")
                     guard fm.fileExists(atPath: store.path) else { continue }
-                    try withStore(store) { try collect(store, now: now) }
+                    do { try withStore(store) { try collect(store, now: now) } } catch { failure = failure ?? error }
+                }
+            }
+            if let failure { throw failure }
+        }
+    }
+
+    // MARK: - Checkout retention (§4.7)
+
+    /// Each slot directory's record of its last use, beside its worktree. Not the directory's
+    /// mtime: a build writing into the checkout would keep a slot nobody leases alive forever.
+    static let lastUsedMarker = ".fd-last-used"
+
+    /// The `max(15%, 10 GiB)` floor of free space on the state root's volume. Below it `gc`
+    /// evicts unleased slots oldest first, idle or not.
+    static func highWaterMark(total: Int64) -> Int64 { max(total / 100 * 15, 10 << 30) }
+
+    /// The worktree directories in a slot directory: everything but the marker.
+    static func worktreeNames(in slotDir: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: slotDir.path)) ?? []).filter { $0 != lastUsedMarker }
+    }
+
+    /// Stamps the lease's slot as used now. Best effort: on a full disk the write fails (or
+    /// truncates the marker, which `lastUsed` then reads by its mtime, also now), and the live
+    /// lease is what protects the slot meanwhile, never the marker.
+    private func touch(_ lease: CheckoutLease) {
+        let marker = lease.path.deletingLastPathComponent().appendingPathComponent(Self.lastUsedMarker)
+        try? Data("\(clock().timeIntervalSince1970)\n".utf8).write(to: marker)
+    }
+
+    /// When the slot was last leased or released: the time its marker holds, or the marker's
+    /// mtime if that does not parse (a write truncated by a full disk).
+    ///
+    /// A slot with no marker was checked out before markers existed. It falls back to its last
+    /// apply, the mtime of its worktree's index (every apply rewrites it, as `existingCheckout`
+    /// relies on), then to the slot directory's own mtime; that time is written into a marker,
+    /// so the fallback is taken once per slot and later passes read the marker.
+    private func lastUsed(_ slotDir: URL) -> Date {
+        let fm = FileManager.default
+        let marker = slotDir.appendingPathComponent(Self.lastUsedMarker)
+        func mtime(_ url: URL) -> Date? { (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date }
+        if let data = fm.contents(atPath: marker.path) {
+            let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let seconds = TimeInterval(text) { return Date(timeIntervalSince1970: seconds) }
+            if let stamped = mtime(marker) { return stamped }
+        }
+        let applied = Self.worktreeNames(in: slotDir)
+            .compactMap { Self.adminDir(slotDir.appendingPathComponent($0)) }
+            .compactMap { mtime($0.appendingPathComponent("index")) }.max()
+        let when = applied ?? mtime(slotDir) ?? .distantPast
+        try? Data("\(when.timeIntervalSince1970)\n".utf8).write(to: marker)
+        return when
+    }
+
+    private struct SlotDir {
+        let key: PoolKey
+        let index: Int
+        let dir: URL
+        let store: URL
+        let lastUsed: Date
+    }
+
+    /// Every slot directory on disk, of every controller and repo, with its last use.
+    private func slotDirs(_ base: URL) -> [SlotDir] {
+        let fm = FileManager.default
+        var found: [SlotDir] = []
+        for controller in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+            guard let id = UUID(uuidString: controller) else { continue }
+            for repoRoot in (try? fm.contentsOfDirectory(atPath: base.appendingPathComponent(controller).path)) ?? [] {
+                let repo = base.appendingPathComponent("\(controller)/\(repoRoot)")
+                let checkouts = repo.appendingPathComponent("checkouts")
+                for name in (try? fm.contentsOfDirectory(atPath: checkouts.path)) ?? [] {
+                    // `<wt-key>-<slot>`: a wt-key may itself contain `-`, the slot never does.
+                    guard let dash = name.lastIndex(of: "-"), dash != name.startIndex,
+                          let index = Int(name[name.index(after: dash)...]) else { continue }
+                    let dir = checkouts.appendingPathComponent(name, isDirectory: true)
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+                    found.append(SlotDir(key: PoolKey(controller: id, repoRoot: repoRoot, wtKey: String(name[..<dash])),
+                                         index: index, dir: dir, store: repo.appendingPathComponent("store.git"),
+                                         lastUsed: lastUsed(dir)))
                 }
             }
         }
+        return found
+    }
+
+    /// Idle eviction, then the high-water mark. Never adds scheduling of its own: it is `gc`'s.
+    private func evictCheckouts(_ base: URL, now: Date) {
+        let all = slotDirs(base)
+        let cutoff = now.addingTimeInterval(-checkoutIdleTTL)
+        var kept: [SlotDir] = []
+        for slot in all.sorted(by: { $0.lastUsed < $1.lastUsed }) {
+            if slot.lastUsed < cutoff, evict(slot) { continue }
+            kept.append(slot)
+        }
+        guard var space = freeSpace(root) else { return }
+        let mark = Self.highWaterMark(total: space.total)
+        for slot in kept where space.available < mark {
+            guard evict(slot) else { continue }
+            guard let next = freeSpace(root) else { return }
+            space = next
+        }
+    }
+
+    /// Deletes one slot directory the way `prune` does (the directory, then `git worktree
+    /// prune` in its store), unless it is leased. Returns whether it was deleted.
+    ///
+    /// The lease check is made under `lock`, the lock `checkout`, `existingCheckout` and
+    /// `release` take, and an unleased slot is reserved there in the same hold: gc becomes its
+    /// holder, not `ready`. A checkout arriving meanwhile sees it held and takes another slot
+    /// or waits (`claimSlot`), a sharer waits for `ready`, and `existingCheckout` skips it, so
+    /// no run can start in a tree being deleted. The reservation ends with the slot forgotten
+    /// and the pool woken, and the next run there rebuilds it from the store.
+    ///
+    /// The directory is deleted outside the store lock: the reservation already keeps every
+    /// apply out of this slot, and deleting gigabytes of build output under that lock would
+    /// stall every sync of the repo. Only the `worktree prune` takes it.
+    private func evict(_ slot: SlotDir) -> Bool {
+        evictionHook?(slot.dir)
+        let gcID = UUID()
+        let created = lock.withLock { () -> Bool? in
+            if let held = pools[slot.key]?[slot.index] {
+                guard held.holders.isEmpty, held.ready else { return nil }
+                held.holders = [gcID]
+                held.ready = false
+                return false
+            }
+            let reserved = Slot(path: slot.dir)
+            reserved.holders = [gcID]
+            reserved.ready = false
+            pools[slot.key, default: [:]][slot.index] = reserved
+            return true
+        }
+        guard let created else { return false }
+        // Used between the pick and the reservation (a whole run came and went): not idle. A
+        // second of slack, because a time read back through the marker's text and `Date` can
+        // differ from the one first read in its last bits.
+        if lastUsed(slot.dir).timeIntervalSince(slot.lastUsed) > 1 {
+            lock.withLock {
+                if created {
+                    pools[slot.key]?[slot.index] = nil
+                } else {
+                    pools[slot.key]?[slot.index]?.holders.remove(gcID)
+                    pools[slot.key]?[slot.index]?.ready = true
+                }
+            }
+            wake(slot.key)
+            return false
+        }
+        defer {
+            lock.withLock { pools[slot.key]?[slot.index] = nil }
+            wake(slot.key)
+        }
+        let fm = FileManager.default
+        try? fm.removeItem(at: slot.dir)
+        // Best effort, like the delete: a record left stale is pruned by the next apply's own
+        // `worktree prune`, and one failure here must not stop the rest of the pass.
+        if fm.fileExists(atPath: slot.store.path) {
+            _ = try? withStore(slot.store) { try git.run(["worktree", "prune"], in: slot.store) }
+        }
+        return !fm.fileExists(atPath: slot.dir.path)
     }
 
     private func collect(_ store: URL, now: Date) throws {
@@ -621,7 +958,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// Serializes git work per store: `worktree add`, `fetch` and ref transactions on one bare
     /// repo would otherwise race on its lock files and fail one of two concurrent syncs.
     /// Blocks a dispatch thread, never the cooperative pool (every caller is inside `offload`).
-    private func withStore<T>(_ store: URL, _ body: () throws -> T) throws -> T {
+    func withStore<T>(_ store: URL, _ body: () throws -> T) throws -> T {
         let storeLock = lock.withLock { () -> NSLock in
             if let l = storeLocks[store.path] { return l }
             let l = NSLock()
@@ -667,6 +1004,15 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     private struct Waiter {
         let id: UUID
         let cont: CheckedContinuation<Void, Error>
+    }
+}
+
+public struct VolumeSpace: Sendable, Equatable {
+    public var available: Int64
+    public var total: Int64
+    public init(available: Int64, total: Int64) {
+        self.available = available
+        self.total = total
     }
 }
 

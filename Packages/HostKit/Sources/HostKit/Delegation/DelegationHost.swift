@@ -35,6 +35,15 @@ public final class DelegationHost: @unchecked Sendable {
     private let services: DelegationHostServices
     private let live: LiveSlots
     private let git = GitRunner(isolated: true)
+    /// Told of every request and every run, service and transfer, for `host.info`'s
+    /// `idleSince`. Public so a hostd hands the core the same tracker the router feeds.
+    public let idle: IdleTracker?
+    /// How long a transfer channel (`sync.push`'s bundle in, `run.result`'s and
+    /// `run.artifacts`' out) may go without moving a byte before its request fails
+    /// `transfer_stalled`. Ten minutes: far past any link's hiccup, short enough that a frozen
+    /// controller cannot hold a billed cloud box "busy" until its TTL.
+    public static let transferStall: TimeInterval = 600
+    private let stall: TimeInterval
 
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: Connection] = [:]
@@ -42,16 +51,22 @@ public final class DelegationHost: @unchecked Sendable {
     /// keys results by repo. In memory, because a run does not outlive hostd (`shutdown`, and
     /// `Runner`'s startup kill of groups a crashed hostd left).
     private var runRepos: [String: String] = [:]
-    /// Runs that ended without ever running (a failed checkout, a locked screen). Their
-    /// `run.result` is "nothing changed", not `result_expired`: there never was a result.
-    private var failedRuns: Set<String> = []
+    /// Runs that ended without ever running (a failed checkout, a locked screen), with the
+    /// offset their synthesized reason line was first sent at. Their `run.result` is "nothing
+    /// changed", not `result_expired`: there never was a result. The offset is kept because
+    /// the line is not in the spool: re-sent at whatever offset a re-attach asked from, a
+    /// controller that already had it printed it twice.
+    private var failedRuns: [String: Int64] = [:]
     /// Slots whose pairing was revoked. A `run.start` from one that was already being routed
     /// when the revoke landed must not start anything afterwards.
     private var revokedSlots: Set<UUID> = []
 
     public init(runner: any RunControlling, workspace: any WorkspaceStore, screen: ScreenLease,
-                portCheck: any PortChecking, screenSupported: Bool) {
+                portCheck: any PortChecking, screenSupported: Bool, idle: IdleTracker? = nil,
+                transferStall: TimeInterval = DelegationHost.transferStall) {
         self.runner = runner
+        self.idle = idle
+        stall = transferStall
         self.workspace = workspace
         self.screen = screen
         let live = LiveSlots()
@@ -59,17 +74,17 @@ public final class DelegationHost: @unchecked Sendable {
         services = DelegationHostServices(context: DelegationHostContext(
             runner: runner, workspace: workspace, portCheck: portCheck, screen: screen,
             isConnected: { live.contains($0) }))
-        capabilities = [.run, .sync, .service] + (screenSupported ? [.screen] : [])
+        capabilities = [.run, .sync, .service, .submodules] + (screenSupported ? [.screen] : [])
     }
 
     /// hostd's wiring: the workspace store and the run spools under the state root, the
-    /// runner releasing its slot only after the result and artifacts are taken (C2's order,
-    /// `RunLifecycle.workspace`), and the store's hourly expiry of results nobody fetched.
+    /// runner releasing its slot only after the result and artifacts are taken (the order
+    /// `RunLifecycle.workspace` keeps), and the store's hourly expiry of results nobody fetched.
     /// `power` and `console` are HostKitDarwin's on a Mac, HostKit's own (Linux) elsewhere.
     public static func standard(root: URL,
                                 power: any PowerAsserting = PowerAssertion.platformDefault,
                                 console: any ConsoleSessionProbing = ConsoleSession.platformDefault,
-                                screenSupported: Bool) -> DelegationHost {
+                                screenSupported: Bool, idle: IdleTracker? = nil) -> DelegationHost {
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
         let runner = Runner(runsRoot: root.appendingPathComponent("runs"), power: power, console: console,
@@ -81,7 +96,7 @@ public final class DelegationHost: @unchecked Sendable {
             }
         }
         return DelegationHost(runner: runner, workspace: workspace, screen: screen, portCheck: PortCheck(),
-                              screenSupported: screenSupported)
+                              screenSupported: screenSupported, idle: idle)
     }
 
     /// hostd is stopping (its SIGTERM path): every service downed, `down` command and all,
@@ -142,13 +157,19 @@ public final class DelegationHost: @unchecked Sendable {
     }
 
     /// Answers request `id` whenever it is done, from a task of its own; returns at once.
+    ///
+    /// Every request is activity for the idle tracker from arrival until it is answered, not
+    /// just at arrival: a `sync.push` or `run.result` streaming a bundle over a slow link for
+    /// minutes is the host at work. Ended on every path out, a failed or aborted transfer too.
     public func handle(id: Int, _ request: DelegationRequest, from peer: any HostPeer) {
         guard let connection = lock.withLock({ connections[ObjectIdentifier(peer)] }) else {
             // The core registers the connection before it acks the hello, so this is a request
             // racing its own connection's close: nobody is left to read an answer.
             return
         }
+        let activity = idle?.begin()
         Task {
+            defer { if let activity { self.idle?.end(activity) } }
             do {
                 let routed = try await self.route(request, on: connection)
                 self.send(.reply(id: id, .delegation(routed.reply)), to: peer)
@@ -179,7 +200,7 @@ public final class DelegationHost: @unchecked Sendable {
             return try await withChannel(channelID, on: connection) { channel in
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-push-\(UUID().uuidString).bundle")
                 defer { try? FileManager.default.removeItem(at: file) }
-                try await Self.save(channel, to: file)
+                try await Self.save(channel, to: file, stall: stall)
                 try await workspace.receive(controller: slot, bundle: file, ref: ref)
                 return Routed(reply: .syncPush)
             }
@@ -193,11 +214,14 @@ public final class DelegationHost: @unchecked Sendable {
             // services to down when its orphan timeout runs out, and the runner exposes neither.
             let runID = spec.service ? services.startService(spec, owner: owner, acquire: acquire)
                                      : runner.start(spec, owner: owner, acquire: acquire)
+            // Before this request's own activity ends, so the host never looks idle between
+            // the reply and the run's first event.
+            watchUntilEnded(runID)
             let revokedMeanwhile: Bool = lock.withLock {
                 // Pruned to the runs the runner still knows, so a hostd up for weeks does not
                 // keep a row per run it ever started.
                 runRepos = runRepos.filter { runner.owner(runID: $0.key) != nil }
-                failedRuns = failedRuns.filter { runner.owner(runID: $0) != nil }
+                failedRuns = failedRuns.filter { runner.owner(runID: $0.key) != nil }
                 runRepos[runID] = ref.repoRoot
                 return revokedSlots.contains(slot)
             }
@@ -237,7 +261,7 @@ public final class DelegationHost: @unchecked Sendable {
                     await channel.finish()
                     return Routed(reply: .runArtifacts(found: false))
                 }
-                try await Self.stream(tar, over: channel)
+                try await Self.stream(tar, over: channel, stall: stall)
                 return Routed(reply: .runArtifacts(found: true))
             }
 
@@ -305,11 +329,11 @@ public final class DelegationHost: @unchecked Sendable {
         guard let repoRoot = lock.withLock({ runRepos[runID] }) else { throw RunnerError.unknownRun(runID) }
         // Asked before the run ended there is no result yet, and `result_expired` would tell
         // the controller it was lost.
-        if let phase = (runner as? Runner)?.phase(runID: runID), !phase.isTerminal { throw SyncError.runActive }
+        if let phase = runner.phase(runID: runID), !phase.isTerminal { throw SyncError.runActive }
         let bundle: URL?
         do {
             bundle = try await workspace.resultBundle(controller: controller, repoRoot: repoRoot, runID: runID)
-        } catch SyncError.resultExpired where lock.withLock({ failedRuns.contains(runID) }) {
+        } catch SyncError.resultExpired where lock.withLock({ failedRuns[runID] != nil }) {
             bundle = nil
         }
         guard let bundle else {
@@ -318,7 +342,7 @@ public final class DelegationHost: @unchecked Sendable {
         }
         defer { try? FileManager.default.removeItem(at: bundle) }
         let commit = try await commit(of: bundle)
-        try await Self.stream(bundle, over: channel)
+        try await Self.stream(bundle, over: channel, stall: stall)
         return Routed(reply: .runResult(commit: commit))
     }
 
@@ -354,6 +378,25 @@ public final class DelegationHost: @unchecked Sendable {
 
     private func owned(_ runID: String, by controller: UUID) throws {
         guard runner.owner(runID: runID)?.controller == controller else { throw RunnerError.unknownRun(runID) }
+    }
+
+    // MARK: - Idle
+
+    /// Holds the host busy until `runID` ends, however it ends: an exit, a service's death or
+    /// `down`, a cancel or revoke, or a failure before it ever ran (the stream throws). Watches
+    /// the runner, not a controller's subscription, because a run outlives the connection
+    /// that started it, and a box whose controller closed its lid mid-build must not be
+    /// reaped as idle while the build goes on.
+    private func watchUntilEnded(_ runID: String) {
+        guard let idle else { return }
+        let activity = idle.begin()
+        let runner = self.runner
+        Task {
+            defer { idle.end(activity) }
+            // From past any spool's end: only the run's end matters here, and replaying its
+            // output for nobody would read the whole spool once per run.
+            do { for try await _ in runner.events(runID: runID, from: .max) {} } catch {}
+        }
     }
 
     // MARK: - Events
@@ -400,9 +443,16 @@ public final class DelegationHost: @unchecked Sendable {
             // stream just throws, and the wire has no event for that. Without this the
             // controller would wait on a run that is already over. It gets the reason as the
             // usual `flightdeck:` line and the 125 every delegation failure exits with (§5).
-            lock.withLock { _ = failedRuns.insert(runID) }
+            // At the offset it was first sent at, and not at all to a re-attach from past it.
             let line = Data("flightdeck: \(Self.describe(error).message)\n".utf8)
-            send(.event(runID: runID, .output(stream: .stderr, offset: end, data: line)), to: peer)
+            let at = lock.withLock { () -> Int64 in
+                if let first = failedRuns[runID] { return first }
+                failedRuns[runID] = end
+                return end
+            }
+            if offset < at + Int64(line.count) {
+                send(.event(runID: runID, .output(stream: .stderr, offset: at, data: line)), to: peer)
+            }
             send(.event(runID: runID, .exited(.code(DelegationError.exitStatus))), to: peer)
         }
     }
@@ -425,12 +475,15 @@ public final class DelegationHost: @unchecked Sendable {
         peer.send(text: text)
     }
 
-    /// Everything the controller writes on `channel` until its EOF, into `file`.
-    private static func save(_ channel: any ByteChannel, to file: URL) async throws {
+    /// Everything the controller writes on `channel` until its EOF, into `file`. Each read
+    /// must arrive within `stall` seconds (`progressing`).
+    private static func save(_ channel: any ByteChannel, to file: URL, stall: TimeInterval) async throws {
         FileManager.default.createFile(atPath: file.path, contents: nil)
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
-        while let chunk = try await channel.read() { try handle.write(contentsOf: chunk) }
+        while let chunk = try await progressing(channel, within: stall, { try await channel.read() }) {
+            try handle.write(contentsOf: chunk)
+        }
         // Our side's EOF too: a channel retires only once both ends have finished, and without
         // it every push left an entry in both muxes for as long as the connection lived.
         await channel.finish()
@@ -438,13 +491,41 @@ public final class DelegationHost: @unchecked Sendable {
 
     /// `file` onto `channel`, then EOF. A write waits on the controller's credit, so a slow
     /// link backs up this transfer and nothing else on the connection.
-    private static func stream(_ file: URL, over channel: any ByteChannel) async throws {
+    private static func stream(_ file: URL, over channel: any ByteChannel, stall: TimeInterval) async throws {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         while let chunk = try handle.read(upToCount: ChannelFrame.maxPayload), !chunk.isEmpty {
-            try await channel.write(chunk)
+            try await progressing(channel, within: stall) { try await channel.write(chunk) }
         }
         await channel.finish()
+    }
+
+    /// One step of a transfer (a read, or a write waiting on the controller's credit), failed
+    /// `transfer_stalled` if it has not finished within `seconds`. A deadline per step, not per
+    /// transfer, so a big bundle over a slow link is never cut while bytes still move.
+    ///
+    /// The transport's TCP keepalive drops a peer whose machine is gone, but not one that is
+    /// alive and silent (a wedged controller, a channel it forgot): without this, that request
+    /// would hold the host busy, and a cloud box billing, until its TTL. On a stall the channel
+    /// is cancelled, which is also what frees the step's own pending read or write.
+    static func progressing<T: Sendable>(_ channel: any ByteChannel, within seconds: TimeInterval,
+                                         _ step: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: StepOutcome<T>.self) { group in
+            group.addTask { .done(try await step()) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return .stalled
+            }
+            defer { group.cancelAll() }
+            switch try await group.next() {
+            case .done(let value)?:
+                return value
+            case .stalled?, nil:
+                channel.cancel()
+                throw DelegationError(code: "transfer_stalled",
+                                      message: "the transfer made no progress for \(Int(seconds)) s; the controller stopped sending or reading")
+            }
+        }
     }
 
     /// An error as the `err` frame's code (the DelegationWire A5 table) and message (the
@@ -478,6 +559,12 @@ public final class DelegationHost: @unchecked Sendable {
             self.mux = mux
         }
     }
+}
+
+/// A transfer step's race against its stall deadline (`DelegationHost.progressing`).
+private enum StepOutcome<T: Sendable>: Sendable {
+    case done(T)
+    case stalled
 }
 
 /// Live connections per controller slot, shared with the services' `isConnected`, which must

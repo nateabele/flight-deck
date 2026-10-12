@@ -82,6 +82,19 @@ protocol DelegationHostDirectory: AnyObject {
     func forget(_ runs: [DelegatedRun])
 }
 
+/// The cloud machines (`InfraService`), as `run --on` needs them: a `[infra.<name>]` host with
+/// `auto_up` is created on the first run aimed at it, and every run on a cloud machine opens
+/// with its cost line (spec §8.4).
+protocol InfraUpProviding: AnyObject {
+    /// Creates `[infra.<name>]` (or takes over the one already running), returning once it is
+    /// a paired, online host. `notice` gets each progress line. Throws `DelegationError` with
+    /// the `infra_*` code and its finished line.
+    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL,
+                             notice: @escaping (String) -> Void) async throws
+    /// The §8.4 line for a cloud machine; nil for any other host.
+    @MainActor func costLine(host: String) -> String?
+}
+
 /// Everything §7 checks, resolved: what the preflight is asked to clear.
 struct DelegationPlan {
     let host: String
@@ -196,6 +209,9 @@ final class DelegationService {
         /// before deciding it has caught up, and how long it waits for the first (see `logs`).
         var replayIdle: TimeInterval = 2
         var replayFirstEvent: TimeInterval = 10
+        /// Cloud machines; nil where this Flight Deck has no cloud service, and a
+        /// `[infra.<name>]` host then has to be brought up some other way.
+        var infra: (any InfraUpProviding)? = nil
     }
 
     /// `flightdeck wait`'s default bound (§6.1): under the 10-minute tool timeout agents run
@@ -209,6 +225,11 @@ final class DelegationService {
 
     let registry: RunRegistry
     private let deps: Dependencies
+    /// The cloud machines, set after `init` because `InfraService` is built beside the app, not
+    /// by the delegation factory; without it `run --on <infra host>` would never auto-up or
+    /// show its cost line. Wins over `Dependencies.infra`, which tests inject.
+    var infraProvider: (any InfraUpProviding)?
+    private var infra: (any InfraUpProviding)? { infraProvider ?? deps.infra }
     /// Runs this app instance is watching, by local id.
     private var live: [String: LiveRun] = [:]
     /// Replay tasks (`logs`, `wait {from}`) still running: each ends with its run, its reader
@@ -449,7 +470,11 @@ final class DelegationService {
             ptySize: run.columns.flatMap { columns in run.rows.map { TerminalSize(columns: columns, rows: $0) } },
             // Only a service is kept alive past a lost controller, so only a service's counts.
             fetch: fetch, pool: recipe?.pool, orphanTimeout: service ? recipe?.orphanTimeout : nil)
+        try await ensureCloudHost(host, config: config, worktree: worktree, cid: cid, reply: reply)
         let link = try deps.hosts.link(named: host)
+        // Before anything streams, so a detached run (whose stream ends on `delegateStarted`)
+        // still shows what the machine it lands on is costing.
+        if let cost = infra?.costLine(host: host) { reply(.delegateNotice(cid: cid, message: cost)) }
 
         // §7 steps 2–7. A preflight failure's message is already the finished §5 line, host
         // and next step included: passed through as is.
@@ -509,6 +534,32 @@ final class DelegationService {
         reply(.delegateStarted(cid: cid, started))
         attach(liveRun, cid: cid, hint: true, cancellation: cancellation, reply: reply)
         monitor(id, liveRun)
+    }
+
+    /// A run aimed at a `[infra.<name>]` machine that is not a paired host yet: created first
+    /// when the recipe says `auto_up`, with its progress as notices; otherwise refused with the
+    /// command that creates it, rather than the directory's bare "unknown host".
+    private func ensureCloudHost(_ host: String, config: DelegateConfig, worktree: URL, cid: Int,
+                                 reply: @escaping (ServerFrame) -> Void) async throws {
+        guard let recipe = config.infra[host],
+              !deps.hosts.hostNames.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) else { return }
+        guard recipe.autoUp else {
+            throw DelegationError(code: "unknown_host",
+                                  message: "\(host) is a cloud machine that is not up — run `flightdeck infra up \(host)` first, or set auto_up = true in [infra.\(host)]")
+        }
+        guard let infra else {
+            throw DelegationError(code: "unknown_host",
+                                  message: "\(host) is a cloud machine that is not up, and cloud machines are not available in this app — bring it up with `flightdeck infra up \(host)` from a build that has them")
+        }
+        let what: String
+        switch recipe.source {
+        case .preset(let preset): what = ([preset] + [recipe.instanceType].compactMap { $0 }).joined(separator: ", ")
+        case .module(let path): what = "module \(path)"
+        }
+        reply(.delegateNotice(cid: cid, message: "creating \(host) (\(what))…"))
+        try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree) { line in
+            reply(.delegateNotice(cid: cid, message: line))
+        }
     }
 
     /// Streams a run's updates to one CLI until it ends, or the CLI is gone.
@@ -1098,6 +1149,17 @@ final class DelegationService {
     // MARK: Transfer
 
     private func push(_ snapshot: SnapshotRef, from worktree: URL, to link: any HostLinking) async throws {
+        // A host that predates submodule support would drop the pins and run against empty
+        // submodule directories; refused here, before anything is sent. A live link whose
+        // helloAck has not arrived yet (mid-reconnect) has no capabilities to check, and
+        // sending then would be that same gamble, so it is refused as a retry. A link that is
+        // not a `LiveHostLink` (a test fake) has no helloAck at all, and the host decides.
+        if let live = link as? LiveHostLink {
+            if !snapshot.submodules.isEmpty, live.capabilities == nil {
+                throw DelegationError(code: "host_unavailable", message: "reconnecting to \(link.name) — try again")
+            }
+            if let refusal = snapshot.unsupported(on: link.name, capabilities: live.capabilities) { throw refusal }
+        }
         guard case .syncTips(let tips) = try await hostRequest(.syncTips(repoRoot: snapshot.repoRoot, wtKey: snapshot.wtKey), on: link)
         else { throw Self.unexpected(link.name, "sync.tips") }
         let bundle = try await deps.bundles.bundle(worktree: worktree, snapshot: snapshot, haves: tips)
@@ -1196,7 +1258,7 @@ final class DelegationService {
         switch code {
         case "tree_mismatch": return "\(host): sync rejected: tree hash mismatch — rerun; if it repeats, flightdeck host prune \(host)"
         case "lfs_unsupported": return "\(host): LFS repos are not supported for delegation yet — run it locally"
-        case "submodules_unsupported": return "\(host): submodules are not supported for delegation yet — run it locally"
+        case "submodules_unsupported": return "\(host)'s Flight Deck predates submodule support — update Flight Deck on \(host), or run it locally"
         case "screen_locked": return "\(host)'s screen is locked — unlock it, then rerun"
         case "no_console_user": return "nobody is logged in at \(host)'s console — log in there, then rerun"
         case "screen_unsupported": return "\(host) has no screen for --screen runs — use a macOS host"

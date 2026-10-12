@@ -49,10 +49,10 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         case host
     }
 
-    /// Peer channels the host holds before anyone claims them. Each is bounded by the
-    /// window, so this bounds the pre-accept bytes too (32 x 256 KiB = 8 MiB): without it an
-    /// authenticated but broken peer could open ids without end and make us hold a window
-    /// for each.
+    /// Peer channels held before anyone claims them: unclaimed in the mux, or waiting in the
+    /// `accept()` stream for its consumer. Each is bounded by the window, so this bounds the
+    /// pre-accept bytes too (32 x 256 KiB = 8 MiB): without it an authenticated but broken
+    /// peer could open ids without end and make us hold a window for each.
     public static let maxUnclaimed = 32
 
     private let role: Role
@@ -61,7 +61,7 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
     // Guarded by `lock`, as is every `Channel`'s mutable state.
     private var nextID: ChannelID
     private var channels: [ChannelID: Channel] = [:]
-    private var closedIDs: Set<ChannelID> = []
+    private var closedIDs = ClosedIDs()
     private var isShutdown = false
     private var incoming: AsyncStream<any ByteChannel>?
     private var incomingContinuation: AsyncStream<any ByteChannel>.Continuation?
@@ -110,10 +110,16 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
     /// Peer-opened channels nobody has claimed by id, each yielded once, at its first frame.
     /// Created on first call, so a side that only ever claims by id (the host's router) never
     /// accumulates channels in a stream nobody drains. The same stream on every call.
+    ///
+    /// The stream holds at most `maxUnclaimed` channels its consumer has not taken yet; a
+    /// channel that arrives past that is closed at both ends, as past the cap without a stream.
+    /// An unbounded buffer let a consumer that stopped draining hold a window per channel
+    /// for as many channels as the peer cared to open.
     public func accept() -> AsyncStream<any ByteChannel> {
         lock.lock(); defer { lock.unlock() }
         if let incoming { return incoming }
-        let (stream, continuation) = AsyncStream<any ByteChannel>.makeStream()
+        let (stream, continuation) = AsyncStream<any ByteChannel>.makeStream(
+            bufferingPolicy: .bufferingOldest(Self.maxUnclaimed))
         if isShutdown { continuation.finish() }
         incoming = stream
         incomingContinuation = continuation
@@ -173,7 +179,9 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
             channels[id] = channel
             if let incomingContinuation {
                 channel.claimed = true
-                effects.yields.append { incomingContinuation.yield(channel) }
+                effects.yields.append {
+                    if case .dropped = incomingContinuation.yield(channel) { channel.cancel() }
+                }
             }
         } else {
             // Our parity, but never opened: dropped (contract A6). Answering with a close
@@ -339,6 +347,9 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         closedIDs.insert(id)
     }
 
+    /// Ids remembered one by one, for tests that pin the bound.
+    var tombstoneCount: Int { lock.withLock { closedIDs.heldIndividually } }
+
     private func isPeerID(_ id: ChannelID) -> Bool {
         // 0 is neither side's: the controller starts at 1, the host at 2.
         id != 0 && (id % 2 == 1) == (role == .host)
@@ -346,7 +357,47 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
 
     // MARK: -
 
-    /// Work gathered under the lock and done after it is released: frames to the transport,
+    /// The ids of one connection that have closed, so a frame still in flight for one is dropped.
+///
+/// A plain set grew by one id per channel ever closed, and a busy forwarded port opens a
+/// channel per connection, so it grew for the whole life of the link. Each side hands out its
+/// ids in order (odd from 1, even from 2), so per parity the ids that have all closed form a
+/// prefix: those collapse into a watermark, and only ids closed above the oldest one still
+/// open (or never seen) are held one by one. Exact, not approximate: an id joins the watermark
+/// only once it is itself closed, which matters on the receiving side, where a later channel's
+/// first frame can arrive before an earlier one's.
+struct ClosedIDs {
+    /// Per parity (index `id % 2`), the lowest id not yet known closed in the prefix.
+    private var floor: [ChannelID]
+    private var above: Set<ChannelID> = []
+
+    /// Floors other than the first ids exist for tests of the top of the id space, which
+    /// would otherwise take two billion inserts to reach.
+    init(evenFloor: ChannelID = 2, oddFloor: ChannelID = 1) {
+        floor = [evenFloor, oddFloor]
+    }
+
+    var heldIndividually: Int { above.count }
+
+    func contains(_ id: ChannelID) -> Bool {
+        let start: ChannelID = id % 2 == 0 ? 2 : 1
+        return (id >= start && id < floor[Int(id % 2)]) || above.contains(id)
+    }
+
+    mutating func insert(_ id: ChannelID) {
+        let p = Int(id % 2)
+        guard id >= floor[p] else { return }
+        above.insert(id)
+        // `ChannelID.max - 1` and `.max` are the last of their parity: the floor cannot pass
+        // them (`+ 2` would trap), so they stay held one by one.
+        while above.contains(floor[p]), floor[p] <= ChannelID.max - 2 {
+            above.remove(floor[p])
+            floor[p] += 2
+        }
+    }
+}
+
+/// Work gathered under the lock and done after it is released: frames to the transport,
     /// and continuations to resume. Sending under the lock would deadlock a transport that
     /// delivers synchronously into a peer that answers straight back.
     fileprivate struct Effects {

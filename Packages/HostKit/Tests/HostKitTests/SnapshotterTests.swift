@@ -334,23 +334,7 @@ final class SnapshotterTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: decoy.path), [])
     }
 
-    /// Submodules are out of v1 (C0 amendment A1): the host has no store to resolve a gitlink
-    /// from, so the submodule's directory would arrive empty and the run would fail confusingly.
-    func testSubmoduleRefused() async throws {
-        let scratch = TempRepo.scratch()
-        let lib = try TempRepo(at: scratch.appendingPathComponent("lib"))
-        lib.write("lib.txt", "lib\n")
-        try lib.commitAll()
-        let app = try TempRepo(at: scratch.appendingPathComponent("app"))
-        app.write("main.txt", "main\n")
-        try app.git("submodule", "add", "-q", lib.url.path, "lib")
-        try app.commitAll()
-
-        let error = await thrown { try await Snapshotter().snapshot(worktree: app.url, host: "mini", include: []) }
-        XCTAssertEqual(error as? SyncError, .submodulesUnsupported)
-        XCTAssertEqual((error as? SyncError)?.code, "submodules_unsupported")
-        XCTAssertEqual(try app.git("for-each-ref", "refs/flightdeck/"), "", "a refused snapshot records nothing")
-    }
+    // Submodules: `SubmoduleSyncTests` (they used to be refused here, before §4.2 step 4).
 
     // MARK: - Transfer (§4.3)
 
@@ -468,7 +452,10 @@ final class GitRunnerTests: XCTestCase {
         let script = dir.appendingPathComponent("git")
         let real = try TempRepo.git(["--exec-path"], in: dir)   // proves a real git exists
         XCTAssertFalse(real.isEmpty)
-        let gitPath = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) }!
+        // Prefer a package-manager git: a stock macOS /usr/bin/git is 2.39 (Apple Git-154), which
+        // the version gate rightly refuses, so taking it first failed this test on any Mac whose
+        // newer git lives in /opt/homebrew.
+        let gitPath = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) }!
         try "#!/bin/sh\nif [ ! -e '\(marker.path)' ]; then touch '\(marker.path)'; exit 1; fi\nexec \(gitPath) \"$@\"\n"
             .write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)

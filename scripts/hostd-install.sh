@@ -15,6 +15,9 @@
 #                      of the installer was built for).
 #   --no-systemd       install the binary only: no user unit, no linger, no pairing (for
 #                      containers and tests, where there is no user manager to start it).
+#   --no-pair          install and start hostd as usual, but end without arming a pairing code
+#                      (for machines enrolled by Flight Deck's cloud-init, which runs
+#                      `flightdeck-hostd enroll` next and has nobody to type a code).
 set -eu
 
 # Replaced by scripts/build-hostd-linux.sh with the release URL, so the pasted command needs no
@@ -22,6 +25,7 @@ set -eu
 ASSET_BASE='@FD_HOSTD_ASSET_BASE@'
 SUMS_DIGEST=
 SYSTEMD=1
+PAIR=1
 
 say() { printf 'flightdeck: %s\n' "$*"; }
 die() { printf 'flightdeck: %s\n' "$*" >&2; exit "${2:-1}"; }
@@ -31,6 +35,7 @@ while [ $# -gt 0 ]; do
     --sha256) [ $# -ge 2 ] || die "--sha256 needs a digest" 64; SUMS_DIGEST=$2; shift 2 ;;
     --asset-base) [ $# -ge 2 ] || die "--asset-base needs a URL" 64; ASSET_BASE=$2; shift 2 ;;
     --no-systemd) SYSTEMD=0; shift ;;
+    --no-pair) PAIR=0; shift ;;
     *) die "unknown option $1" 64 ;;
   esac
 done
@@ -133,6 +138,12 @@ while :; do
   [ "$tries" -lt 15 ] || die "flightdeck-hostd did not start; see: journalctl --user -u flightdeck-hostd" 2
   sleep 1
 done
+
+# Waited for above even so: the `enroll` that follows needs the admin socket up.
+if [ "$PAIR" = 0 ]; then
+  say "flightdeck-hostd is running; not pairing (--no-pair)"
+  exit 0
+fi
 
 # The scratch directory goes now, because exec replaces this shell and its EXIT trap with it.
 cd /

@@ -1,8 +1,8 @@
 import Foundation
 
 // Runs (spec §6): a command in its own process group on the host, with its output spooled so
-// a dropped controller can reattach from an offset. Implemented by track C3; the host router
-// and `DelegationService` consume it. Codecs for the enums live in `DelegationWire.swift`.
+// a dropped controller can reattach from an offset. Implemented by `Runner` and `OutputSpool`;
+// the host router (`DelegationHost`) and `DelegationService` consume it. Codecs for the enums live in `DelegationWire.swift`.
 
 /// What to run, as the controller resolved it from the CLI and the recipe.
 public struct RunSpec: Codable, Sendable, Equatable {
@@ -176,7 +176,7 @@ public struct LeaseHolderOwner: Sendable, Equatable {
     }
 }
 
-/// The host's runner (track C3).
+/// The host's runner; `Runner` is the real one.
 public protocol RunControlling: Sendable {
     /// Registers `spec` and returns its run id at once, before it holds a slot: a run waiting
     /// on the screen or a busy pool must already be nameable, so the controller can attach,
@@ -201,6 +201,11 @@ public protocol RunControlling: Sendable {
     /// `controller`'s runs that are still queued or running, services included. Revoking a
     /// controller ends exactly these.
     func liveRuns(controller: UUID) -> [String]
+    /// Where `runID` is now, or nil for an unknown run. `run.result` asks it, to answer a run
+    /// still going `run_active` rather than `result_expired`. A requirement with no default:
+    /// the router once got it by casting to `Runner`, and every other conformer silently
+    /// skipped the check.
+    func phase(runID: String) -> RunPhase?
     /// hostd is stopping: every service is downed (`downCommand` included) and every other run
     /// ended, SIGTERM now and SIGKILL to any group still alive after `grace` seconds. Returns
     /// once every run has ended, or after `deadline` seconds, whichever is first; a run that

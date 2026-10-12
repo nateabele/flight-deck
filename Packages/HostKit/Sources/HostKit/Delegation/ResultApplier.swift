@@ -80,7 +80,10 @@ public struct ResultApplier: Sendable {
         let runID = try SyncName.validate(runID)
         return try await GitRunner.offload { [git] () -> String? in
             guard let result = try? git.text(["rev-parse", "-q", "--verify", Self.ref(runID)], in: worktree) else { return nil }
-            let out = try git.run(["diff", "--binary", "--no-color", "--no-ext-diff", "\(result)^", result], in: worktree)
+            // Without submodules, as `apply` is: a "Subproject commit" hunk would show a change
+            // that applying never makes.
+            let out = try git.run(["diff", "--binary", "--no-color", "--no-ext-diff", "--ignore-submodules=all",
+                                   "\(result)^", result], in: worktree)
             return String(decoding: out.stdout, as: UTF8.self)
         }
     }
@@ -126,7 +129,15 @@ public struct ResultApplier: Sendable {
         let mergedTree = fields[0]
         var conflicts = Set(merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : [])
 
-        let changes = Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
+        let all = Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
+        // Submodules are never part of a result (§4.5): a current host leaves them out, and a
+        // gitlink change from any other is dropped here with everything beneath it. Applied, a
+        // deleted gitlink would delete the user's submodule checkout, and one replaced by a
+        // directory would scatter another repository's files into this one.
+        let gitlinks = Set(all.filter { $0.oldMode == Self.gitlink || $0.newMode == Self.gitlink }.map(\.path))
+        func inSubmodule(_ path: String) -> Bool { gitlinks.contains { path == $0 || path.hasPrefix($0 + "/") } }
+        let changes = all.filter { !inSubmodule($0.path) }
+        conflicts = conflicts.filter { !inSubmodule($0) }
         let realTop = top.resolvingSymlinksInPath()
 
         // Every check runs before the first write, so a refusal never leaves a partial apply.
@@ -187,10 +198,10 @@ public struct ResultApplier: Sendable {
             }
             let staged = staging.appendingPathComponent(change.path)
             guard (try? fm.attributesOfItem(atPath: staged.path)) != nil else {
-                // Only a gitlink legitimately stages nothing. Anything else missing lost a
-                // collision in staging (on APFS, `Notes/bar` and `notes` from a case-sensitive
-                // host are one entry): report it and keep the result, never drop it silently.
-                if change.newMode != "160000" { skip.insert(change.path) }
+                // Gitlinks were filtered out above, so anything missing lost a collision in
+                // staging (on APFS, `Notes/bar` and `notes` from a case-sensitive host are one
+                // entry): report it and keep the result, never drop it silently.
+                skip.insert(change.path)
                 continue
             }
             try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -208,6 +219,7 @@ public struct ResultApplier: Sendable {
     }
 
     private static let absent = "000000"
+    private static let gitlink = "160000"
 
     /// One changed path, both sides, from `diff-tree --raw -z`.
     struct Change {
@@ -332,14 +344,14 @@ public struct ResultApplier: Sendable {
     }
 
     /// Refuses a host-supplied path that could write outside the worktree or into git's own
-    /// files: absolute, a `.`/`..`/`.git` component (any case: macOS's file system folds it),
+    /// files: absolute, a `.`/`..`/`.git` component (any case and any HFS+ spelling, `isDotGit`),
     /// or an existing parent that is a symlink (checked with `lstat`, component by component),
     /// which would carry the write wherever it points. A newline is refused too: the batched
     /// git calls take paths one per line.
     static func checkSafe(_ path: String, under top: URL) throws {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !path.hasPrefix("/"), !path.contains("\n"),
-              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" })
+              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || isDotGit($0) })
         else { throw SyncError.unsafePath(path) }
         var dir = top
         let fm = FileManager.default
@@ -349,6 +361,23 @@ public struct ResultApplier: Sendable {
             if type == .typeSymbolicLink { throw SyncError.unsafePath(path) }
         }
     }
+
+    /// Whether a path component names `.git` on a case-insensitive file system that ignores
+    /// HFS+'s ignorable code points, as git's own `is_hfs_dotgit` decides it. HFS+ drops these
+    /// when it compares names, so `.g\u{200C}it` *is* `.git` on such a volume, and a plain
+    /// case fold let a result write `.g\u{200C}it/hooks/pre-commit` (a hook on the user's next
+    /// commit). `index-pack --strict` refuses such trees at `fetch`, but `apply` must not
+    /// depend on how its result arrived.
+    static func isDotGit(_ component: String) -> Bool {
+        let kept = component.unicodeScalars.filter { !hfsIgnorable.contains($0.value) }
+        return String(String.UnicodeScalarView(kept)).lowercased() == ".git"
+    }
+
+    /// git's list (utf8.c, `next_hfs_char`): zero-width joiners, directional marks and
+    /// embeddings, the deprecated format characters, and the byte-order mark.
+    private static let hfsIgnorable: Set<UInt32> = Set(
+        Array(0x200C...0x200F) + Array(0x202A...0x202E) + Array(0x206A...0x206F) + [0xFEFF]
+    )
 
 }
 

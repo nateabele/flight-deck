@@ -14,6 +14,13 @@ final class AdminWireTests: XCTestCase {
                        #"{"slot":"00000000-0000-0000-0000-000000000001","t":"revoke"}"#)
     }
 
+    func testEnrollRoundTrips() throws {
+        let p = EnrollmentPayload(version: 1, slot: UUID(), secretHex: String(repeating: "00", count: 32),
+                                  controllerName: "c", idleSeconds: 60, issuedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(try HostWire.decode(AdminRequest.self, from: HostWire.encode(AdminRequest.enroll(p))), .enroll(p))
+        XCTAssertTrue(try HostWire.encode(AdminRequest.enroll(p)).contains(#""t":"enroll""#))
+    }
+
     func testReplyShapesArePinned() throws {
         XCTAssertEqual(
             try HostWire.encode(AdminReply.status(paired: 2, armedUntil: t10, listeningPort: 4711, hostName: "mini")),

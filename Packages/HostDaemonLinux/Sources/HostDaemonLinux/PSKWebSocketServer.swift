@@ -92,7 +92,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
         // Built once up front and discarded, so a configuration BoringSSL rejects (a cipher
         // string it has no suite for) fails the daemon at launch rather than every handshake.
         _ = try NIOSSLContext(configuration: Self.tls(keys: keys, into: SlotAttribute()))
-        return try ServerBootstrap(group: group)
+        return try Self.keepingAlive(ServerBootstrap(group: group))
             .serverChannelOption(.backlog, value: 64)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -134,6 +134,26 @@ final class PSKWebSocketServer: @unchecked Sendable {
             }
             .bind(host: host, port: port)
             .wait()
+    }
+
+    /// TCP keepalive on every accepted socket: 60 s of silence, then a probe every 15 s, and
+    /// the connection is dropped after 4 go unanswered, so a peer whose machine vanished (a
+    /// laptop asleep mid-`sync.push`, its Wi-Fi gone) is noticed in about 2 minutes. Without
+    /// it a half-open connection lasts forever: hostd only reads, so nothing ever fails, the
+    /// request never ends, and the host never reports idle — a cloud box bills until its TTL.
+    /// The close runs the usual disconnect path, which fails the request and ends its
+    /// activity. A live but frozen peer still answers probes; `DelegationHost`'s transfer
+    /// stall deadline covers that one.
+    static let keepaliveOptions: [(String, ChannelOptions.Types.SocketOption, SocketOptionValue)] = [
+        ("TCP_KEEPIDLE", .init(level: .tcp, name: .init(rawValue: TCP_KEEPIDLE)), 60),
+        ("TCP_KEEPINTVL", .init(level: .tcp, name: .init(rawValue: TCP_KEEPINTVL)), 15),
+        ("TCP_KEEPCNT", .init(level: .tcp, name: .init(rawValue: TCP_KEEPCNT)), 4),
+    ]
+
+    static func keepingAlive(_ bootstrap: ServerBootstrap) -> ServerBootstrap {
+        keepaliveOptions.reduce(bootstrap.childChannelOption(.socketOption(.so_keepalive), value: 1)) {
+            $0.childChannelOption($1.1, value: $1.2)
+        }
     }
 
     static func tls(keys: @escaping @Sendable () -> [String: [UInt8]],

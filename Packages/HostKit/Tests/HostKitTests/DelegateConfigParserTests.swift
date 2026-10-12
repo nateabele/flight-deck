@@ -142,7 +142,7 @@ final class DelegateConfigParserTests: XCTestCase {
             ("[[route]]\nrecipe = \"a\"", 1, "match"),
             ("[[route]]\nmatch = \"a *\"", 1, "recipe"),
             ("run = \"\"\"multi\"\"\"", 1, "multi-line"),
-            ("pool = 1.5", 1, "value"),
+            ("pool = 1.5e3", 1, "value"),
             ("key = \"a\" trailing", 1, "end of line"),
             ("= \"a\"", 1, "key"),
             ("x = \"bad \\q escape\"", 1, "escape"),
@@ -185,9 +185,14 @@ final class DelegateConfigParserTests: XCTestCase {
                 XCTAssertEqual((error as? DelegateConfigIssue)?.message, "keys nested too deeply")
             }
         }
-        // An inline table takes a single key, so a dotted one is refused before any table is
-        // built; the point is that it is an error and not a crash.
-        XCTAssertThrowsError(try DelegateConfigParser.parse("x = { \(path) = 1 }"))
+        // An inline table takes a single key, so a dotted one is refused at its first `.`,
+        // before any of the path is walked. Pinned to that refusal, not just "it threw": a
+        // parser that walked the dotted path first (to build it, or to bound it) would still
+        // throw, and only the exact message says it stopped at the first component.
+        XCTAssertThrowsError(try DelegateConfigParser.parse("x = { \(path) = 1 }")) { error in
+            XCTAssertEqual(error as? DelegateConfigIssue,
+                           DelegateConfigIssue(.error, line: 1, "expected = after the key"))
+        }
         let ok = Array(repeating: "a", count: 32).joined(separator: ".")
         XCTAssertNoThrow(try DelegateConfigParser.parse("[\(ok)]\n\(ok) = 1"))
     }
@@ -309,5 +314,30 @@ final class DelegateConfigParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Self.specExample.write(to: file, atomically: true, encoding: .utf8)
         XCTAssertEqual(try DelegateConfigParser.load(projectRoot: root)?.config.defaultHost, "mini")
+    }
+
+    func testFloatLexes() throws {
+        var reader = TOMLReader("a = 1.25\nb = -0.5\nc = 3\n")
+        let table = try reader.read().root
+        guard case .value(.float(let a), _) = table.entries["a"]!,
+              case .value(.float(let b), _) = table.entries["b"]!,
+              case .value(.int(3), _) = table.entries["c"]! else { return XCTFail("\(table.entries)") }
+        XCTAssertEqual(a, 1.25)
+        XCTAssertEqual(b, -0.5)
+    }
+
+    func testFloatValueReachesInfraMaxHourly() throws {
+        let config = try DelegateConfigParser.parse("""
+        [recipe.x]
+        run = "make"
+
+        [infra.g]
+        preset = "aws-linux"
+        region = "us-east-1"
+        instance_type = "g6.xlarge"
+        ttl = "1h"
+        max_hourly = 1.50
+        """).config
+        XCTAssertEqual(config.infra["g"]?.maxHourly, 1.5)
     }
 }

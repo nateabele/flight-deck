@@ -482,6 +482,11 @@ final class DelegateCommandRunner {
     /// ("flightdeck: unsupported"). Each still keeps a message when there is one: a host's
     /// `unsupported` reaches here already worded by the app, naming the host to update.
     static func line(code: String, message: String?) -> String {
+        // The host's own wording ("the controller stopped sending or reading") reads as a
+        // Flight Deck bug; what happened is a link that went quiet, and the fix is to retry.
+        if code == "transfer_stalled" {
+            return "the transfer stalled (no progress for 10 minutes); retry when the connection is back"
+        }
         if let message, !message.isEmpty { return message }
         switch code {
         case "unsupported", "unhandled", "not_implemented":
@@ -513,7 +518,7 @@ enum DelegateOutput {
                 run.recipe.map { "[\($0)] \(run.command)" } ?? run.command,
             ])
         }
-        return columns(rows)
+        return CLIOutput.columns(rows)
     }
 
     static func recipes(_ book: WireRecipeBook) -> String {
@@ -538,15 +543,6 @@ enum DelegateOutput {
         for entry in usage {
             rows.append([entry.worktreeName, String(entry.repoRoot.prefix(12)), size.string(fromByteCount: entry.bytes)])
         }
-        return columns(rows)
-    }
-
-    /// `CLIOutput`'s column layout (private there): left-aligned, two spaces apart.
-    private static func columns(_ rows: [[String]]) -> String {
-        let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
-        return rows.map { cells in
-            cells.enumerated().map { column, cell in cell.padding(toLength: widths[column], withPad: " ", startingAt: 0) }
-                .joined(separator: "  ").trimmingCharacters(in: .whitespaces)
-        }.joined(separator: "\n")
+        return CLIOutput.columns(rows)
     }
 }

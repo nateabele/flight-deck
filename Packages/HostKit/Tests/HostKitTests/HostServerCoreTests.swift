@@ -31,6 +31,19 @@ final class HostServerCoreTests: XCTestCase {
         XCTAssertEqual(info.hostName, "mini")
     }
 
+    /// `host.info` reports the tracker's `idleSince`, so a controller can stop a box that has
+    /// sat unused past its threshold.
+    func testHostInfoCarriesIdleSince() throws {
+        let tracker = IdleTracker(now: { Date(timeIntervalSince1970: 42) })
+        let c = HostServerCore(hostName: { "mini" }, probe: probe, idle: tracker); let p = FakePeer()
+        c.receive(text: try hello(), from: p)
+        c.receive(text: try HostWire.encode(HostClientFrame.request(id: 3, .hostInfo)), from: p)
+        let f = try p.frames()
+        guard case .reply(3, .hostInfo(let info)) = f[1] else { return XCTFail("\(f)") }
+        XCTAssertEqual(info.hostName, "mini")
+        XCTAssertEqual(info.idleSince, Date(timeIntervalSince1970: 42))
+    }
+
     /// The core asks its provider on every hello rather than caching one answer, because a
     /// host's addresses change under it (a laptop host joining the tailnet).
     func testHelloAckCarriesTheProvidersEndpoints() throws {

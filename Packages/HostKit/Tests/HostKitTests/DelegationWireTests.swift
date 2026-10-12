@@ -27,6 +27,22 @@ final class DelegationWireTests: XCTestCase {
                        #"{"id":1,"req":{"channel":3,"op":"sync.push","ref":"# + refJSON + #"},"t":"req"}"#)
     }
 
+    /// Submodule pins ride inside `ref`, only when there are any: a submodule-free snapshot is
+    /// byte-identical to what every earlier build sent (pinned above), and a ref from one of
+    /// those builds, which has no such key, still decodes.
+    func testSnapshotRefCarriesSubmodulePinsOnlyWhenThereAreAny() throws {
+        let pinned = SnapshotRef(repoRoot: "r00t", wtKey: "k1", worktreeName: "flight-deck", commit: "c0ffee", tree: "7ree",
+                                 submodules: [SubmodulePin(path: "vendor/lib", commit: "b0b", url: "https://example.com/lib.git")])
+        XCTAssertEqual(try req(.syncPush(ref: pinned, channel: 3)),
+                       #"{"id":1,"req":{"channel":3,"op":"sync.push","ref":{"commit":"c0ffee","repoRoot":"r00t","#
+                       + #""submodules":[{"commit":"b0b","path":"vendor/lib","url":"https://example.com/lib.git"}],"#
+                       + #""tree":"7ree","worktreeName":"flight-deck","wtKey":"k1"}},"t":"req"}"#)
+        let decoded = try JSONDecoder().decode(SnapshotRef.self, from: Data(try JSONEncoder().encode(pinned)))
+        XCTAssertEqual(decoded, pinned)
+        XCTAssertEqual(try JSONDecoder().decode(SnapshotRef.self, from: Data(refJSON.utf8)), ref)
+        XCTAssertEqual(try JSONDecoder().decode(SnapshotRef.self, from: Data(refJSON.utf8)).submodules, [])
+    }
+
     func testRunStartShapeIsPinned() throws {
         let spec = RunSpec(command: "make test", subdir: "pkg", env: ["A": "1"], pty: true, screen: false,
                            service: true, downCommand: "make down",

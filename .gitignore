@@ -41,3 +41,7 @@ scripts/local.env
 
 # scripts/release.sh output: archives, exports, notarized zips and dmgs
 dist/
+
+# A `tofu init` run in place leaves provider binaries beside a preset; test-infra-presets.sh
+# works on copies under build/, so this only guards a hand-run init.
+Resources/Infra/**/.terraform/

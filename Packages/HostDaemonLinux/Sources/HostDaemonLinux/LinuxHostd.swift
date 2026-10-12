@@ -50,6 +50,8 @@ final class LinuxHostd: @unchecked Sendable {
     let port: Int
     let hostName: String
     let store: ControllerStore
+    /// Enrollment slots already redeemed, so a revoke cannot reopen one (`enroll`).
+    private let spent: SpentEnrollments
     let core: HostServerCore
     /// Kept beside the core, which holds it privately, for the SIGTERM path's `shutdown`.
     private let delegation: DelegationHost
@@ -67,20 +69,33 @@ final class LinuxHostd: @unchecked Sendable {
     /// reports "expired" for a controller that has just paired.
     private let pairingLock = NSLock()
 
+    /// How long this box may sit idle before its controller may stop it, from the enrollment
+    /// that created it; nil for a host paired by code. Kept in `<root>/idle.json` because the
+    /// one-time enroll file is deleted, and idle reporting must survive a restart.
+    var idleThreshold: TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        return _idleThreshold
+    }
+    private var _idleThreshold: TimeInterval?
+
     /// `delegation` defaults to the real router under `root` (runs, checkouts; no screen on
-    /// Linux in v1); a test passes its own.
+    /// Linux in v1); a test passes its own. The core reports the router's own idle tracker,
+    /// so `host.info`'s `idleSince` counts exactly the runs, services and syncs it serves; on
+    /// Linux there is no console session to count besides.
     init(root: URL, port: Int, hostName: String, delegation: DelegationHost? = nil) {
         self.root = root
         self.port = port
         self.hostName = hostName
         store = ControllerStore(root: root)
-        let delegation = delegation ?? .standard(root: root, screenSupported: false)
+        spent = SpentEnrollments(root: root)
+        let delegation = delegation ?? .standard(root: root, screenSupported: false, idle: IdleTracker())
         self.delegation = delegation
         core = HostServerCore(hostName: { hostName },
                               probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion),
                               endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) },
-                              delegation: delegation)
+                              delegation: delegation, idle: delegation.idle)
         knownSlots = Set(store.all().map(\.slot))
+        _idleThreshold = IdleFile.load(root: root)
     }
 
     /// This box's `host:port` list for `helloAck`, from a `getifaddrs` walk: loopback and
@@ -244,6 +259,61 @@ final class LinuxHostd: @unchecked Sendable {
             // A Linux host has no display session to keep from locking, and its runs already
             // hold their own systemd-inhibit sleep lock; the option is the macOS host's.
             return .failed("Keeping the host awake while plugged in is available on Mac hosts only.")
+        case .enroll(let payload):
+            return enroll(payload)
+        }
+    }
+
+    /// Redeems a one-time enrollment file's payload. Under `pairingLock`, like a code pairing's
+    /// add, so two enrolls of one payload racing cannot both pass the "already" checks.
+    private func enroll(_ payload: EnrollmentPayload) -> AdminReply {
+        let now = Date()
+        let key: (slot: UUID, secret: Data)
+        do { key = try payload.validate(now: now) }
+        catch let error as EnrollmentError { return .failed("enrollment \(Self.describe(error))") }
+        catch { return .failed("enrollment refused: \(error)") }
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        // A reused payload is refused rather than re-added: the store would list the slot twice.
+        guard !store.all().contains(where: { $0.slot == key.slot }) else { return .failed("slot already enrolled") }
+        // The store check alone stops a reuse only until the slot is revoked: the payload stays
+        // valid for `maxAge` and readable from the metadata service, so a revoked controller's
+        // key could be enrolled straight back. The spent list survives the revoke and a restart.
+        do {
+            guard try spent.spend(slot: key.slot, issuedAt: payload.issuedAt, now: now) else {
+                return .failed("enrollment already used: slot \(key.slot) was redeemed before, and a revoked "
+                    + "controller cannot re-enroll from the same payload")
+            }
+        } catch SpentEnrollments.Failure.unreadable(let path) {
+            return .failed("enrollment refused: cannot read \(path), so cannot tell whether this payload was "
+                + "already used; move it aside to accept enrollments again")
+        } catch {
+            return .failed("could not record the enrollment as used: \(error)")
+        }
+        do {
+            try store.add(PairedController(slot: key.slot, name: payload.controllerName, secret: key.secret,
+                                           pairedAt: Date()))
+        } catch {
+            // Released again, so a disk error does not burn the machine's only enrollment file:
+            // `enroll` keeps the file on a refusal, and a retry must be able to redeem it.
+            try? spent.forget(key.slot)
+            return .failed("could not store the enrolled controller: \(error)")
+        }
+        let threshold = TimeInterval(payload.idleSeconds)
+        lock.lock(); _idleThreshold = threshold; lock.unlock()
+        do { try IdleFile.save(threshold, root: root) } catch {
+            // The controller is enrolled either way; only idle reporting after a restart is lost.
+            FileHandle.standardError.write(Data("could not record the idle threshold: \(error)\n".utf8))
+        }
+        FileHandle.standardError.write(Data("enrolled controller in slot \(key.slot)\n".utf8))
+        return .ok
+    }
+
+    static func describe(_ error: EnrollmentError) -> String {
+        switch error {
+        case .expired: "expired"
+        case .notYetValid: "is not valid yet (this machine's clock is behind)"
+        case .malformed: "malformed"
+        case .wrongVersion: "has an unsupported version"
         }
     }
 
@@ -306,5 +376,22 @@ final class LinuxHostd: @unchecked Sendable {
         } catch {
             FileHandle.standardError.write(Data("paired, but could not store the controller: \(error)\n".utf8))
         }
+    }
+}
+
+/// `<root>/idle.json`, `{"idleSeconds":N}`: the enrolled idle threshold. Missing or unreadable
+/// reads as nil (no threshold), which only means the host does not report itself idle.
+enum IdleFile {
+    private struct Body: Codable { let idleSeconds: Int }
+
+    static func load(root: URL) -> TimeInterval? {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("idle.json")),
+              let body = try? JSONDecoder().decode(Body.self, from: data) else { return nil }
+        return TimeInterval(body.idleSeconds)
+    }
+
+    static func save(_ threshold: TimeInterval, root: URL) throws {
+        try JSONEncoder().encode(Body(idleSeconds: Int(threshold)))
+            .write(to: root.appendingPathComponent("idle.json"), options: .atomic)
     }
 }

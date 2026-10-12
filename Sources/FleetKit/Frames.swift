@@ -781,10 +781,26 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// The reply to `host.disk`.
     case hostDisk(cid: Int, [WireWorkspaceUsage])
 
+    // The replies to `FleetRequest.infra` (see `InfraControlWire.swift`). Unsequenced and sent
+    // only to the local CLI that asked, like the delegation replies; `up` and `down` stream.
+
+    /// One step of an `up` or `down`; more frames follow on its `cid`.
+    case infraProgress(cid: Int, line: String)
+    /// `up` or `extend` done: the machine as it now is. Terminal.
+    case infraMachine(cid: Int, WireInfraMachine)
+    /// The reply to `infra.ls`: every machine, each orphan as `kind:id`, and each cloud the
+    /// orphan scan could not read (cloud → why). Both are empty unless orphans were asked for.
+    case infraList(cid: Int, [WireInfraMachine], orphans: [String], unreadable: [String: String] = [:])
+    /// The reply to `infra.doctor`.
+    case infraDoctor(cid: Int, [WireInfraCheck])
+    /// `down` done: the machine or orphan is gone. Terminal.
+    case infraDone(cid: Int)
+
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
+        case line, machine, machines, orphans, unreadable, checks
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
@@ -793,6 +809,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
+        case infraProgress, infraMachine, infraList, infraDoctor, infraDone
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -909,6 +926,27 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.hostDisk, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(usage, forKey: .usage)
+        case .infraProgress(let cid, let line):
+            try c.encode(Tag.infraProgress, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(line, forKey: .line)
+        case .infraMachine(let cid, let machine):
+            try c.encode(Tag.infraMachine, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(machine, forKey: .machine)
+        case .infraList(let cid, let machines, let orphans, let unreadable):
+            try c.encode(Tag.infraList, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(machines, forKey: .machines)
+            try c.encode(orphans, forKey: .orphans)
+            try c.encode(unreadable, forKey: .unreadable)
+        case .infraDoctor(let cid, let checks):
+            try c.encode(Tag.infraDoctor, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(checks, forKey: .checks)
+        case .infraDone(let cid):
+            try c.encode(Tag.infraDone, forKey: .t)
+            try c.encode(cid, forKey: .cid)
         }
     }
 
@@ -1012,6 +1050,24 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .hostDisk:
                 self = .hostDisk(cid: try c.decode(Int.self, forKey: .cid),
                                  try c.decode([WireWorkspaceUsage].self, forKey: .usage))
+            case .infraProgress:
+                self = .infraProgress(cid: try c.decode(Int.self, forKey: .cid),
+                                      line: try c.decode(String.self, forKey: .line))
+            case .infraMachine:
+                self = .infraMachine(cid: try c.decode(Int.self, forKey: .cid),
+                                     try c.decode(WireInfraMachine.self, forKey: .machine))
+            case .infraList:
+                // `unreadable` absent reads as every account scanned: `orphans` is then the
+                // whole answer.
+                self = .infraList(cid: try c.decode(Int.self, forKey: .cid),
+                                  try c.decode([WireInfraMachine].self, forKey: .machines),
+                                  orphans: try c.decodeIfPresent([String].self, forKey: .orphans) ?? [],
+                                  unreadable: try c.decodeIfPresent([String: String].self, forKey: .unreadable) ?? [:])
+            case .infraDoctor:
+                self = .infraDoctor(cid: try c.decode(Int.self, forKey: .cid),
+                                    try c.decode([WireInfraCheck].self, forKey: .checks))
+            case .infraDone:
+                self = .infraDone(cid: try c.decode(Int.self, forKey: .cid))
             }
             return
         }
@@ -1034,7 +1090,8 @@ public extension ServerFrame {
              .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
              .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
-             .recipeCheck(let cid, _), .hostDisk(let cid, _):
+             .recipeCheck(let cid, _), .hostDisk(let cid, _), .infraProgress(let cid, _),
+             .infraMachine(let cid, _), .infraList(let cid, _, _, _), .infraDoctor(let cid, _), .infraDone(let cid):
             return cid
         }
     }

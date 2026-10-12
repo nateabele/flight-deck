@@ -213,6 +213,10 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// `op` exactly as these do, so the wire is the same, and every switch over requests
     /// gains one arm instead of fifteen.
     case delegate(DelegateRequest)
+    /// A cloud-infra subcommand (`flightdeck infra up`, `ls`, …), forwarding to `InfraRequest`
+    /// for `delegate`'s reason. Its ops all begin `infra.`, which is how the decoder below
+    /// tells the two apart.
+    case infra(InfraRequest)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
@@ -281,6 +285,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(name, forKey: .name)
         case .delegate(let request):
             try request.encode(to: encoder)
+        case .infra(let request):
+            try request.encode(to: encoder)
         }
     }
 
@@ -291,9 +297,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let op = try c.decode(String.self, forKey: .op)
         guard let known = Op(rawValue: op) else {
-            // Not one of ours: a delegation op, or one nobody knows, which still throws
-            // (`DelegateRequest`'s own `Op` fails to decode it).
-            self = .delegate(try DelegateRequest(from: decoder))
+            // Not one of ours: an infra or delegation op, or one nobody knows, which still
+            // throws (`InfraRequest`'s or `DelegateRequest`'s own `Op` fails to decode it).
+            if op.hasPrefix("infra.") {
+                self = .infra(try InfraRequest(from: decoder))
+            } else {
+                self = .delegate(try DelegateRequest(from: decoder))
+            }
             return
         }
         switch known {

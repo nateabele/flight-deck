@@ -58,6 +58,7 @@ the Linux package (`Packages/HostDaemonLinux`) is never seen by Xcode.
 | `scripts/test-hostd-linux-interop.sh <mode>` | Builds the Linux hostd, runs it in a container on a published port, then runs the Darwin side through `test-unit.sh` scoped to the mode's test class (`LinuxHostdInteropTests`, or `LinuxHostdRunInteropTests` for `run`) | Modes: `echo` (gate 1: Darwin TLS-PSK to swift-nio-ssl over 0xCCAC, plus a wrong-key refusal), `pair` (gate 2: a Darwin `PairingInitiator(profile: .host)` pairs with the Linux SPAKE2 responder), `pair-wrong` (three wrong codes exhaust the window; the container must exit 1), `serve` (a full hostd on 47410 with pairing on 47411: hello, `host.info`, revoke, pair-then-hello), `run` (delegated execution against the real `serve` on 47410: the app's factory-built `DelegationService` syncs a temp repo with an uncommitted edit, runs `echo`, then `git status`/`rev-parse HEAD` in the synced checkout, which must be clean, at the snapshot commit, and carry the edit). A gate test that is skipped or not run **fails** the script. |
 | `scripts/build-hostd-linux.sh [arch ...]` | Builds the release assets in `build/hostd-release/`: a static-stdlib tarball per architecture, `hostd-install.sh` with the release URL baked in, `SHA256SUMS`, and `installer.xcconfig` | Default is both architectures; x86_64 is emulated and slow. Run it with **no arguments** before a Release build (see AGENT-OPERATIONS.md §2). Uploads nothing. |
 | `scripts/test-hostd-install.sh` | Runs the pasted install command in `ubuntu:24.04` against a local HTTP server; ends `INSTALL PASS` | Rebuilds aarch64 only and **empties `build/hostd-release/`**; `FD_HOSTD_SKIP_BUILD=1` reuses what is there. |
+| `scripts/test-infra-presets.sh` | `tofu init` + `tofu test` for each preset in `Resources/Infra/presets/`, on a copy under `build/infra-presets/`; ends `PRESETS PASS` | Needs `tofu` on `PATH` (or `TOFU=`), not Docker. `mock_provider` replaces AWS and Google, so no credentials and no cloud call; `init` downloads the providers pinned in each `.terraform.lock.hcl` (`-lockfile=readonly`, so a constraint that drifted from the lock fails here). Never in place: `Resources/Infra` is bundled whole. |
 | `scripts/hostd-install.sh` | The installer itself, not a build step | The source copy has an `@FD_HOSTD_ASSET_BASE@` placeholder and needs `--asset-base`; `build-hostd-linux.sh` stamps the release URL into the copy that ships. |
 
 **Never run two interop runs at once, or one next to `test-hostd-linux.sh`.** They bind fixed
@@ -88,6 +89,21 @@ script: they need a real second Mac and are the maintainer's, written up as proc
 **Route shims at run time.** A Debug build writes its shims under its own state directory
 (`Application Support/Flight Deck (Debug)/route-shims/`), and a UITest reset writes none. To run a
 routed command locally in a tab, set `FLIGHTDECK_NO_ROUTE=1`.
+
+### Cloud infra hosts (sub-project E)
+
+No build step either: HostKit's `Infra/` builds with everything else, the presets are a folder
+reference (`Resources/Infra`) copied into the bundle as they are, and `tofu`, `aws` and `gcloud`
+are found or fetched at run time, never at build time. **No test below touches a cloud** except
+the last, which is opt-in and the user's to run.
+
+| Script / mode | Does | Notes |
+|---|---|---|
+| `scripts/test-hostkit.sh` | Also runs `DurationTests`, `InfraConfigTests` (and the parser's float and `[infra.*]` cases in `DelegateConfigParserTests`), `CostModelTests`, `EnrollmentPayloadTests`, `IdleTrackerTests`, `AdminWireTests`, on macOS and Linux | |
+| `scripts/test-hostd-linux.sh` | Also runs hostd's `enroll` (`HostDaemonLinuxTests`): the admin op, reuse and expiry refusals, the behind-clock retry that keeps the file | |
+| `FD_TEST_FILTER=… ./scripts/test-unit.sh` | The app's infra classes: `InfraServiceTests`, `ReaperTests`, `InfraRegistryTests`, `CostLedgerTests`, `InfraWorkdirTests`, `TofuRunnerTests`, `ToolResolverTests`, `CloudInitRendererTests` (golden files in `Fixtures/cloud-init/`), `CloudAccountsTests`, `PriceCatalogTests` (fixtures and their provenance in `Fixtures/prices/`), `TailnetIntegrationTests`, `HuJSONPatcherTests`, `InfraControlWireTests`, `InfraCommandsTests` | Every seam is faked through `InfraEnvironment` (`InfraFakes.swift`), and `ToolResolverTests` runs fake tool scripts on a fake `PATH`, so nothing is downloaded and nothing is created. Exits 0 on failure: `rg -n "error:\|failed \("` the output. |
+| `scripts/test-infra-presets.sh` | See "The host scripts" above | Needs `tofu`; no credentials. |
+| `FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws\|gcp` | The spec's success criteria against the **real** account: in a throwaway repo, `run --on` an `auto_up` machine (t4g.nano / e2-micro, `ttl = "15m"`), `uname -a`, `host ls`, `infra down`, then `infra ls --orphans --json` must show no orphans **and** no unreadable account; ends `INFRA LIVE PASS` | **Costs money and creates real resources.** Refuses (exit 2) without `FD_INFRA_LIVE=1`. Drives the *installed* app's `flightdeck` (or `FLIGHTDECK=`) from a Flight Deck tab with Settings → Cloud set up; its exit trap runs `infra down` whatever happened. Never in any suite; never run by an agent unasked (AGENT-OPERATIONS.md §3). Has not run yet. |
 
 ## Running tests
 

@@ -107,7 +107,11 @@ ALL_CLASSES="$(rg -o --no-filename '^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestC
 if [ -n "${FD_TEST_FILTER:-}" ]; then
   for sel in ${FD_TEST_FILTER//,/ }; do
     cls="${sel%%/*}"; cls="${cls#FlightDeckTests.}"
-    printf '%s\n' "$ALL_CLASSES" | rg -qx "$cls" \
+    # A here-string, not `printf | rg -q`: rg -q exits at its first match, and under
+    # pipefail a printf still writing then takes SIGPIPE and fails the whole pipeline, which
+    # reported a real class as unknown (measured: 3 in 2000 under CPU contention, every time
+    # once the list outgrows a pipe buffer).
+    rg -qx "$cls" <<<"$ALL_CLASSES" \
       || { echo "error: FD_TEST_FILTER names unknown test class '$cls'" >&2; exit 2; }
   done
   run_xctest "$FD_TEST_FILTER"

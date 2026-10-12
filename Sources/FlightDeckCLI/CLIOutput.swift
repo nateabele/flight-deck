@@ -85,7 +85,7 @@ enum CLIOutput {
     }
 
     /// Left-aligned columns two spaces apart, each as wide as its widest cell.
-    private static func columns(_ rows: [[String]]) -> String {
+    static func columns(_ rows: [[String]]) -> String {
         let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
         return rows.map { cells in
             cells.enumerated().map { column, cell in

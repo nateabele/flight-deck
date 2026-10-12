@@ -67,6 +67,18 @@ final class DelegationCLIRunnerTests: XCTestCase {
         XCTAssertEqual(err, ["flightdeck: mini is offline (last seen 4m ago)"])
     }
 
+    /// A host's `transfer_stalled` says what happened and what to do, not the host's own
+    /// "the controller stopped sending or reading".
+    func testATransferStallSaysToRetryOnceTheConnectionIsBack() {
+        let t = FakeTransport()
+        _ = runner("run", "--on", "mini", "--", "make", transport: t)
+        answerBook(t)
+        t.push(.err(cid: lastCID(t), code: "transfer_stalled",
+                    message: "mini: the transfer made no progress for 600 s; the controller stopped sending or reading"))
+        XCTAssertEqual(code, 125)
+        XCTAssertEqual(err, ["flightdeck: the transfer stalled (no progress for 10 minutes); retry when the connection is back"])
+    }
+
     func testAWaitTimeoutIs124() {
         let t = FakeTransport()
         _ = runner("wait", "r7", "--timeout", "30", transport: t)

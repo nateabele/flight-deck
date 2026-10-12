@@ -107,13 +107,16 @@ enum HostPairingAddresses {
 /// `tailscale status --json`, from whichever CLI this Mac has. Every failure is nil: a Mac
 /// without Tailscale simply lists no tailnet address.
 enum TailscaleCLI {
+    /// The Mac App Store and standalone app's binary. Shared with `ToolResolver`'s search path.
+    static let appBinary = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
     /// The Mac App Store and standalone app's own binary, which answers CLI arguments, then a
     /// Homebrew or manual install. Searched explicitly as well as on `PATH`, because an app
     /// launched from the Dock gets launchd's bare `/usr/bin:/bin:/usr/sbin:/sbin`.
     static func candidates(path: String? = ProcessInfo.processInfo.environment["PATH"]) -> [String] {
         let onPath = (path ?? "").split(separator: ":").map { "\($0)/tailscale" }
         var seen = Set<String>()
-        return (["/Applications/Tailscale.app/Contents/MacOS/Tailscale"] + onPath
+        return ([appBinary] + onPath
                 + ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"])
             .filter { seen.insert($0).inserted }
     }
@@ -128,7 +131,10 @@ enum TailscaleCLI {
         return nil
     }
 
-    private static func run(_ path: String, _ arguments: [String], timeout: TimeInterval) -> Data? {
+    /// One bounded run of the CLI at `path`: its stdout on a zero exit, else nil. Internal so
+    /// `TailnetIntegration` drives `lock status` and `lock sign` through the same guard
+    /// against a wedged daemon.
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments

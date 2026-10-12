@@ -111,7 +111,9 @@ final class DelegationHostTests: XCTestCase {
     }
 
     /// A core with the real router: a real `Runner` and `Workspace` under a temp state root.
-    private func host(probe: HostInfoProbe? = nil) throws -> HostServerCore {
+    /// `wrap` stands another `RunControlling` in front of the runner, as a hostd may.
+    private func host(probe: HostInfoProbe? = nil,
+                      wrap: (Runner) -> any RunControlling = { $0 }) throws -> HostServerCore {
         let root = try tempDir("fd-host")
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
@@ -119,7 +121,7 @@ final class DelegationHostTests: XCTestCase {
                             hostEnvironment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSTemporaryDirectory()],
                             power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
                             lifecycle: .workspace(workspace))
-        let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
+        let delegation = DelegationHost(runner: wrap(runner), workspace: workspace, screen: screen,
                                         portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
         return HostServerCore(hostName: { "mini" },
                               probe: probe ?? HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
@@ -195,10 +197,29 @@ final class DelegationHostTests: XCTestCase {
 
     // MARK: -
 
+    /// `run.result` asked while the run is still going has no result yet, and must say so
+    /// (`run_active`) rather than `result_expired`, which tells the controller the result is
+    /// lost. The router used to learn the phase by casting its runner to `Runner`, so any
+    /// other conformer (a wrapper, a fake) silently skipped the check.
+    func testResultOfARunStillGoingIsRunActiveWhateverTheRunner() async throws {
+        for (name, wrap) in [("Runner", { $0 } as (Runner) -> any RunControlling),
+                             ("a forwarding runner", { ForwardingRunner($0) as any RunControlling })] {
+            let c = Controller(core: try host(wrap: wrap))
+            _ = try await c.hello()
+            let ref = try await sync(try repo(), over: c)
+            let runID = try await start("sleep 30", ref, over: c)
+            try await c.started(runID)
+            let code = await remote { try await self.result(runID, over: c) }
+            XCTAssertEqual(code, "run_active", name)
+            _ = c.post(.delegation(.runCancel(runID: runID)))
+            _ = try await c.events(runID)
+        }
+    }
+
     func testHelloAdvertisesTheDelegationCapabilities() async throws {
         let c = Controller(core: try host())
         let caps = try await c.hello()
-        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service], "no screen on a host that has none")
+        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service, .submodules], "no screen on a host that has none")
     }
 
     func testSyncThenRunStreamsOutputAndExitCode() async throws {
@@ -364,9 +385,9 @@ final class DelegationHostTests: XCTestCase {
     func testPiecesSplitAtTheWireCap() {
         let data = Data(repeating: 7, count: 150_000)
         let pieces = DelegationHost.pieces(of: data, at: 1000)
-        XCTAssertEqual(pieces.map(\.offset), [1000, 1000 + 65536, 1000 + 131072])
+        XCTAssertEqual(pieces.map(\.offset), [1000, 1000 + 65536, 1000 + 131072] as [Int64])
         XCTAssertEqual(pieces.map(\.data.count), [65536, 65536, 150_000 - 131072])
-        XCTAssertEqual(DelegationHost.pieces(of: Data([1]), at: 9).map(\.offset), [9])
+        XCTAssertEqual(DelegationHost.pieces(of: Data([1]), at: 9).map(\.offset), [9] as [Int64])
     }
 
     /// A slow `host.info` (docker wedged) must not hold the connection's serial queue: the
@@ -404,6 +425,41 @@ final class DelegationHostTests: XCTestCase {
         XCTAssertEqual(events.last, .exited(.code(125)))
         let (commit, _) = try await result(runID, over: c)
         XCTAssertNil(commit, "nothing ran, so nothing changed")
+    }
+
+    /// The reason line of a run that never ran is synthesized, not stored in the spool, so it
+    /// used to be re-sent at whatever offset a re-attach asked from: a controller that already
+    /// had it, re-attaching from just past it, got it again at the new offset and printed it
+    /// twice. The line keeps the offset it was first sent at.
+    func testAReattachDoesNotRepeatTheNeverRanReason() async throws {
+        let repo = try repo()
+        let c = Controller(core: try host())
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let wrong = SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName,
+                                commit: ref.commit, tree: String(repeating: "f", count: 40))
+        let runID = try await start("echo must-not-run", wrong, over: c)
+        let first = try await c.events(runID)
+        let lines = first.compactMap { event -> (Int64, Data)? in
+            if case .output(_, let at, let data) = event { return (at, data) }; return nil
+        }
+        XCTAssertEqual(lines.count, 1)
+        let (at, line) = try XCTUnwrap(lines.first)
+        let past = at + Int64(line.count)
+
+        c.forgetFrames()
+        _ = c.post(.delegation(.runAttach(runID: runID, offset: past)))
+        let again = try await c.events(runID)
+        XCTAssertEqual(again.last, .exited(.code(125)))
+        XCTAssertEqual(output(again), "", "re-attached past the reason, so nothing to print")
+
+        c.forgetFrames()
+        _ = c.post(.delegation(.runAttach(runID: runID, offset: 0)))
+        let replay = try await c.events(runID)
+        let replayed = replay.compactMap { event -> Int64? in
+            if case .output(_, let at, _) = event { return at }; return nil
+        }
+        XCTAssertEqual(replayed, [at], "a replay from the start gets the line at its own offset")
     }
 
     /// A service starts through the services (so they hold its slot and can sync and down
@@ -466,7 +522,7 @@ extension DelegationHostTests {
         let runner: Runner
     }
 
-    private func parts() throws -> Parts {
+    private func parts(idle: IdleTracker? = nil, transferStall: TimeInterval = DelegationHost.transferStall) throws -> Parts {
         let root = try tempDir("fd-host")
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
@@ -475,7 +531,8 @@ extension DelegationHostTests {
                             power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
                             lifecycle: .workspace(workspace))
         let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
-                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
+                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false, idle: idle,
+                                        transferStall: transferStall)
         let core = HostServerCore(hostName: { "mini" }, probe: HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
                                   delegation: delegation)
         return Parts(core: core, delegation: delegation, runner: runner)
@@ -593,6 +650,138 @@ extension DelegationHostTests {
     }
 }
 
+// MARK: - Idle tracking
+
+extension DelegationHostTests {
+    private func eventually(_ what: String, within seconds: TimeInterval = 30,
+                            _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("never: \(what)") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// A run belongs to the host, not to the connection that started it: a controller that
+    /// closes its lid mid-build must not make the box look idle (and get it stopped) while the
+    /// build is still going, and the run's end must still be heard with nobody attached.
+    func testARunKeepsTheHostBusyAfterItsControllerLeavesUntilItEnds() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let run = try await start("echo ready; while :; do sleep 0.1; done", ref, over: c)
+        try await c.started(run)
+        c.closeConnection()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a live run with no controller attached is still activity")
+
+        p.runner.cancel(runID: run)
+        try await waitTerminal(p.runner, [run], within: 20)
+        try await eventually("idle after the run ended") { idle.idleSince != nil }
+    }
+
+    /// A run that never ran (its checkout failed) ends without an exit of its own; it must
+    /// still close its activity, or the host would never look idle again.
+    func testARunThatFailedBeforeRunningDoesNotKeepTheHostBusy() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let wrong = SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName,
+                                commit: ref.commit, tree: String(repeating: "f", count: 40))
+        let runID = try await start("echo must-not-run", wrong, over: c)
+        let events = try await c.events(runID)
+        XCTAssertEqual(events.last, .exited(.code(125)))
+        try await eventually("idle after the failed run") { idle.idleSince != nil }
+    }
+
+    /// A `sync.push` is activity while its bundle streams in, and ends as activity when its
+    /// connection drops mid-transfer: the aborted push must not leave the host busy forever.
+    func testAnAbortedSyncPushIsActivityUntilItFails() async throws {
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let channel = try await c.mux.open()
+        let ref = SnapshotRef(repoRoot: String(repeating: "a", count: 40), wtKey: "abcd", worktreeName: "w",
+                              commit: String(repeating: "b", count: 40), tree: String(repeating: "c", count: 40))
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(Data("partial".utf8))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a push in flight is activity")
+
+        c.closeConnection()
+        let code = await remote { try await c.reply(to: id) }
+        XCTAssertNotNil(code)
+        try await eventually("idle after the aborted push") { idle.idleSince != nil }
+    }
+
+    /// A controller that went silent mid-push with its connection still up (a frozen peer, or
+    /// a sleeping laptop whose half-open TCP the host has not yet noticed) must not hold the
+    /// host busy forever: a transfer that makes no progress for the stall deadline fails.
+    func testASilentSyncPushFailsAfterTheStallDeadlineAndTheHostGoesIdle() async throws {
+        let idle = IdleTracker()
+        let p = try parts(idle: idle, transferStall: 0.3)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let channel = try await c.mux.open()
+        let ref = SnapshotRef(repoRoot: String(repeating: "a", count: 40), wtKey: "abcd", worktreeName: "w",
+                              commit: String(repeating: "b", count: 40), tree: String(repeating: "c", count: 40))
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(Data("partial".utf8))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(idle.idleSince, "a push in flight is activity")
+
+        let code = await remote { try await c.reply(to: id, timeout: 10) }
+        XCTAssertEqual(code, "transfer_stalled")
+        try await eventually("idle after the stalled push") { idle.idleSince != nil }
+    }
+
+    /// A transfer that keeps making progress is never cut, however long it takes in all.
+    func testASlowButSteadySyncPushIsNotCut() async throws {
+        let repo = try repo()
+        let p = try parts(transferStall: 0.5)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await Snapshotter().snapshot(worktree: repo.url, host: "mini", include: [])
+        let bundle = try Data(contentsOf: try await BundleMaker().bundle(worktree: repo.url, snapshot: ref, haves: []))
+        let channel = try await c.mux.open()
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        let pieces = stride(from: 0, to: bundle.count, by: max(1, bundle.count / 4)).map {
+            bundle.subdata(in: $0..<min($0 + max(1, bundle.count / 4), bundle.count))
+        }
+        for piece in pieces {
+            try await channel.write(piece)
+            try await Task.sleep(nanoseconds: 250_000_000)   // 1 s+ in all, past the 0.5 s deadline
+        }
+        await channel.finish()
+        let pushed = try await c.reply(to: id)
+        XCTAssertEqual(pushed, .delegation(.syncPush))
+    }
+
+    /// A service is activity from its start until it is downed, like a run.
+    func testAServiceKeepsTheHostBusyUntilItIsDowned() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let svc = try await startService(service("echo up; while :; do sleep 0.1; done", down: "true"), ref, over: c)
+        try await c.started(svc)
+        XCTAssertNil(idle.idleSince, "a live service is activity")
+
+        let downed = try await c.request(.serviceDown(service: svc))
+        XCTAssertEqual(downed, .serviceDown)
+        try await eventually("idle after the service was downed") { idle.idleSince != nil }
+    }
+}
+
 private extension RunPhase {
     var isQueued: Bool { if case .queued = self { return true }; return false }
 }
@@ -602,4 +791,25 @@ private final class EOFFlag: @unchecked Sendable {
     private var raised = false
     func set() { lock.withLock { raised = true } }
     var isSet: Bool { lock.withLock { raised } }
+}
+
+/// Stands in front of a `Runner` and forwards every requirement, as a logging or metering layer
+/// in a hostd would. Only the protocol is visible to the router through it.
+private final class ForwardingRunner: RunControlling, @unchecked Sendable {
+    private let inner: Runner
+    init(_ inner: Runner) { self.inner = inner }
+    func start(_ spec: RunSpec, owner: LeaseHolderOwner,
+               acquire: @escaping @Sendable () async throws -> CheckoutLease) -> String {
+        inner.start(spec, owner: owner, acquire: acquire)
+    }
+    func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
+        inner.events(runID: runID, from: offset)
+    }
+    func signal(runID: String, _ sig: Int32) throws { try inner.signal(runID: runID, sig) }
+    func cancel(runID: String) { inner.cancel(runID: runID) }
+    func down(runID: String) async throws { try await inner.down(runID: runID) }
+    func owner(runID: String) -> LeaseHolderOwner? { inner.owner(runID: runID) }
+    func liveRuns(controller: UUID) -> [String] { inner.liveRuns(controller: controller) }
+    func phase(runID: String) -> RunPhase? { inner.phase(runID: runID) }
+    func shutdown(grace: Double, deadline: Double) async { await inner.shutdown(grace: grace, deadline: deadline) }
 }
