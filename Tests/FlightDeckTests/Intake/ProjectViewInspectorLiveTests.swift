@@ -175,10 +175,36 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(lists.count, 2, "sidebar and Intakes list both drawn: \(lists.map(\.numberOfRows))")
     }
 
+    /// The Notes mode must not set the window's minimum height. SwiftUI sizes a window's minimum
+    /// from its content measured at a zero proposal, and at zero width every line of the rail's
+    /// vertically fixed-size text wrapped a character at a time: the footer alone came to 618 pt,
+    /// each unplaced note card to hundreds more. The window was then held taller than it was —
+    /// grown here, and on a screen that could not grow it (a tiled or full-screen window) laid
+    /// out taller than itself and anchored at the bottom, so every column's top was cut off:
+    /// the sidebar, the Intakes list and the inspector showed empty panes and the plan could
+    /// not scroll to its top (the maintainer, 2026-10-11, on `118e6db0`). Measured before the fix: a
+    /// 700 pt window grew to 833 pt with no notes, and its minimum height went 349 → 833.
+    func testTheNotesRailLeavesTheWindowItsHeight() throws {
+        let (_, _, _, _, window) = try openTwoShapingProjects(pendingNotes: 3)
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(1.5)
+        let rounds = window.contentMinSize.height
+        let modes = try XCTUnwrap(all(NSSegmentedControl.self, in: try XCTUnwrap(window.contentView)).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        modes.selectedSegment = 0
+        XCTAssertTrue(modes.sendAction(modes.action, to: modes.target))
+        settle(1.5)
+        XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), "Notes")
+        XCTAssertLessThanOrEqual(window.contentMinSize.height, rounds + 1,
+                                 "the rail raised the window's minimum height: \(rounds) on Rounds, \(window.contentMinSize.height) on Notes")
+        XCTAssertEqual(window.frame.height, 700, accuracy: 0.5, "the window was grown to fit the rail")
+    }
+
     // MARK: - Fixtures
 
     /// Two projects, each with a shaping intake selected, A shown in a hosted `RootView`.
-    private func openTwoShapingProjects() throws -> (SessionStore, Repo, Repo, UUID, NSWindow) {
+    private func openTwoShapingProjects(pendingNotes: Int = 0) throws -> (SessionStore, Repo, Repo, UUID, NSWindow) {
         let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
         let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
                                  preferences: prefs, intakesRoot: root)
@@ -193,7 +219,7 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
             var settings = prefs.projectSettings(repo.url.path)
             settings.flywheelEnabled = true
             prefs.setProjectSettings(repo.url.path, settings)
-            try seedShaping(project: repo.url.standardizedFileURL.path)
+            try seedShaping(project: repo.url.standardizedFileURL.path, pendingNotes: pendingNotes)
         }
         // Seeded before first read: the service loads its intakes once, at init.
         let service = store.intakeService
@@ -216,7 +242,7 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     }
 
 
-    private func seedShaping(project: String) throws {
+    private func seedShaping(project: String, pendingNotes: Int = 0) throws {
         var intake = Intake(projectPath: project, intent: "Plan the thing")
         intake.state = .shaping
         intake.recommended = .featurePlan
@@ -227,6 +253,8 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         var tape = tapes.loadTape()
         try tapes.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date()),
                                   files: ["drafts/0.md": Data("# Plan\n\nSome words to note.\n".utf8)], into: &tape)
+        // Unanchored, so the rail stacks them at its top rather than beside a line.
+        tape.pendingNotes = (0..<pendingNotes).map { PlanNote(note: "Fixture note \($0): say more about the rollout and who signs it off.") }
         tape.status = .paused
         try tapes.saveTape(tape)
     }

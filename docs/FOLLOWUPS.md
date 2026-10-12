@@ -3505,12 +3505,36 @@ Still open:
   unmeasured. `AppKitMenuSlot` puts the items back a turn later if one ever happens; that would
   show as a blink inside an open menu, not in the bar. The UI-test Mac's screen was locked all
   afternoon, so the activated run could not be repeated there.
-- **"Opening the inspector renders blank columns" (the maintainer's screenshot, same Release) did not
-  reproduce offscreen.** `testOpeningTheInspectorSettlesWithEveryColumnDrawn` hosts `RootView`,
-  opens the inspector on a shaping plan and finds no idle re-evaluation, the Notes/Rounds control
-  laid out, and the sidebar's and Intakes list's rows present — on `4e13c49d` and on the fix.
-  The offscreen window is never key, so it has no menu bar or focused values, which is where the
-  two causes above lived. Unverified until the maintainer opens the inspector on the next Release.
+- **"Opening the inspector renders blank columns"** — fixed 2026-10-12 (`inspector-blank-columns`),
+  see the next section.
+
+### Opening the inspector blanked every column (fixed 2026-10-12, `inspector-blank-columns`)
+
+The maintainer, on the Release from `118e6db0`: with the inspector open the session sidebar, the Intakes
+list and the inspector were empty panes, and the plan would not scroll to its top; hiding the
+inspector brought them back. Not a redraw loop: the Notes rail set the window's minimum height.
+SwiftUI takes a window's minimum content size from its content measured at a zero proposal; at
+zero width the rail's vertically fixed-size text (its footer, each unplaced note card) wrapped a
+character a line. Measured in `ProjectViewInspectorLiveTests`: the window's minimum height went
+349 → 833 pt on Notes with no notes, 3,322 pt with three unplaced notes, and an offscreen 700 pt
+window was grown to match. A window that cannot grow that tall lays out taller than itself,
+anchored at the bottom, so every column's top is off screen. `4e13c49d` made Notes a remembered
+mode the inspector opens onto; before it the rail showed only while the plan held focus.
+The lane now has no minimum height (it fills and clips, as it always drew) and the footer is no
+longer fixed-size; `testTheNotesRailLeavesTheWindowItsHeight` pins the minimum on both modes.
+`PlanningInspectorUITests` (fixture `-FlightDeckPlanningFixture shaping`) drives it in a real,
+key window and checks every column for ink in the window's screenshot.
+
+Still open:
+- **The inspector can push the detail split past the window's right edge.** In the same offscreen
+  1000 pt window, Rounds open, the inspector's split view (plan pane + inspector, minimum 840 pt)
+  sat in a 634 pt slot and ran 202 pt off the right edge; the window's minimum width (920) does
+  not count the Intakes column beside it. Not what the maintainer saw (his window was 1,862 pt wide), so
+  left alone; a narrow window with the inspector open will clip the inspector.
+- **`testOpeningTheInspectorSettlesWithEveryColumnDrawn` flakes**: one store publish from the
+  window's clock in its 2 s idle sample (root 1, detail 2, inspector 2). Run alone on this Mac
+  on 2026-10-12 it failed 3 of 4 runs without this fix and 3 of 4 with it; it opens on Rounds,
+  where the rail is not mounted.
 
 ## Rounds timeline editor (2026-10-09, `rounds-timeline-editor`)
 
