@@ -443,6 +443,13 @@ extension AnswerTrigger {
                     self.tool = tool
                     self.summary = summary
                     self.questions = nil
+                case .signIn:
+                    // Never offered through this trigger — it lists transcript-derived dialogs —
+                    // and the URL is deliberately not copied into its output.
+                    self.kind = "signin"
+                    self.tool = nil
+                    self.summary = nil
+                    self.questions = nil
                 }
             }
         }

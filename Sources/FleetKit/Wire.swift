@@ -154,6 +154,14 @@ extension KeyedDecodingContainer {
 /// for such an agent (`AgentOpenPromptReader.transcriptCarriesOpenPrompt == false`), and only
 /// for such an agent: a claude tab never carries this field, so its bytes are unchanged.
 ///
+/// **A second, claude-side use: a dialog read off the Mac's SCREEN** (`ScreenPromptID`). claude's
+/// own TUI menus — `/login`, `/model`, a resume picker — never reach its transcript, so for a
+/// claude tab `OpenPrompt.find` finds nothing and the session reads "Waiting for you". After the
+/// Mac's debounce says it cannot name the dialog, it parses the screen and sends what it read
+/// here, under a `screen:`/`signin:` call id. The phone's rule is unchanged — the transcript
+/// derivation first, this when there is none, the Mac's id as the veto — and it keeps working for
+/// a phone built before this, which draws a `"question"` it does not know the origin of.
+///
 /// **It never replaces the veto.** The phone shows it only while `openPromptCall` names the
 /// same call, and it rides the same `activityChanged` event as that id — so the supersede that
 /// moves the id moves this with it, and a dialog that closes clears both on one event.
@@ -163,21 +171,27 @@ extension KeyedDecodingContainer {
 /// failure that would take the whole snapshot down with it.
 public struct WireOpenPrompt: Codable, Equatable, Sendable {
     public var callID: String
-    /// `"permission"` or `"question"`.
+    /// `"permission"`, `"question"` or `"signin"`.
     public var kind: String
     public var tool: String?
     public var summary: String?
     public var questions: [PromptQuestion]?
+    /// A sign-in's authorize URL — `kind == "signin"` only. Optional with the synthesized
+    /// coder's `decodeIfPresent`/`encodeIfPresent`, so every other kind puts the bytes on the
+    /// wire it always did, and a phone built before it decodes a `"signin"` as an unknown kind
+    /// (`prompt` is nil: no card) rather than failing.
+    public var url: String?
 
     public init(
         callID: String, kind: String, tool: String? = nil, summary: String? = nil,
-        questions: [PromptQuestion]? = nil
+        questions: [PromptQuestion]? = nil, url: String? = nil
     ) {
         self.callID = callID
         self.kind = kind
         self.tool = tool
         self.summary = summary
         self.questions = questions
+        self.url = url
     }
 
     public init(_ open: OpenPrompt) {
@@ -186,6 +200,8 @@ public struct WireOpenPrompt: Codable, Equatable, Sendable {
             self.init(callID: id, kind: "permission", tool: tool, summary: summary)
         case .question(let id, let questions):
             self.init(callID: id, kind: "question", questions: questions)
+        case .signIn(let id, let url):
+            self.init(callID: id, kind: "signin", url: url)
         }
     }
 
@@ -198,6 +214,12 @@ public struct WireOpenPrompt: Codable, Equatable, Sendable {
         case "question":
             guard let questions, !questions.isEmpty else { return nil }
             return .question(callID: callID, questions)
+        case "signin":
+            // Vetted again here: a card whose button opens an in-app browser is the one place a
+            // phone follows a link on a Mac's say-so, so the rule that decided the Mac would
+            // send it is run on this end too, over the same string.
+            guard let url, ClaudeSignInURL.parse(url) != nil else { return nil }
+            return .signIn(callID: callID, url: url)
         default:
             return nil
         }

@@ -191,3 +191,31 @@ The harness shares the real parser (`ChoiceDialog.swift`, via `probe.swift`), bu
 is still Python — it does not exercise `SessionStore`'s async settle behaviour (`perform`'s
 recursive, repaint-then-check structure). A pass here means the interlock's *rules* held over a
 live screen; it is not a substitute for driving `SessionStore` itself.
+
+## `loginfuzz.py` — a screen menu, driven live (no tokens, no login)
+
+`runfuzz.py` covers dialogs that have a transcript record. claude's own TUI menus and its OAuth
+sign-in have none, and the Mac names them from the screen alone
+(`Sources/FlightDeck/ScreenPromptReader.swift`). `loginfuzz.py` starts a real `claude` with an
+**empty** `CLAUDE_CONFIG_DIR`, so it shows its first-run flow, and checks the real reader at each
+screen: the unnumbered theme picker makes no card; the "Select login method:" menu is read with
+three rows, cursor on row 0 and the line above as its question; Down then Up moves the cursor
+without moving the identity; and Return lands on the paste-code screen, whose hard-wrapped authorize
+URL must come back rejoined, on `claude.com`, with a non-localhost redirect and the same `state`
+the shimmed browser was handed.
+
+```sh
+/tmp/livefuzz-venv/bin/python loginfuzz.py     # ~20 s, 22 checks, prints no URL
+```
+
+It goes **up to, and stops on,** the paste-code screen. It never pastes a code and never completes
+a login: `open`/`xdg-open`/`BROWSER` are shimmed, the config dir is a throwaway, and claude never
+reaches a conversation, so it spends no tokens. Its probe (`screenprobe.swift`) is compiled by
+`build_screenprobe()` against the real `ScreenPromptReader`, `ChoiceDialog` and the FleetKit files
+they read, every run.
+
+**Its limit, in the same words as above:** it renders through pyte at 140x45, and the Mac reads
+Ghostty's own viewport. A terminal that soft-wraps the URL without a newline would hand the reader
+one long line rather than four, which the reader also handles (the rejoin is a no-op), but no
+harness here has watched Ghostty do it.
+

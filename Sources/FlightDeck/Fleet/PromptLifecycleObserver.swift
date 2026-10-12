@@ -184,14 +184,28 @@ final class PromptLifecycleObserver {
     /// `pushedOpenPrompt` and not `openPrompt`, because a log line must not build an agent's
     /// adapter to write itself — see that method for the side-effect rule, which the store's
     /// own per-tick derivation now leans on too.
+    ///
+    /// **Then the screen, when the transcript names nothing.** A dialog this Mac read off the
+    /// terminal (`ScreenPromptReader`) is in no transcript, so `pushedOpenPrompt` refuses it
+    /// `prompt_changed` and a log built on that alone would call it `unnamed` for as long as it
+    /// is up. The store's own offer is the same object the wire carries, so this records what
+    /// was actually pushed and cannot disagree with it.
     private func derive(_ id: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
-        prompts.pushedOpenPrompt(inSession: id)
+        let result = prompts.pushedOpenPrompt(inSession: id)
+        if case .failure = result, let screen = store.openPromptOffers[id],
+           ScreenPromptID.isScreenDerived(screen.callID) {
+            return .success(screen)
+        }
+        return result
     }
 
     private static func kind(of prompt: OpenPrompt) -> PromptLifecycleRecord.Kind {
         switch prompt {
+        case .question(let call, let questions) where ScreenPromptID.isMenu(call):
+            return .screenMenu(rows: questions.first?.options.count ?? 0)
         case .question(_, let questions): return .question(options: questions.map(\.options.count))
         case .permission(_, let tool, _): return .permission(tool: tool)
+        case .signIn: return .signIn
         }
     }
 
@@ -203,10 +217,19 @@ final class PromptLifecycleObserver {
     private static func detail(of prompt: OpenPrompt) -> String? {
         let text: String?
         switch prompt {
+        case .question(let call, let questions) where ScreenPromptID.isMenu(call):
+            // The rows too: a menu has no transcript record to read them from afterwards, and
+            // which menu it was is the first thing anyone asks of this line. File only — this
+            // is `detail`, which `PromptLifecycleLog.record` never sends to the unified log.
+            text = (questions.map(\.question) + (questions.first?.options.map(\.label) ?? []))
+                .joined(separator: " | ")
         case .question(_, let questions):
             text = questions.map(\.question).joined(separator: " | ")
         case .permission(_, _, let summary):
             text = summary
+        case .signIn:
+            // No detail at all: the only words on a sign-in are its URL.
+            text = nil
         }
         guard let text, !text.isEmpty else { return nil }
         return text.count <= 240 ? text : String(text.prefix(240)) + "…"

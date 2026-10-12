@@ -94,9 +94,9 @@ final class ClaudeComposerDetectorTests: XCTestCase {
 
     /// **The corpus assertion that stops the blank-row admission from widening into a hole.**
     /// Admitting a blank row inside the box is safe only as long as no dialog reaches the loop
-    /// that reads it; all twenty-three are refused earlier, by the rule-immediately-above test (13)
+    /// that reads it; all twenty-four are refused earlier, by the rule-immediately-above test (13)
     /// or for carrying no usable marker at all (`workspace-trust` has none,
-    /// `permission-write-row2` puts one on row 0). That is a property of today's corpus, not a
+    /// `permission-write-row2` puts one on row 0; `login-method` has a marker but no rule above it). That is a property of today's corpus, not a
     /// theorem, so it is asserted rather than assumed — and asserted against
     /// `ClaudeDialogVetoTests.dialogs` rather than a second hand-typed list, so a dialog capture
     /// added there is held to this predicate too.

@@ -534,6 +534,8 @@ final class CLIRunner {
             return usage("answer: this is a question — answer with [[index…]] (see flightdeck prompt)")
         case (.selections, .permission):
             return usage("answer: this is a permission prompt — answer with allow or deny")
+        case (_, .signIn):
+            return usage("answer: this is a sign-in — finish it on your Mac or phone")
         case (.selections(let selections), .question(_, let questions)):
             // Checked here, before anything is sent: the Mac would refuse a bad index too, but
             // only after a round trip, and a set is answered as a unit so a short one is never

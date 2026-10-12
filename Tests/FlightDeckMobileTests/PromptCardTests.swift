@@ -351,6 +351,66 @@ final class PromptCardTests: XCTestCase {
                 activity: "waiting", call: .unreported),
             "a Mac too old to report the field has said nothing about this dialog either way")
     }
+
+    // MARK: Sign-in
+
+    private let signIn = OpenPrompt.signIn(
+        callID: "signin:0123456789abcdef",
+        url: "https://claude.com/cai/oauth/authorize?code=true&client_id=c&response_type=code"
+            + "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+            + "&code_challenge=x&code_challenge_method=S256&state=s")
+
+    func testASignInCardIsTitledForTheAgentAndTakesItsOwnInputs() {
+        XCTAssertEqual(PromptCard.title(for: signIn, agent: "claude"), "Sign in to Claude")
+        XCTAssertEqual(PromptCard.title(for: signIn, agent: nil), "Sign in",
+                       "no agent from the wire, no name invented")
+        XCTAssertNil(PromptCard.heading(for: signIn))
+        XCTAssertNil(PromptCard.subtitle(for: signIn))
+        XCTAssertTrue(PromptCard.hasInputs(signIn))
+        XCTAssertTrue(PromptCard.hidesComposer(for: signIn, minimized: false),
+                      "its code field replaces the message box, as a question's inputs do")
+        XCTAssertFalse(PromptCard.hidesComposer(for: signIn, minimized: true))
+        XCTAssertFalse(PromptCard.hidesComposer(for: permission, minimized: false))
+    }
+
+    func testASignInOffersControlsUntilTheCodeIsSentAndCanAlwaysBeDismissed() {
+        XCTAssertTrue(PromptCard.showsControls(for: signIn, state: .idle))
+        XCTAssertFalse(PromptCard.showsControls(for: signIn, state: .sent(call: signIn.callID)),
+                       "a second Send would paste the code twice")
+        XCTAssertTrue(PromptCard.showsControls(for: signIn, state: .sent(call: "toolu_OTHER")))
+        XCTAssertTrue(PromptCard.showsDismiss(for: signIn, state: .idle),
+                      "the corner x is Escape: it cancels the login, whatever was parsed")
+        XCTAssertNil(PromptCard.footnote(for: signIn, state: .idle))
+        XCTAssertEqual(PromptCard.footnote(for: signIn, state: .sent(call: signIn.callID)),
+                       PromptCard.sentFootnote)
+    }
+
+    /// **What the Mac will accept is what the phone sends.** A pasted code arrives with a
+    /// trailing newline and sometimes interior ones; the Mac refuses control characters because
+    /// in claude's field a newline is Return, so the phone flattens them and sends nothing for
+    /// an empty field.
+    func testTheCodeIsFlattenedAndAnEmptyFieldSendsNothing() throws {
+        XCTAssertEqual(PromptCard.signInCode("  abc123#def\n"), "abc123#def")
+        XCTAssertEqual(PromptCard.signInCode("abc\ndef"), "abc def")
+        XCTAssertNil(PromptCard.signInCode(""))
+        XCTAssertNil(PromptCard.signInCode(" \n "))
+        XCTAssertNil(PromptCard.signInSelections(code: "  "))
+        let selections = try XCTUnwrap(PromptCard.signInSelections(code: "abc"))
+        XCTAssertEqual(selections, [[AnswerSelection(index: 0, label: "", text: "abc")]])
+        for scalar in try XCTUnwrap(selections[0][0].text).unicodeScalars {
+            XCTAssertNotEqual(scalar.properties.generalCategory, .control)
+        }
+    }
+
+    /// The button opens only a URL the Mac's own rule would have shipped.
+    func testOnlyATrustedSignInUrlOpensInTheBrowser() {
+        guard case .signIn(_, let link) = signIn else { return XCTFail() }
+        XCTAssertNotNil(SignInPage(link))
+        XCTAssertNil(SignInPage("https://claude.com/oauth/authorize?state=s&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback"))
+        XCTAssertNil(SignInPage("https://example.com/oauth/authorize?state=s&redirect_uri=https%3A%2F%2Fa.b%2Fc"))
+        XCTAssertNil(SignInPage("http://claude.com/oauth/authorize?state=s&redirect_uri=https%3A%2F%2Fa.b%2Fc"))
+        XCTAssertNil(SignInPage(""))
+    }
 }
 
 extension FleetModel {

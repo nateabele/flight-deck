@@ -1068,8 +1068,20 @@ final class SessionTimelineModel {
     /// `call` names it, so a superseded or closed dialog leaves nothing to tap.
     func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
         let items = statusPromptAgent == nil ? feed.items : subagentPage
-        let derived = OpenPrompt.find(in: items, agent: agent, activity: activity)
-            ?? (activity == "waiting" ? statusOffer?.prompt : nil)
+        let offered = activity == "waiting" ? statusOffer?.prompt : nil
+        let derived: OpenPrompt?
+        if let offered, case .call(let id) = call, offered.callID == id,
+           ScreenPromptID.isScreenDerived(id) {
+            // **A dialog the Mac read off its screen outranks the transcript derivation.** The
+            // transcript is exactly what could not name it, and what it can still find — a
+            // background Task's unanswered `tool_use`, say — is an older call the Mac's own id
+            // already vetoes. Letting it win would hide the card the Mac is naming. Only for a
+            // screen id, and only when it is the very call the Mac says is open, so every other
+            // agent's order (transcript first, offer as the fallback) is unchanged.
+            derived = offered
+        } else {
+            derived = OpenPrompt.find(in: items, agent: agent, activity: activity) ?? offered
+        }
         let shown = Self.shown(derived: derived, call: call)
         note(derived: derived, macSays: call, shown: shown)
         return shown
