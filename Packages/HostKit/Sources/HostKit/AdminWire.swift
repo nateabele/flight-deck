@@ -4,6 +4,7 @@ import Foundation
 //
 //   request  {"t":"status"} | {"t":"arm"} | {"t":"cancelArm"} | {"t":"ls"}
 //            {"t":"revoke","slot":uuid}
+//            {"t":"enroll","payload":EnrollmentPayload}
 //            {"t":"keepAwake"} | {"t":"setKeepAwake","on":bool}
 //   reply    {"t":"status","paired":int,"armedUntil":date?,"listeningPort":int?,"hostName":string}
 //            {"t":"armed","code":string,"expiresAt":date,"pairingPort":int?}
@@ -25,14 +26,18 @@ public enum AdminRequest: Codable, Sendable, Equatable {
     case cancelArm
     case listControllers
     case revoke(slot: UUID)
+    /// Adds the payload's controller to the running hostd's store. Through the admin socket,
+    /// not by writing `controllers.json`, because `serve` reads that file once at start and
+    /// would never see a key written behind its back.
+    case enroll(EnrollmentPayload)
     /// Reads "keep this Mac awake while plugged in" and whether it is holding now.
     case keepAwake
     /// Sets it, persists it in the host's state root, and answers like `keepAwake`.
     case setKeepAwake(Bool)
 
-    enum CodingKeys: String, CodingKey { case t, slot, on }
+    enum CodingKeys: String, CodingKey { case t, slot, payload, on }
 
-    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke, keepAwake, setKeepAwake }
+    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke, enroll, keepAwake, setKeepAwake }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +49,9 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .revoke(let slot):
             try c.encode(Tag.revoke, forKey: .t)
             try c.encode(slot, forKey: .slot)
+        case .enroll(let payload):
+            try c.encode(Tag.enroll, forKey: .t)
+            try c.encode(payload, forKey: .payload)
         case .keepAwake: try c.encode(Tag.keepAwake, forKey: .t)
         case .setKeepAwake(let on):
             try c.encode(Tag.setKeepAwake, forKey: .t)
@@ -59,6 +67,7 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .cancelArm: self = .cancelArm
         case .ls: self = .listControllers
         case .revoke: self = .revoke(slot: try c.decode(UUID.self, forKey: .slot))
+        case .enroll: self = .enroll(try c.decode(EnrollmentPayload.self, forKey: .payload))
         case .keepAwake: self = .keepAwake
         case .setKeepAwake: self = .setKeepAwake(try c.decode(Bool.self, forKey: .on))
         }

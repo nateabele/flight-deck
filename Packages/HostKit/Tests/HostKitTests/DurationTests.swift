@@ -1,0 +1,39 @@
+import XCTest
+@testable import HostKit
+
+final class DurationTests: XCTestCase {
+    func testParsesUnits() {
+        XCTAssertEqual(Duration.parse("45s")?.seconds, 45)
+        XCTAssertEqual(Duration.parse("30m")?.seconds, 1800)
+        XCTAssertEqual(Duration.parse("4h")?.seconds, 14_400)
+        XCTAssertEqual(Duration.parse("1d")?.seconds, 86_400)
+        XCTAssertEqual(Duration.parse("1h30m")?.seconds, 5400)
+    }
+
+    func testRejectsGarbage() {
+        for bad in ["", "4", "h", "-1h", "1.5h", "4 h", "1w", "0m"] {
+            XCTAssertNil(Duration.parse(bad), bad)
+        }
+    }
+
+    func testOverflowIsNilNotATrap() {
+        XCTAssertNil(Duration.parse("9999999999999999d"))
+        // Each unit alone fits; the sum is what overflows.
+        XCTAssertNil(Duration.parse("106751991167300d16h"))
+    }
+
+    func testRejectsRepeatedOrOutOfOrderUnits() {
+        // `1m1h` and `30m30m` are typos for something; guessing which would bill the wrong span.
+        for bad in ["1m1h", "30m30m", "1s1d", "1h30m1h", "2h1d"] {
+            XCTAssertNil(Duration.parse(bad), bad)
+        }
+        XCTAssertEqual(Duration.parse("1d2h3m4s")?.seconds, 93_784)
+        XCTAssertEqual(Duration.parse("1d30m")?.seconds, 88_200)
+    }
+
+    func testFormatsLargestUnitsFirst() {
+        XCTAssertEqual(Duration(seconds: 5400).formatted, "1h30m")
+        XCTAssertEqual(Duration(seconds: 172_800).formatted, "2d")
+        XCTAssertEqual(Duration(seconds: 59).formatted, "59s")
+    }
+}

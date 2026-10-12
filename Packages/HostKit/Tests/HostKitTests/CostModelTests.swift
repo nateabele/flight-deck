@@ -1,0 +1,131 @@
+import XCTest
+@testable import HostKit
+
+final class CostModelTests: XCTestCase {
+    var s = BudgetSettings.default
+
+    func testWorstCaseIsRateTimesTTL() {
+        XCTAssertEqual(CostModel.worstCase(hourly: 0.8, ttl: Duration(seconds: 4 * 3600)), 3.2, accuracy: 1e-9)
+    }
+
+    func testAllowsWithinEveryLimit() {
+        XCTAssertEqual(CostModel.checkLaunch(hourly: 0.8, ttl: .init(seconds: 4*3600), idle: .init(seconds: 1800),
+            instanceType: "g6.xlarge", cloud: "aws", running: 0, monthToDate: 10, settings: s), .allowed)
+    }
+
+    func testPerMachineCapBoundary() {
+        // $10 cap: 12.5h at $0.80 = $10.00 exactly is allowed; one more minute is not.
+        var longTTL = s
+        longTTL.maxTTL = .init(seconds: 86_400)
+        XCTAssertEqual(CostModel.checkLaunch(hourly: 0.8, ttl: .init(seconds: 45_000), idle: .init(seconds: 60),
+            instanceType: "g6.xlarge", cloud: "aws", running: 0, monthToDate: 0, settings: longTTL), .allowed)
+        guard case .refused(let why) = CostModel.checkLaunch(hourly: 0.8, ttl: .init(seconds: 45_060), idle: .init(seconds: 60),
+            instanceType: "g6.xlarge", cloud: "aws", running: 0, monthToDate: 0, settings: longTTL)
+        else { return XCTFail() }
+        XCTAssertTrue(why.contains("per-machine"), why)
+    }
+
+    func testMonthlyCapCountsMonthToDate() {
+        guard case .refused(let why) = CostModel.checkLaunch(hourly: 1, ttl: .init(seconds: 3*3600), idle: .init(seconds: 60),
+            instanceType: "g6.xlarge", cloud: "aws", running: 0, monthToDate: 48, settings: s) else { return XCTFail() }
+        XCTAssertTrue(why.contains("monthly") && why.contains("48"), why)
+    }
+
+    func testUnpricedRefusedOnlyWhenADollarCapIsSet() {
+        guard case .refused = CostModel.checkLaunch(hourly: nil, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+            instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: s) else { return XCTFail() }
+        var noCaps = s; noCaps.monthlyCapUSD = nil; noCaps.perMachineCapUSD = nil
+        XCTAssertEqual(CostModel.checkLaunch(hourly: nil, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+            instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: noCaps), .allowed)
+    }
+
+    func testGuardrails() {
+        let s = self.s
+        func refused(_ t: String, cloud: String = "aws", running: Int = 0, ttl: Int = 3600, idle: Int = 60) -> Bool {
+            if case .refused = CostModel.checkLaunch(hourly: 0.1, ttl: .init(seconds: ttl), idle: .init(seconds: idle),
+                instanceType: t, cloud: cloud, running: running, monthToDate: 0, settings: s) { return true }
+            return false
+        }
+        XCTAssertTrue(refused("p5.48xlarge"))
+        XCTAssertFalse(refused("t3.small"))
+        XCTAssertTrue(refused("t3.small", running: 2))
+        XCTAssertTrue(refused("t3.small", ttl: 13 * 3600))
+        XCTAssertTrue(refused("t3.small", idle: 3 * 3600))
+        XCTAssertFalse(refused("e2-standard-2", cloud: "gcp"))
+        XCTAssertTrue(refused("a3-highgpu-8g", cloud: "gcp"))
+    }
+
+    func testRunningThresholds() {
+        XCTAssertEqual(CostModel.checkRunning(spent: 5, monthToDate: 20, settings: s), .ok)
+        guard case .warn = CostModel.checkRunning(spent: 8.1, monthToDate: 20, settings: s) else { return XCTFail() }
+        guard case .destroy = CostModel.checkRunning(spent: 10, monthToDate: 20, settings: s) else { return XCTFail() }
+        guard case .destroy = CostModel.checkRunning(spent: 1, monthToDate: 50, settings: s) else { return XCTFail() }
+    }
+
+    func testGlob() {
+        XCTAssertTrue(CostModel.globMatches("t3.*", "t3.micro"))
+        XCTAssertTrue(CostModel.globMatches("m6i.*large", "m6i.xlarge"))
+        XCTAssertFalse(CostModel.globMatches("m6i.*large", "m6i.metal"))
+        XCTAssertFalse(CostModel.globMatches("t3.*", "t3a.micro"))
+    }
+
+    /// A budget saved before a field existed keeps every value it has; only the missing field
+    /// takes its default. A cap reset to the default would silently raise a user's lower one.
+    func testAnOldBudgetBlobKeepsItsValues() throws {
+        let old = #"{"monthlyCapUSD": 20, "warnFraction": 0.9, "maxConcurrent": 1, "maxTTL": {"seconds": 3600}}"#
+        let b = try JSONDecoder().decode(BudgetSettings.self, from: Data(old.utf8))
+        XCTAssertEqual(b.monthlyCapUSD, 20)
+        XCTAssertEqual(b.warnFraction, 0.9)
+        XCTAssertEqual(b.maxConcurrent, 1)
+        XCTAssertEqual(b.maxTTL, Duration(seconds: 3600))
+        XCTAssertNil(b.perMachineCapUSD, "an absent optional cap is no cap, as it was saved")
+        XCTAssertEqual(b.maxIdle, BudgetSettings.default.maxIdle)
+        XCTAssertEqual(b.allowedTypes, BudgetSettings.default.allowedTypes)
+        let round = try JSONDecoder().decode(BudgetSettings.self, from: JSONEncoder().encode(BudgetSettings.default))
+        XCTAssertEqual(round, .default)
+    }
+
+    func testGlobMidPatternStars() {
+        XCTAssertTrue(CostModel.globMatches("a*b*c", "axxbyyc"))
+        // Every `*` may match nothing.
+        XCTAssertTrue(CostModel.globMatches("a*b*c", "abc"))
+        XCTAssertTrue(CostModel.globMatches("t3.*", "t3."))
+        // Order matters, and the literals may not overlap: `abc` holds no separate `bc` then `c`.
+        XCTAssertFalse(CostModel.globMatches("a*b*c", "acb"))
+        XCTAssertFalse(CostModel.globMatches("a*bc*c", "abc"))
+        XCTAssertFalse(CostModel.globMatches("a*a", "a"))
+    }
+
+    func testMonthlyCapAloneWarns() {
+        var monthlyOnly = s; monthlyOnly.perMachineCapUSD = nil
+        guard case .warn(let why) = CostModel.checkRunning(spent: 1, monthToDate: 41, settings: monthlyOnly)
+        else { return XCTFail() }
+        XCTAssertTrue(why.contains("monthly"), why)
+        XCTAssertEqual(CostModel.checkRunning(spent: 1, monthToDate: 39, settings: monthlyOnly), .ok)
+    }
+
+    /// Either cap alone is a dollar cap an unpriced machine could blow through unseen.
+    func testUnpricedRefusedWithEitherCapAlone() {
+        var monthlyOnly = s; monthlyOnly.perMachineCapUSD = nil
+        var perMachineOnly = s; perMachineOnly.monthlyCapUSD = nil
+        for settings in [monthlyOnly, perMachineOnly] {
+            guard case .refused(let why) = CostModel.checkLaunch(hourly: nil, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+                instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: settings)
+            else { return XCTFail("\(settings)") }
+            XCTAssertTrue(why.contains("max_hourly"), why)
+        }
+    }
+
+    /// A negative rate makes the worst case negative, which passes every cap and would even
+    /// shrink the month-to-date sum; a broken price lookup must not read as "free".
+    func testNegativeHourlyIsRefused() {
+        for hourly in [-0.5, -.ulpOfOne, Double.nan] {
+            guard case .refused(let why) = CostModel.checkLaunch(hourly: hourly, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+                instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: s)
+            else { return XCTFail("\(hourly)") }
+            XCTAssertTrue(why.contains("hourly price"), why)
+        }
+        XCTAssertEqual(CostModel.checkLaunch(hourly: 0, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+            instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: s), .allowed)
+    }
+}

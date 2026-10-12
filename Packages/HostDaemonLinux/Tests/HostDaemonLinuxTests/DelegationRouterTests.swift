@@ -135,7 +135,7 @@ final class DelegationRouterTests: XCTestCase {
                                                                    controllerName: "laptop"))))
         let ack = try await log.wait("helloAck") { if case .helloAck = $0 { return true }; return false }
         guard case .helloAck(_, let caps, _, _) = ack else { return XCTFail("\(ack)") }
-        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service], "no screen capability on Linux")
+        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service, .submodules], "no screen capability on Linux")
 
         let ref = try await Snapshotter().snapshot(worktree: repo, host: "linux-test", include: [])
         try post(1, .delegation(.syncTips(repoRoot: ref.repoRoot, wtKey: ref.wtKey)))

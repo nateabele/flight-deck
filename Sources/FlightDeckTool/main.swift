@@ -51,6 +51,12 @@ let usageLines = [
     "flightdeck recipe ls|check",
     "flightdeck recipe add NAME --run CMD [--host H] [--service] [--long] [--screen] [--port P]... [--apply auto]",
     "  (delegation failures exit 125 with one flightdeck: line naming the host and the next step)",
+    "flightdeck infra up <name>            create [infra.<name>] from this repo's delegate.toml",
+    "flightdeck infra down <name> | --orphan <id>",
+    "flightdeck infra ls [--orphans]",
+    "flightdeck infra doctor",
+    "flightdeck infra extend <name> <duration>",
+    "  (infra failures exit 125, one flightdeck: line per problem, each with its fix)",
     "flightdeck raw '<ClientFrame JSON>'",
     "",
     "Flags go before or after operands. Put -- before text that starts with -:",
@@ -182,18 +188,18 @@ let runner = CLIRunner(
 )
 
 // A delegated run forwards Ctrl-C to the host (§6.1) rather than dying and leaving the run
-// going there unwatched. Only for the verbs attached to a run; every other verb keeps the
-// default disposition.
+// going there unwatched. Only for the verbs attached to a run, and `infra up`; every other
+// verb keeps the default disposition.
 var interruptSources: [DispatchSourceSignal] = []
-if case .delegate(let command) = invocation.command {
-    switch command {
-    case .run, .exec, .wait, .logs, .routeExec:
-        interruptSources = RunnerSignals.install(signals: [SIGINT]) {
-            DispatchQueue.main.async { runner.interrupt() }
-        }
-    default:
-        break
+switch invocation.command {
+// `infra up` keeps going in the app on Ctrl-C (a half-created machine must not be abandoned);
+// the CLI says so, and how to cancel it, rather than dying silently mid-create.
+case .delegate(.run), .delegate(.exec), .delegate(.wait), .delegate(.logs), .delegate(.routeExec), .infra(.up):
+    interruptSources = RunnerSignals.install(signals: [SIGINT]) {
+        DispatchQueue.main.async { runner.interrupt() }
     }
+default:
+    break
 }
 
 runner.run()

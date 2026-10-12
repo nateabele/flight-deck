@@ -2627,10 +2627,34 @@ container; **nothing has run against a real second machine.**
 - **Revoking a controller does not delete its `workspaces/<slot>/`** on the host (spec §3.5). Its
   checkouts, and any `include`d secret in them, stay until removed by hand or by
   `flightdeck host prune`.
-- **Submodules are refused** (`submodules_unsupported`), like LFS: decided during the build to keep
-  sync bounded. Spec §4.2 step 4 (recursive submodules) is deferred. **This includes Flight Deck's
-  own repo** (`vendor/ghostty`, `vendor/boringssl`), so `flightdeck run` from any Flight Deck
-  worktree exits 125 until submodules are supported.
+- **Submodules are refused — FIXED (2026-10-08).** Delegation now syncs submodules for the common
+  case (ARCHITECTURE.md, "Submodules"): the controller pins each gitlink with its resolved URL, the
+  host fetches it into a per-URL cache and places it at its pin, nested ones too. What stays out
+  of v1, by decision:
+  - **A dirty submodule is refused** (`submodule_dirty`), and so is one whose commit no
+    remote-tracking branch or tag contains (`submodule_unpushed`). Only the pinned commit
+    travels, so uncommitted work inside a submodule cannot reach the host. Sending it (a
+    snapshot commit per submodule, bundled like the superproject's) is the next step if it
+    is ever needed.
+  - **The unpushed check reads local refs only.** A commit that is on the remote but newer than
+    the last `fetch` in the submodule is refused until `git -C <path> fetch`; a commit only a
+    local tag holds passes and fails later, on the host, as `submodule_fetch_failed`.
+  - **Changes a run makes inside a submodule stay on the host.** They are never in the result,
+    `flightdeck diff` or `apply`; the run's output ends with a warning naming the submodule.
+  - **The host fetches with its own access.** Its git ignores `~/.gitconfig`
+    (`GitRunner(isolated: true)`), so a credential helper configured there is not used: a
+    private `https` submodule fails as `submodule_fetch_failed`. `ssh` URLs use the host
+    user's keys and agent, in batch mode (no prompts). Credentials in the controller's URLs
+    are stripped before they travel, by design, so the controller's token never helps.
+  - **A `git://` fetch has no stall bound of its own.** http has a low-speed limit and ssh has
+    timeouts and keepalives, but git's own protocol has neither: a hung `git://` server holds
+    the fetch until `longTimeout` (an hour) or the run is cancelled, which now kills it.
+  - **Submodule caches are not `gc`ed.** `host ls --disk` lists them and `host prune` deletes
+    the ones no checkout uses (FIXED 2026-10-08), but the hourly sweep does not run `gc` in
+    them, so a cache a checkout still uses keeps every commit any slot ever pinned.
+  - **Unverified across machines.** Tested with real git in temp dirs (HostKit's
+    `SubmoduleSyncTests`), not with a real second host, and not with this repo, whose
+    `vendor/boringssl` URL is on googlesource.com: a host has to reach both that and GitHub.
 - **Phones cannot delegate.** Every `delegate.*` from a paired phone is `out_of_scope`: the phone
   has no UI for it, and delegation runs code on hosts. A phone feature needs that decision
   revisited first.
@@ -2648,7 +2672,9 @@ container; **nothing has run against a real second machine.**
 - **Stale shim directories.** A tab closed while the app was not running (a crash, a hand-edited
   `sessions.json`) leaves `route-shims/<id>/` behind: a few dangling symlinks, never pruned.
 - **Spec §8 wording.** The shim runs `flightdeck route-exec <name> -- <args>` and the CLI does the
-  matching; the spec says the shim runs `flightdeck run <recipe> -- <argv>`. Same behaviour.
+  matching; the spec says the shim runs `flightdeck run <recipe> -- <argv>`. Same behaviour. **Resolved
+  (audited 2026-10-08):** spec §8 already carries the as-built note ("the shim calls `flightdeck
+  route-exec`, which matches"), so nothing is left to change.
 - **Unknown future `RunEvent` kinds** make the whole `event` frame fail to decode, and `HostLink`
   drops it. Fine for 1.x skew, but adding an event kind is a minor bump older controllers ignore.
 
@@ -2657,7 +2683,9 @@ container; **nothing has run against a real second machine.**
 **Host router and wire**
 - **No failure event.** A run that never ran is a synthesized `flightdeck: <reason>` line plus
   `exited(125)`. The line sits at the spool's end without being stored in it, so a re-attach from
-  past it sends it again at the new offset (a cosmetic duplicate).
+  past it sends it again at the new offset (a cosmetic duplicate). **Duplicate FIXED (2026-10-08):** the router
+  keeps the offset the line was first sent at, re-sends it only there, and not at all to a
+  re-attach from past it. There is still no failure event.
 - **No event-send backpressure on the host.** `HostPeer.send(text:)` is fire-and-forget and
   `Runner.events` buffers without limit: replaying a full 64 MiB spool to a slow link holds about
   85 MiB in hostd.
@@ -2676,7 +2704,8 @@ container; **nothing has run against a real second machine.**
 - `run.ack` is best effort: an ack lost with its connection leaves the result on the host until its
   24 h expiry, which costs disk, not data.
 - `run.result` tells a run still going (`run_active`) by `(runner as? Runner)?.phase`:
-  `RunControlling` has no phase query.
+  `RunControlling` has no phase query. **FIXED (2026-10-08):** `phase(runID:)` is a `RunControlling`
+  requirement, with no default, and the router asks the protocol.
 - `port.open` checks the run's owner, not that it is a service still running; a finished run's port
   simply gets `dial_failed`.
 
@@ -2685,9 +2714,38 @@ container; **nothing has run against a real second machine.**
   runs on one snapshot cross-contaminate each other's result commits, and two `xcodebuild`s in one
   checkout share DerivedData, so the second fails with "database is locked". Sharing only for
   `exec` is worth considering.
-- **Host disk grows without bound across worktrees.** Each new worktree gets up to `pool` full
-  checkouts plus their build output, and nothing ages them out; `flightdeck host prune` is the only
-  cleanup, and it is fleet-wide. An LRU age-out of idle slots in the hourly `gc` would bound it.
+- **Host disk grows without bound across worktrees — FIXED (2026-10-10).** Each new worktree got
+  up to `pool` full checkouts plus their build output, and nothing aged them out: the jeeves Linux
+  hostd reached 100% disk with 60 GB of checkouts of one repo, most for worktrees long gone. The
+  hourly `gc` now deletes slots idle past `checkoutIdleTTL` (3 days) by their `.fd-last-used`
+  marker, then evicts unleased slots oldest first while the state root's volume is below
+  `max(15%, 10 GiB)` free (ARCHITECTURE.md, "Checkout retention"). What stays open:
+  - **A slot from before markers falls back once** to its worktree index's mtime (its last
+    apply), then the slot directory's mtime, and that time becomes its marker. A checkout that
+    was leased often but rarely re-applied (the same snapshot run again and again) reads older
+    than it is on that first pass and may go a little early; the next run rebuilds it.
+  - **The TTL is not configurable** outside the `Workspace` initializer: no `delegate.toml` or
+    hostd flag sets it, and every host uses 3 days.
+  - **The high-water pass deletes idle checkouts a user may still want warm** (a big
+    DerivedData) when the disk is tight, oldest first. It never deletes a leased slot, so a
+    disk filled by a single running build stays full until that run ends.
+  - **Submodule caches stay outside retention**, as the item above says: an evicted slot's
+    submodule worktrees go with it, but the caches are deleted only by `host prune`.
+  - **"Worktree gone" is not detected** on purpose: the host cannot see the controller's
+    worktrees, and the TTL covers it.
+- **`host ls --disk` sat for minutes on a big, full host — FIXED (2026-10-10).** `Workspace.usage`
+  stats every file of every checkout, under the controller's one-hour bulk timeout; on jeeves
+  (60 GB of checkouts) it ran for minutes. It now answers within 10 s (ARCHITECTURE.md,
+  "Checkout retention"). What stays open:
+  - **A figure past the budget is stale or partial, unmarked.** The wire's `WorkspaceUsage` has no
+    field to say "last hour's figure" or "still counting", so a reader cannot tell. Adding one is
+    a wire change (`DelegationWire.swift`).
+  - **The reported `host info` hang was not reproduced.** By the code it cannot last past 10 s:
+    `FleetService` answers `host.info` from `HostService.info`, whose `HostLink.request` expires at
+    `HostLink.requestTimeout` (10 s); on the host, `HostInfoProbe.gather` reads free space with one
+    `statvfs`, which took 0.4 ms on a full tmpfs (`FullDiskTests`, run with `FD_FULL_VOLUME`).
+    If `host info` itself hangs again, look at the app's main actor (the reply and the timer both
+    land there) or at the CLI's socket, not at the host.
 
 **Controller adapters**
 - A replay is recognised when offsets go backwards or a state event arrives, so a `queued`→`started`
@@ -2695,15 +2753,24 @@ container; **nothing has run against a real second machine.**
   until the next replay.
 
 **Channel mux**
-- The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only).
+- The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only). **FIXED
+  (2026-10-08):** the stream buffers at most `maxUnclaimed` channels its consumer has not taken,
+  and one past that is closed at both ends. Nothing in the app consumes the stream today, so the
+  gap was latent.
 - `closedIDs` grows by one tombstone per channel ever closed on a connection; a busy forwarded
   port accumulates them until the link drops. Tombstoning only above a low-water mark would bound it.
+  **FIXED (2026-10-08):** `ChannelMux.ClosedIDs` collapses each parity's contiguous run of closed
+  ids into a watermark, so only ids closed above the oldest one still open (or never seen) are
+  held one by one. The drop rule is unchanged. A single long-lived channel still holds the
+  watermark back until it closes.
 - Throughput is about one 256 KiB window per round trip per channel (about 5 MiB/s on a 50 ms
   tailnet path). A larger or adaptive window is the lever if bundles or forwards prove slow.
 
 **Sync and results**
 - `ResultApplier`'s `.git` check is case-insensitive but does not cover HFS-ignorable Unicode
-  variants; git's own `verify_path` does, at checkout.
+  variants; git's own `verify_path` does, at checkout. **FIXED (2026-10-08):** `checkSafe` drops
+  the code points git's `is_hfs_dotgit` ignores (U+200C–200F, U+202A–202E, U+206A–206F, U+FEFF)
+  before the case fold, so `.g\u{200C}it/hooks/…` is refused like `.GIT/hooks/…`.
 - A symlink planted *during* an apply makes it throw `unsafe_path` after earlier paths were written,
   and a time-of-check gap remains between the parent walk and the rename (Foundation has no portable
   `openat`/`O_NOFOLLOW` write).
@@ -2718,7 +2785,8 @@ container; **nothing has run against a real second machine.**
 **Config and routing shims**
 - The shim's probe watchdog (`sleep 2`) can linger up to 2 s after the probe returns; `exec sleep`
   would end it with the probe.
-- The inline-table deep-key test asserts only that it throws.
+- The inline-table deep-key test asserts only that it throws. **FIXED (2026-10-08):** it now
+  asserts the exact refusal (`delegate.toml:1: error: expected = after the key`).
 - A CLI found on `PATH` (not this build's) costs one extra process start per routed command for the
   `route-exec` probe.
 - `recipe add` drops comments inside the recipe's own table when it replaces it, and cannot replace a
@@ -2759,7 +2827,8 @@ container; **nothing has run against a real second machine.**
 **Tests and tooling**
 - `scripts/test-unit.sh`'s class check can report a real class as unknown under load
   (`printf … | rg -qx` under `pipefail`: `rg -q` exits on its match and `printf` takes SIGPIPE).
-  Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`.
+  Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`. **FIXED (2026-10-08)** with exactly that;
+  reproduced first at the real list size (3 false "unknown class" in 2000 checks on one busy CPU).
 - `PromptDeliveredLoopbackTests.testPromptTypedFollowsTheAckOverTheWire` is load-flaky (passes alone
   and with the delegation contract reverted).
 - **"Listeners are released after any later failure" is checked only against a recording fake**
@@ -2775,9 +2844,14 @@ container; **nothing has run against a real second machine.**
   on the LAN for the test's duration, so it can rename-collide with a real host named "mini".
 - `test-hostd-linux-interop.sh run|serve` publish `127.0.0.1:47410`, which this Mac's own hostd
   holds while Hosting is on (AGENT-OPERATIONS.md says to turn it off first). The script could check
-  the port and refuse with that advice instead of failing later.
+  the port and refuse with that advice instead of failing later. **FIXED (2026-10-08):** before `docker run`
+  it connects to each port the mode publishes and exits 2 if one answers, naming the port and, for
+  47410, Settings → Hosting. Before, `docker run` failed with exit 125 and left a Created container
+  behind, because the cleanup trap is armed only after it.
 - The HostKit `Delegation/*` file headers still say "Implemented by track Cn", which means nothing
-  after the merge.
+  after the merge. **FIXED (2026-10-08):** each now names the type that implements it
+  (`Runner`, `ChannelMux`, `DelegateConfigParser`, `Workspace`…); `HostServerCore`'s `send(binary:)`
+  note too.
 
 ## Hidden tabs and idle polling CPU (2026-10-05)
 
@@ -2943,6 +3017,77 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
   "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
   1125pt-tall screen. A screen-size environment failure, not the race it hunts.
+
+## Cloud infra hosts: account checks (2026-10-07)
+
+- **AWS quota ignores vCPUs already running.** `AWSAccount.quota` compares one machine's vCPUs
+  (`describe-instance-types`) with the family's whole Service Quotas value; it does not subtract
+  the region's running usage, so `ok` can say yes when the quota is already spent. Usage would
+  come from CloudWatch's `AWS/Usage` `ResourceCount` metric for the same quota. GCP does not have
+  this gap: `regions describe` carries usage, so its `have` is limit − usage.
+- **AWS quota covers only the standard, G/VT and P families.** `AWSAccount.quotaCode` maps
+  A/C/D/H/I/M/R/T/Z, G/VT and P (on-demand and spot); any other family (F, Inf, Trn, X, DL,
+  mac, u-…) throws `unsupportedInstanceType` rather than guess a quota code.
+- **The GCP quota link is not filtered to the metric.** The console's per-metric filter is an
+  undocumented `pageState` blob, so `increaseURL` opens the project's quotas page and the user
+  searches for the metric (`G2_CPUS`, `NVIDIA_L4_GPUS`…) themselves.
+
+## Cloud infra hosts: tailnet (2026-10-07)
+
+- **The tailnet IP comes from the Tailscale API, matched by hostname.** When several devices
+  share a hostname (a previous machine's node not yet gone), `nodeAddress` takes the newest by
+  `created`, and `deleteNode` deletes every one tagged `tag:flightdeck-cloud`. `nodeAddress`
+  does not filter by tag, so machine hostnames must be unique per machine and never collide
+  with one of the user's own devices.
+
+## Cloud infra hosts: as built (2026-10-08)
+
+The [spec's as-built note](superpowers/specs/2026-10-07-cloud-infra-hosts-design.md#15-as-built-2026-10-08)
+lists the deliberate departures; this is what is unverified or not built.
+
+**Never run against a real cloud.**
+- **The live test has never run.** `FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp` is
+  The maintainer's to run, once Settings → Cloud is set up; until it passes, nothing proves the presets,
+  cloud-init and enrollment work together on a real machine. Unit suites, `tofu test` on mock
+  providers and the Linux container are all this code has seen.
+- **The GUI checklist is the maintainer's:** Settings → Cloud and the Set up… sheet (sign-ins, Tailscale
+  policy diff and OAuth paste, budget, the Test button), and the four manual checks at the end of
+  [the plan](superpowers/plans/2026-10-07-cloud-infra-hosts.md#manual-checks-nates).
+- **GCP SKU descriptions and the price fixture are unverified against a live catalog.**
+  `GCPMachineTypes` maps a machine family to the SKU description stem it expects (`N2D AMD
+  Instance`, `Nvidia L4`…), and `Fixtures/prices/gcp-skus-compute.json` is constructed, not
+  captured (its `prices.provenance.json` entry says so: the recording machine had no GCP
+  credentials), so the test proves the matcher against Flight Deck's own reading of the
+  descriptions. A stem Google words differently prices nothing, and `up`
+  refuses while a cap is set. Probe P4 (three sample types within 1% of the published price) has
+  not run.
+- **The live per-user AWS pkg install has never run.** The managed `aws` 2.37.10 is installed
+  with `installer -target CurrentUserHomeDirectory` and a `customLocation` choice under
+  `~/Library/Caches/dev.flightdeck/tools/aws` (the pkg refuses a path with a space). Probe P3 —
+  that this works without admin rights on current macOS — is unconfirmed; a user with `aws` v2
+  on `PATH` never reaches it.
+- **The cloud-final user-manager hardening is unproven on a real image.** cloud-init starts
+  `user@<uid>` and exports `XDG_RUNTIME_DIR` before the installer's `systemctl --user`, because
+  `enable-linger` returns before the manager is up. That race was reasoned from systemd's
+  behaviour and tested only in a container, not on Canonical's Noble image under cloud-final.
+
+**Known gaps.**
+- **AWS quota ignores running usage** (detail under "account checks" above): `ok` can say yes
+  when the family's vCPU quota is already spent, and the apply then fails with AWS's own error.
+- **The disk price is a constant.** AWS prices the boot disk at the US gp3 list price; other
+  regions' gp3 rates and GCP's disk SKUs by region are not looked up. Disk is a small share of
+  a GPU machine's rate, so the error is cents.
+- **The macOS hostd has no idle tracker or keepalive.** Its `idleSince` is always nil (never
+  idle, so never idle-reaped) and it has no TCP keepalive or transfer stall deadline. No preset
+  creates a Mac, so no cloud machine runs it today; a Mac preset needs both first.
+- **The interop gate has no `enroll` mode** (spec §11 planned one). hostd's `enroll` is tested in
+  the Linux container's unit suite, against its own admin socket, but no gate drives a Darwin
+  controller's real `EnrollmentPayload` through to a hello.
+- **`extend` stops at the creation TTL** (spec deviation 6): to run longer, `down` and `up` again
+  with a longer `ttl`.
+
+**Not built** (spec §13): Mac instances, SkyPilot, Packer images, remote OpenTofu state, and
+native cloud budgets (AWS Budgets / GCP Budgets) as a backstop to Flight Deck's own caps.
 
 ## Grok as a planning harness (2026-10-07, Track G)
 

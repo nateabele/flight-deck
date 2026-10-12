@@ -28,7 +28,8 @@ public enum GitError: Error, Equatable, CustomStringConvertible {
 /// `code` is the host error code the router replies with (C0 amendment A5).
 public enum SyncError: Error, Equatable, CustomStringConvertible {
     case lfsUnsupported
-    case submodulesUnsupported
+    /// A submodule this sync cannot reproduce on the host, by its path in the superproject.
+    case submodule(path: String, problem: SubmoduleProblem)
     /// The worktree has no commit yet, so there is no history to sync against.
     case unbornHead
     /// The checkout's `HEAD^{tree}` is not the tree the controller snapshotted (§4.4).
@@ -56,7 +57,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     public var code: String {
         switch self {
         case .lfsUnsupported: return "lfs_unsupported"
-        case .submodulesUnsupported: return "submodules_unsupported"
+        case .submodule(_, let problem): return problem.code
         case .treeMismatch: return "tree_mismatch"
         case .noCheckout: return "no_checkout"
         case .runActive: return "run_active"
@@ -70,7 +71,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .lfsUnsupported: return "LFS repos are not supported for delegation yet"
-        case .submodulesUnsupported: return "repos with submodules are not supported for delegation yet"
+        case .submodule(let path, let problem): return problem.describe(path)
         case .unbornHead: return "this worktree has no commits yet; commit once before delegating"
         case .treeMismatch(let expected, let actual):
             return "the host's checkout has tree \(actual.prefix(12)), not the snapshot's \(expected.prefix(12)); nothing ran"
@@ -83,6 +84,53 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         case .resultExpired: return "the run's result is gone from the host (fetched already, or older than 24h)"
         case .unsafePath(let path): return "the host's result writes an unsafe path \"\(path)\"; nothing was applied"
         case .gitTooOld(let version): return "git \(version) is too old; delegation needs git 2.40 or later"
+        }
+    }
+}
+
+/// Why a submodule cannot be synced. The first three are the controller's refusals, raised
+/// while snapshotting and never sent by a host; `fetchFailed` and `missingCommit` are the
+/// host's, sent as `submodule_fetch_failed`. Each description names the path and the next step,
+/// because the reader is usually an agent that can act only on what the line tells it.
+public enum SubmoduleProblem: Equatable, Sendable {
+    /// Uncommitted or untracked changes inside it: only the pinned commit travels, so the host
+    /// would run against something other than what the user is looking at.
+    case dirty
+    /// Pinned to a commit no remote-tracking branch or tag contains: a local commit the host
+    /// could never fetch.
+    case unpushed(commit: String)
+    /// A gitlink with no URL in `.gitmodules` or the local config: a nested repository that
+    /// was never registered as a submodule.
+    case noURL
+    /// The host could not fetch from the URL at all.
+    case fetchFailed(url: String, detail: String)
+    /// The host fetched from the URL, and the pinned commit was not there.
+    case missingCommit(url: String, commit: String)
+
+    public var code: String {
+        switch self {
+        case .dirty: return "submodule_dirty"
+        case .unpushed: return "submodule_unpushed"
+        case .noURL: return "submodule_no_url"
+        case .fetchFailed, .missingCommit: return "submodule_fetch_failed"
+        }
+    }
+
+    func describe(_ path: String) -> String {
+        switch self {
+        case .dirty:
+            return "submodule \(path) has uncommitted changes; commit them inside \(path) and in the superproject, or discard them, then rerun"
+        case .unpushed(let commit):
+            return "submodule \(path) is at \(commit.prefix(12)), which no branch or tag of its remote contains; push it (git -C \(path) push), or fetch if it is already pushed, then rerun"
+        case .noURL:
+            return "\(path) is a nested git repository with no URL in .gitmodules; add it with git submodule add <url> \(path), or ignore it, then rerun"
+        // Redacted: these quote a URL from the wire and git's own words about it, and either
+        // may carry a token (`SubmoduleURL.redacted`).
+        case .fetchFailed(let url, let detail):
+            let detail = SubmoduleURL.redacted(detail.trimmingCharacters(in: .whitespacesAndNewlines))
+            return "couldn't fetch submodule \(path) from \(SubmoduleURL.redacted(url)): \(detail); make that URL reachable from the host, then rerun"
+        case .missingCommit(let url, let commit):
+            return "submodule \(path)'s commit \(commit.prefix(12)) is not on \(SubmoduleURL.redacted(url)); push it, then rerun"
         }
     }
 }
@@ -167,6 +215,7 @@ public struct GitRunner: Sendable {
     public func run(_ args: [String], in dir: URL? = nil, env extra: [String: String] = [:],
                     input: Data? = nil, accept: Set<Int32> = [0], timeout: TimeInterval? = nil) throws -> Output {
         guard let executable else { throw GitError.notFound }
+        if GitCancellation.current?.isCancelled == true { throw CancellationError() }
         try Self.requireSupported(executable, environment: environment)
         return try execute(executable, args, in: dir, env: environment.merging(extra) { $1 }, input: input,
                            accept: accept, timeout: timeout ?? self.timeout)
@@ -187,6 +236,9 @@ public struct GitRunner: Sendable {
         let exited = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in exited.signal() }
         try p.run()
+        let cancel = GitCancellation.current
+        if let cancel, !cancel.started(p.processIdentifier) { GitCancellation.kill(p.processIdentifier) }
+        defer { cancel?.ended(p.processIdentifier) }
 
         // Both pipes drain on their own threads: a git that fills stderr while we block on
         // stdout (or the reverse) would otherwise deadlock until the timeout. Each reader closes
@@ -223,6 +275,7 @@ public struct GitRunner: Sendable {
         let (stdout, stderr) = box.lock.withLock { (box.out, box.err) }
         let status = p.terminationReason == .exit ? p.terminationStatus : 128 + p.terminationStatus
         let result = Output(status: status, stdout: stdout, stderr: String(decoding: stderr, as: UTF8.self))
+        if cancel?.isCancelled == true, !accept.contains(status) { throw CancellationError() }
         guard accept.contains(status) else {
             throw GitError.failed(args: args, status: status, stderr: result.stderr)
         }
@@ -315,9 +368,24 @@ public struct GitRunner: Sendable {
     /// API is async (C0 amendment A1) because git can take minutes; running it inline would pin
     /// a cooperative-pool thread, and a handful of concurrent syncs would starve every other
     /// task in the process, including the transport that is feeding them bytes.
+    ///
+    /// Cancelling the calling task kills the git `work` is running (its whole process group,
+    /// so a `git fetch`'s ssh or remote helper goes too), and every later git call in `work`
+    /// throws `CancellationError`. Before, a cancel waited for git: a run cancelled while its
+    /// checkout fetched a submodule from a hung remote held its slot until git's timeout.
     static func offload<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { cont in
-            DispatchQueue.global().async { cont.resume(with: Result { try work() }) }
+        let cancel = GitCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                DispatchQueue.global().async {
+                    let previous = GitCancellation.current
+                    GitCancellation.current = cancel
+                    defer { GitCancellation.current = previous }
+                    cont.resume(with: Result { try work() })
+                }
+            }
+        } onCancel: {
+            cancel.cancel()
         }
     }
 
@@ -325,6 +393,53 @@ public struct GitRunner: Sendable {
         let lock = NSLock()
         var out = Data()
         var err = Data()
+    }
+}
+
+/// The cancel `GitRunner.offload` hands the git calls of one blocking body, through a
+/// thread-local: the body runs synchronously on one dispatch thread, and threading a token
+/// through every git call in Workspace and Submodules would touch them all for one concern.
+final class GitCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var running: Set<pid_t> = []
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+
+    func cancel() {
+        let pids: Set<pid_t> = lock.withLock {
+            cancelled = true
+            return running
+        }
+        pids.forEach(Self.kill)
+    }
+
+    /// Records a git just started; false when the body was already cancelled (kill it).
+    func started(_ pid: pid_t) -> Bool {
+        lock.withLock {
+            guard !cancelled else { return false }
+            running.insert(pid)
+            return true
+        }
+    }
+
+    func ended(_ pid: pid_t) { _ = lock.withLock { running.remove(pid) } }
+
+    /// SIGKILL to git's process group (Foundation starts each child as a group leader) and to
+    /// git itself. Not TERM: a child inherits the blocked-signal mask of the thread that
+    /// spawned it, and a hostd thread may block TERM (measured: a `Process` child under XCTest
+    /// on Linux has it blocked), so a TERM could go unseen. What a killed fetch leaves behind
+    /// (lock files) is cleared by the next fetch into the same cache.
+    static func kill(_ pid: pid_t) {
+        _ = Foundation.kill(-pid, SIGKILL)
+        _ = Foundation.kill(pid, SIGKILL)
+    }
+
+    private static let key = "dev.flightdeck.git-cancellation"
+
+    static var current: GitCancellation? {
+        get { Thread.current.threadDictionary[key] as? GitCancellation }
+        set { Thread.current.threadDictionary[key] = newValue }
     }
 }
 

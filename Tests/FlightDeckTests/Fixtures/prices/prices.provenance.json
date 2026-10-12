@@ -1,0 +1,23 @@
+{
+  "files": {
+    "aws-getproducts-g6.json": {
+      "isVerbatimCapturedOutput": true,
+      "capturedOn": "2026-10-07",
+      "command": "aws pricing get-products --region us-east-1 --service-code AmazonEC2 --filters Type=TERM_MATCH,Field=instanceType,Value=g6.xlarge Type=TERM_MATCH,Field=regionCode,Value=us-east-1 Type=TERM_MATCH,Field=operatingSystem,Value=Linux Type=TERM_MATCH,Field=tenancy,Value=Shared Type=TERM_MATCH,Field=preInstalledSw,Value=NA Type=TERM_MATCH,Field=capacitystatus,Value=Used --output json",
+      "edits": "re-indented only; the Pricing API is public price data and carries no account identifier"
+    },
+    "aws-spot.json": {
+      "isVerbatimCapturedOutput": true,
+      "capturedOn": "2026-10-07",
+      "command": "aws ec2 describe-spot-price-history --region us-east-1 --instance-types g6.xlarge --product-descriptions Linux/UNIX --start-time <now> --output json",
+      "edits": "AvailabilityZoneId removed from every entry: the zone-name-to-id mapping is per account"
+    },
+    "gcp-skus-compute.json": {
+      "isVerbatimCapturedOutput": false,
+      "capturedOn": "2026-10-07",
+      "why": "no GCP credentials on the recording machine; the Billing Catalog refuses unauthenticated callers",
+      "format": "https://cloud.google.com/billing/docs/reference/rest/v1/services.skus/list",
+      "edits": "constructed: placeholder skuIds; on-demand unit prices are the published us-central1 per-vCPU, per-GB and per-GPU rates (https://cloud.google.com/compute/vm-instance-pricing), which reproduce the published e2-standard-2, n2-standard-4 and g2-standard-4 prices; spot unit prices are split so each type's total matches its published spot price; the europe-west1 E2 rows and the custom, sole-tenancy and commitment N2 rows are distractors the matcher must skip"
+    }
+  }
+}

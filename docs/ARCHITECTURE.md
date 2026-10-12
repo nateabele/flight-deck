@@ -201,9 +201,18 @@ under the 15-character label limit. On Linux, avahi's `avahi-publish` is used if
 without it nothing is advertised and the user types the address.
 
 **The admin socket's trust model.** `<state root>/admin.sock` is how the Hosting tab and
-`flightdeck-hostd pair|status|controllers|revoke` drive a *running* hostd (arm, list, revoke).
+`flightdeck-hostd pair|status|controllers|revoke|enroll` drive a *running* hostd (arm, list, revoke, enroll).
 On a Linux host, `flightdeck-hostd controllers` (`--json` for JSON) prints each paired controller's
-slot, name and pairing time; the slot is what `flightdeck-hostd revoke SLOT` takes. The boundary is
+slot, name and pairing time; the slot is what `flightdeck-hostd revoke SLOT` takes. A cloud machine
+pairs with no code: its user-data writes a one-time `EnrollmentPayload` file (the controller's slot,
+secret and idle threshold, valid 30 minutes) and `flightdeck-hostd enroll --file PATH` hands it to
+the running `serve` as the admin socket's `enroll` request, because `serve` reads
+`controllers.json` only at start; the file is deleted once enrolled or expired (one issued in "the
+future" means the VM clock is behind, and is re-checked for 2 minutes, then kept), a reused slot is
+refused even after its controller is revoked (redeemed slots are recorded in
+`<state root>/enrollments-spent.json`, `0600`, pruned once their payload is past 30 minutes; an
+unreadable list refuses every enrollment rather than guess), and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
+`hostd-install.sh --no-pair` installs without arming a code for that path). The boundary is
 the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or
 other-writable, checked before bind. It is not authenticated beyond that, so anything running as the
 same user can arm a window, which is already equivalent to that user's other powers. A new hostd
@@ -308,7 +317,7 @@ live probes: [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
 4. **Host** (`Packages/HostKit/Sources/HostKit/Delegation/`). The hostd's router answers each op
    off the connection's serial receive path (`DelegationHost`: one task per request, and
    `host.info` answered off it too), because `sync.push` waits on channel bytes that arrive on
-   that same connection. Each connection gets its mux at hello and loses it at close. `Workspace` holds the object store and checkouts, `Runner` spawns
+   that same connection. Each connection gets its mux at hello and loses it at close. `Workspace` holds the object store and checkouts (and evicts idle ones, below), `Runner` spawns
    and spools, `ScreenLease` serialises screen runs, `PortCheck` names a port's holder. Both hostds
    (`Sources/HostDaemon`, `Packages/HostDaemonLinux`) wire the same HostKit code.
 
@@ -321,9 +330,69 @@ host says which tips it holds; the controller sends a bundle of only what is mis
 checkouts (two per worktree by default), each a `git worktree` named after the local worktree so
 `docker compose` project names match. An apply is `checkout --force --detach` then `clean -fd`
 (never `-x`), so ignored build output survives and builds stay incremental; the tree hash is checked
-before anything runs. Refused up front: LFS repos (`lfs_unsupported`), repos with submodules
-(`submodules_unsupported`: v1 refuses them, like LFS, instead of the spec's recursive handling, to
-keep sync bounded), and git older than 2.40 (`git_too_old`).
+before anything runs. Refused up front: LFS repos (`lfs_unsupported`) and git older than 2.40
+(`git_too_old`).
+
+**Checkout retention** (`Workspace.gc`, run hourly by `DelegationHost.standard`; no scheduling of
+its own). Checkouts are the host's real disk cost: each slot carries its build output, and one
+per worktree accumulates, for worktrees the host cannot know are gone. A jeeves hostd filled its
+disk with 60 GB of them, because nothing but `host prune` ever deleted one. Each lease and each
+release now stamps `checkouts/<wt-key>-<slot>/.fd-last-used` with the time (never the directory's
+mtime, which builds keep bumping). gc then:
+1. deletes every slot whose marker is older than `checkoutIdleTTL` (a `Workspace` init parameter,
+   3 days by default), and
+2. if free space on the state root's volume is below `max(15%, 10 GiB)`, deletes unleased slots
+   oldest first by marker until it is back above (`Workspace.volumeSpace`: `statvfs` on Linux, the
+   volume resource keys on macOS, Foundation only).
+
+A deletion is `prune`'s: the slot directory, then `git worktree prune` in the store, which stays,
+so the next run there rebuilds the slot as a delta. A leased slot is never deleted. The check is
+made under the pool lock that `checkout` and `release` take, and an unleased slot is reserved
+in the same hold (gc becomes its holder, not `ready`), so a run that starts mid-gc takes another
+slot or waits rather than lose its tree. A slot from before markers existed falls back once to
+its last apply (its worktree index's mtime), then to the directory's mtime, and that time is
+written into a new marker. gc evicts before it touches git, and one store's failure no longer
+stops the rest: on a full disk git's own steps fail with ENOSPC, and they used to abort gc before
+anything was freed. Submodule caches are not part of retention (FOLLOWUPS).
+
+`host ls --disk` (`Workspace.usage`) stats every file of every checkout, and the controller waits
+up to an hour for it (`LiveHostLink.bulkReplyTimeout`). On the full jeeves disk that walk ran for
+minutes. It now runs on a global queue, one per controller at a time (asking again joins it), and
+`usage` answers within `usageBudget` (10 s): the walk's rows if it finished, otherwise the last
+finished walk's, otherwise every row at what has been counted so far. `host info` is not this
+path: `HostInfoProbe` reads free space with one `statvfs`, and the controller caps the request at
+`HostLink.requestTimeout` (10 s).
+
+**Submodules** (`Submodules.swift`, spec §4.2 step 4). The snapshot's tree already pins each
+submodule (a gitlink is a commit id, covered by the tree check); what it lacks is where to fetch
+it, and only the controller knows that (its `.git/config`, the superproject's remote for a
+relative URL, its `insteadOf` rules). So the snapshot carries `SnapshotRef.submodules`, one
+`{path, commit, url}` per gitlink, nested ones included, with the URL already resolved and any
+credentials stripped (an http(s) URL's userinfo, another scheme's password; the host fetches with
+its own). Before
+anything is recorded or sent, a populated submodule with uncommitted or untracked changes is
+refused (`submodule_dirty`), as is one at a commit no remote-tracking branch or tag of it contains
+(`submodule_unpushed`, a local-refs check: no network on every run), and a nested repository that
+has no URL (`submodule_no_url`). On the host, after the superproject's tree is verified, each
+gitlink is fetched into a per-URL bare cache, `<state root>/submodules/<controller slot>/`, kept
+across runs, and placed as a `git worktree` of that cache at its path, recursing into nested
+submodules. Placement runs after the store lock is released (a slow fetch must not stall the
+repo's other syncs), under each cache's own lock. The fetch is a shallow one of the pinned commit;
+only a server's refusal of exactly that ("unadvertised object", "not our ref") earns a full fetch,
+and a connection or auth failure is final. It is bounded: http gives up below 1000 B/s for 60 s,
+ssh runs in batch mode with a 15 s connect timeout and 15 s keepalives, and cancelling the run
+SIGKILLs git's process group (`GitRunner.offload` ties every git it runs to the calling task).
+Transports are `git`, `http`, `https` and `ssh`, plus `file` for the controller's own pins only. A
+nested gitlink with no pin falls back to its parent's committed `.gitmodules`. A URL the host
+cannot reach fails the checkout as `submodule_fetch_failed`, naming the path, the URL (credentials
+redacted) and git's reason line. The controller's excludes apply inside submodules too (their
+`clean` and the end-of-run status). `host ls --disk` lists each cache under the repo `submodules`,
+and `host prune` deletes the caches no remaining checkout uses. The run's idle-sleep assertion is
+held from acquire, so a long fetch does not let a Mac host sleep. A host advertises the
+`submodules` capability; the controller refuses to sync a snapshot with submodules to one that
+does not (`submodules_unsupported`), or whose capabilities it does not know yet, mid-reconnect
+(`host_unavailable`), because it would drop the pins and run against empty directories. A
+submodule-free snapshot is byte-identical on the wire to what earlier builds sent.
 
 **Results come back two ways.** Tracked changes are committed on the host as a child of the
 snapshot (`refs/fd/results/<run>`) and fetched as a one-commit bundle. The host keeps it until the
@@ -333,7 +402,11 @@ connection died before the Mac's copy landed, so the controller's ack is what re
 worktree, so edits made during the run conflict instead of being overwritten. `apply = "auto"`
 applies on completion and falls back to review on a conflict. `ResultApplier` trusts nothing the
 host sends: a path into `.git`, through a symlink, or colliding with another after case and NFC
-folding is refused as `unsafe_path` with nothing written. Artifacts (`--fetch`, recipe `fetch`)
+folding is refused as `unsafe_path` with nothing written. Nothing inside a submodule comes back:
+the host's result commit leaves every gitlink at its pin (its `add -A` excludes them), the run's
+output ends with a `flightdeck: warning:` line naming each submodule the run changed, and
+`ResultApplier` drops any gitlink change (and anything beneath one) a result carries, so a host
+that predates this cannot delete or scatter a submodule either. Artifacts (`--fetch`, recipe `fetch`)
 are tarred on the host at exit and unpacked over local files only where those are ignored.
 
 **Execution** (`Runner`, `OutputSpool`). A run is `$SHELL -lc '<cmd>'` in its own process group,
@@ -440,6 +513,197 @@ synthesized `flightdeck: <reason>` output line and `exited(125)`: the wire has n
 an in-process `DarwinHostServer`, real processes in temp repos, including `logs` replay across a
 relaunch and a real service downed by a shortened orphan timeout) and, against the Linux hostd in a
 container, by `test-hostd-linux-interop.sh run`. Neither has crossed to a real second machine.
+
+## Cloud infra hosts (sub-project E)
+
+`flightdeck infra up <name>` creates a machine in the user's own AWS or GCP account with OpenTofu,
+pairs it as an ordinary host with nothing typed, and `infra down` destroys it, so every delegation
+feature above works on a machine that did not exist a minute ago. Spec:
+[the cloud-infra spec](superpowers/specs/2026-10-07-cloud-infra-hosts-design.md) (its "As built"
+note lists where the code departs from it); plan:
+[the cloud-infra plan](superpowers/plans/2026-10-07-cloud-infra-hosts.md).
+
+**Units.**
+
+- **HostKit** (`Packages/HostKit/Sources/HostKit/Infra/`, Foundation-only, Linux too):
+  `InfraConfig` (the `[infra.<name>]` table, parsed by `DelegateConfigParser`), `Duration`
+  (`30m`, `4h`, `1d`), `CostModel` (rate × duration, worst case, cap decisions, `BudgetSettings`),
+  `EnrollmentPayload` (the one-time enroll file both ends read) and `IdleTracker`. HostKit's
+  `Duration` shadows `Swift.Duration` in every file that imports HostKit, so a file that needs
+  both writes `Swift.Duration` (or `HostKit.Duration`) at the clash site.
+- **Controller** (`Sources/FlightDeck/Infra/`): `ToolPins`/`ToolResolver`/`ToolDownloader`
+  (find or fetch `tofu`, `aws`, `gcloud`; find `tailscale`), `TofuRunner` and `InfraWorkdir` (one
+  OpenTofu workdir per machine), `CloudInitRenderer`, `CloudAccounts` (`AWSAccount`,
+  `GCPAccount`: sign-in, quota, console output, the orphan scan), `PriceCatalog`, `InfraRegistry`
+  (`infra.json`) and `CostLedger` (`infra-ledger.json`, kept apart so spend history outlives a
+  machine's record), `TailnetIntegration` and `HuJSONPatcher`, `InfraPreflight`, `InfraService`
+  (the state machine and every operation), `Reaper`, `InfraNotifier`, `SecretRedaction`, and
+  `InfraControl` (the `infra.*` requests' handler, and `run --on`'s auto-up).
+- **Presets** (`Resources/Infra/presets/{aws-linux,gcp-linux}/`): bundled OpenTofu modules with
+  provider lock files and `tofu test` suites on mock providers (`scripts/test-infra-presets.sh`).
+  `Resources/Infra` is a folder reference, so nothing may ever be left beside a preset: the script
+  tests copies under `build/`.
+- **Wire** (`Sources/FleetKit/InfraControlWire.swift`): `FleetRequest.infra(InfraRequest)` and its
+  frames (`infraProgress`, `infraMachine`, `infraList`, `infraDoctor`, `infraDone`). Refusals are
+  `infra_*` error codes, which the CLI exits 125 on.
+- **CLI** (`Sources/FlightDeckCLI/InfraCommands.swift`): `infra up|down|ls|doctor|extend`,
+  `down --orphan KIND:ID`, `ls --orphans`. The CLI holds no credential, state or budget; the app
+  does everything.
+- **hostd**: an `enroll` subcommand and admin op, `idleSince` in `host.info`, TCP keepalive, and a
+  transfer stall deadline (below).
+
+**The path of one `infra up`.** `InfraControl` loads the repo's `[infra.<name>]` and hands it to
+`InfraService.up`, which writes each state to `infra.json` *before* the step it names begins
+(`planned → provisioning → enrolling → ready ⇄ idle → destroying → gone`, plus `failed` and
+`orphaned`), so a crash or quit at any point leaves a record that the next launch's
+`resumeAfterLaunch` adopts (it enrolled) or destroys (its enroll window passed) — never a machine
+nobody knows about. In order: `InfraPreflight` (tools, config, caps and guardrails, credentials,
+region and type, quota, price, name not in use by another repo or a paired host, network mode),
+all before anything is created; the workdir (`infra/<name>/module/` plus
+`fd.auto.tfvars.json`); a fresh `FleetDeviceKey` and a provisioning `HostRecord`; user-data from
+`CloudInitRenderer`; `tofu init` then `apply -auto-approve -json`, one progress line per resource;
+outputs `fd_address`/`fd_instance_id`; then up to 10 minutes for the machine's hello over the
+ordinary `HostLink`, with the cloud's console output (redacted) attached to a timeout. Ctrl-C in
+the CLI leaves the app creating the machine; `infra down <name>` cancels it.
+
+**Enrollment** goes through the running hostd, never its files. `ControllerStore` reads
+`controllers.json` once at start, so a second process writing it would be ignored until a
+restart; instead `flightdeck-hostd enroll --file` sends `AdminRequest.enroll(payload)` over the
+admin socket and `serve` adds the controller to its live store. The file is deleted once spent
+or expired. A payload issued "in the future" (a fresh VM whose clock is behind the Mac's, before
+NTP syncs) is `notYetValid`: `enroll` re-checks every 5 s for up to 120 s and, if the clock still
+has not caught up, exits 1 **keeping** the file, because deleting it would strand a machine that
+a minute's patience would have enrolled.
+
+**cloud-init** (`CloudInitRenderer`, pure, golden-file tested). Every interpolated value is
+checked against a character set that cannot leave its YAML quotes or `sh -c` string, since
+user-data runs as root; the enroll line is pure-ASCII JSON (`\u`-escaping U+0085 and U+2028/9,
+which YAML reads as line breaks). In order:
+
+1. `bootcmd`, **every boot**: `iptables`/`ip6tables` reject the metadata endpoint for every uid
+   but root — `169.254.169.254`, and on AWS `fd00:ec2::254`. The enrollment secret is the
+   controller's long-lived PSK for this host and user-data stays readable for the machine's whole
+   life, so a workload that could read it could impersonate the controller. Firewall rules do not
+   survive a reboot, hence `bootcmd` and not `runcmd`.
+2. AWS only, the first `runcmd`: enable the TTL timer (below), before anything that can fail.
+3. Start `user@<uid>` and set `XDG_RUNTIME_DIR` (`enable-linger` returns before the user manager
+   is up), install hostd with `hostd-install.sh --sha256 … --no-pair`, then `enroll` as its own
+   entry, so a failing step never skips the next and the TTL covers a machine that never enrolls.
+4. Tailnet mode: install Tailscale and `tailscale up` with the single-use key.
+
+**Nothing outlives its TTL** — two independent guarantees, either alone sufficient:
+
+- **The machine.** AWS: a systemd timer at an absolute UTC deadline with `Persistent=true`
+  (a reboot clears a pending `shutdown -h +N`; a persistent timer fires at boot if the deadline
+  passed while stopped), armed first, plus `instance_initiated_shutdown_behavior = "terminate"` so
+  the poweroff ends billing. GCP: no on-machine timer at all — a guest poweroff only *stops* a GCE
+  VM, which keeps billing its disk and halts `max_run_duration`, so a timer firing first would
+  turn the guarantee into a leak; `scheduling.max_run_duration` with
+  `instance_termination_action = "DELETE"` is the guarantee. Because this deadline is fixed when
+  the machine boots, `infra extend` cannot move past the creation TTL (plan deviation 6).
+- **The controller.** `Reaper` (below) destroys at TTL after a 10-minute warning.
+
+**Networking.** Tailnet mode is chosen when the local `tailscale status` reports `Running` and an
+OAuth client for that same tailnet is in the Keychain: each `up` mints a single-use, preauthorized,
+ephemeral key tagged `tag:flightdeck-cloud` (15-minute expiry), and `fd_address` is the node's
+tailnet IP from the Tailscale API. Tailnet machines still get a public IP, used for egress only:
+the default VPC/network has no NAT, and cloud-init must download hostd. `aws-linux` needs the
+region's default VPC and refuses at plan time without one, naming `aws ec2 create-default-vpc`
+(a precondition on the lookup; AWS's own read failed later with "no matching EC2 VPC found").
+Inbound stays closed (the
+AWS security group has no ingress rule; GCP gets a deny-all-ingress rule). Public mode admits TCP
+47410 from this Mac's `/32` only — no SSH in either mode — and the delegation link is TLS-PSK with
+the enrolled key, so the open port answers no one else. The OAuth client itself is a manual
+checklist plus a clipboard paste into the Keychain: probe P1 found no API that creates one.
+
+**Re-apply never replaces a running machine.** Both presets `ignore_changes` the image (AMI /
+boot image: Canonical publishes a new Noble image weekly) and the user-data (re-rendered on every
+`up`), both force-new; without it, the public-IP re-apply that only moves `fd_allow_cidr` would
+destroy and recreate the machine. GCP firewall, network-tag and instance names are project-global,
+so GCP names carry a 12-hex owner prefix (`fd-<owner>-<name>`) and two controllers' `gpu` never
+collide; GCP firewalls take no labels, so their **description** carries
+`flightdeck-owner=… flightdeck-name=…` for the orphan scan.
+
+**Ownership.** `controllerID` is a UUID minted once per state directory (`infra-controller.json`);
+only its SHA-256's first 12 hex characters leave the Mac, as the `flightdeck-owner` label every
+resource carries. Per state directory, so a Debug build and the Release app never list, reap or
+"orphan" each other's machines.
+
+**Tools.** `ToolResolver` takes a user's own `tofu`/`aws`/`gcloud`/`tailscale` from the login
+shell's `PATH`, `/opt/homebrew/bin` or `/usr/local/bin` when its version is compatible, else a
+managed copy pinned in `ToolPins.swift`: **tofu 1.8.11**, **aws 2.37.10**, **gcloud 588**. Each
+download is checked against a compiled-in SHA-256 before it is unpacked; a mismatch is a hard
+failure. The AWS pkg is installed per user under `~/Library/Caches/dev.flightdeck/tools/aws`, not
+Application Support, because its installer refuses a path with a space. The gcloud tarball bundles
+no Python and macOS's 3.9 is too old, so the resolver finds a 3.10+ one and passes it as
+`CLOUDSDK_PYTHON`. Tailscale is never installed (it is a system network extension).
+
+**Idle.** hostd's `IdleTracker` reports `idleSince` in `host.info` (nil while anything runs, and
+always nil from the macOS hostd). The Reaper reaps only after it has watched the *same*
+`idleSince` for the whole idle period on this Mac's clock, so a host clock running behind can
+never reap early, and any activity in between restarts the count. Two hostd fixes keep a dead
+peer from pinning a host busy forever: TCP keepalive on every accepted socket (60 s idle, then
+probes every 15 s), and a 10-minute per-chunk deadline on transfers, which fail as
+`transfer_stalled`.
+
+**Reaper**, once a minute per machine, first destroy wins: drift (at most every 10 minutes,
+`tofu plan -refresh-only` with `-lock=false`: it writes nothing, so it must never hold the state
+lock a user's `down` or a re-apply needs; an instance its own timer ended is marked gone); TTL (warning 10 minutes
+before); idle; budget (a warning at the threshold, separately for the per-machine cap and the
+monthly cap, once each; at a cap, destroy after 5 minutes unless the cap was raised meanwhile —
+`extend` cannot override it). It **claims a name** before acting, exactly as `up`/`down` do, so it
+never races a user's `down`. A destroy that failed is retried with backoff 1, 5, 15, then every 30
+minutes. A public-mode machine whose link stays down has its firewall re-pointed at this Mac's
+current public IP — 30 s after the drop, every 3 minutes while it stays down, and on every network
+path change — because the Mac moving networks is the commonest reason the link fails.
+
+**Orphans.** `orphans()` asks each configured account for every resource carrying this
+controller's owner label that `infra.json` does not know, as kind-qualified refs
+(`instance:…`, `security-group:…`, `firewall:…`; a GCE instance and its firewall can share a
+name). An account it could not read lands in `unreadable` with the reason, so "none" is only
+ever said when every account was actually scanned. `infra doctor` includes the scan.
+
+**Secrets never leave in text.** `SecretRedaction` replaces `tskey-…` and any run of 64+ hex
+characters (the enrollment secret) in OpenTofu output and console text before it becomes an
+event, an error, a notification or an `infra.json` failure note: a failed apply's diagnostics
+can quote user-data, and a boot console can echo it.
+
+**Trust boundaries.** Cloud credentials never pass through Flight Deck: OpenTofu's providers and
+the CLIs read the user's own stores (AWS profiles and SSO cache, gcloud ADC). The Keychain holds
+only the Tailscale OAuth client and each machine's host key. Budgets and guardrails live in the
+user's settings; a repo can ask for a machine but never raise a cap.
+
+**Tested** by unit suites with fakes for every seam (`InfraEnvironment`: a fake `TofuRunner`,
+accounts, prices, tailnet, clock), HostKit's suite on macOS and Linux, hostd's `enroll` in the
+Linux container, and the presets' `tofu test` on mock providers. No test creates a cloud
+resource except `scripts/test-infra-live.sh`, which refuses without `FD_INFRA_LIVE=1` and has
+not yet run.
+
+### Cloud machines in the app (Settings → Cloud, `Sources/FlightDeck/Infra/`)
+
+`FlightDeckApp.init` builds `InfraService` eagerly, beside `HostService`, through
+`InfraLive.wire`: files beside `sessions.json` (`infra.json`, `infra-ledger.json`,
+`infra-prices.json`, `infra-controller.json`, `infra/` work directories, `tools/`), both clouds as
+`LiveCloudAccount`s that resolve their CLI on first use (never at launch, where the login-shell
+search path would block main) and read the profile/project from `CloudChoices`, a lock-guarded copy
+of `Preferences.cloud` kept current by a sink. It then starts the `Reaper` and runs
+`resumeAfterLaunch()`, and `makeFleetService` sets `FleetService.infra` before either socket starts.
+The controller id behind the `flightdeck-owner` label is a UUID minted once into
+`infra-controller.json`, not the preferences' `installID`: Debug and Release share that defaults
+domain but not a state directory, so a shared id would make each build's orphan scan offer the
+other's machines. Public mode's address is `checkip.amazonaws.com` (5 s), accepted only as a dotted
+quad. Under `-FlightDeckResetState` the same wiring uses a scratch directory, an empty tool search
+path, in-memory Tailscale secrets and no Reaper or resume.
+
+Settings → Cloud (`CloudSettingsTab`) edits `CloudPreferences` (AWS profile from `~/.aws/config`,
+GCP project, the regions the setup sheet uses, `BudgetSettings`), shows the tailnet mode and lists
+machines with their §8.4 cost line and a Down button. Settings → Hosts badges a host that is an
+infra machine with its rate and spend. **Set Up…** opens `CloudSetupSheet` over
+`CloudSetupModel` (spec §9): every step is a live check plus its automation, and every effect
+(open URL, clipboard, copy, the delegated `uname -a` of the test step) is an injected closure. The
+OAuth client is created by hand (probe P1: the API cannot create one), from a two-item checklist
+and Paste from Clipboard; the policy step diffs with `HuJSONPatcher` and writes with the fetched
+`ETag`, falling back to copying `HuJSONPatcher.snippet` and opening the policy editor.
 
 ## Preferences
 

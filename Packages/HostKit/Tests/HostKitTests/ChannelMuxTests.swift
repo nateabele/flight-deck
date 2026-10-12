@@ -571,4 +571,123 @@ final class ChannelMuxTests: XCTestCase {
         XCTAssertEqual(pair.framesToController, 0, "answered a stray credit")
         watcher.cancel()
     }
+
+    /// Every closed id is remembered so a late frame for it is dropped, but a forwarded port
+    /// opens one channel per connection: a set of every id ever closed grew without bound for
+    /// the link's life. A contiguous run of closed ids collapses into a watermark, so the
+    /// memory is the ids closed *above* the oldest one still open, and the drop rule is the same.
+    func testClosedIDTombstonesStayBounded() async throws {
+        let pair = MuxPair()
+        let longLived = try await pair.controller.open()
+        _ = try await pair.host.accept(longLived.id)
+        var closed: [ChannelID] = []
+        for _ in 0..<200 {
+            let c = try await pair.controller.open()
+            _ = try await pair.host.accept(c.id)
+            c.cancel()
+            closed.append(c.id)
+        }
+        // Held above the one still open: those ids really are remembered one by one.
+        XCTAssertEqual(pair.controller.tombstoneCount, 200)
+        XCTAssertEqual(pair.host.tombstoneCount, 200)
+
+        longLived.cancel()
+        XCTAssertEqual(pair.controller.tombstoneCount, 0, "the run below nextID collapses once nothing in it is open")
+        XCTAssertEqual(pair.host.tombstoneCount, 0)
+
+        // The drop rule survives the collapse: a late frame for an old id is still dropped,
+        // and the id still cannot be claimed again.
+        let before = pair.framesToController
+        for id in [longLived.id, closed[0], closed[199]] {
+            pair.host.receive(binary: ChannelFrame(channel: id, kind: .data, payload: Data("x".utf8)).encoded())
+            do { _ = try await pair.host.accept(id); XCTFail("re-claimed closed \(id)") } catch {
+                XCTAssertEqual(error as? ChannelMuxError, .closed)
+            }
+        }
+        XCTAssertEqual(pair.framesToController, before, "answered a frame for a closed id")
+
+        // And the next id is untouched by the watermark.
+        let next = try await pair.controller.open()
+        let peer = try await pair.host.accept(next.id)
+        try await next.write(Data("ok".utf8))
+        await next.finish()
+        let got = try await readAll(peer)
+        XCTAssertEqual(got, Data("ok".utf8))
+    }
+
+    /// The host side sees ids out of order (a later channel's bytes can beat an earlier one's
+    /// request), so its watermark may only pass ids that really closed.
+    func testWatermarkWaitsForAGapInPeerIDs() async throws {
+        let pair = MuxPair()
+        let first = try await pair.controller.open()     // never reaches the host
+        let second = try await pair.controller.open()
+        _ = try await pair.host.accept(second.id)
+        second.cancel()
+        XCTAssertEqual(pair.host.tombstoneCount, 1, "id \(first.id) is not closed, so \(second.id) cannot collapse")
+        let late = try await pair.host.accept(first.id)
+        try await first.write(Data("late".utf8))
+        await first.finish()
+        let got = try await readAll(late)
+        XCTAssertEqual(got, Data("late".utf8))
+    }
+
+    /// The collapse at the edges: 0 is no side's id and never closed, and the last id of each
+    /// parity cannot be passed by the floor, so it must stay remembered rather than vanish.
+    func testClosedIDsEdges() {
+        var ids = ChannelMux.ClosedIDs()
+        XCTAssertFalse(ids.contains(0))
+        ids.insert(1); ids.insert(2)
+        XCTAssertTrue(ids.contains(1) && ids.contains(2))
+        XCTAssertEqual(ids.heldIndividually, 0)
+        XCTAssertFalse(ids.contains(0) || ids.contains(3) || ids.contains(4))
+
+        // Every id below the top few already closed, as if the link had lived that long.
+        var top = ChannelMux.ClosedIDs(evenFloor: ChannelID.max - 3, oddFloor: ChannelID.max - 4)
+        for id in [ChannelID.max, ChannelID.max - 2, ChannelID.max - 4, ChannelID.max - 1, ChannelID.max - 3] {
+            top.insert(id)
+        }
+        for id in (ChannelID.max - 6)...ChannelID.max {
+            XCTAssertTrue(top.contains(id), "\(id) closed")
+        }
+        XCTAssertEqual(top.heldIndividually, 2, "only the last id of each parity is held one by one")
+    }
+
+    /// The unclaimed cap used to stop applying once anyone called `accept()`: each new peer
+    /// channel was yielded into the stream, whose buffer had no bound, so a consumer that
+    /// stopped draining let a peer queue channels (each with a window of bytes) without end.
+    /// The stream now holds at most `maxUnclaimed`; one past that is closed like any other
+    /// channel past the cap.
+    func testAcceptStreamIsCappedLikeUnclaimedChannels() async throws {
+        let pair = MuxPair()
+        let stream = pair.controller.accept()     // nobody drains it yet
+        var opened: [any ByteChannel] = []
+        for _ in 0..<ChannelMux.maxUnclaimed {
+            let c = try await pair.host.open()
+            try await c.write(Data([1]))
+            opened.append(c)
+        }
+        let over = try await pair.host.open()
+        try await over.write(Data([1]))
+        // A read, not a check of state: if the channel stayed open it parks, and the timeout
+        // reports that instead of hanging the suite.
+        let closed = expectation(description: "past the cap is closed")
+        let reader = Task {
+            do { _ = try await over.read() } catch {
+                XCTAssertEqual(error as? ChannelMuxError, .closed)
+                closed.fulfill()
+            }
+        }
+        await fulfillment(of: [closed], timeout: 2)
+        reader.cancel()
+
+        // Every channel within the cap is still delivered, in order, and readable.
+        var got: [ChannelID] = []
+        for await channel in stream {
+            let first = try await channel.read()
+            XCTAssertEqual(first, Data([1]))
+            got.append(channel.id)
+            if got.count == opened.count { break }
+        }
+        XCTAssertEqual(got, opened.map(\.id))
+    }
 }

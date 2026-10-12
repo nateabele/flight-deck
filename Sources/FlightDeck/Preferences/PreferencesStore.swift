@@ -142,6 +142,16 @@ final class PreferencesStore: ObservableObject {
         preferences.capacity = next
     }
 
+    /// Settings → Cloud, defaults filled. A read, like `capacity`.
+    var cloud: CloudPreferences { preferences.cloud ?? CloudPreferences() }
+
+    /// One edit, one write, like `updateCapacity`.
+    func updateCloud(_ edit: (inout CloudPreferences) -> Void) {
+        var next = cloud
+        edit(&next)
+        preferences.cloud = next
+    }
+
     /// The pools Flight Control leases from, derived from the Accounts list (unify brief R6):
     /// `CapacityLedger`, `CapacityPoolDirectory` and `UsageService` all read this, so a pool
     /// edited in Settings → Accounts is the pool every lease sees.

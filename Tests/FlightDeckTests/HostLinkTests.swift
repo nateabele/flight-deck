@@ -24,8 +24,12 @@ func waitUntil(timeout: TimeInterval = 10, file: StaticString = #filePath, line:
 /// rather than waited out.
 @MainActor
 final class ManualHostLinkClock: HostLinkClock {
-    private(set) var now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    private(set) var now: Date
     private var timers: [Timer] = []
+
+    /// `now` is where time starts: the infra harness starts it at its own fixture date, so
+    /// the clock the Reaper reads and the one its machines were stamped with agree.
+    init(now: Date = Date(timeIntervalSinceReferenceDate: 800_000_000)) { self.now = now }
 
     final class Timer: HostLinkCancellable {
         let due: Date

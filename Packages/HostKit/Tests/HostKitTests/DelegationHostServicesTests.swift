@@ -458,6 +458,7 @@ private final class FakeRunner: RunControlling, @unchecked Sendable {
     func liveRuns(controller: UUID) -> [String] {
         lock.withLock { _owners.filter { $0.value.controller == controller && !_downs.contains($0.key) }.map(\.key).sorted() }
     }
+    func phase(runID: String) -> RunPhase? { nil }
     func shutdown(grace: Double, deadline: Double) async {}
 }
 

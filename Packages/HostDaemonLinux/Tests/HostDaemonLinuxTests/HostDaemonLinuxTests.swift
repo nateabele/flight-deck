@@ -2,6 +2,7 @@ import Foundation
 import HostKit
 import NIOCore
 import NIOEmbedded
+import NIOPosix
 import NIOWebSocket
 @_spi(HostPairing) import PairingCore
 import XCTest
@@ -83,6 +84,220 @@ final class ControllersCommandTests: XCTestCase {
         XCTAssertEqual(try ControllersCommand.json(Array(list.prefix(1))),
             #"[{"name":"laptop","pairedAt":"2026-10-05T11:33:20Z","slot":"6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00"}]"#)
         XCTAssertEqual(try ControllersCommand.json([]), "[]")
+    }
+}
+
+/// `enroll`: a cloud machine's one-time file adds its controller to the *running* hostd, through
+/// the admin handler, because `serve` reads `controllers.json` once and would never see a key
+/// written beside it. A payload is good for one slot, once, and only while fresh.
+final class AdminEnrollTests: XCTestCase {
+    private func makeTestHostd() throws -> (LinuxHostd, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-enroll-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return (LinuxHostd(root: root, port: 47499, hostName: "linux-test"), root)
+    }
+
+    private func payload(issued: Date = Date(), idle: Int = 600) -> EnrollmentPayload {
+        EnrollmentPayload(version: 1, slot: UUID(), secretHex: String(repeating: "11", count: 32),
+                          controllerName: "ctl", idleSeconds: idle, issuedAt: issued)
+    }
+
+    func testAdminEnrollAddsControllerAndIsIdempotentlyRefusedOnReuse() throws {
+        let (hostd, _) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.store.all().map(\.slot), [p.slot])
+        XCTAssertEqual(hostd.store.all().first?.name, "ctl")
+        XCTAssertEqual(hostd.store.all().first?.secret, Data(repeating: 0x11, count: 32))
+        guard case .failed(let why) = hostd.handle(.enroll(p)) else { return XCTFail() }
+        XCTAssertTrue(why.contains("already"), why)
+        XCTAssertEqual(hostd.store.all().count, 1)
+    }
+
+    /// The replay this guards: user-data stays readable from the metadata service, so after a
+    /// revoke anyone on the box could re-enroll the revoked controller's key from it until the
+    /// payload aged out, because "already in the store" was the only reuse check.
+    func testARevokedEnrollmentCannotBeReplayed() throws {
+        let (hostd, _) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.handle(.revoke(slot: p.slot)), .ok)
+        guard case .failed(let why) = hostd.handle(.enroll(p)) else { return XCTFail("replayed after revoke") }
+        XCTAssertTrue(why.contains("already used"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
+    func testARevokedEnrollmentCannotBeReplayedAfterARestart() throws {
+        let (hostd, root) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.handle(.revoke(slot: p.slot)), .ok)
+        let restarted = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        guard case .failed(let why) = restarted.handle(.enroll(p)) else { return XCTFail("replayed after restart") }
+        XCTAssertTrue(why.contains("already used"), why)
+        XCTAssertTrue(restarted.store.all().isEmpty)
+    }
+
+    /// Fail closed: an unreadable spent list cannot prove the slot unspent.
+    func testAnUnreadableSpentListRefusesEnrollment() throws {
+        let (hostd, root) = try makeTestHostd()
+        try Data("{not json".utf8).write(to: root.appendingPathComponent("enrollments-spent.json"))
+        guard case .failed(let why) = hostd.handle(.enroll(payload())) else { return XCTFail("enrolled") }
+        XCTAssertTrue(why.contains("enrollments-spent.json"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
+    func testAdminEnrollRefusesExpired() throws {
+        let (hostd, _) = try makeTestHostd()
+        guard case .failed(let why) = hostd.handle(.enroll(payload(issued: Date(timeIntervalSinceNow: -3600)))) else {
+            return XCTFail()
+        }
+        XCTAssertTrue(why.contains("expired"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
+    func testAdminEnrollRefusesANonPositiveIdleThreshold() throws {
+        let (hostd, _) = try makeTestHostd()
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: 0))), .failed("enrollment malformed"))
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: -5))), .failed("enrollment malformed"))
+        XCTAssertTrue(hostd.store.all().isEmpty)
+        XCTAssertNil(hostd.idleThreshold)
+    }
+
+    /// Task 5's idle reporting reads the threshold after a restart, when the enroll file is gone.
+    func testEnrolledIdleThresholdSurvivesARestart() throws {
+        let (hostd, root) = try makeTestHostd()
+        XCTAssertNil(hostd.idleThreshold)
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: 900))), .ok)
+        XCTAssertEqual(hostd.idleThreshold, 900)
+        XCTAssertEqual(LinuxHostd(root: root, port: 47499, hostName: "linux-test").idleThreshold, 900)
+    }
+}
+
+/// `flightdeck-hostd enroll --file`: which outcomes consume the one-time file. A redeemed or
+/// expired file is deleted (it can never enroll again, and it holds a secret); a refusal that a
+/// person might fix (a newer format, a hostd that answered oddly) leaves it for inspection.
+final class EnrollCommandTests: XCTestCase {
+    private func file(_ p: EnrollmentPayload) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("enroll-\(UUID().uuidString.prefix(8)).json")
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        try enc.encode(p).write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    /// Whole seconds by default: the file's ISO 8601 dates carry none, so a fractional `Date()`
+    /// would not compare equal to what `run` read back.
+    private func payload(issued: Date = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down)),
+                         version: Int = 1) -> EnrollmentPayload {
+        EnrollmentPayload(version: version, slot: UUID(), secretHex: String(repeating: "22", count: 32),
+                          controllerName: "ctl", idleSeconds: 60, issuedAt: issued)
+    }
+
+    func testEnrolledDeletesTheFile() throws {
+        let p = payload(), url = try file(p)
+        var sent: [AdminRequest] = []
+        let out = EnrollCommand.run(file: url) { sent.append($0); return .ok }
+        XCTAssertEqual(out.exitCode, 0)
+        XCTAssertEqual(sent, [.enroll(p)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// What `FileManager.removeItem` throws when the file's directory is not writable. Injected
+    /// rather than staged on disk: the test container runs as root, which deletes from a 0500
+    /// directory anyway, so a real read-only directory would never exercise this path there.
+    private static func notPermitted(_ url: URL) throws {
+        throw CocoaError(.fileWriteNoPermission,
+                         userInfo: [NSFilePathErrorKey: url.path, NSUnderlyingErrorKey: POSIXError(.EACCES)])
+    }
+
+    /// The enrollment stands even when its spent file cannot be deleted (a tmpfs remounted
+    /// read-only, a file written by another user): exit 0, but say the secret is still on disk.
+    func testUndeletableFileAfterEnrollWarnsAndStillSucceeds() throws {
+        let p = payload(), url = try file(p)
+        var removed: [URL] = []
+        let out = EnrollCommand.run(file: url, remove: { removed.append($0); try Self.notPermitted($0) }) { _ in .ok }
+        XCTAssertEqual(out.exitCode, 0, out.message)
+        XCTAssertEqual(removed, [url])
+        XCTAssertEqual(out.warnings.count, 1)
+        let warning = try XCTUnwrap(out.warnings.first)
+        XCTAssertTrue(warning.hasPrefix("could not delete \(url.path): "), warning)
+        XCTAssertTrue(warning.contains("still holds a controller's secret"), warning)
+    }
+
+    func testUndeletableExpiredFileWarnsToo() throws {
+        let url = try file(payload(issued: Date(timeIntervalSinceNow: -3600)))
+        let out = EnrollCommand.run(file: url, remove: Self.notPermitted) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("expired"), out.message)
+        XCTAssertEqual(out.warnings.count, 1)
+        let warning = try XCTUnwrap(out.warnings.first)
+        XCTAssertTrue(warning.hasPrefix("could not delete \(url.path): "), warning)
+    }
+
+    func testDeletedFileHasNoWarning() throws {
+        let url = try file(payload())
+        XCTAssertEqual(EnrollCommand.run(file: url) { _ in .ok }.warnings, [])
+    }
+
+    func testExpiredIsDeletedWithoutAskingHostd() throws {
+        let url = try file(payload(issued: Date(timeIntervalSinceNow: -3600)))
+        let out = EnrollCommand.run(file: url) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("expired"), out.message)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// A VM that boots with its clock behind the Mac's must not burn its only enrollment file:
+    /// the payload is kept, and `run` waits up to `clockWait` for NTP before giving up.
+    func testFuturePayloadIsKeptWhenTheClockNeverCatchesUp() throws {
+        let t0 = Date(timeIntervalSince1970: 2_000_000_000)
+        let url = try file(payload(issued: t0.addingTimeInterval(600)))
+        var clock = t0, slept: TimeInterval = 0
+        let out = EnrollCommand.run(file: url, now: { clock }, sleep: { clock += $0; slept += $0 }) { _ in
+            XCTFail("sent"); return .ok
+        }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("clock"), out.message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertGreaterThanOrEqual(slept, EnrollCommand.clockWait)
+        XCTAssertLessThan(slept, EnrollCommand.clockWait + 10)
+    }
+
+    func testFuturePayloadEnrollsOnceTheClockCatchesUp() throws {
+        let t0 = Date(timeIntervalSince1970: 2_000_000_000)
+        let p = payload(issued: t0.addingTimeInterval(330)), url = try file(p)
+        var clock = t0
+        var sent: [AdminRequest] = []
+        // NTP steps the clock forward on the second wait.
+        var waits = 0
+        let out = EnrollCommand.run(file: url, now: { clock }, sleep: { waits += 1; clock += waits == 2 ? 600 : $0 }) {
+            sent.append($0); return .ok
+        }
+        XCTAssertEqual(out.exitCode, 0, out.message)
+        XCTAssertEqual(sent, [.enroll(p)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testRefusalKeepsTheFile() throws {
+        let url = try file(payload())
+        let out = EnrollCommand.run(file: url) { _ in .failed("slot already enrolled") }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("already"), out.message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testWrongVersionKeepsTheFile() throws {
+        let url = try file(payload(version: 2))
+        let out = EnrollCommand.run(file: url) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testUnreadableFileIsARefusal() {
+        let url = URL(fileURLWithPath: "/nonexistent/enroll.json")
+        XCTAssertEqual(EnrollCommand.run(file: url) { _ in .ok }.exitCode, 1)
     }
 }
 
@@ -302,5 +517,88 @@ final class HandshakeGateTests: XCTestCase {
         let d = try connectRaw(port)
         defer { close(d) }
         XCTAssertFalse(closedByPeer(d, within: 0.3), "a freed slot was not reusable")
+    }
+}
+
+/// `host.info` from the real `serve` wiring carries `idleSince`, so a cloud box's controller
+/// can reap it once idle. A hostd built without the router's tracker reported none, which the
+/// controller must read as "never reap on idle": the box would run, and bill, until its TTL.
+final class IdleReportingTests: XCTestCase {
+    private final class Peer: HostPeer, @unchecked Sendable {
+        let slot = UUID()
+        private let lock = NSLock()
+        private var sent: [HostServerFrame] = []
+        func send(text: String) {
+            guard let frame = try? HostWire.decode(HostServerFrame.self, from: text) else { return }
+            lock.withLock { sent.append(frame) }
+        }
+        func close() {}
+
+        func info(_ id: Int) async throws -> HostInfo {
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                for frame in lock.withLock({ sent }) { if case .reply(id, .hostInfo(let info)) = frame { return info } }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw CocoaError(.featureUnsupported)
+        }
+    }
+
+    func testServeReportsIdleSinceInHostInfo() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-idle-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let booted = Date()
+        let hostd = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        let peer = Peer()
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.hello(
+            protocolVersion: .current, capabilities: [.hostInfo], controllerName: "laptop")), from: peer)
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.request(id: 1, .hostInfo)), from: peer)
+        let info = try await peer.info(1)
+        let idleSince = try XCTUnwrap(info.idleSince, "nothing is running, so the host is idle")
+        XCTAssertGreaterThanOrEqual(idleSince.timeIntervalSince(booted), -1, "idle since it booted, not since 1970")
+    }
+}
+
+/// Every accepted socket probes its peer: a controller whose laptop slept mid-transfer leaves
+/// a half-open TCP connection that only keepalive notices, and until it does, that request
+/// holds a cloud box "busy" and billing. Read back off a real accepted socket, because a
+/// bootstrap option NIO silently fails to apply would otherwise look fine in review.
+final class KeepaliveTests: XCTestCase {
+    private final class Seen: @unchecked Sendable {
+        let lock = NSLock()
+        var options: [String: SocketOptionValue] = [:]
+    }
+
+    func testAcceptedSocketsProbeADeadPeerWithinAboutTwoMinutes() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let seen = Seen()
+        let accepted = group.next().makePromise(of: Void.self)
+        let server = try PSKWebSocketServer.keepingAlive(ServerBootstrap(group: group))
+            .childChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    let options = try XCTUnwrap(channel.syncOptions)
+                    for (name, option, _) in PSKWebSocketServer.keepaliveOptions {
+                        let value = try options.getOption(option)
+                        seen.lock.withLock { seen.options[name] = value }
+                    }
+                    let alive = try options.getOption(ChannelOptions.socketOption(.so_keepalive))
+                    seen.lock.withLock { seen.options["SO_KEEPALIVE"] = alive }
+                    accepted.succeed(())
+                }
+            }
+            .bind(host: "127.0.0.1", port: 0).wait()
+        defer { try? server.close().wait() }
+        let client = try ClientBootstrap(group: group).connect(to: try XCTUnwrap(server.localAddress)).wait()
+        defer { try? client.close().wait() }
+        try accepted.futureResult.wait()
+
+        let options = seen.lock.withLock { seen.options }
+        XCTAssertNotEqual(options["SO_KEEPALIVE"], 0)
+        XCTAssertEqual(options["TCP_KEEPIDLE"], 60)
+        XCTAssertEqual(options["TCP_KEEPINTVL"], 15)
+        // 60 s quiet, then 4 unanswered probes 15 s apart: a dead peer is dropped in 2 minutes.
+        XCTAssertEqual(options["TCP_KEEPCNT"], 4)
     }
 }

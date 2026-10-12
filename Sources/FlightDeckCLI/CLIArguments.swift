@@ -58,6 +58,8 @@ public enum CLICommand: Equatable {
     /// One case rather than fifteen so the verbs' parsing and output live together in
     /// `DelegateArguments.swift`/`DelegateCommands.swift`.
     case delegate(DelegateCommand)
+    /// `infra up|down|ls|doctor|extend`: cloud machines (`InfraCommands.swift`).
+    case infra(InfraCommand)
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -322,6 +324,9 @@ public enum CLIArguments {
         case "host":
             return try parseHost(&c)
 
+        case "infra":
+            return try InfraArguments.parse(&c)
+
         case "run", "exec", "up", "down", "restart", "sync", "ps", "logs", "stop", "diff", "apply",
              "recipe", "route-exec":
             return .delegate(try DelegateArguments.parse(verb, &c))
@@ -439,6 +444,8 @@ public enum CLIArguments {
         // Delegation (DelegateArguments).
         "--on", "--include", "--fetch", "--env", "--port", "--host", "--run", "--down", "--apply",
         "--pool", "--repo", "--from",
+        // Cloud machines (InfraArguments).
+        "--orphan",
     ]
 
     /// One verb's tokens, split up front into two streams: operands (session, text, …) and
