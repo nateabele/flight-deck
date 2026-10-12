@@ -169,6 +169,13 @@ struct FlightDeckApp: App {
             settings.flywheelEnabled = true
             preferences.setProjectSettings(backend.projectPath, settings)
         }
+        // PlanningInspectorUITests: Flight Control on for the planning fixture's project, the
+        // same way and in the same hermetic preferences.
+        if let planning = PlanningUIFixture.active {
+            var settings = preferences.projectSettings(planning.projectPath)
+            settings.flywheelEnabled = true
+            preferences.setProjectSettings(planning.projectPath, settings)
+        }
         #endif
         _preferences = StateObject(wrappedValue: preferences)
         // Eager like `preferences`, for the same reason: the Settings scene and the store need
@@ -371,6 +378,13 @@ struct FlightDeckApp: App {
         let swarmsRoot = defaultSwarmsRoot
         #endif
 
+        // The planning fixture's own scratch intakes, so its plan is read and nothing real is.
+        #if DEBUG
+        let planningFixtureIntakes = resetState ? PlanningUIFixture.active?.intakesRoot : nil
+        #else
+        let planningFixtureIntakes: URL? = nil
+        #endif
+
         let store = SessionStore(
             ghostty: GhosttyApp.shared,
             resetState: resetState && fixture == nil,
@@ -397,7 +411,7 @@ struct FlightDeckApp: App {
             // one (`SessionStore.resolvedIntakesRoot`). Honours `-FlightDeckStateDir` like the
             // search index does, so a debug instance pointed at a copy of a real deck never
             // triages into the real one's intakes.
-            intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+            intakesRoot: planningFixtureIntakes ?? (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
                 .appendingPathComponent("intakes", isDirectory: true),
             delegationHooks: delegation,
             flywheelTools: flywheelTools,
@@ -422,6 +436,11 @@ struct FlightDeckApp: App {
         if resetState, Self.isSeedingSecondProject {
             store.newSession(in: FileManager.default.temporaryDirectory)
         }
+        #if DEBUG
+        if resetState, let planning = PlanningUIFixture.active {
+            PlanningUIFixture.present(in: store, fixture: planning)
+        }
+        #endif
 
         // Wraps the SAME `Notifying` instance `notifier` above wraps for ordinary session
         // notifications — no second `Notifying` is constructed, and no extra launch-time
