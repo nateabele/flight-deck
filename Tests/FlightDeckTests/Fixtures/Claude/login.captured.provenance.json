@@ -1,0 +1,22 @@
+{
+  "files": [
+    "login-theme-picker.captured.txt",
+    "login-method.captured.txt",
+    "login-paste-code.captured.txt"
+  ],
+  "isVerbatimCapturedOutput": true,
+  "claudeVersion": "2.1.296 (Claude Code)",
+  "capturedOn": "2026-10-11",
+  "method": "pyte 140x45 screen over a real `claude` TUI in a pty, started with an EMPTY CLAUDE_CONFIG_DIR so it shows its first-run login flow, with `open`/`xdg-open`/BROWSER shimmed so no browser launched. Keys sent as raw bytes: Return on the theme picker, then Return on '1. Claude account with subscription'. No code was ever pasted and no login completed.",
+  "sanitized": "login-paste-code.captured.txt is otherwise verbatim, but the `code_challenge` and `state` query values of the on-screen URL were replaced with same-length placeholders (FAKE-code-challenge-PLACEHOLDER-*, FAKE-state-PLACEHOLDER-*) so no live OAuth attempt is committed. Same length, so the hard-wrap columns are unchanged. The first screen line ('uWelcometo Claude Code') is pyte's rendering of the welcome banner's title, kept as captured.",
+  "screens": {
+    "login-theme-picker.captured.txt": "First-run theme picker. Rows are drawn `❯ ✔ Dark mode` with NO numbers: not a list ChoiceDialog reads, and deliberately not widened to.",
+    "login-method.captured.txt": "`Select login method:` - three numbered rows, cursor on row 0.",
+    "login-paste-code.captured.txt": "After choosing row 0: the browser-did-not-open screen. The URL is hard-wrapped at the 140-column width with no spaces; its redirect_uri is platform.claude.com's code page, not localhost."
+  },
+  "sha256": {
+    "login-theme-picker.captured.txt": "49748bcee3d4f0f5f519d47157930638bc21d085b55cce4aa1be417aa8c78837",
+    "login-method.captured.txt": "448391c703c79d36d56093731e15e1bea4c868975cd9a708d1cef8f1d2151428",
+    "login-paste-code.captured.txt": "2251b77c33d32e2e45e8c7a27f4ecc5adeb9a428628019dc557ae2a40edfc319"
+  }
+}
