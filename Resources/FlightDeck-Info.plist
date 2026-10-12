@@ -6,5 +6,24 @@
 	<string>$(FD_HOSTD_RELEASE_BASE_URL)</string>
 	<key>FDHostdInstallerSHA256</key>
 	<string>$(FD_HOSTD_INSTALLER_SHA256)</string>
+	<!-- Programs run in Flight Deck's terminals ask for these through the app, so the app
+	     carries the prompt text. Each pairs with an entitlement in FlightDeck.entitlements;
+	     under the hardened runtime a request with no usage string is denied without a prompt. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A program running in Flight Deck wants to control another app.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A program running in Flight Deck wants to use the camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A program running in Flight Deck wants to use the microphone.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>A program running in Flight Deck wants to access your contacts.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>A program running in Flight Deck wants to access your calendars.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>A program running in Flight Deck wants to access your calendars.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>A program running in Flight Deck wants to use your location.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A program running in Flight Deck wants to access your photo library.</string>
 </dict>
 </plist>
