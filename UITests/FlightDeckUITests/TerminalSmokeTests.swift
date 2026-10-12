@@ -117,6 +117,26 @@ final class TerminalSmokeTests: XCTestCase {
         app.windows.containing(.button, identifier: "Agents").firstMatch
     }
 
+    /// Scrolls Settings → Agents' form until the command field can be clicked, and returns it.
+    ///
+    /// The field sits at the foot of a long form, and it is an `NSScrollView` itself. When an
+    /// element is off screen XCUITest scrolls its NEAREST scroll ancestor, which for the field is
+    /// its own scroll view, not the form; so `field.click()` below the fold fails with "Unable to
+    /// find hit point for ScrollView". It passed on the UI-test Mac and failed on a 2026-10-12
+    /// local run (macOS 26, whose form rows are taller): after the Verbose click the field was
+    /// 214 pt below the window's bottom edge. Clicking the hint line right under the field
+    /// scrolls the form instead (that text's nearest scroll view is the form's), and a click
+    /// on static text does nothing else.
+    @discardableResult
+    private func revealCommandField(in prefs: XCUIElement) -> XCUIElement {
+        let field = prefs.textViews["command-field"]
+        if !field.isHittable {
+            let hint = prefs.staticTexts["command-field-hint"]
+            if hint.waitForExistence(timeout: 5) { hint.click() }
+        }
+        return field
+    }
+
     /// A point `dx` **points** in from a project heading's leading edge, vertically centred.
     ///
     /// Points rather than a normalized fraction, deliberately. The sidebar is ~240pt wide and
@@ -539,7 +559,7 @@ final class TerminalSmokeTests: XCTestCase {
                 failures.append("iteration \(i): command field missing")
                 continue
             }
-            field.click()
+            revealCommandField(in: prefs).click()
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
 
@@ -2637,7 +2657,7 @@ final class TerminalSmokeTests: XCTestCase {
             let checkbox = prefs.checkBoxes.matching(identifier: "Agent-to-user messages").firstMatch
             XCTAssertEqual(checkbox.value as? Int, 0)
 
-            field.click()
+            revealCommandField(in: prefs).click()
             // To the end of the text before typing: a click puts the caret wherever it lands.
             // On the UI-test Mac's narrower Settings window the command wraps, the click landed
             // at the end of the first line — which is the START of the editable flags — and
@@ -2655,7 +2675,7 @@ final class TerminalSmokeTests: XCTestCase {
         // The whole point of the locked prefix: select-all + delete must not destroy it.
         XCTContext.runActivity(named: "the locked prefix survives select-all and delete") { _ in
             let prefs = preferencesWindow(app)
-            let field = prefs.textViews["command-field"]
+            let field = revealCommandField(in: prefs)
             field.click()
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
