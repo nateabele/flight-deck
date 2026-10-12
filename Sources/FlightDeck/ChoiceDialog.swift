@@ -75,6 +75,12 @@ import Foundation
 /// while on a *single-select* screen the descriptions sit at column 5 themselves — so without
 /// the checkbox condition `question-single` would grow a phantom row out of its own prose.
 ///
+/// **One reader, and it is fenced.** `menu(inViewport:marker:)` DOES read — rows and the line above
+/// them — for the claude TUI menus that have no transcript to know them from (`/login`). It is the
+/// same `list` reading with three extra refusals, and it exists because for those dialogs the
+/// screen is the only source there is; everything above still holds for every dialog that has a
+/// transcript.
+///
 /// The distrust `InputBar` documents applies throughout. `ghostty_surface_read_text` returns
 /// plain text with no cell attributes, so nothing here can tell a dialog from a paragraph that
 /// happens to contain the same words — which is why every uncertain answer is `nil` or `false`
@@ -201,6 +207,10 @@ enum ChoiceDialog {
         var textColumn: Int
         /// Whether the row drew a checkbox, i.e. whether this is a multi-select question.
         var isCheckbox: Bool = false
+        /// The viewport line the row was read from. Set by `list` and used by `menu`, which
+        /// needs to know what sits above and below the list; nothing that decides a keypress
+        /// reads it.
+        var line = 0
         /// Unnumbered lines under it: a wrapped label at a narrow width, or an
         /// `AskUserQuestion` option's description. **The screen does not distinguish them** —
         /// both sit at the label's column.
@@ -328,8 +338,9 @@ enum ChoiceDialog {
             pending = nil
         }
 
-        for line in viewport.components(separatedBy: "\n") {
-            if let row = parse(line, marker: marker) {
+        for (lineNumber, line) in viewport.components(separatedBy: "\n").enumerated() {
+            if var row = parse(line, marker: marker) {
+                row.line = lineNumber
                 // Counted without the candidate, which is exactly what is in question here.
                 if row.number == current.count + 1 {
                     demoteCandidate()
@@ -361,6 +372,88 @@ enum ChoiceDialog {
         confirmCandidate()
         lists.append(current)
         return lists.last(where: { $0.count >= 2 })
+    }
+
+    // MARK: - Reading a menu nobody told us about
+
+    /// A select list read off the screen **with no transcript behind it** — claude's own TUI
+    /// menus (`/login`'s "Select login method:", `/model`, a resume picker), which never reach
+    /// the transcript and so have nothing but this to name them.
+    ///
+    /// **This widens nothing.** It is `list` and `focusedRow`'s own reading, with the rows and
+    /// the line above them handed back, plus three refusals that exist because there is no
+    /// transcript to cross-check the result against:
+    ///
+    /// - **A checkbox list is not a menu.** A multiSelect screen has an action row and an order
+    ///   of operations (`AnswerPlan`); a menu is one pick, then Return.
+    /// - **The cursor must be unambiguous** — exactly one marked row, as `focusedRow` requires.
+    /// - **The last marker on screen must be the list's own focused row.** The idle composer
+    ///   draws `❯` too, and so does claude's echo of the user's prompt; a list with a marker
+    ///   line BELOW it is scrollback over a live composer, not the thing the session is blocked
+    ///   on. This is the one check with no `list` counterpart, and it is what keeps a numbered
+    ///   list in an old answer, above a prompt, from becoming a card.
+    ///
+    /// **An unnumbered menu produces nothing, and that is the rule rather than a gap.** The
+    /// first-run theme picker draws `❯ ✔ Dark mode` with no numbers
+    /// (`Fixtures/Claude/login-theme-picker.captured.txt`): there is no run of numbered rows for
+    /// `list` to find, so there is no card, and the session reads "Waiting for you". A card for
+    /// a list nothing here can count is a card that presses a wrong row.
+    ///
+    /// The known limitation `list` documents — numbered lines in claude's own prose being the
+    /// last run on screen — applies unchanged and fails the same way: toward no card, or toward
+    /// a card whose answer the interlock then refuses (`row(_:reads:)` against the same screen).
+    struct Menu: Equatable {
+        struct Row: Equatable {
+            var label: String
+            /// The unnumbered lines under the row, joined. A wrapped label and an option's
+            /// description look the same on screen, so this is whichever it is.
+            var detail: String?
+        }
+        /// The nearest non-blank line above the first row — "Select login method:" — or nil
+        /// when there is none within two blank lines, or it is a rule.
+        var prompt: String?
+        var rows: [Row]
+        var focused: Int
+    }
+
+    static func menu(inViewport viewport: String, marker: Character) -> Menu? {
+        guard let list = list(inViewport: viewport, marker: marker),
+              list.allSatisfy({ $0.number != nil && !$0.isCheckbox }),
+              let focused = focusedRow(inViewport: viewport, marker: marker),
+              let first = list.first
+        else { return nil }
+
+        let lines = viewport.components(separatedBy: "\n")
+        guard let lastMarker = lines.lastIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).first == marker
+        }), lastMarker == list[focused].line else { return nil }
+
+        return Menu(
+            prompt: promptLine(above: first.line, in: lines),
+            rows: list.map {
+                Menu.Row(label: $0.label,
+                         detail: $0.continuations.isEmpty
+                             ? nil : $0.continuations.joined(separator: " "))
+            },
+            focused: focused
+        )
+    }
+
+    /// The line a menu is asking its question on: the nearest non-blank one above the list,
+    /// skipping at most two blank lines, and only when it holds a letter — a full-width rule
+    /// is the edge of a box, not a question.
+    private static func promptLine(above line: Int, in lines: [String]) -> String? {
+        var index = line - 1
+        var blanks = 0
+        while index >= 0, normalized(lines[index]).isEmpty {
+            blanks += 1
+            index -= 1
+            if blanks > 2 { return nil }
+        }
+        guard index >= 0 else { return nil }
+        let text = normalized(lines[index])
+        guard text.contains(where: \.isLetter) else { return nil }
+        return text.count <= 200 ? text : String(text.prefix(200))
     }
 
     /// The unnumbered row a multiSelect question submits through, or nil for any other line.

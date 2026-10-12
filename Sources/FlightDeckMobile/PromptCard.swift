@@ -94,6 +94,8 @@ struct PromptCard: View {
         // Allow and Deny are intents, not payload, so there is nothing to be unanswerable
         // about.
         case .permission: return true
+        // Its button and its field are the controls, and the Mac checks the code on arrival.
+        case .signIn: return true
         }
     }
 
@@ -134,7 +136,17 @@ struct PromptCard: View {
         return false
     }
 
-    /// Whether the message box should be out of the way: while a question is up and expanded.
+    /// Whether the card carries inputs of its own — the question's "Type something" field, the
+    /// sign-in's code field — which is what earns it a minimize button and the composer's room.
+    static func hasInputs(_ open: OpenPrompt) -> Bool {
+        switch open {
+        case .question, .signIn: return true
+        case .permission: return false
+        }
+    }
+
+    /// Whether the message box should be out of the way: while a question or a sign-in is up
+    /// and expanded.
     ///
     /// **A question's own inputs replace it.** The card and the composer ride the keyboard as
     /// one inset, so with both showing the composer sat between the card and the keyboard (122pt
@@ -142,7 +154,7 @@ struct PromptCard: View {
     /// was. A minimized card gives the composer back — that is what minimizing is for — and a
     /// permission card never takes it, having no inputs of its own.
     static func hidesComposer(for open: OpenPrompt?, minimized: Bool) -> Bool {
-        guard case .question = open else { return false }
+        guard let open, hasInputs(open) else { return false }
         return !minimized
     }
 
@@ -358,7 +370,27 @@ struct PromptCard: View {
                 return name.map { "\($0) is waiting for you" } ?? "Waiting for you"
             }
             return name.map { "\($0) wants to run \(tool)" } ?? "Waiting to run \(tool)"
+        case .signIn:
+            // From the wire, like the permission's, so an agent this build never named gets the
+            // sentence with no name in it. Today only claude's `/login` produces one.
+            return TimelineStyle.agentName(agent).map { "Sign in to \($0)" } ?? "Sign in"
         }
+    }
+
+    /// What a sign-in card tells the reader to do, in the order they do it.
+    static let signInInstructions =
+        "Open the page and sign in. It shows a code: copy it, then paste it here."
+
+    /// The code as it will be pasted into claude's field, or nil when there is nothing there
+    /// worth sending. The same flattening and refusal a typed answer gets (`typedAnswer`): a
+    /// page's copy button, or a long-press selection, can bring a trailing newline with it, and
+    /// the Mac refuses control characters outright because in that field a newline is Return.
+    static func signInCode(_ text: String) -> String? { typedAnswer(text) }
+
+    /// The one answer a sign-in takes: the code, as the wire's free-text selection. See
+    /// `SessionStore.answerScreenPrompt` for why this is not a new `PromptAnswer` case.
+    static func signInSelections(code: String) -> [[AnswerSelection]]? {
+        signInCode(code).map { [[.typed($0, optionCount: 0)]] }
     }
 
     /// The second line: an option's own words have their descriptions instead, so this is only
@@ -393,6 +425,13 @@ struct PromptCard: View {
     /// The call whose card the reader minimized. Keyed on the call, like `picks`, so the next
     /// dialog opens expanded rather than inheriting a collapse made for a different question.
     @State private var minimizedFor: String?
+    /// The sign-in page being shown in the in-app browser, or nil.
+    @State private var signInPage: SignInPage?
+    /// What the reader has pasted into the sign-in card's code field. Cleared with the call —
+    /// see `signInCodeFor` — so a code copied for one login attempt is never one tap from being
+    /// sent to the next.
+    @State private var signInCode = ""
+    @State private var signInCodeFor: String?
 
     var body: some View {
         if let open {
@@ -412,7 +451,7 @@ struct PromptCard: View {
                 // card — the heading, or the title when there is none — moved over beside it.
                 // Everything under that line keeps the card's left edge.
                 HStack(alignment: .center, spacing: 8) {
-                    if Self.isQuestion(open) { minimizeButton(for: open) }
+                    if Self.hasInputs(open) { minimizeButton(for: open) }
                     if let heading {
                         Text(heading)
                             .font(.caption2.weight(.semibold))
@@ -656,7 +695,9 @@ struct PromptCard: View {
             // One unit, under one id, so scrolling to it shows the field AND the buttons that
             // send what was typed — same 10pt spacing as the card's own stack.
             VStack(alignment: .leading, spacing: 10) {
-                if acceptsTypedAnswers {
+                // Never on a menu the Mac read off its screen: those have no "Type something" row,
+                // and the Mac would refuse the answer.
+                if acceptsTypedAnswers, !ScreenPromptID.isMenu(call) {
                     typedRow(question: question, index: index, call: call,
                              immediate: immediate, enabled: enabled)
                 }
@@ -666,6 +707,9 @@ struct PromptCard: View {
                 }
             }
             .id(Self.typedRowID)
+
+        case .signIn(let call, let link):
+            signInControls(call: call, link: link, enabled: enabled)
 
         case .permission(let call, _, _):
             HStack(spacing: 8) {
@@ -688,6 +732,76 @@ struct PromptCard: View {
 }
 
 extension PromptCard {
+    /// claude's OAuth sign-in: a button that opens the authorize page in an in-app browser, and
+    /// the field the code that page shows is pasted into.
+    ///
+    /// **Two steps because the Mac cannot do either of them.** The browser claude opened on the
+    /// Mac redirects to `localhost`, which means nothing from here; the URL on its screen
+    /// redirects to a page that displays the code instead, and the code has to travel back by
+    /// hand. The button opens that page; Send pastes the code into claude's field and presses
+    /// Return (`SessionStore.answerScreenPrompt`, which re-checks the screen first).
+    ///
+    /// **`PasteButton`, not a read of `UIPasteboard`.** The system button needs no permission
+    /// prompt and cannot read the pasteboard behind the reader's back; the field is also an
+    /// ordinary one, so a long-press paste works as well.
+    @ViewBuilder
+    fileprivate func signInControls(call: String, link: String, enabled: Bool) -> some View {
+        let page = SignInPage(link)
+        let text = signInCodeFor == call ? signInCode : ""
+        let selections = Self.signInSelections(code: text)
+        let send = { if let selections { model.answerSet(selections, to: call) } }
+        Text(Self.signInInstructions)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        Button { signInPage = page } label: {
+            Label("Open sign-in page", systemImage: "safari").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        // A URL this build will not open is no button rather than a dead one.
+        .disabled(!enabled || page == nil)
+        .accessibilityIdentifier("prompt-signin-open")
+        .sheet(item: $signInPage) { SafariView(url: $0.url).ignoresSafeArea() }
+
+        HStack(spacing: 8) {
+            TextField("Paste code", text: Binding(
+                get: { text },
+                set: { signInCodeFor = call; signInCode = $0 }
+            ))
+            .font(.footnote.monospaced())
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .focused($typingFocused)
+            .submitLabel(.send)
+            .onSubmit(send)
+            .accessibilityIdentifier("prompt-signin-code")
+            PasteButton(payloadType: String.self) { strings in
+                guard let pasted = strings.first else { return }
+                signInCodeFor = call
+                signInCode = pasted
+            }
+            .labelStyle(.iconOnly)
+            .buttonBorderShape(.capsule)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.tertiarySystemBackground))
+        )
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+        .id(Self.typedRowID)
+
+        Button(action: send) {
+            Text("Send code").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!enabled || selections == nil)
+        .accessibilityIdentifier("prompt-signin-send")
+    }
+
     /// The terminal's "Type something" row: the reader's own words in place of, or on a
     /// checkbox question beside, the options.
     ///

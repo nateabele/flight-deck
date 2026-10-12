@@ -689,4 +689,91 @@ final class SessionTimelineBlockedTests: XCTestCase {
         XCTAssertEqual(stub.requests.count, asked, "nothing to fetch for a card already in hand")
         XCTAssertFalse(model.blockedChaseExhausted)
     }
+
+    // MARK: A dialog the Mac read off its screen (claude)
+
+    private let screenMenu: OpenPrompt = .question(
+        callID: ScreenPromptID.menu(prompt: "Select login method:", labels: ["Subscription", "Console"]),
+        [PromptQuestion(question: "Select login method:",
+                        options: [.init(label: "Subscription"), .init(label: "Console")])])
+
+    private let signInURL = "https://claude.com/cai/oauth/authorize?code=true&client_id=c"
+        + "&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        + "&code_challenge=x&code_challenge_method=S256&state=s"
+
+    /// **The card a `/login` menu never had.** A claude tab whose feed holds nothing for it, the
+    /// Mac naming a screen id and sending the words: drawn, and an answer names that id.
+    func testAScreenMenuIsDrawnFromTheMacsWordsAndAnsweredByItsCall() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call(screenMenu.callID),
+                           offered: WireOpenPrompt(screenMenu))
+        XCTAssertEqual(model.blockedPrompt, screenMenu)
+
+        model.answer(.option(index: 1, label: "Console"), to: screenMenu.callID)
+        guard case .answerPrompt(model.sessionID, _, let call, .option(1, "Console"), nil)? = stub.sent else {
+            return XCTFail("expected an option answer, got \(String(describing: stub.sent))")
+        }
+        XCTAssertEqual(call, screenMenu.callID)
+    }
+
+    /// **The screen outranks a transcript call the Mac has already left.** A background Task's
+    /// unanswered `tool_use` is exactly what a claude feed can still hold while a menu is up;
+    /// `OpenPrompt.find` would return it, the Mac's own id vetoes it, and the card the Mac IS
+    /// naming would never draw. Only for a screen id, and only when it is the open call.
+    func testAScreenMenuOutranksAnOlderTranscriptCall() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([permissionItem(callID: "toolu_OLD")], session: model.sessionID)))
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call(screenMenu.callID),
+                           offered: WireOpenPrompt(screenMenu))
+        XCTAssertEqual(model.blockedPrompt, screenMenu)
+    }
+
+    /// And for every other id the order is unchanged: the transcript first, the offer a
+    /// fallback — so a claude tab's ordinary dialogs are drawn exactly as they were.
+    func testATranscriptCallStillOutranksAnOfferForAnOrdinaryId() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([permissionItem(callID: "toolu_A")], session: model.sessionID)))
+        model.updateStatus(
+            agent: "claude", activity: "waiting", call: .call("toolu_A"),
+            offered: WireOpenPrompt(.permission(callID: "toolu_A", tool: "Other", summary: "elsewhere")))
+        XCTAssertEqual(model.blockedPrompt,
+                       .permission(callID: "toolu_A", tool: "Bash", summary: nil),
+                       "the transcript's own derivation, not the offer's tool and summary")
+    }
+
+    /// The same veto as every card: a menu the Mac no longer names, or "nothing open", is none.
+    func testAScreenMenuIsVetoedWhenTheMacMovesOn() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call(screenMenu.callID),
+                           offered: WireOpenPrompt(screenMenu))
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting", call: .call(screenMenu.callID)))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting",
+                                   call: .call(ScreenPromptID.menu(prompt: "Other", labels: ["x", "y"]))))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .noPrompt))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "busy", call: .call(screenMenu.callID)))
+
+        model.updateStatus(agent: "claude", activity: "waiting", call: .noPrompt, offered: nil)
+        XCTAssertNil(model.blockedPrompt)
+    }
+
+    func testASignInIsDrawnAndItsCodeIsSentAsOneTypedSelection() throws {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        let signIn = OpenPrompt.signIn(callID: ScreenPromptID.signIn(state: "s"), url: signInURL)
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call(signIn.callID),
+                           offered: WireOpenPrompt(signIn))
+        XCTAssertEqual(model.blockedPrompt, signIn)
+
+        model.answerSet(try XCTUnwrap(PromptCard.signInSelections(code: " abc123#def \n")), to: signIn.callID)
+        guard case .answerPrompt(model.sessionID, _, signIn.callID, .answers(let selections), nil)? = stub.sent
+        else { return XCTFail("expected an answers command, got \(String(describing: stub.sent))") }
+        XCTAssertEqual(selections, [[AnswerSelection(index: 0, label: "", text: "abc123#def")]])
+    }
 }
