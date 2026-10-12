@@ -132,4 +132,24 @@ final class CreateFromMenuAgentTests: XCTestCase {
         XCTAssertNil(created)
         XCTAssertTrue(store.repos.isEmpty)
     }
+
+    /// With project B's view up, ⌘N lands in B — not in project A, whose session is still
+    /// selected behind the view. It used to follow that hidden session, swapping the screen
+    /// away from the project the user was looking at and opening the tab somewhere else.
+    func testCreateFromMenuAgentWithAProjectViewUpCreatesInThatProject() async {
+        let store = makeStore()
+        let a = URL(fileURLWithPath: "/work/a", isDirectory: true)
+        let b = URL(fileURLWithPath: "/work/b", isDirectory: true)
+        _ = store.newSession(in: b)
+        let hidden = store.newSession(in: a)
+        store.selectedSessionID = hidden.id
+        let projectB = store.repos.first { $0.url.standardizedFileURL == b.standardizedFileURL }!
+        store.selectProject(projectB.id)
+
+        XCTAssertEqual(store.currentProjectPath, b.path)
+        let created = await store.createFromMenu(agent: .claude, chooseFolder: { nil })
+
+        XCTAssertEqual(created?.workingDirectory, b.path)
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+    }
 }

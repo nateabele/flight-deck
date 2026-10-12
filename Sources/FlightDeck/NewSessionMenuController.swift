@@ -126,6 +126,14 @@ final class NewSessionMenuController: NSObject {
 
     @objc private func create(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? Target else { return }
+        // A main-menu key equivalent fires from whichever window is key, but the tab opens in
+        // the session window. From Settings it landed behind Settings, and under ⌘K behind the
+        // panel's scrim — a created tab nobody could see, which read as ⌘N doing nothing.
+        if let search = NSApp.keyWindow as? SearchPanel {
+            search.dismiss()
+        } else if !SessionWindow.isKey {
+            SessionWindow.main?.makeKeyAndOrderFront(nil)
+        }
         let store = store
         Task { await store.createFromMenu(agent: target.agent, account: target.account) }
     }

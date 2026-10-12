@@ -221,9 +221,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if newSessionMenu == nil { newSessionMenu = NewSessionMenuController(store: store, preferences: preferences) }
+        installStoreMenus()
+    }
+
+    /// The menu half of `installToolsMenu`, retried like `installPaneMenus`. Both of its call
+    /// sites can run before SwiftUI has built `NSApp.mainMenu`, and without a retry that launch
+    /// never got File ▸ New … Session: ⌘N then did nothing from a terminal (Ghostty's own
+    /// `new_window` binding is not handled) yet still worked from the sidebar, whose dropdown
+    /// rows carry their own ⌘N.
+    @MainActor
+    private func installStoreMenus(attempt: Int = 0) {
         if let mainMenu = NSApp.mainMenu {
             toolsMenu.install(in: mainMenu)
             newSessionMenu?.install(in: mainMenu)
+        } else if attempt < 50 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                MainActor.assumeIsolated { self?.installStoreMenus(attempt: attempt + 1) }
+            }
         }
     }
 
