@@ -19,12 +19,13 @@ final class ClaudeDialogVetoTests: XCTestCase {
         try TimelineFixtureTests.text("\(name).captured", in: "Claude")
     }
 
-    /// Twenty-one of these twenty-three carry `Esc to cancel`. The two review screens,
+    /// Twenty-one of these twenty-four carry `Esc to cancel`. The two review screens,
     /// `question-two-review` and `question-typed-checkbox-review`, do not — their footer is
     /// `❯ 1. Submit answers` / `  2. Cancel`, caught only by the marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
+    /// Nor does `login-method` (claude 2.1.296's `/login` menu): it ends on its last row.
     ///
     /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
-    /// predicate to the same twenty-three screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// predicate to the same twenty-four screens — see its `testEveryDialogCaptureIsRefused`. One
     /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
     /// which is the whole reason the list is shared instead of copied.
     static let dialogs = [
@@ -38,7 +39,19 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-typed-focused", "question-typed-single", "question-typed-set",
         "question-typed-checkbox", "question-typed-checkbox-submit-focused",
         "question-typed-checkbox-review",
+        // claude 2.1.296's first-run `/login` menu — `login.captured.provenance.json`.
+        "login-method",
     ]
+
+    /// Screens that are neither a dialog the veto must catch nor a composer it must pass: claude's
+    /// first-run theme picker and its paste-code screen, which draw no input box at all.
+    ///
+    /// **The footer/row veto does not catch them and does not need to** — the theme picker's
+    /// rows are unnumbered and neither screen carries `Esc to cancel` — because injection also
+    /// requires a composer box on screen (`isComposerBox`), and `testNoInputScreenIsAComposer`
+    /// holds that gate to them. Listed here so a capture nobody classified cannot slip past
+    /// `testTheCorpusSplitCoversEveryCapture`.
+    private static let noInputScreens = ["login-theme-picker", "login-paste-code"]
 
     private static let composers = [
         "idle-empty-box", "busy-echo-only", "busy-draft-below-echo",
@@ -53,10 +66,10 @@ final class ClaudeDialogVetoTests: XCTestCase {
     /// exactly like passing. The corpus IS the proof for this predicate, so a screen nobody
     /// has decided about is a hole in it, not a neutral addition.
     func testTheCorpusSplitCoversEveryCapture() throws {
-        let classified = Set(Self.dialogs + Self.composers)
+        let classified = Set(Self.dialogs + Self.composers + Self.noInputScreens)
         XCTAssertEqual(
-            classified.count, Self.dialogs.count + Self.composers.count,
-            "a name is listed as both a dialog and a composer"
+            classified.count, Self.dialogs.count + Self.composers.count + Self.noInputScreens.count,
+            "a name is listed in more than one of dialogs, composers and noInputScreens"
         )
         let onDisk = try Self.capturedNames(in: "Claude")
         XCTAssertEqual(
@@ -85,6 +98,17 @@ final class ClaudeDialogVetoTests: XCTestCase {
                 .filter { $0.hasSuffix(".captured") }
                 .map { String($0.dropLast(".captured".count)) }
         )
+    }
+
+    /// The gate that actually protects a no-input screen: injection needs a composer box on screen,
+    /// and neither first-run screen has one.
+    func testNoInputScreenIsAComposer() throws {
+        for name in Self.noInputScreens {
+            XCTAssertFalse(
+                ClaudeTextChannel.isComposerBox(try viewport(name)),
+                "\(name) draws no input box — injection here must be refused by the composer gate"
+            )
+        }
     }
 
     func testEveryDialogCaptureVetoes() throws {
