@@ -899,6 +899,27 @@ on a supersede. The field is absent for every other agent, so an older phone see
 always saw. A `kind` this build cannot draw decodes to no card, and a malformed value drops the
 card, not the snapshot (`try?`).
 
+**A claude dialog that exists only on the screen reaches the phone the same way.** claude's own
+TUI menus (`/login`, `/model`, a resume picker) are never written to its transcript, so
+`OpenPrompt.find` names nothing for them. Past the same 5 s debounce `answerless` rides (the
+unnameable episode in `SessionStore.derivedOpenPromptCalls`, so the ordinary status/transcript
+race never reaches the screen) the Mac reads the live viewport and asks
+`ScreenPromptReader` — `ChoiceDialog.menu` for a numbered single-select list, plus the OAuth
+sign-in's paste-code screen. What it finds goes out as `openPromptCall` + `WireSession.openPrompt`
+under a call id that names the *screen* (`ScreenPromptID`: `screen:<fnv1a64 of the question and
+labels>`, `signin:<fnv1a64 of the OAuth state>`), so a different menu is a wire change and a cursor
+move is not. A menu is an ordinary `"question"` offer, which a phone built before this already
+draws; the sign-in is a new `"signin"` kind carrying the authorize URL (`ClaudeSignInURL` vets it
+on both ends: https, `claude.com`, a non-loopback `redirect_uri`, a `state`). The phone prefers an
+offer that is the very call the Mac says is open when its id is a screen id, because the
+transcript is what could not name it. `prompt.answer` for a screen id is routed by `PromptService`
+to `SessionStore.answerScreenPrompt`, which re-reads the screen instead of a transcript: refuse
+`prompt_changed` unless the screen still reads as the dialog the id names, check the row's label,
+move the cursor, confirm it landed and the identity held, then Return. A sign-in's code is the
+wire's existing free-text `AnswerSelection`, pasted with `sendText` and followed by Return only if
+the sign-in is still on screen. Claude only; an unnumbered menu (the first-run theme picker) makes
+no card by design. See `docs/HANDOFF-phone-answering.md`, "Dialogs that exist only on the screen".
+
 ## Tab navigation
 
 ⌘⇧[ / ⌘⇧] move the selection along `sidebarRows` — exactly what the sidebar draws, top to

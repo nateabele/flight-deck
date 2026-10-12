@@ -695,9 +695,59 @@ page.
     Note…, no ⋯ and no "Add a note to the whole plan" — and the phone stays connected. Wrong:
     any of those controls showing (the Mac would drop the connection on the first command).
 
+94. **A claude menu that is not a question, answered from the phone** (`/login`, `/model`, a
+    resume picker). Get a claude tab to one — on a Mac with a signed-out claude account, `/login`
+    is the easy way to a "Select login method:" list. For the first few seconds the row says
+    "Waiting for you" with no card; that is the debounce, and a card appearing at once would be
+    this feature reading the screen during the ordinary status-file race. After ~5 seconds a card
+    appears titled with the line above the list, with one button per row. Tap one: the Mac's
+    cursor must move to that row and Return must follow, and the terminal must show the screen
+    that row leads to. Then, on the Mac, move the cursor with the arrow keys while the card is up:
+    the card must NOT blink or vanish (the identity ignores the cursor). Tap a row after pressing
+    Escape at the keyboard: the phone must say "Your Mac has moved on from this" and no key may
+    land. Tap the corner ×: the menu must close as with Escape. The card must show NO "Type
+    something" field — a menu has no such row. **And open the first-run theme picker** (a fresh
+    claude config dir, before any login): its rows read `❯ ✔ Dark mode` with no numbers, and the
+    phone must show "Waiting for you" with NO card. A card there would press a wrong row.
+95. **A real `/login` from the phone, end to end.** Only hardware and a real Anthropic account
+    can prove this; every part of it is covered by tests except the browser and the pasted code.
+    Use a throwaway tab whose `CLAUDE_CONFIG_DIR` has no credentials. On the phone: tap
+    "1. Claude account with subscription" on the menu card. The Mac's terminal moves to "Browser
+    didn't open? Use the url below…" and, within the next tick, the card becomes **"Sign in to
+    Claude"** with an "Open sign-in page" button, a code field and a paste button. Tap the
+    button: Safari opens inside the app (a sheet), on `claude.com`, and it must offer
+    "Authorize" if you are already signed in to claude.ai — not a login form — and it must NOT
+    go to `localhost`. Authorize; the page shows a code. Copy it, swipe the sheet away, tap the
+    system Paste button (iOS must not ask permission to read the pasteboard), tap "Send code".
+    On the Mac: the code appears in claude's field and Return follows. **Check that the keyboard
+    does not hide the field**, which no suite can see. Then tap the corner × on a second, fresh
+    attempt: claude must leave the sign-in, as with Escape. Finally, watch
+    `~/Library/Logs/flight-deck-prompt.log` and `log show --predicate 'category == "prompt"'`
+    over the whole thing: `opened … kind=screen-menu rows=3`, `opened … kind=signin`,
+    `answer … code=ok`, and **no** URL, `state=` or option label in the unified log (labels are in
+    the file's `detail`; the sign-in has no detail at all).
+96. **The screen after a sign-in — NOT YET CAPTURED, so nothing here may be assumed.** Nobody
+    has seen what claude draws after the code is accepted: success with "Press Enter to
+    continue", or a further numbered menu, or something else. The unit suites cannot say, because
+    no one could capture it without a real login. After item 95's Send, record what the terminal
+    shows and what the phone shows. The contract: a screen with a numbered list and a cursor
+    becomes a menu card (item 94); anything else — "Press Enter to continue" included — leaves
+    the session at "Waiting for you" with NO card and NO wrong press, and you finish it at the
+    Mac. Wrong: a card for something that is not a menu, or a Return the phone sent that you did
+    not tap. Capture the screen into `Tests/FlightDeckTests/Fixtures/Claude/` (provenance and
+    sha256, as `login.captured.provenance.json` does) so the next reader has it, and if it is a
+    menu, add a test beside `ScreenPromptReaderTests`.
+97. **Version skew, both ways.** (a) A phone build from before this against this Mac, with a
+    `/login` menu up: it draws the menu card (it is an ordinary question offer under a `screen:`
+    id, so the phone's existing offer rule shows it) and taps work; on the paste-code screen it
+    shows "Waiting for you" with no card, because it does not know the `"signin"` kind — and it
+    must not crash or lose the rest of the session list. (b) This phone against a Mac from
+    before this: "Waiting for you" on both screens, exactly as before. Wrong: a decode failure,
+    a blank session list, or a card with a button that does nothing.
+
 ## A second checklist: the iOS plumbing
 
-The ninety-three items above test the *feature* — that pairing, replication, resume, revocation,
+The ninety-seven items above test the *feature* — that pairing, replication, resume, revocation,
 typing into and answering a live agent, and watching and steering Flight Control behave. These fifteen test the *app*, and they are
 separated because they have a different character: each one was identified during review or
 execution as something no amount of reading or type-checking on the build machine could settle,

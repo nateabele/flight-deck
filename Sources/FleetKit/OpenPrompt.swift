@@ -13,6 +13,8 @@ import Foundation
 /// never holds the open call (gemini's agy), there is nothing on the phone to derive from, so
 /// the Mac's own derivation rides `WireSession.openPrompt` — which is why this type is `Codable`
 /// (`Wire.swift`). Every agent whose transcript does carry the call still derives it on both ends.
+/// The same channel carries a claude dialog the Mac read off its SCREEN (`ScreenPromptID`) — a
+/// TUI menu or the OAuth sign-in — which no transcript holds either.
 public struct PromptQuestion: Equatable, Hashable, Sendable {
     public struct Option: Equatable, Hashable, Sendable {
         public var label: String

@@ -3255,3 +3255,27 @@ planning seats). What remains:
   default — `opencode models` does not mark one.
 - **The integrator's edit pattern assumes OpenCode's worktree is the nearest `.git` ancestor**
   (else `/`). Probed for both; a linked-worktree `.git` FILE is treated the same, unprobed.
+
+## Dialogs read off the terminal screen (2026-10-11, branch `phone-screen-menus`)
+
+claude's own TUI menus (`/login`, `/model`, resume pickers) and its OAuth sign-in are offered to the
+phone from the screen — `docs/HANDOFF-phone-answering.md`, "Dialogs that exist only on the screen".
+What remains:
+
+- **The screen after a sign-in is uncaptured.** Nobody has seen what claude draws once a code is
+  accepted (success + "Press Enter to continue", or a further menu). It degrades to "Waiting for
+  you". `docs/MOBILE.md` item 96 is the capture.
+- **Never run on hardware.** The real end-to-end `/login` from a phone — the in-app browser, the
+  system Paste button, the keyboard over the code field — is `docs/MOBILE.md` item 95. Unit suites,
+  the replicator's drift check and `scripts/livefuzz/loginfuzz.py` (a live claude through the
+  paste-code screen, nothing pasted) are what was run.
+- **Only `claude.com`'s authorize URL.** The Console-account sign-in (login row 2) redirects through
+  `platform.claude.com` and is deliberately not recognised: no capture exists, so it stays "Waiting
+  for you" rather than a card built on a guess.
+- **Unnumbered menus are out of scope on purpose.** The first-run theme picker draws `❯ ✔ Dark mode`
+  with no numbers and gets no card; `ChoiceDialog`'s rules were not widened for it.
+- **Other agents.** Claude only. Another agent's screen is another grammar and marker.
+- **The pyte/Ghostty gap.** The captures and the live harness render through pyte at 140x45; the Mac
+  reads Ghostty's viewport. If Ghostty joins a soft-wrapped URL into one line the rejoin is a no-op,
+  and if it pads or indents differently `ChoiceDialog.menu` fails to no card, not a wrong press.
+

@@ -75,6 +75,12 @@ import Foundation
 /// while on a *single-select* screen the descriptions sit at column 5 themselves — so without
 /// the checkbox condition `question-single` would grow a phantom row out of its own prose.
 ///
+/// **One reader, and it is fenced.** `menu(inViewport:marker:)` DOES read — rows and the line above
+/// them — for the claude TUI menus that have no transcript to know them from (`/login`). It is the
+/// same `list` reading with three extra refusals, and it exists because for those dialogs the
+/// screen is the only source there is; everything above still holds for every dialog that has a
+/// transcript.
+///
 /// The distrust `InputBar` documents applies throughout. `ghostty_surface_read_text` returns
 /// plain text with no cell attributes, so nothing here can tell a dialog from a paragraph that
 /// happens to contain the same words — which is why every uncertain answer is `nil` or `false`

@@ -176,8 +176,10 @@ prompt session=… push asserts=absent activity=idle clients=1
 prompt session=- resume lastSeq=0 mode=snapshot-initial frames=1 waiting=1 clients=1
 ```
 
-**No prompt is ever on the wire** — `OpenPrompt` is derived on both ends from a transcript each
-already holds — so `activity` is the *whole* of what a client is told about a dialog. That is
+**No transcript prompt is ever on the wire** — `OpenPrompt` is derived on both ends from a transcript
+each already holds — so `activity` (and now the call id) is the *whole* of what a client is told
+about one; the exceptions are the words the Mac itself reads and sends (gemini's agy, and the
+screen dialogs below). That is
 why `superseded-by-…` has no push beside it, and it is the fact any repair has to start from.
 Option labels and tool summaries go to the file only, never to the unified log.
 
@@ -309,6 +311,48 @@ Measured live in a pty, with the captures in `typed-answers.captured.provenance.
   newline is Return, and an Escape ends the paste and cancels the dialog. The phone flattens a
   pasted newline to a space (`PromptCard.typedAnswer`) so that the answer stays sendable.
 - The typed row is always the last pick in a checkbox question, so every arrow goes down.
+
+## Dialogs that exist only on the screen (2026-10-11, claude 2.1.296)
+
+claude's own TUI menus never enter the transcript, so `OpenPrompt.find` returned nothing and the
+phone showed "Waiting for you" with no controls; the Mac logged `unnamed code=prompt_changed`
+and then `stuck …`. They are now read off the screen and offered. The design, and where it can
+fail:
+
+- **When:** only past the 5 s unnameable-episode debounce (`derivedOpenPromptCalls`), claude only,
+  never waking a sleeping tab (`screenPrompt(for:)` reads `surfaces[id]` directly), and the episode
+  is deliberately NOT cleared by an offer — the transcript probe fails every tick while the menu is
+  up, and clearing it would restart the debounce and blink the card.
+- **What is read:** `ChoiceDialog.menu` — `list`'s own reading plus three refusals that exist
+  because no transcript backs it (no checkbox lists, one cursor, and the LAST marker on screen
+  must be the list's focused row so a numbered list above a live composer is not a card). The
+  unnumbered first-run theme picker (`❯ ✔ Dark mode`) makes no card; `ChoiceDialog`'s rules were
+  not widened for it.
+- **Identity:** `ScreenPromptID`. A menu's is a digest of its question and labels (never the
+  cursor); a sign-in's is a digest of the OAuth `state`. A change of menu is therefore a wire change.
+- **Answering:** `SessionStore.answerScreenPrompt`. Before any key the screen must still read as the
+  dialog the id names (else `prompt_changed`) and the client's label must be the row's own words;
+  after the arrows the cursor must have landed, the row must read as its label and the identity must
+  have held, then Return. Deny is one Escape after the identity check (a stale Escape into a live
+  turn would interrupt it). Nothing is pressed for a screen this cannot read.
+- **Sign-in:** the code travels as `AnswerSelection.typed` (the wire's closed `PromptAnswer`
+  vocabulary did not grow), is trimmed, refused with a control character or past 1024 characters,
+  pasted with `sendText`, and Return follows only if the sign-in is still on screen after the paste
+  settles — a login finished in the Mac's own browser mid-paste must not Return into whatever claude
+  drew next.
+- **Logs:** `opened … kind=screen-menu rows=N` / `kind=signin`, then the usual `answer`/`closed`
+  lines. Labels are in the file-only `detail`; a sign-in has no detail; no URL or `state` reaches
+  either log, and `AnswerAbort`s on these paths carry no `expected` (it is part of the os_log
+  summary) and a viewport only after the screen has been verified to be a menu.
+- **Not captured:** what claude draws after a code is accepted. It degrades to "Waiting for you"
+  if unparsed; `docs/MOBILE.md` item 96 asks whoever first sees it to capture it.
+- **Known limits:** claude's own prose numbered list drawn below a real menu outranks it in
+  `ChoiceDialog.list`, exactly as for a permission dialog (fails to no card or a refused tap, never
+  a wrong key); the Console-account sign-in (`platform.claude.com`) is not recognised, only
+  `claude.com`'s; the captures are pyte renders, and no harness has watched Ghostty's own viewport
+  wrap the URL.
+- **Live check:** `scripts/livefuzz/loginfuzz.py` (22 checks, no tokens, stops on the paste-code
+  screen).
 
 ## Ruled out, with evidence — do not re-investigate
 
