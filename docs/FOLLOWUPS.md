@@ -3014,9 +3014,14 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
   "Flight Deck quit unexpectedly." from the libghostty relaunch crash. Every UI class now
   closes that dialog (Ignore) before launching (`dismissFlightDeckCrashReports`). That path has
   not yet run against a real dialog: none was up for the verifying run.
-- **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
-  "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
-  1125pt-tall screen. A screen-size environment failure, not the race it hunts.
+- **FIXED 2026-10-12: "Unable to find hit point for ScrollView" on the command field** — in
+  `testPermissionBypassConfirmationUnderChurn` on the UI-test Mac (y≈2600) and in
+  `testTheWholeShellInOneSession` on a local macOS 26 run (y≈1225). Not a screen too short for
+  the Settings window, as this entry used to say: the window is a fixed 720×560 content (648 pt
+  framed) and fits; the field is at the foot of the Agents pane's long form, below its fold.
+  XCUITest scrolls an off-screen element's nearest scroll ancestor, and the field is an
+  `NSScrollView` itself, so the form never scrolled. The tests now click the hint line under the
+  field first (`revealCommandField`, identifier `command-field-hint`), which scrolls the form.
 
 ## Cloud infra hosts: account checks (2026-10-07)
 
