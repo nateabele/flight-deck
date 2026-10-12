@@ -3530,7 +3530,9 @@ Still open:
   1000 pt window, Rounds open, the inspector's split view (plan pane + inspector, minimum 840 pt)
   sat in a 634 pt slot and ran 202 pt off the right edge; the window's minimum width (920) does
   not count the Intakes column beside it. Not what the maintainer saw (his window was 1,862 pt wide), so
-  left alone; a narrow window with the inspector open will clip the inspector.
+  left alone. It shows in `PlanningInspectorUITests`' own screenshots at the app's default
+  window size: the inspector's Rounds segment is cut off at the right edge, and the plan pane
+  slides under the Intakes column.
 - **`testOpeningTheInspectorSettlesWithEveryColumnDrawn` flakes**: one store publish from the
   window's clock in its 2 s idle sample (root 1, detail 2, inspector 2). Run alone on this Mac
   on 2026-10-12 it failed 3 of 4 runs without this fix and 3 of 4 with it; it opens on Rounds,

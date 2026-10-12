@@ -104,7 +104,9 @@ final class PlanningInspectorUITests: XCTestCase {
         let toggle = element(app, "intake-inspector-toggle")
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no inspector toggle in the toolbar")
         toggle.click()
-        let picker = element(app, "inspector-mode-picker")
+        // By its segment: the column's own `intake-inspector` identifier is what the segmented
+        // control's radio group reports, not `inspector-mode-picker`.
+        let picker = app.radioButtons["Notes Inspector"].firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 10), "the inspector's Notes|Rounds control never appeared")
         // Past the column's open animation (`IntakeDetailView.openSettle`).
         RunLoop.current.run(until: Date().addingTimeInterval(2.5))
