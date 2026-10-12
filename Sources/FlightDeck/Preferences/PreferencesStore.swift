@@ -310,6 +310,30 @@ final class PreferencesStore: ObservableObject {
             AccountDirectory.identity(atHome: home, agent: preferences.accounts[index].agent)
     }
 
+    /// Re-reads every live account's identity from its home, and writes only the ones whose
+    /// email or organization changed.
+    ///
+    /// A login is done by the agent itself, in a tab, and nothing tells Flight Deck when it
+    /// finishes: before this, identity was read only at seed and relocate, so an account added
+    /// before its first sign-in said "Not signed in" under a home that plainly held the login.
+    /// `readAt` is ignored in the comparison because the Accounts pane calls this on a timer
+    /// and every preferences write is persisted — rewriting an unchanged identity would save
+    /// the blob every tick.
+    func refreshAccountIdentities() {
+        var accounts = preferences.accounts
+        var changed = false
+        for index in accounts.indices where !accounts[index].isRemoved {
+            let read = AccountDirectory.identity(atHome: accounts[index].home, agent: accounts[index].agent)
+            let cached = accounts[index].cachedIdentity
+            guard read?.email != cached?.email || read?.organization != cached?.organization
+                    || (read == nil) != (cached == nil)
+            else { continue }
+            accounts[index].cachedIdentity = read
+            changed = true
+        }
+        if changed { preferences.accounts = accounts }
+    }
+
     /// Tombstones the account AND drops every project assignment naming it, so nothing is left
     /// pointing at a login the user removed. A record emptied by that clearing is removed,
     /// matching how an emptied flag override already drops a project from the list.

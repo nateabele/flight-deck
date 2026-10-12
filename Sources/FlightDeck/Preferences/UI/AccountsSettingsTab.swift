@@ -68,6 +68,16 @@ struct AccountsSettingsTab: View {
             Divider()
             bottomBar
         }
+        // Polled, not one-shot on appear: the usual sign-in is Sign In Now → log in in the tab
+        // it opens → look back at this pane, which never disappeared in between. A file
+        // watcher would need one per home and still miss claude's write-to-temp-then-rename.
+        // Each tick reads one small JSON per account and writes nothing unless a login changed.
+        .task {
+            while !Task.isCancelled {
+                preferences.refreshAccountIdentities()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .sheet(item: $addingAccountFor) { choice in
             AddAccountSheet(preferences: preferences, agent: choice.agent) { justAdded = $0 }
         }
