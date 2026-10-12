@@ -402,12 +402,22 @@ struct NotesRail: View {
         VStack(spacing: 0) {
             header
             Divider()
+            // The rail has no minimum height of its own: the lane fills what the column has and
+            // clips the rest, so it says so here. SwiftUI takes a window's minimum size from its
+            // content measured at a zero proposal, and at zero width each card's wrapped text
+            // runs a character a line — three unplaced notes asked for a 3,322 pt window. A window
+            // that could not grow that tall laid out taller than itself, anchored at the bottom,
+            // and every column's top went off screen: blank sidebar, blank Intakes list, a plan
+            // that would not scroll to its top (`testTheNotesRailLeavesTheWindowItsHeight`).
             NotesLane(controller: controller, geometry: controller.geometry, roundName: roundName, focusesDraft: focusesDraft)
+                .frame(minHeight: 0, maxHeight: .infinity, alignment: .top)
+                .clipped()
             Divider()
+            // Not `fixedSize(vertical:)`, for the same reason: it wrapped to 618 pt at zero
+            // width. The lane is the flexible child, so the line still gets its full height.
             Text("Notes and your edits go to the next round when it starts.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)

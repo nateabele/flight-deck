@@ -2238,6 +2238,11 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     Inspector, selecting an agent of the running round (Rounds, drilled in on the agent with a
     "‹ Rounds" back button), and a round's agent stack. A single task offers Notes alone; from
     review on, Rounds shows the config that planned the plan, read-only.
+    **Nothing the column shows outside a scroll view may have a minimum height.** SwiftUI sizes
+    the window's minimum from its content at a zero proposal, where vertically fixed-size text
+    wraps a character a line: the notes rail once asked for a 3,322 pt window, and a window that
+    could not grow laid out taller than itself and cut off every column's top (2026-10-12,
+    `testTheNotesRailLeavesTheWindowItsHeight`). The rail's lane is `minHeight: 0` and clipped.
   - **Agent stacks** (`Planning/AgentStack.swift`): every agent has one monogram disc
     (`AgentBadge`, `AgentID.monogram`/`.tint` — no vendor marks, the repo is public), and every
     round drawn in the main view (finished-round cards, the live round's header) carries an
