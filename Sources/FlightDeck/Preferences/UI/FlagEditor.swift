@@ -96,6 +96,11 @@ struct FlagEditor: View {
                 Text("⌘↩ or clicking away applies. Esc discards. Tab moves on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    // The UI test scrolls the form by this line before it clicks the field: the
+                    // field is itself an NSScrollView, so XCUITest's scroll-to-visible stops at
+                    // it rather than scrolling the form, and fails when the field is below the
+                    // fold. This text's nearest scroll view is the form's own.
+                    .accessibilityIdentifier("command-field-hint")
 
                 ForEach(Array(diagnostics.enumerated()), id: \.offset) { _, diagnostic in
                     Label {
