@@ -1951,6 +1951,21 @@ an FD quit to finish them — is rewritten `.interrupted` before anything is pub
 `.shaping` intake is **not**: its rounds run in the detached runner, so launch recovery
 respawns the runner instead (below).
 
+**Archive and Move to Trash (2026-10-12).** Archiving a plan writes an empty `archived` file
+beside its `intake.json` (`IntakeStore.archivedMarker`), never a field in it: an older build
+decodes `intake.json` and writes it back whole, so a field it doesn't know would be dropped by
+its first save and the plan would reappear. Archived plans leave `intakes(forProject:)` — the
+one list the attention badge, the phone's plan summaries and `intakeDetail` all read — and come
+back only through `listedIntakes(forProject:)` under the list's Show Archived checkbox. Move to
+Trash moves the whole intake directory to the Trash (`FileManager.trashItem`, recoverable from
+Finder). A plan whose round is running asks "Stop and archive?" first and stops through
+`send(.stop)`, the Stop control's path; Move to Trash of a plan with a live runner queues the
+stop, marks it archived, and trashes the directory on the clock once the runner has exited
+(`pendingTrash`), since the runner reads its stop from that directory. The shortcuts, ⌃⌘A
+(Archive, Mail's) and ⌘⌫ (Move to Trash, Finder's), are view shortcuts that exist only while
+the Intakes list has focus — not menu items, which would take ⌘⌫ from every terminal
+(`MenuKeyEquivalents`) and would break "the menu bar never rebuilds".
+
 **FD is the sole writer of `br` on an intake's behalf; `br` never sees the change set at all
 before release, at any fidelity.** Every op — creates, edits, reopens, edges — is staged in
 FD's own files only, until `BeadWriter` applies the release. Spec §5.3's early

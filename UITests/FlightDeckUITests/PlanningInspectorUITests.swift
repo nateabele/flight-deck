@@ -126,4 +126,60 @@ final class PlanningInspectorUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(2.0))
         assertEveryColumnDrawn(app, shot(app, "5-closed-again"), "after closing")
     }
+
+    private func waitGone(_ e: XCUIElement, _ message: String, timeout: TimeInterval = 10,
+                          file: StaticString = #filePath, line: UInt = #line) {
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: e)
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: timeout), .completed, message, file: file, line: line)
+    }
+
+    /// Archive / Unarchive / Move to Trash on the Intakes list (2026-10-12): from the row's context
+    /// menu and from the list's own shortcuts — ⌃⌘A (Mail's Archive) and ⌘⌫ (Finder's Move to
+    /// Trash), live only while the list has focus. The fixture plan is paused, so Archive acts at
+    /// once; Move to Trash always confirms.
+    func testArchiveUnarchiveAndTrashAPlan() throws {
+        let app = launch()
+        let row = element(app, "intake-row")
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "the fixture plan's row never appeared")
+        let badge = element(app, "intake-archived-badge")
+        let showArchived = element(app, "intake-show-archived")
+        XCTAssertTrue(showArchived.waitForExistence(timeout: 5), "no Show Archived control under the list")
+
+        // Context menu → Archive: the plan leaves the list.
+        row.rightClick()
+        let archiveItem = app.menuItems["Archive"].firstMatch
+        XCTAssertTrue(archiveItem.waitForExistence(timeout: 5), "no Archive in the row's context menu")
+        archiveItem.click()
+        waitGone(row, "the archived plan is still listed")
+
+        // Show Archived → it is back, dimmed and badged; Unarchive from its menu.
+        showArchived.click()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Show Archived did not bring the plan back")
+        XCTAssertTrue(badge.waitForExistence(timeout: 5), "the archived plan has no Archived badge")
+        row.rightClick()
+        let unarchiveItem = app.menuItems["Unarchive"].firstMatch
+        XCTAssertTrue(unarchiveItem.waitForExistence(timeout: 5), "no Unarchive on an archived plan")
+        unarchiveItem.click()
+        waitGone(badge, "Unarchive left the Archived badge")
+        showArchived.click()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the unarchived plan is not listed")
+
+        // ⌃⌘A with the list focused archives the selected plan.
+        row.click()
+        app.typeKey("a", modifierFlags: [.control, .command])
+        waitGone(row, "⌃⌘A did not archive the selected plan")
+
+        // Back via Show Archived, ⌃⌘A again unarchives, then ⌘⌫ → confirm → gone for good.
+        showArchived.click()
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.click()
+        app.typeKey("a", modifierFlags: [.control, .command])
+        waitGone(badge, "⌃⌘A on an archived plan did not unarchive it")
+        row.click()
+        app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: .command)
+        let trash = app.buttons["Move to Trash"].firstMatch
+        XCTAssertTrue(trash.waitForExistence(timeout: 5), "⌘⌫ did not ask to move the plan to the Trash")
+        trash.click()
+        waitGone(row, "the trashed plan is still listed, with Show Archived on")
+    }
 }
