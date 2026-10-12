@@ -289,6 +289,14 @@ final class SessionStore: ObservableObject {
     /// not looking at — from a key pressed while looking at something else — is a surprise.
     var renamableSessionID: UUID? { selectedProjectID == nil ? selectedSessionID : nil }
 
+    /// The project whose view fills the detail column, or nil when a terminal does. ⌘N and
+    /// the New Session rows open their tab here: following the session hidden behind the view
+    /// opened it in another project and swapped the screen away from the one being looked at.
+    var viewedProjectURL: URL? {
+        guard let pid = selectedProjectID else { return nil }
+        return repos.first { $0.id == pid }?.url
+    }
+
     /// Closes the project view and returns the detail column to whatever session was selected
     /// underneath it — `selectedSessionID` is left alone, not cleared, so the terminal that was
     /// selected before the project view opened is still what the detail column falls back to.
@@ -4001,6 +4009,11 @@ final class SessionStore: ObservableObject {
     ) async -> Session? {
         switch SessionCreateAction.forState(hasProjects: !repos.isEmpty) {
         case .newSession:
+            // A project view outranks the session selected behind it, for the reason
+            // `renamableSessionID` gives: that session is not what the user is looking at.
+            if let viewed = viewedProjectURL {
+                return await create(agent, in: viewed.path, account: account)
+            }
             if let activeID = selectedSessionID, let at = locate(activeID) {
                 let active = repos[at.repo].sessions[at.session]
                 return await create(agent, in: active.workingDirectory, at: at.session + 1, account: account)
@@ -8857,6 +8870,7 @@ final class SessionStore: ObservableObject {
     /// and the File menu's New Session rows (`NewSessionMenuController`) can both ask "which project" without duplicating that
     /// walk or triggering it.
     var currentProjectPath: String? {
+        if let viewed = viewedProjectURL { return viewed.path }
         if let activeID = selectedSessionID, let at = locate(activeID) {
             return repos[at.repo].sessions[at.session].workingDirectory
         }
