@@ -176,6 +176,15 @@ public enum PresetExpansion {
     /// "A" is the first available model, codex if present, else claude. "B" is the other one
     /// if present, else A — so a single-harness machine gets every seat filled with the one
     /// model it has, and no fallback pointing at a model that doesn't exist.
+    ///
+    /// Gemini and Grok, when detected, take the seats where another family pays off without
+    /// slowing every round (`docs/FOLLOWUPS.md`, "Four-family planning rounds"): Gemini is the
+    /// cross-reviewer, Grok only when there is no Gemini, and a Full plan gives its coverage
+    /// drafter to Gemini and its stress-test drafter to Grok. Grok never reviews by default —
+    /// the reviewer runs every refinement round, and Grok's took 745 s in the four-family live
+    /// round against 42-73 s for the drafters. Each of their seats falls back to A or B.
+    /// OpenCode is never seated here: the Rounds editor offers it, but no live planning round
+    /// has measured it.
     public static func config(for preset: Preset, available: AvailableModels) -> RoundConfig? {
         guard preset != .bead else { return nil }
         let a: ModelChoice
@@ -194,6 +203,11 @@ public enum PresetExpansion {
         let hasFallback = available.codex != nil && available.claude != nil
         let integrator = available.claude ?? a
         let encoder = a
+        let gemini = available.choice(for: .gemini)
+        let grok = available.choice(for: .grok)
+        // Another family to check the reviewer's work: Gemini, else Grok, else B when B is a
+        // second family. Never a fallback — a same-family fallback is not a cross-check.
+        let crossReviewer = (gemini ?? grok).map { Slot($0) } ?? (hasFallback ? Slot(b) : nil)
 
         switch preset {
         case .bead:
@@ -206,7 +220,7 @@ public enum PresetExpansion {
                 integrator: integrator, encoder: encoder, polisher: nil,
                 refinementCap: 2, polishCap: 0, freshEyesAndDedup: false,
                 defaultPlay: .toReview, customized: false,
-                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .off : nil)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .off)
         case .featurePlan:
             return RoundConfig(
                 drafters: [
@@ -218,21 +232,23 @@ public enum PresetExpansion {
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 3, polishCap: 2, freshEyesAndDedup: false,
                 defaultPlay: .nextMajor, customized: false,
-                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .firstAndLast : nil)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast)
         case .fullPlan:
             return RoundConfig(
                 drafters: [
                     Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
                     Slot(b, persona: .realist, fallback: hasFallback ? a : nil),
-                    Slot(a, persona: .coverage, fallback: hasFallback ? b : nil),
-                    Slot(b, persona: .stressTest, fallback: hasFallback ? a : nil),
+                    gemini.map { Slot($0, persona: .coverage, fallback: a) }
+                        ?? Slot(a, persona: .coverage, fallback: hasFallback ? b : nil),
+                    grok.map { Slot($0, persona: .stressTest, fallback: b) }
+                        ?? Slot(b, persona: .stressTest, fallback: hasFallback ? a : nil),
                 ],
                 synthesizer: Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
                 reviewer: Slot(a, fallback: hasFallback ? b : nil),
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 5, polishCap: 6, freshEyesAndDedup: true,
                 defaultPlay: .nextMajor, customized: false,
-                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .firstAndLast : nil)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast)
         }
     }
 }
