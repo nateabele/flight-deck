@@ -851,7 +851,35 @@ process is killed, the tab is restamped and the same conversation id is resumed 
 and the draft is pasted (never submitted) once the new composer is up. Any blocker — frozen in a
 dialog, unreadable composer, gemini (single account), confirm on — or no other member with
 headroom thaws in place on the spent account with a notice; a swarm agent's account is left to the
-hand-off driver. Planning runs use the same resolver through its `AccountResolving`
+hand-off driver.
+
+**`/switch-account` is the same move on demand.** `rollOver` takes an origin: `.thaw` retires a
+frozen agent (`sleepController.forget`), `.requested` retires a LIVE idle one (surface torn down,
+`daemonControl.terminate`) and words its notification as "you asked", not "over its limit". The
+trigger is `SessionStore.requestAccountSwitch`, reached from the local control socket (below). It
+refuses, in one line and without killing anything: an unknown tab, an agent with no
+`conversationTransfer` (gemini), a swarm agent, a tab the sleep controller holds ("open it, then
+try again" — a tab that is asking cannot be asleep, so waking it first would only be reachable
+from another shell), a move already in progress (`rollingOver`), and a tab that is not idle
+(`statuses[id]?.activity == .idle`). The answer goes back first; the move starts
+`accountSwitchDelay` (0.8 s) later, because the claude that asked is the process it kills. It
+then re-checks idle, reads the composer (`textChannel.draft`) while the agent still exists — an
+unreadable composer cancels the move with a notice rather than risk the draft — and rolls over;
+the draft comes back through `pendingDrafts`, and a turn that starts while the conversation is
+being copied cancels the move (the copy is already stale). The old lease is released with the old
+process and the new account is leased by `reacquire` only when the project's assigned hosted pool
+lists it. Naming is `AccountResolver.switchDecision` (`Agents/AccountSwitch.swift`): a target is an
+account's email, name or id, or a pool's label or id (exact, case-insensitive), among the tab's
+own agent's live accounts only; a name two things share is refused with both listed. A pool
+resolves to the first member in pool order that is **below its limit** (`isBelowLimit`: ledger
+state `underSoft` or `unknown`, so an idle account with no reading is usable, and never
+`overSoft`), skipping the tab's own account; none left refuses naming the pool. That is
+`LeasePolicy`'s notion but not `resolvePool(leasing: true)`, which would pick over the current
+account too and prefer an under-soft member to an earlier unknown one. An explicit account that
+is over its hard limit is moved to anyway and the answer says so; the tab's own account answers
+"Already on …".
+
+Planning runs use the same resolver through its `AccountResolving`
 conformance (`Intake/PlanningAccounts.swift`), but keep their own lease book (the runner
 controller's `heldAccounts` plus `accounts.json`, which survives a relaunch) rather than
 `hold(for:)`, so one lease is never in two books.
@@ -1348,6 +1376,23 @@ them:
   in `UserDefaults`, generated once and read back thereafter, so re-deriving the token for a
   given session id always agrees with what was handed out at launch.
 
+**Two requests act on the caller's own tab: `account.list` and `account.switch`**
+(`Sources/FleetKit/AccountControlWire.swift`; `FleetRequest.accountList` / `.accountSwitch`,
+answered by `ServerFrame.accountChoices` / `.accountSwitched`; local callers only, a phone gets
+`out_of_scope`). `list` answers the tab's agent's choices — the current account id, the project's
+assigned pool, each pool in Settings order with its members nested, then the accounts in no
+pool, each with email (when known), headroom state and `isCurrent`. `switch` answers
+`{ ok, message, to? }` synchronously and schedules the move (see "Smart sleep moves the lease").
+`flightdeck account list [--json] [--session S]` and `flightdeck account switch TARGET… [--session S]`
+default to `self` and print prose to a pipe unless `--json` is given; a refusal is exit 1 with the
+message on stderr. The bundled Claude plugin's mod (`Resources/ClaudePlugin/hooks/switch-account.tsx`,
+named in `hooks.json` `modules`) registers a bare `/switch-account` only in a tab that has
+`FLIGHT_DECK_SESSION_ID` and `FLIGHTDECK_CLI`, calls those two verbs, and draws a pane of
+`Button` rows (pools, their members indented, then unpooled accounts) for the bare form. Its tests
+are `hooks/switch-account.test.ts` (`claude plugin test Resources/ClaudePlugin`); the folder is
+copied whole into the bundle and the materialized copy, and `PluginReload` fingerprints every file
+in it, so adding the module needed no change to either.
+
 **`ControlScope`** (`Sources/FlightDeck/Fleet/ControlScope.swift`) is the pure policy `FleetService`
 checks before `apply`, for local callers only — a paired phone is always fully privileged, and
 a human shell that presents no `caller` token is never scoped either. The preference
@@ -1355,7 +1400,9 @@ a human shell that presents no `caller` token is never scoped either. The prefer
 is read fresh on every command via `FleetService.scopeLevel()`, so the Preferences picker (the
 Devices tab's "Command Line" section) takes effect immediately, with no listener restart. A
 token that fails to verify is `.invalid`, not `.human` — it fails closed under a scoped level
-rather than falling back to a human's trust. Refusal is `err(cid, "out_of_scope")`. **This is a
+rather than falling back to a human's trust. `account.list` only reads; `account.switch` is a
+write that belongs to its tab (`.ownSession` allows it only when the token's session is the
+request's). Refusal is `err(cid, "out_of_scope")`. **This is a
 guardrail, not a sandbox**, and both the preference caption and the code comments say so: any
 process running as the user can already read the environment or the defaults domain and mint
 its own token.
