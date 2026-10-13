@@ -18,10 +18,13 @@ struct ProjectView: View {
     /// it directly (rather than reading through `store.intakeService` in the body) is what
     /// makes triage/release progress redraw the list and detail pane live.
     @ObservedObject private var intakeService: IntakeService
-    @State private var intent = ""
-    /// The composer in the detail pane (`ExpandedIntakeComposer`) instead of at the list's foot:
-    /// view state, so a new project starts collapsed. One draft (`intent`) behind both.
-    @State private var composerExpanded = false
+    /// The composer's unsent request. Seeded from, and written back to, `IntakeService`
+    /// (`setDraft`), because this view's `@State` resets on every switch to another project or
+    /// tab and back — local state for typing, the service for keeping it.
+    @State private var intent: String
+    /// The composer in the detail pane (`ExpandedIntakeComposer`) instead of at the list's foot,
+    /// kept by the service alongside the draft. One draft (`intent`) behind both.
+    @State private var composerExpanded: Bool
     /// Both the sheet's presentation and its content, same shape as
     /// `DevicesSettingsTab.pairingWindow` — see the `.sheet(item:)` below.
     @State private var reviewIntakeID: UUID?
@@ -53,6 +56,9 @@ struct ProjectView: View {
         self.store = store
         self.repo = repo
         self._intakeService = ObservedObject(wrappedValue: store.intakeService)
+        let project = repo.url.standardizedFileURL.path
+        self._intent = State(initialValue: store.intakeService.draft(forProject: project))
+        self._composerExpanded = State(initialValue: store.intakeService.composerExpanded(forProject: project))
     }
 
     /// Standardized so it matches how `SessionStore` keys flywheel identities — a
@@ -117,6 +123,8 @@ struct ProjectView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("project-view")
         .onAppear { probeFlywheelStatusIfNeeded() }
+        .onChange(of: intent) { _, text in intakeService.setDraft(text, inProject: projectPath) }
+        .onChange(of: composerExpanded) { _, expanded in intakeService.setComposerExpanded(expanded, inProject: projectPath) }
         .sheet(item: $reviewIntakeID) { id in
             ReleaseReviewView(store: store, intakeID: id, onClose: { reviewIntakeID = nil })
         }

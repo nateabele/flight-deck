@@ -31,7 +31,10 @@ struct RootView: View {
         } detail: {
             if let projectID = store.selectedProjectID,
                let repo = store.repos.first(where: { $0.id == projectID }) {
+                // Keyed on the project, so its `@State` (seeded from the service: the draft,
+                // the composer's size) is never carried from one project into the next.
                 ProjectView(store: store, repo: repo)
+                    .id(repo.id)
             } else if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
                 VStack(spacing: 0) {
                     TerminalPane(store: store)

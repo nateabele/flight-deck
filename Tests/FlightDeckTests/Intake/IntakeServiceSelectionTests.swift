@@ -186,4 +186,38 @@ final class IntakeServiceSelectionTests: XCTestCase {
         svc.setIntakeListCollapsed(true, inProject: "/a")
         XCTAssertEqual(publishes, 1)
     }
+    // MARK: - The composer's draft
+
+    /// Per project, kept by the service for the reason the list's collapse is, and across a
+    /// relaunch: a half-written request is the human's work, not view state.
+    func testTheDraftIsPerProjectAndOutlivesTheService() {
+        let svc = makeService()
+        XCTAssertEqual(svc.draft(forProject: "/a"), "")
+        svc.setDraft("# Add a thing\n\nwith detail", inProject: "/a")
+        svc.setComposerExpanded(true, inProject: "/a")
+        XCTAssertEqual(svc.draft(forProject: "/a/"), "# Add a thing\n\nwith detail", "a trailing slash is the same project")
+        XCTAssertEqual(svc.draft(forProject: "/b"), "", "one project's draft is not another's")
+        XCTAssertFalse(svc.composerExpanded(forProject: "/b"))
+
+        let relaunched = makeService()
+        XCTAssertEqual(relaunched.draft(forProject: "/a"), "# Add a thing\n\nwith detail")
+        XCTAssertTrue(relaunched.composerExpanded(forProject: "/a"))
+        relaunched.setDraft("", inProject: "/a")
+        relaunched.setComposerExpanded(false, inProject: "/a")
+        XCTAssertEqual(makeService().draft(forProject: "/a"), "")
+        XCTAssertEqual(defaults.dictionary(forKey: "IntakeDraftByProject")?.count, 0, "a sent draft leaves nothing behind")
+    }
+
+    /// Written on every keystroke, so it must never publish: every view observing the service
+    /// would redraw per character.
+    func testWritingTheDraftPublishesNothing() {
+        let svc = makeService()
+        var publishes = 0
+        let watch = svc.objectWillChange.sink { publishes += 1 }
+        defer { watch.cancel() }
+        svc.setDraft("a", inProject: "/a")
+        svc.setDraft("ab", inProject: "/a")
+        svc.setComposerExpanded(true, inProject: "/a")
+        XCTAssertEqual(publishes, 0)
+    }
 }
