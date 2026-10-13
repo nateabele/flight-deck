@@ -202,8 +202,11 @@ public enum Triage {
           any other mutating verb) — FD is the only writer. You may run `br list`, `br show`,
           `br graph`, and `br ready`. `bv` is not available to you; the graph file above is
           already the read you'd use it for.
-        - Ask a clarifying question only when its answer would change the change set you
-          would produce. If the intent is already unambiguous, do not ask anything.
+        - Nail the scope down before you recommend anything. Ask as many clarifying
+          questions as it takes: what is in and out of scope, what done looks like, the
+          constraints, and every ambiguity you would otherwise settle by guessing. Ask
+          rather than assume. Leave out only a question the intent or the files above
+          already answer.
 
         Choose one of four fidelity presets:
         - Bead: no drafting or refinement — you encode the change set yourself in one pass.
@@ -224,7 +227,9 @@ public enum Triage {
     }
 
     /// The follow-up turn once the human has answered triage's clarifying questions:
-    /// restates the Q&A and asks for the recommendation triage withheld the first time.
+    /// restates the Q&A and asks for the recommendation triage withheld — or for more
+    /// questions, when the answers leave the scope unsettled. Each `questions` reply is
+    /// another exchange the human answers, so triage may ask for as many rounds as it needs.
     public static func answersPrompt(questions: [String], answers: [String]) -> String {
         let qa = zip(questions, answers)
             .map { "Q: \($0)\nA: \($1)" }
@@ -234,9 +239,10 @@ public enum Triage {
 
         \(qa)
 
-        Using these answers, return your recommendation now: a preset, a one-sentence
-        reason, and — if you recommend Bead fidelity — the full change set. Follow the
-        same change-set rules as before.
+        If these answers leave the scope unsettled, or raise something new, ask your
+        follow-up questions now (kind=questions). Otherwise return your recommendation: a
+        preset, a one-sentence reason, and — if you recommend Bead fidelity — the full
+        change set. Follow the same change-set rules as before.
         """
     }
 
