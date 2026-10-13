@@ -3617,3 +3617,37 @@ What remains:
   reads Ghostty's viewport. If Ghostty joins a soft-wrapped URL into one line the rejoin is a no-op,
   and if it pads or indents differently `ChoiceDialog.menu` fails to no card, not a wrong press.
 
+## `/switch-account`: move a live conversation to another account (2026-10-12)
+
+`flightdeck account list|switch`, the `account.list`/`account.switch` control requests, the live
+path of `SessionStore.rollOver`, and the bundled plugin's `/switch-account` mod. See
+ARCHITECTURE.md, "Smart sleep moves the lease" and "Local control socket". What is NOT verified:
+
+- **No real GUI tab has run it.** Swift is unit-tested through the store with fakes
+  (`AccountSwitchTests`), the control request over a real local socket, and the mod headlessly
+  with `claude -p` and a fake CLI (it registers a bare `/switch-account`, passes its argument to
+  `flightdeck account switch -- <arg>`, and a bare run calls `account list --json`). Nothing has
+  killed and resumed a real claude from its own slash command.
+- **The mod's dialog has never been drawn in a real FD tab.** `claude -p` has no surface, so only
+  `claude plugin test` (terminal, desktop and mobile surfaces, by key) exercised the pane. How the
+  Button rows look in Ghostty, whether Tab/arrows walk them, and whether Esc closes it are unseen.
+- **Whether a mod-answered command leaves the tab `.idle`.** The move refuses unless
+  `statuses[id].activity == .idle` when asked and again when it starts. A headless run showed no
+  `UserPromptSubmit` hook for the command, only Stop, which suggests it stays idle; an interactive
+  tab may differ, in which case every `/switch-account` would answer "mid-turn".
+- **The mod's output text** is shown as the command's output under "flight-deck:" (headless); the
+  toast after a picker choice and what the person sees as claude is killed 0.8 s later are unseen.
+- **A paired phone has no path** (local only, by design).
+- **The old account keeps a stale copy** of the transcript, as with a thaw rollover.
+
+GUI check for the maintainer, in a Release build with two claude accounts in a pool:
+1. In a tab with a short conversation, type `/switch-account` (bare). A pane titled "Switch
+   account" should list the pool, its two accounts indented beneath it with emails and a
+   "(current)" mark, then any unpooled accounts. Tab/arrows move, Enter picks, Esc closes.
+2. Pick the other account. A toast says it is moving; within about a second the tab restarts and
+   resumes the same conversation (ask "what did we just discuss?"), and a notification says
+   "Moved to …". `flightdeck account list` from that tab now marks the new account `*`.
+3. Type half a sentence, then run `/switch-account <email>` from another tab via
+   `flightdeck account switch --session <id> <email>`: the half sentence returns unsent.
+4. `/switch-account nope` answers with the list of valid choices; `/switch-account <pool>` with
+   every other member over soft answers that nothing is below its limit and moves nothing.

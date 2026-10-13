@@ -38,6 +38,8 @@ let usageLines = [
     "flightdeck host ls [--disk [HOST]]",
     "flightdeck host info <host>",
     "flightdeck host prune <host> [--repo R]",
+    "flightdeck account list [--json] [--session S]   accounts and pools this tab's agent can move to",
+    "flightdeck account switch TARGET [--session S]   move this conversation to an email, account or pool",
     "flightdeck run [--on H] [--include P]... [--fetch G]... [--env K=V]... [--pty] [--screen] [--detach] -- cmd...",
     "flightdeck run RECIPE [same flags] [-- extra args]",
     "flightdeck exec --on H -- cmd...      run in the host's checkout without syncing",

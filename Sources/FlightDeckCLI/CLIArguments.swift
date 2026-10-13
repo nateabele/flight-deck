@@ -54,6 +54,11 @@ public enum CLICommand: Equatable {
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
+    /// `account list`: what tab `session`'s agent could move to. `session` is a token like any
+    /// other verb's, defaulting to `self`.
+    case accountList(session: String)
+    /// `account switch TARGET`: moves tab `session`'s conversation to another account.
+    case accountSwitch(session: String, target: String)
     /// Every delegated-execution verb (spec §5): `run`, `exec`, `up`, `ps`, `wait <run>`, …
     /// One case rather than fifteen so the verbs' parsing and output live together in
     /// `DelegateArguments.swift`/`DelegateCommands.swift`.
@@ -326,6 +331,8 @@ public enum CLIArguments {
 
         case "infra":
             return try InfraArguments.parse(&c)
+        case "account":
+            return try parseAccount(&c)
 
         case "run", "exec", "up", "down", "restart", "sync", "ps", "logs", "stop", "diff", "apply",
              "recipe", "route-exec":
@@ -393,6 +400,28 @@ public enum CLIArguments {
             return .hostInfo(name: try c.requirePositional("host info: missing host"))
         default:
             throw CLIUsageError("host: unknown subcommand \"\(sub)\"")
+        }
+    }
+
+    private static func parseAccount(_ c: inout Cursor) throws -> CLICommand {
+        let sub = try c.requirePositional("account: missing subcommand")
+        switch sub {
+        case "list", "ls", "switch":
+            var session = "self"
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--session": session = try c.require(after: flag)
+                default: throw Cursor.unknownFlag(flag, in: "account \(sub)")
+                }
+            }
+            if sub != "switch" { return .accountList(session: session) }
+            // Every remaining word is the target, so `account switch My Work` needs no quotes.
+            var words: [String] = []
+            while let word = c.optionalPositional() { words.append(word) }
+            guard !words.isEmpty else { throw CLIUsageError("account switch: missing account or pool") }
+            return .accountSwitch(session: session, target: words.joined(separator: " "))
+        default:
+            throw CLIUsageError("account: unknown subcommand \"\(sub)\"")
         }
     }
 
