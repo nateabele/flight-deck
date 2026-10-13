@@ -3,7 +3,7 @@ import IntakeKit
 
 // Planning bills the project's accounts (unify brief R9). Every planning seat — triage, and
 // every seat of every round — runs as the account or pool the project assigns its agent, the
-// same answer a new tab in that project gets; no assignment is the agent's first live account,
+// same answer a new tab in that project gets; no assignment is the agent's default (an account or a pool), else its first live account,
 // and an agent with no account record at all runs in its CLI's built-in home.
 //
 // `AccountResolving` is the seam planning needs from account resolution, kept to exactly what
@@ -109,7 +109,7 @@ extension AccountBilling {
 }
 
 /// The live resolver is the one tabs use, so "which login does this project bill" has one
-/// answer for a tab and a planning seat (unify brief R8/R9). Its rules: no assignment → the
+/// answer for a tab and a planning seat (unify brief R8/R9). Its rules: no assignment → the agent's default, else the
 /// agent's first live account; a pool → a `CapacityLedger` lease, else a member inside the pool
 /// (never a login outside it), with a notice when every member is over its hard limit.
 extension AccountResolver: AccountResolving {

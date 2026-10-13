@@ -10,7 +10,9 @@ import IntakeKit
 
 /// Where a resolution's account came from.
 enum AccountSource: Equatable, Sendable {
-    /// The project names nothing for this agent: the agent's first live account in list order.
+    /// The project names nothing for this agent, and neither does the agent's default (or that
+    /// default is an account): the agent's first live account in list order, or its default
+    /// account. A default POOL resolves as `.pool`, exactly as if the project had named it.
     case unassigned
     /// The project names this account directly.
     case assigned
@@ -141,7 +143,7 @@ final class AccountResolver {
     /// question with no side effect (a menu checkmark, a preview), and never returns a lease.
     func resolve(agent: AgentID, project: String,
                  leasing: Bool = true) -> Result<AccountResolution, AccountResolutionError> {
-        resolve(agent: agent, assignment: preferences.projectSettings(project).accounts[agent], leasing: leasing)
+        resolve(agent: agent, assignment: preferences.effectiveAssignment(for: agent, project: project), leasing: leasing)
     }
 
     /// One assignment, whoever holds it — a project's (above) or the capability index's
@@ -226,11 +228,14 @@ final class AccountResolver {
         return mine.first(where: \.isDefault)?.id
     }
 
-    /// What the index's refresh bills for `agent`: the stored choice, else the default pool.
+    /// What the index's refresh bills for `agent`: the stored choice, else the agent's own default
+    /// (Settings → Accounts' "Make Default" is an explicit choice, which beats guessing), else the
+    /// default pool.
     /// Only claude is ever asked — every source runs `claude -p` (`IndexExtraction.command`) —
     /// but the rule is per agent so a second extraction agent needs no new one.
     func indexAssignment(_ agent: AgentID) -> AccountAssignment? {
         if agent == .claude, let stored = preferences.indexAccount { return stored }
+        if let chosen = preferences.effectiveAccountDefault(for: agent) { return chosen }
         return Self.defaultIndexPool(for: agent, in: preferences.effectivePools).map(AccountAssignment.pool)
     }
 
@@ -275,7 +280,7 @@ final class AccountResolver {
     ///   → `.rollOver` to it, with the lease (if any) on the resolution;
     /// - spent, and every other member is spent too → `.inPlace(.noHeadroom)`, never a dead tab.
     func thawPlan(agent: AgentID, project: String, account: AgentAccount, blocked: ThawBlocker?) -> ThawPlan {
-        guard case .pool(let id)? = preferences.projectSettings(project).accounts[agent],
+        guard case .pool(let id)? = preferences.effectiveAssignment(for: agent, project: project),
               let pool = preferences.effectivePools.first(where: { $0.id == id && $0.agent == agent }),
               pool.kind == .hosted, pool.accounts.contains(account.id)
         else { return .inPlace(nil) }
@@ -304,7 +309,7 @@ final class AccountResolver {
     @discardableResult
     func reacquire(agent: AgentID, project: String, account: AgentAccount, for holder: UUID) -> Bool {
         guard leases(heldBy: holder).isEmpty else { return true }
-        guard case .pool(let id)? = preferences.projectSettings(project).accounts[agent],
+        guard case .pool(let id)? = preferences.effectiveAssignment(for: agent, project: project),
               let pool = preferences.effectivePools.first(where: { $0.id == id && $0.agent == agent }),
               pool.kind == .hosted, pool.accounts.contains(account.id), !account.isRemoved
         else { return false }

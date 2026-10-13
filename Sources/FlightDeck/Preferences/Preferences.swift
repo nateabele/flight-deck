@@ -129,6 +129,11 @@ struct Preferences: Codable, Equatable {
     /// it. Optional for the reason `confirmations` is; nil means "never migrated", which
     /// `migrateAccountsIfNeeded` fills in from `storedAccounts` and `capacity.pools`.
     var storedAccountList: AccountList?
+    /// Each agent's explicit default login (`AgentAccountDefaults`). Optional for the reason
+    /// `confirmations` is; nil means nobody chose, i.e. the topmost live account.
+    var storedAgentAccountDefaults: AgentAccountDefaults?
+    /// The stored choices, as a plain map (empty: nobody chose anything).
+    var agentAccountDefaults: [AgentID: AccountAssignment] { storedAgentAccountDefaults?.assignments ?? [:] }
     /// Keyed by standardized project path, replacing `projectFlags`. Optional for the same
     /// reason; `migrateProjectSettingsIfNeeded` folds the old field in.
     var storedProjectSettings: [String: ProjectSettings]?
@@ -196,7 +201,8 @@ struct Preferences: Codable, Equatable {
         terminalFontSize: Float? = nil,
         flightControlRouting: RoutingPreferences? = nil,
         capacity: CapacityPreferences? = nil,
-        cloud: CloudPreferences? = nil
+        cloud: CloudPreferences? = nil,
+        storedAgentAccountDefaults: AgentAccountDefaults? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -215,6 +221,7 @@ struct Preferences: Codable, Equatable {
         self.flightControlRouting = flightControlRouting
         self.capacity = capacity
         self.cloud = cloud
+        self.storedAgentAccountDefaults = storedAgentAccountDefaults
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

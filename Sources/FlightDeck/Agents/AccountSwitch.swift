@@ -90,7 +90,7 @@ extension AccountResolver {
             WireAccountChoice(id: a.id.uuidString, displayName: a.displayName, email: a.cachedIdentity?.email,
                               state: headroomState(of: a).rawValue, isCurrent: a.id == current?.id)
         }
-        let assigned = preferences.projectSettings(project).accounts[agent]?.poolID
+        let assigned = preferences.effectiveAssignment(for: agent, project: project)?.poolID
         let pools = list.pools.filter { $0.agent == agent && $0.kind == .hosted }.compactMap { pool -> WireAccountPoolChoice? in
             let members = pool.members.filter { !$0.isRemoved && $0.agent == agent }
             guard !members.isEmpty else { return nil }

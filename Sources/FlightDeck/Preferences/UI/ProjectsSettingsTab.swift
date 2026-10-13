@@ -251,17 +251,25 @@ struct ProjectsSettingsTab: View {
         )
     }
 
-    /// One choice in the Account picker: nil is "Default" (the agent's topmost account).
+    /// One choice in the Account picker: nil is "Default" (the agent's default account or pool,
+    /// else its topmost account).
     typealias AccountOption = AccountAssignmentOption
 
     /// What a project can bill `agent`'s work to (unify brief R8): Default — naming the account
-    /// it means today — then each live account of the agent in list order, then each of its
+    /// or pool it means today (`agentDefault`, Settings → Accounts' Make Default, else the
+    /// topmost account) — then each live account of the agent in list order, then each of its
     /// pools: the user's pools in list order, and last the agent's default pool (its unpooled
     /// accounts), when it has one. Local pools are left out: they lease an endpoint slot, not an
     /// account a tab could sign in as.
-    static func accountOptions(for agent: AgentID, in list: AccountList) -> [AccountOption] {
+    static func accountOptions(for agent: AgentID, in list: AccountList,
+                               agentDefault: AccountAssignment? = nil) -> [AccountOption] {
         let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
-        var options = [AccountOption(value: nil, title: accounts.first.map { "Default (\($0.displayName))" } ?? "Default",
+        let defaultTitle: String? = switch list.effectiveDefault(agentDefault, for: agent) {
+        case .account(let id)?: accounts.first { $0.id == id }?.displayName
+        case .pool(let id)?: list.pool(id).map { AccountBilling.poolName($0.label) }
+        case nil: accounts.first?.displayName
+        }
+        var options = [AccountOption(value: nil, title: defaultTitle.map { "Default (\($0))" } ?? "Default",
                                      isPool: false)]
         options += accounts.map { AccountOption(value: .account($0.id), title: $0.displayName, isPool: false) }
         let effective = list.effectivePools().filter { $0.agent == agent && $0.kind == .hosted }
@@ -281,7 +289,8 @@ struct ProjectsSettingsTab: View {
     }
 
     private func accountPicker(for path: String, agent: AgentID) -> some View {
-        AccountAssignmentPicker(options: Self.accountOptions(for: agent, in: preferences.preferences.accountList),
+        AccountAssignmentPicker(options: Self.accountOptions(for: agent, in: preferences.preferences.accountList,
+                                                             agentDefault: preferences.accountDefault(for: agent)),
                                 selection: accountBinding(for: path, agent: agent),
                                 identifier: "project-account-picker-\(agent.rawValue)")
     }

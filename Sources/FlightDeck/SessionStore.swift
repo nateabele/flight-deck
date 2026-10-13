@@ -1184,7 +1184,7 @@ final class SessionStore: ObservableObject {
                 continue
             }
             var pooled = false
-            if case .pool? = preferences.projectSettings(session.workingDirectory).accounts[session.agent] { pooled = true }
+            if case .pool? = preferences.effectiveAssignment(for: session.agent, project: session.workingDirectory) { pooled = true }
             // A tab in an unpooled project that holds nothing has nothing to reconcile, and
             // costs no process walk.
             guard holds || pooled else { tabLeaseAgentGoneSince[session.id] = nil; continue }
@@ -8976,7 +8976,7 @@ final class SessionStore: ObservableObject {
                 let sessionAccount = preferences.resolvedAccountID(for: session.agent, in: session.accountID)
                 // A pool project's login is ANY live member: leasing spreads its tabs across
                 // them, so comparing against one member would mark the feature working.
-                if case .pool(let pool)? = preferences.projectSettings(repo.url.path).accounts[session.agent] {
+                if case .pool(let pool)? = preferences.effectiveAssignment(for: session.agent, project: repo.url.path) {
                     let members = preferences.effectivePools.first { $0.id == pool }?.accounts ?? []
                     return !members.contains { $0 == sessionAccount }
                 }
