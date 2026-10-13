@@ -43,7 +43,10 @@ final class ExpandedIntakeComposerTests: XCTestCase {
         XCTAssertEqual(inline.body.pointSize, 13, accuracy: 0.001)
         let plan = PlanTheme.standard
         let factor = inline.body.pointSize / plan.body.pointSize
-        XCTAssertEqual(inline.headingSizes[0], plan.headingSizes[0] * factor, accuracy: 0.001)
+        // Except its headings: a scaled `#` (about 21 pt) outweighed the request in the list's
+        // box, so they step only a little above the body, largest first.
+        XCTAssertEqual(inline.headingSizes, [16, 15, 14, 13, 13, 13])
+        XCTAssertEqual(ComposerStyle.expanded.theme.headingSizes, plan.headingSizes, "the main view keeps the plan's headings")
         XCTAssertEqual(inline.mono.pointSize, plan.mono.pointSize * factor, accuracy: 0.001)
         XCTAssertEqual(ComposerStyle.expanded.theme.body.pointSize, plan.body.pointSize)
     }
