@@ -215,4 +215,23 @@ final class PlanningInspectorUITests: XCTestCase {
         XCTAssertEqual(field.value as? String, "Add a dark mode and a light one", "collapsing lost the typed text")
         XCTAssertFalse(expanded.exists, "the expanded editor is still on screen")
     }
+
+    /// The whole composer box takes a click, in the list and expanded (the maintainer, 2026-10-13): a
+    /// click below a short draft's last line used to fall on dead space and place no caret.
+    func testAClickBelowTheDraftStillTypesIntoIt() throws {
+        let app = launch()
+        let field = element(app, "intake-intent-field")
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "the list's composer never appeared")
+        // Below the text view's own frame (one line tall) but inside the 60 pt box.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1)).withOffset(CGVector(dx: 0, dy: 18)).click()
+        app.typeText("Short")
+        XCTAssertEqual(field.value as? String, "Short", "a click below the line did not reach the editor")
+
+        app.buttons["Expand the editor"].click()
+        let expanded = element(app, "intake-intent-expanded-field")
+        XCTAssertTrue(expanded.waitForExistence(timeout: 5), "the expanded editor never appeared")
+        expanded.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1)).withOffset(CGVector(dx: 0, dy: 60)).click()
+        app.typeText(" draft")
+        XCTAssertEqual(expanded.value as? String, "Short draft", "a click below the expanded text did not reach the editor")
+    }
 }
