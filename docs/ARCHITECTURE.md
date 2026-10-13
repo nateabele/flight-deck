@@ -2305,6 +2305,15 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     TextKit 2 layout), `MarkdownStyler.swift` (live-preview styling), `EditLayer.swift` +
     `DecorationLayer.swift` (below), `SelectionToolbar.swift` (the floating annotate/highlight
     toolbar), `NotesRail.swift` (the side rail of note/edit cards, tracking the editor's scroll).
+  - **The intake composer is the plan editor, at three sizes** (2026-10-13). `IntakeComposer`
+    (`IntakeRail.swift`: the list's foot and the rail's + popover) and `ExpandedIntakeComposer`
+    (`ExpandedIntakeComposer.swift`: the detail pane's replacement while `ProjectView.composerExpanded`)
+    are one `ComposerEditor` — `PlanTextView` with `PlanTheme.scaled(by:)` — in two `ComposerStyle`s:
+    `.inline` (13 pt body, `compact`: no gutter, no minimum height) and `.expanded` (the plan's
+    own 15 pt, at a 820 pt column). One draft (`intent`), written on every keystroke
+    (`commitsEachKeystroke`; a plan keeps its two-second idle commit), so Triage and collapsing
+    never miss typed text. The corner arrow expands, the arrow in the same corner (and Esc)
+    collapses; while expanded the list shows "Editing in the main view", never a second editor.
   - `IntakeService.swift` — the service described above, plus `ShapingModel.swift` (pure
     view-model folds over a `Tape`) and `RoundConfigEditor.swift` (the Rounds inspector editor).
   - **The inspector has two explicit modes, Notes and Rounds** (`DetailLayout.InspectorMode`,

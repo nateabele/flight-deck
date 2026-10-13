@@ -186,4 +186,29 @@ final class PlanningInspectorUITests: XCTestCase {
         trash.click()
         waitGone(row, "the trashed plan is still listed, with Show Archived on")
     }
+
+    /// The composer's expanded mode (2026-10-13): the corner arrow moves the draft from the list's
+    /// foot to the main view and back, as the same text, with one live editor at a time.
+    func testTheComposerExpandsAndCollapsesWithItsDraft() throws {
+        let app = launch()
+        let field = element(app, "intake-intent-field")
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "the list's composer never appeared")
+        field.click()
+        field.typeText("Add a dark mode")
+        XCTAssertEqual(field.value as? String, "Add a dark mode")
+
+        element(app, "intake-composer-expand").click()
+        let expanded = element(app, "intake-intent-expanded-field")
+        XCTAssertTrue(expanded.waitForExistence(timeout: 5), "the expanded editor never appeared")
+        XCTAssertEqual(expanded.value as? String, "Add a dark mode", "expanding lost the draft")
+        XCTAssertFalse(field.exists, "two editors are live on one draft")
+        XCTAssertTrue(element(app, "intake-composer-placeholder").exists, "the list shows no placeholder while expanded")
+
+        expanded.click()
+        expanded.typeText(" and a light one")
+        element(app, "intake-composer-collapse").click()
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "the list's composer did not come back")
+        XCTAssertEqual(field.value as? String, "Add a dark mode and a light one", "collapsing lost the typed text")
+        XCTAssertFalse(expanded.exists, "the expanded editor is still on screen")
+    }
 }

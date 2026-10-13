@@ -53,7 +53,13 @@ struct PlanTheme {
     /// Revealed syntax, list markers, table pipes: present but quieter than the words.
     var syntax = NSColor.tertiaryLabelColor
     var link = NSColor.linkColor
-    var codeBackground = NSColor.secondaryLabelColor.withAlphaComponent(0.1)
+    /// Light and dark each their own: a tenth of the secondary label colour is a visible wash on
+    /// the dark window and nothing on the light one (the inline code read as plain text there).
+    var codeBackground = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor.secondaryLabelColor.withAlphaComponent(0.1)
+            : NSColor.black.withAlphaComponent(0.07)
+    }
     /// A fenced block's box, drawn behind its lines by `EditLayerFragment`.
     var codeBlockBackground = NSColor.secondaryLabelColor.withAlphaComponent(0.08)
     var quoteText = NSColor.secondaryLabelColor
@@ -88,6 +94,28 @@ struct PlanTheme {
     var quoteIndent: CGFloat = 16
 
     static let standard = PlanTheme()
+
+    /// This theme with every size and every space scaled by `factor`, so a smaller editor keeps
+    /// the plan's proportions (heading against body against code) rather than shrinking only
+    /// the body. Colours and the hidden-syntax font are unchanged: the latter is already zero.
+    func scaled(by factor: CGFloat) -> PlanTheme {
+        guard factor != 1 else { return self }
+        var theme = self
+        theme.body = NSFont.systemFont(ofSize: body.pointSize * factor)
+        theme.mono = NSFont.monospacedSystemFont(ofSize: mono.pointSize * factor, weight: .regular)
+        theme.headingSizes = headingSizes.map { $0 * factor }
+        theme.gap = NSFont.systemFont(ofSize: gap.pointSize * factor)
+        theme.lineSpacing *= factor
+        theme.paragraphSpacing *= factor
+        theme.itemSpacing *= factor
+        theme.headingSpaceBefore = headingSpaceBefore.map { $0 * factor }
+        theme.headingSpaceAfter *= factor
+        theme.listIndent *= factor
+        theme.codePadding *= factor
+        theme.codeVerticalPadding *= factor
+        theme.quoteIndent *= factor
+        return theme
+    }
 
     var monoAdvance: CGFloat { ("0" as NSString).size(withAttributes: [.font: mono]).width }
 
