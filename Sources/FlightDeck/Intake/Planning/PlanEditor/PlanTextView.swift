@@ -134,6 +134,8 @@ struct PlanTextView: NSViewRepresentable {
     var focusOnAppear = false
     /// What UI tests find the text view by; the composers set their own.
     var identifier = "plan-editor"
+    /// See `filling(height:)`.
+    var fillHeight: CGFloat = 0
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false,
@@ -193,6 +195,15 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// At least `height` tall, the space past the text a place to click into: the composers'
+    /// boxes, where the editor reporting only its text's height left the box's empty lower part
+    /// to SwiftUI, and a click there placed no caret (`PlanEditorContainer.hitTest`).
+    func filling(height: CGFloat) -> PlanTextView {
+        var view = self
+        view.fillHeight = height
+        return view
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func annotating(_ notes: PlanNotesController?) -> PlanTextView {
@@ -231,7 +242,7 @@ struct PlanTextView: NSViewRepresentable {
     /// offered: the plan is part of the page, which scrolls it.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView container: PlanEditorContainer, context: Context) -> CGSize? {
         let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? container.frame.width
-        return CGSize(width: width, height: container.contentHeight)
+        return CGSize(width: width, height: max(container.contentHeight, fillHeight))
     }
 
     func updateNSView(_ container: PlanEditorContainer, context: Context) {
@@ -1025,6 +1036,19 @@ final class PlanEditorContainer: NSView {
     }
 
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: contentHeight) }
+
+    /// Below the text (a composer box taller than its draft, `PlanTextView.filling`) is still
+    /// the editor: a click there goes to the text view, which puts the caret at the nearest
+    /// character — the end, as in TextEdit — and a drag from there selects. Without it the
+    /// click hit this bare container and did nothing.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self && textView.isEditable ? textView : hit
+    }
+
+    override func resetCursorRects() {
+        if textView.isEditable { addCursorRect(bounds, cursor: .iBeam) }
+    }
 
     override func layout() {
         super.layout()

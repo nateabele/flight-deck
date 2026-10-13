@@ -28,7 +28,7 @@ struct ComposerEditor: View {
                 PlanTextView(text: $text, editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {},
                              theme: style.theme, compact: style.compact, focusOnAppear: focusOnAppear, identifier: identifier)
                     .committingEachKeystroke()
-                    .frame(minHeight: proxy.size.height, alignment: .topLeading)
+                    .filling(height: proxy.size.height)
             }
         }
     }

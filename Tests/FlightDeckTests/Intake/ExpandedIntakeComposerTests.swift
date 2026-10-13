@@ -48,6 +48,30 @@ final class ExpandedIntakeComposerTests: XCTestCase {
         XCTAssertEqual(ComposerStyle.expanded.theme.body.pointSize, plan.body.pointSize)
     }
 
+    /// The whole box takes a click, not only its lines of text (the maintainer, 2026-10-13): the editor
+    /// fills the space it is given, and a click below the last line lands in the text view.
+    func testAClickBelowTheTextLandsInTheEditor() throws {
+        let draft = Draft()
+        draft.text = "One line"
+        let host = NSHostingView(rootView: Host(draft: draft).frame(width: 700, height: 900))
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 700, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        let view = try XCTUnwrap(textView(in: host))
+        let container = try XCTUnwrap(view.superview as? PlanEditorContainer)
+        XCTAssertGreaterThan(container.frame.height, view.frame.height + 200,
+                             "the editor stops at its text, leaving the rest of the pane dead to clicks")
+        // The container is flipped: its bottom is its bounds' maxY. `hitTest` takes the
+        // superview's coordinates.
+        let local = NSPoint(x: container.bounds.midX, y: container.bounds.maxY - 20)
+        let below = container.superview.map { container.convert(local, to: $0) } ?? local
+        XCTAssertFalse(view.frame.contains(local), "the probe point must be below the text")
+        XCTAssertTrue(container.hitTest(below) === view, "a click below the text hit nothing that takes it")
+    }
+
     func testTypingReachesTheDraftAtOnce() throws {
         let draft = Draft()
         let host = NSHostingView(rootView: Host(draft: draft).frame(width: 700, height: 500))
