@@ -2328,8 +2328,10 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     wraps a character a line: the notes rail once asked for a 3,322 pt window, and a window that
     could not grow laid out taller than itself and cut off every column's top (2026-10-12,
     `testTheNotesRailLeavesTheWindowItsHeight`). The rail's lane is `minHeight: 0` and clipped.
-  - **Agent stacks** (`Planning/AgentStack.swift`): every agent has one monogram disc
-    (`AgentBadge`, `AgentID.monogram`/`.tint` — no vendor marks, the repo is public), and every
+  - **Agent stacks** (`Planning/AgentStack.swift`): every agent has one circular provider
+    icon (`AgentBadge`: its mark from `Assets.xcassets/Agent*.imageset`, `AgentID.iconAsset`, on
+    a brand-avatar disc with a hairline; marks from `@lobehub/icons-static-svg`, MIT, credited in
+    the README), and every
     round drawn in the main view (finished-round cards, the live round's header) carries an
     overlapping stack of its distinct agents (`AgentStackModel`, max 3 then "+N", tooltip per
     role).

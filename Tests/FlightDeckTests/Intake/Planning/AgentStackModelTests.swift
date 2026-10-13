@@ -126,11 +126,13 @@ final class AgentStackModelTests: XCTestCase {
         XCTAssertEqual(RoundConfigEditor.sections(of: sketch).map(\.section), [.draft, .refine, .encode])
     }
 
-    /// Every agent has its own glyph: a monogram never shared by two agents, so two agents in one
-    /// stack are told apart without the tint.
-    func testEveryAgentHasADistinctMonogram() {
-        let monograms = AgentID.allCases.map(\.monogram)
-        XCTAssertEqual(Set(monograms).count, AgentID.allCases.count)
-        XCTAssertFalse(monograms.contains(""))
+    /// Every agent has its own provider icon in the app bundle, a vector that loads, and no two
+    /// agents share one, so two agents in one stack are told apart.
+    func testEveryAgentHasALoadableIcon() {
+        let bundle = Bundle(for: SessionStore.self)
+        for agent in AgentID.allCases {
+            XCTAssertNotNil(bundle.image(forResource: agent.iconAsset), "\(agent)")
+        }
+        XCTAssertEqual(Set(AgentID.allCases.map(\.iconAsset)).count, AgentID.allCases.count)
     }
 }

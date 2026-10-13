@@ -79,3 +79,7 @@ Copyright (c) 2026 Nate Abele. Released under the [BSD 3-Clause License](LICENSE
 
 Ghostty is vendored as a submodule and carries its own MIT license
 (Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors).
+
+The agent icons (Claude, OpenAI, Grok, Gemini, OpenCode) are from
+[`@lobehub/icons-static-svg`](https://github.com/lobehub/lobe-icons) (MIT, Copyright (c) LobeHub).
+Each mark belongs to its owner and appears only to identify that provider's agent.
