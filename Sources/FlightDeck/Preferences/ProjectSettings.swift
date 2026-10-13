@@ -23,7 +23,9 @@ struct ProjectSettings: Codable, Equatable {
     /// nil = "use global settings": inherit the global agent order untouched.
     var defaultAgent: AgentID?
     /// Per agent, because one project can run several agents. A missing key means that agent's
-    /// default account — the top of its list. See `PreferencesStore.account(for:project:)` for
+    /// default account — the top of its list. This is the path's OWN choice: it also applies to
+    /// every path beneath this one that sets none (`PreferencesStore.inheritedAssignment`), and
+    /// it is the only field that cascades. Read a login through `effectiveAssignment`. See `PreferencesStore.account(for:project:)` for
     /// how a pool resolves.
     var accounts: [AgentID: AccountAssignment]
     var options: [AgentID: AgentOptions]
