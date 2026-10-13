@@ -121,9 +121,27 @@ struct PlanTextView: NSViewRepresentable {
     var folds: PlanFoldStore?
     /// What the plan's relative file links resolve against — the intake's project directory.
     var projectPath: String?
+    /// Writes `text` on every keystroke rather than after `EditPolicy.idle`. For an editor whose
+    /// binding is a draft read at once (the intake composer's Triage), where waiting two
+    /// seconds would send the text from before the last few keystrokes. A plan keeps the idle
+    /// commit: each of its commits appends the whole plan to `commands.jsonl`.
+    var commitsEachKeystroke = false
+    /// No gutter lanes and no trailing margin, and no minimum height: the editor as a small
+    /// box's text rather than a page (the intake composer in the list). The lanes are for
+    /// edits, churn and fold chevrons, none of which a draft has.
+    var compact = false
+    /// Takes the keyboard when it appears — the composer in the popover, which is opened to type in.
+    var focusOnAppear = false
+    /// What UI tests find the text view by; the composers set their own.
+    var identifier = "plan-editor"
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
-         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
+         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false,
+         theme: PlanTheme = .standard, compact: Bool = false, focusOnAppear: Bool = false, identifier: String = "plan-editor") {
+        self.theme = theme
+        self.compact = compact
+        self.focusOnAppear = focusOnAppear
+        self.identifier = identifier
         _text = text
         self.editable = editable
         self.onCommit = onCommit
@@ -168,6 +186,13 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// This view committing on every keystroke — see `commitsEachKeystroke`.
+    func committingEachKeystroke() -> PlanTextView {
+        var view = self
+        view.commitsEachKeystroke = true
+        return view
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func annotating(_ notes: PlanNotesController?) -> PlanTextView {
@@ -192,6 +217,13 @@ struct PlanTextView: NSViewRepresentable {
         container.revert.onRevert = { [weak coordinator] in coordinator?.revert(hunk: $0) }
         coordinator.revertButton = container.revert
         coordinator.load(text)
+        if focusOnAppear {
+            // After the view is in a window; `makeNSView` runs before it is.
+            DispatchQueue.main.async { [weak container] in
+                guard let container else { return }
+                container.window?.makeFirstResponder(container.textView)
+            }
+        }
         return container
     }
 
@@ -206,6 +238,8 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.parent = self
         container.textView.isEditable = editable
+        container.compact = compact
+        container.textView.setAccessibilityIdentifier(identifier)
         container.textView.projectPath = projectPath
         container.textView.obscuredTop = context.environment.pageObscuredTop
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
@@ -813,7 +847,12 @@ struct PlanTextView: NSViewRepresentable {
                 foldsFollowEdit()
             }
             MainActor.assumeIsolated { notesBridge.textChanged() }
-            scheduleIdleCommit()
+            if parent.commitsEachKeystroke, !textView.hasMarkedText(), let text = session.flush() {
+                timer?.invalidate()
+                commit(text)
+            } else {
+                scheduleIdleCommit()
+            }
         }
 
         func textDidEndEditing(_ notification: Notification) {
@@ -892,6 +931,19 @@ final class PlanEditorContainer: NSView {
     /// The shortest the text runs, so an empty or two-line plan is still a place to type into
     /// rather than a sliver — the height the boxed editor had as its minimum.
     static let minimumTextHeight: CGFloat = 240
+    /// A compact editor's floor: one line and its insets, so an empty draft is no taller than its caret.
+    static let compactMinimumTextHeight: CGFloat = 28
+
+    /// See `PlanTextView.compact`.
+    var compact = false {
+        didSet {
+            guard compact != oldValue else { return }
+            textView.compact = compact
+            textView.minSize = NSSize(width: 0, height: minimumHeight)
+            heightChanged()
+        }
+    }
+    private var minimumHeight: CGFloat { compact ? Self.compactMinimumTextHeight : Self.minimumTextHeight }
     static let bannerGap: CGFloat = 6
 
     /// The height last handed to SwiftUI, and whether a hand-over is already queued this turn.
@@ -969,7 +1021,7 @@ final class PlanEditorContainer: NSView {
 
     /// The banner (when shown) and the text, stacked: what this view needs to show all of it.
     var contentHeight: CGFloat {
-        (banner.isHidden ? 0 : banner.fittingSize.height + Self.bannerGap) + max(textView.frame.height, Self.minimumTextHeight)
+        (banner.isHidden ? 0 : banner.fittingSize.height + Self.bannerGap) + max(textView.frame.height, minimumHeight)
     }
 
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: contentHeight) }
@@ -1012,6 +1064,12 @@ final class PlanEditorContainer: NSView {
         publishedHeight = height
         heightPublishes += 1
         invalidateIntrinsicContentSize()
+        // TextKit 2's viewport layers keep the height the text view had at its first layout
+        // (measured: 240 pt under a 314 pt view), so a text view that grew and was not
+        // scrolled — the composer's, which stands on its own — left its new last lines
+        // undrawn, and its scrolled-to lines blank.
+        textView.needsLayout = true
+        textView.layoutSubtreeIfNeeded()
     }
 
     /// When the text last changed, and how long after it a growth still counts as the edit's.
@@ -1063,15 +1121,26 @@ class PlanNSTextView: NSTextView {
     /// The text starts after the gutter lanes: the margin is all on the leading side, where
     /// an even `textContainerInset` would split it.
     override var textContainerOrigin: NSPoint {
-        NSPoint(x: PlanGutter.width(churn: showsChurn), y: super.textContainerOrigin.y)
+        NSPoint(x: gutterWidth, y: super.textContainerOrigin.y)
     }
+
+    var compact = false {
+        didSet {
+            guard compact != oldValue else { return }
+            textContainerInset = NSSize(width: gutterWidth / 2 + (compact ? 0 : 4), height: compact ? 4 : 8)
+            fitContainer()
+            needsDisplay = true
+        }
+    }
+
+    private var gutterWidth: CGFloat { compact ? 0 : PlanGutter.width(churn: showsChurn) }
 
     /// Whether the gutter's CHURN column is open (`ChurnLaneView` has markers): the text moves
     /// over for it, and the container narrows to match so lines rewrap rather than clip.
     var showsChurn = false {
         didSet {
             guard showsChurn != oldValue else { return }
-            textContainerInset = NSSize(width: (PlanGutter.width(churn: showsChurn) + 8) / 2, height: textContainerInset.height)
+            textContainerInset = NSSize(width: gutterWidth / 2 + (compact ? 0 : 4), height: textContainerInset.height)
             fitContainer()
             needsDisplay = true
         }
@@ -1094,7 +1163,7 @@ class PlanNSTextView: NSTextView {
     /// off until the drag ends. Measured in `PlanEditorKeystrokeTests.testResizeReflowIsUnderAFrame`.
     private func fitContainer() {
         guard let container = textContainer else { return }
-        let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
+        let width = compact ? max(0, frame.width) : PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
         guard container.size.width != width else { return }
         container.size = NSSize(width: width, height: container.size.height)
         // Every line re-wraps: the height is an estimate again until it is all laid out.

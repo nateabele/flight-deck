@@ -78,6 +78,8 @@ struct IntakeRail: View {
     @Binding var selection: UUID?
     @Binding var intent: String
     let onTriage: () -> Void
+    /// Opens the expanded composer in the main view; the + popover closes as it does.
+    var onExpand: () -> Void = {}
 
     @ObservedObject private var hover = HoverCardIntent.shared
     /// This rail's key in the app-wide hover intent, so two rails never open each other's card.
@@ -163,7 +165,10 @@ struct IntakeRail: View {
             IntakeComposer(intent: $intent, onTriage: {
                 onTriage()
                 composing = false
-            }, onCancel: { composing = false })
+            }, onCancel: { composing = false }, onExpand: {
+                composing = false
+                onExpand()
+            })
             .frame(width: 340)
             .padding(14)
         }
@@ -206,22 +211,24 @@ struct IntakeComposer: View {
     /// Set in the popover: adds Cancel, bound to Esc — a focused text view takes Esc as
     /// completion rather than passing it on, so the popover's own Esc never came.
     var onCancel: (() -> Void)? = nil
-
-    @FocusState private var editing: Bool
+    /// The corner arrow that moves the draft to the main view (`ExpandedIntakeComposer`).
+    var onExpand: (() -> Void)? = nil
 
     private var empty: Bool { intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Describe what you want…").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $intent)
-                .font(.body)
-                // In the popover a set height: a TextEditor takes all it is offered, and the
+            HStack(alignment: .firstTextBaseline) {
+                Text("Describe what you want…").font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if let onExpand { IntakeComposerResizeButton(expanded: false, action: onExpand) }
+            }
+            // The plan document's Markdown editor at the `TextEditor`'s size (`ComposerStyle.inline`).
+            ComposerEditor(text: $intent, style: .inline, focusOnAppear: onCancel != nil, identifier: "intake-intent-field")
+                // In the popover a set height: the editor takes all it is offered, and the
                 // popover offered its whole maximum, a tall empty box for a one-line request.
                 .frame(minHeight: onCancel == nil ? 60 : 110, maxHeight: onCancel == nil ? 120 : 110)
                 .border(.separator)
-                .focused($editing)
-                .accessibilityIdentifier("intake-intent-field")
             if let onCancel {
                 HStack {
                     Spacer()
@@ -232,7 +239,6 @@ struct IntakeComposer: View {
                 triage
             }
         }
-        .onAppear { if onCancel != nil { editing = true } }
     }
 
     private var triage: some View {

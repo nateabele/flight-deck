@@ -19,6 +19,9 @@ struct ProjectView: View {
     /// makes triage/release progress redraw the list and detail pane live.
     @ObservedObject private var intakeService: IntakeService
     @State private var intent = ""
+    /// The composer in the detail pane (`ExpandedIntakeComposer`) instead of at the list's foot:
+    /// view state, so a new project starts collapsed. One draft (`intent`) behind both.
+    @State private var composerExpanded = false
     /// Both the sheet's presentation and its content, same shape as
     /// `DevicesSettingsTab.pairingWindow` — see the `.sheet(item:)` below.
     @State private var reviewIntakeID: UUID?
@@ -210,7 +213,9 @@ struct ProjectView: View {
         let collapsed = listCollapsed
         return ZStack(alignment: .topLeading) {
             Group {
-                if let id = selectionBinding.wrappedValue, let intake = intakes.first(where: { $0.id == id }) {
+                if composerExpanded {
+                    ExpandedIntakeComposer(intent: $intent, onTriage: triage, onCollapse: { composerExpanded = false })
+                } else if let id = selectionBinding.wrappedValue, let intake = intakes.first(where: { $0.id == id }) {
                     // Keyed on the intake's id, not just present: selecting a different row
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen
                     // preset), which a same-identity re-render would otherwise carry over.
@@ -269,7 +274,7 @@ struct ProjectView: View {
         ZStack(alignment: .topLeading) {
             if collapsed {
                 IntakeRail(intakes: intakes, tapes: intakeService.tapes, selection: selectionBinding,
-                           intent: $intent, onTriage: triage)
+                           intent: $intent, onTriage: triage, onExpand: { composerExpanded = true })
                     .transition(.opacity)
             } else {
                 expandedList
@@ -310,7 +315,15 @@ struct ProjectView: View {
             .background { if listFocused { planShortcuts } }
             listFooter
             Divider()
-            IntakeComposer(intent: $intent, onTriage: triage)
+            if composerExpanded {
+                // Never two live editors on one draft.
+                Text("Editing in the main view")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .center)
+                    .accessibilityIdentifier("intake-composer-placeholder")
+            } else {
+                IntakeComposer(intent: $intent, onTriage: triage, onExpand: { composerExpanded = true })
+            }
         }
         .padding(16)
     }
@@ -459,6 +472,7 @@ struct ProjectView: View {
     private func triage() {
         intakeService.capture(intent: intent, project: projectPath)
         intent = ""
+        composerExpanded = false
     }
 }
 
