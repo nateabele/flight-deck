@@ -56,6 +56,27 @@ carried forward on trust.
 - Archived plans are hidden from the phone by `intakes(forProject:)`; the phone has no
   archive control and no way to see archived plans.
 
+## Default account or pool per agent (2026-10-12) — unverified
+
+Built and unit-tested (`AgentAccountDefaultTests`) with no GUI run: the SwiftUI shell
+(`AccountsSettingsTab` menus and capsule, the Projects picker's "Default (…)" title) is unseen.
+- **GUI check.** Settings → Accounts with two claude accounts and a pool: right-click an account
+  inside the pool, choose Make Default; the "Default" capsule moves to that member, the footer
+  reads "…use “X”." (no ", the topmost"), and Settings → Projects shows "Default (X)" for a
+  project with no account. Right-click the pool header, Make Default; the capsule moves to the
+  header, the footer says "…use the “P” pool.", and a new tab in an unassigned project takes a
+  lease (Flight Control → Capacity shows it under P). Use Topmost as Default restores the old
+  capsule and footer. Remove the default account (or the pool): the capsule returns to the top.
+  A gemini group and the unpooled-accounts header must offer no Make Default.
+- Not covered: a real tab restored after relaunch under a pool default re-leasing through
+  `reconcileTabLeases` (the resolver half, `reacquire`/`thawPlan`, is tested).
+- The Capability Index's unset Default now follows the agent default when one is set (an
+  explicit choice beats `defaultIndexPool`'s guess); its own stored choice still wins.
+- An older build that SAVES `preferences.v1` drops the new key, so the default silently reverts
+  to the topmost account there; it never fails the decode.
+- Removing a pool that is the default says nothing about the default in the confirmation text
+  (projects assigned to it are counted; the agent default is not).
+
 ## Host keys in the legacy keychain (open, 2026-10-10)
 
 A build signed by any identity other than the one that created a host's key prompts for that key
