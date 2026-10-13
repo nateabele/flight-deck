@@ -13,6 +13,8 @@ struct RoundInspectorModel: Equatable {
 
     struct Agent: Equatable, Identifiable {
         let id: String
+        /// The agent's wire id ("claude", "codex"…), for its icon (`AgentIcon`).
+        let agent: String
         let role: String
         /// The drafter's angle ("arbiter", "realist"); nil for `general`, which says nothing.
         let persona: String?
@@ -20,6 +22,8 @@ struct RoundInspectorModel: Equatable {
         let line: String
         /// "Falls back to Claude · opus · high", when the agent has one.
         let fallback: String?
+        /// The fallback's wire id, for its icon.
+        let fallbackAgent: String?
     }
 
     struct Stage: Equatable, Identifiable {
@@ -78,8 +82,9 @@ struct RoundInspectorModel: Equatable {
     }
 
     private static func agent(_ id: String, _ role: String, _ seat: WireSeat) -> Agent {
-        Agent(id: id, role: role, persona: seat.persona.flatMap { $0 == "general" ? nil : $0 },
-              line: describe(seat.choice), fallback: seat.fallback.map { "Falls back to \(describe($0))" })
+        Agent(id: id, agent: seat.choice.agent, role: role, persona: seat.persona.flatMap { $0 == "general" ? nil : $0 },
+              line: describe(seat.choice), fallback: seat.fallback.map { "Falls back to \(describe($0))" },
+              fallbackAgent: seat.fallback?.agent)
     }
 
     static func describe(_ c: WireModelChoice) -> String {

@@ -107,6 +107,38 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The Rounds inspector with every agent family the Mac seats, so each provider icon (and
+    /// each fallback's) is drawn.
+    func testDrawRoundInspector() throws {
+        try begin()
+        func choice(_ agent: String, _ name: String, _ model: String) -> WireModelChoice {
+            WireModelChoice(agent: agent, agentName: name, model: model, effort: "high")
+        }
+        let codex = choice("codex", "Codex", "gpt-6-sol"), claude = choice("claude", "Claude", "opus")
+        let gemini = choice("gemini", "Gemini", "gemini-3.1-pro-high"), grok = choice("grok", "Grok", "grok-4.7")
+        var detail = Fixture.running
+        detail.roundConfig = WireRoundConfig(
+            drafters: [WireSeat(choice: codex, persona: "arbiter", fallback: claude),
+                       WireSeat(choice: claude, persona: "realist", fallback: codex),
+                       WireSeat(choice: gemini, persona: "coverage", fallback: codex),
+                       WireSeat(choice: grok, persona: "stressTest", fallback: claude)],
+            synthesizer: WireSeat(choice: codex, persona: "arbiter", fallback: claude),
+            reviewer: WireSeat(choice: codex, persona: "general", fallback: claude),
+            crossReviewer: WireSeat(choice: gemini, persona: "general"), crossCheck: "firstAndLast",
+            integrator: WireSeat(choice: claude), encoder: WireSeat(choice: codex),
+            polisher: WireSeat(choice: choice("opencode", "OpenCode", "sonnet")), refinementCap: 5, polishCap: 6,
+            freshEyesAndDedup: true, defaultPlay: "nextMajor", customized: true)
+        let flightControl = FlightControlModel(fetcher: stub(detail))
+        let model = flightControl.detailModel(for: detail.summary.id)
+        model.refresh()
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let view = NavigationStack {
+                RoundInspectorScreen(intake: detail.summary.id, preset: nil, model: model, flightControl: flightControl)
+            }
+            try write(screenImage(of: view, style: style, size: nil), to: "round-inspector-\(Self.styleName(style)).png")
+        }
+    }
+
     func testDrawClarifications() throws {
         try begin()
         let flightControl = FlightControlModel(fetcher: stub(Fixture.needsAnswers))
