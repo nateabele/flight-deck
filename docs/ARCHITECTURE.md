@@ -1107,10 +1107,22 @@ older build installed over this one keeps the same account ids. A project assign
 an `AccountAssignment` — `.account(UUID)` or `.pool(PoolID)` — stored under `accounts` and
 `accountPools` respectively, so the old key keeps its old shape. Settings → Accounts
 (`AccountsSettingsTab`, rules in `AccountsPaneModel`) is the only editor of the list.
+Each agent may also have an explicit **default** — an account or a hosted user pool, chosen by
+Make Default there — stored as `Preferences.storedAgentAccountDefaults` (`AgentAccountDefaults`,
+`{accounts: {agent: uuid}, pools: {agent: poolID}}`, a key an older build ignores; absent means the
+topmost live account, so nobody sees a change until they choose). It applies to every project
+with no assignment for that agent: `PreferencesStore.effectiveAssignment(for:project:)` is the
+project's assignment, else `effectiveAccountDefault` (the default, if it still names a live
+account or a pool with a live member, else nothing). A default is cleared with the thing it names
+(`markAccountRemoved`, `removePool`); moving an account between pools leaves it the default, being
+the same account.
 
 **One resolver turns an assignment into a login.** `AccountResolver` (`Agents/AccountResolver.swift`,
 `SessionStore.accountResolver`, built on `UsageService.shared.ledger`) answers which account a
-project's work for one agent runs as. No assignment → the agent's first live account; an account →
+project's work for one agent runs as. No assignment → the agent's default if one is set (an account
+as below, a pool leased exactly as if the project named it — tabs, planning seats, thaw/rollover,
+`reacquire`, `/switch-account`'s `isAssigned` and the index's unset choice all read the same
+`effectiveAssignment`), else the agent's first live account; an account →
 that account (a tombstone is missing, never another login); a pool → a `CapacityLedger` lease on the
 first member under soft (`LeasePolicy`). When the ledger leases nothing the work still starts on a
 pool member: the first member if the ledger has not seen the pool yet, the first over-soft member,
