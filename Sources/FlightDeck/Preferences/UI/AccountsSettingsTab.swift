@@ -40,7 +40,9 @@ struct AccountsSettingsTab: View {
     }
 
     private var list: AccountList { preferences.preferences.accountList }
-    private var groups: [AccountsPaneModel.Group] { AccountsPaneModel.groups(list, collapsed: collapsed) }
+    private var groups: [AccountsPaneModel.Group] {
+        AccountsPaneModel.groups(list, defaults: preferences.preferences.agentAccountDefaults, collapsed: collapsed)
+    }
     private var allSessions: [Session] { sessions.repos.flatMap(\.sessions) }
 
     var body: some View {
@@ -198,14 +200,7 @@ struct AccountsSettingsTab: View {
     /// The footer says what the order means, and doubles as the drop zone for "last at top
     /// level" — the one place a row can be dropped that is not another row.
     private func groupFooter(_ group: AccountsPaneModel.Group) -> some View {
-        let caption: String = {
-            if group.agent == .gemini { return "Gemini signs in through the system keychain, so it has one account." }
-            guard let first = list.accounts.first(where: { $0.id == group.defaultAccountID }) else {
-                return "Projects use the agent's own sign-in."
-            }
-            return "Projects that haven't chosen an account use “\(first.displayName)”, the topmost."
-        }()
-        return Text(caption)
+        return Text(AccountsPaneModel.footer(for: group, in: list))
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -248,14 +243,14 @@ struct AccountsSettingsTab: View {
     private func rowView(_ row: AccountsPaneModel.Row, in group: AccountsPaneModel.Group) -> some View {
         switch row {
         case .account(let account):
-            accountRow(account, pool: nil, isDefault: account.id == group.defaultAccountID)
+            accountRow(account, pool: nil, group: group)
                 .overlay(alignment: .top) { if dropTargetRow == row.id { dropLine } }
                 .draggable(AccountsPaneModel.payload(.account(account.id)))
                 .dropDestination(for: String.self) { items, _ in
                     perform(items, on: .before(.account(account.id)))
                 } isTargeted: { setTarget(row.id, $0) }
         case .member(let account, let pool):
-            accountRow(account, pool: pool, isDefault: account.id == group.defaultAccountID)
+            accountRow(account, pool: pool, group: group)
                 .padding(.leading, Self.iconColumn + Self.iconSpacing)
                 .overlay(alignment: .top) {
                     if dropTargetRow == row.id { dropLine.padding(.leading, Self.iconColumn + Self.iconSpacing) }
@@ -265,7 +260,7 @@ struct AccountsSettingsTab: View {
                     perform(items, on: .intoPool(pool, before: account.id))
                 } isTargeted: { setTarget(row.id, $0) }
         case .pool(let pool):
-            poolRow(pool)
+            poolRow(pool, group: group)
                 .background {
                     if dropTargetRow == row.id {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -311,8 +306,38 @@ struct AccountsSettingsTab: View {
     static let iconColumn: CGFloat = 26
     static let iconSpacing: CGFloat = 10
 
-    private func accountRow(_ account: AgentAccount, pool: PoolID?, isDefault: Bool) -> some View {
-        HStack(spacing: Self.iconSpacing) {
+    /// The "Default" tag, on whichever row is in effect: an account or a pool.
+    private func defaultCapsule(help: String) -> some View {
+        Text("Default")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.primary.opacity(0.07)))
+            .help(help)
+            .accessibilityIdentifier("accounts-default-badge")
+    }
+
+    /// "Make Default" and, while a choice is in force, "Use Topmost as Default". Shared by the
+    /// account and pool menus; the model decides which rows offer them.
+    @ViewBuilder
+    private func defaultActions(_ row: AccountsPaneModel.Row, in group: AccountsPaneModel.Group) -> some View {
+        let target = AccountsPaneModel.makeDefaultTarget(row, in: group)
+        let canClear = AccountsPaneModel.canClearDefault(in: group)
+        if let target {
+            Button("Make Default") { preferences.setAccountDefault(target, for: group.agent) }
+                .accessibilityIdentifier("accounts-make-default")
+        }
+        if canClear {
+            Button("Use Topmost as Default") { preferences.setAccountDefault(nil, for: group.agent) }
+                .accessibilityIdentifier("accounts-clear-default")
+        }
+        if target != nil || canClear { Divider() }
+    }
+
+    private func accountRow(_ account: AgentAccount, pool: PoolID?, group: AccountsPaneModel.Group) -> some View {
+        let isDefault = account.id == group.defaultAccountID
+        return HStack(spacing: Self.iconSpacing) {
             Image(systemName: account.cachedIdentity == nil ? "person.crop.circle.badge.questionmark" : "person.crop.circle.fill")
                 .font(.title2)
                 .foregroundStyle(account.cachedIdentity == nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
@@ -335,16 +360,10 @@ struct AccountsSettingsTab: View {
             }
             Spacer(minLength: 8)
             if isDefault {
-                Text("Default")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.07)))
-                    .help("Projects that haven't chosen an account use this one")
+                defaultCapsule(help: "Projects that haven't chosen an account use this one")
             }
             Menu {
-                accountActions(account, pool: pool)
+                accountActions(account, pool: pool, group: group)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -354,13 +373,14 @@ struct AccountsSettingsTab: View {
             .accessibilityIdentifier("account-actions-\(account.displayName)")
         }
         .contentShape(Rectangle())
-        .contextMenu { accountActions(account, pool: pool) }
+        .contextMenu { accountActions(account, pool: pool, group: group) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("account-row-\(account.displayName)")
     }
 
     @ViewBuilder
-    private func accountActions(_ account: AgentAccount, pool: PoolID?) -> some View {
+    private func accountActions(_ account: AgentAccount, pool: PoolID?, group: AccountsPaneModel.Group) -> some View {
+        defaultActions(.account(account), in: group)
         Button("Rename") { beginRename(account) }
         Button("Sign In Again") { signIn(account) }
         Button("Relocate…") { relocate(account) }
@@ -386,7 +406,7 @@ struct AccountsSettingsTab: View {
             .disabled(!AccountsSection.canRemove(account, among: preferences.preferences.accounts(for: account.agent)))
     }
 
-    private func poolRow(_ pool: AccountPool) -> some View {
+    private func poolRow(_ pool: AccountPool, group: AccountsPaneModel.Group) -> some View {
         let isCollapsed = collapsed.contains(pool.id)
         return HStack(spacing: Self.iconSpacing) {
             Image(systemName: "square.stack.3d.up.fill")
@@ -402,6 +422,9 @@ struct AccountsSettingsTab: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
+            if pool.id == group.defaultPoolID {
+                defaultCapsule(help: "Projects that haven't chosen an account use this pool")
+            }
             // The disclosure control sits with the row's other controls rather than in the icon
             // column, so a pool's name starts on the same edge as every account's.
             Button {
@@ -434,9 +457,7 @@ struct AccountsSettingsTab: View {
                                     close: { popover = nil })
             }
             Menu {
-                Button("Settings…") { popover = pool.id }
-                Divider()
-                Button("Remove Pool…") { pendingPoolRemoval = pool }
+                poolActions(pool, group: group)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -445,12 +466,17 @@ struct AccountsSettingsTab: View {
             .fixedSize()
         }
         .contentShape(Rectangle())
-        .contextMenu {
-            Button("Settings…") { popover = pool.id }
-            Button("Remove Pool…") { pendingPoolRemoval = pool }
-        }
+        .contextMenu { poolActions(pool, group: group) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pool-row-\(pool.label)")
+    }
+
+    @ViewBuilder
+    private func poolActions(_ pool: AccountPool, group: AccountsPaneModel.Group) -> some View {
+        defaultActions(.pool(pool), in: group)
+        Button("Settings…") { popover = pool.id }
+        Divider()
+        Button("Remove Pool…") { pendingPoolRemoval = pool }
     }
 
     private func popoverBinding(_ id: PoolID) -> Binding<Bool> {

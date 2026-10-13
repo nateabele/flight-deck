@@ -177,6 +177,46 @@ final class PreferencesStore: ObservableObject {
             preferences.projectSettings[path] = settings.isEmpty ? nil : settings
         }
         if indexAccount == .pool(id) { indexAccount = nil }
+        // The agent default too: a default naming a deleted pool would otherwise be ignored
+        // forever by `effectiveAccountDefault` while the pane could never show who held it.
+        clearAccountDefaults { $0 == .pool(id) }
+    }
+
+    // MARK: Agent defaults
+
+    /// What `agent`'s projects run as when they have chosen none, as the user set it (nil: the
+    /// topmost live account). Not validated; callers that act on it want `effectiveAccountDefault`.
+    func accountDefault(for agent: AgentID) -> AccountAssignment? {
+        preferences.storedAgentAccountDefaults?.assignments[agent]
+    }
+
+    /// Sets or clears (nil) `agent`'s default. Writes only on a change, like `indexAccount`.
+    func setAccountDefault(_ assignment: AccountAssignment?, for agent: AgentID) {
+        guard assignment != accountDefault(for: agent) else { return }
+        var next = preferences.storedAgentAccountDefaults ?? AgentAccountDefaults()
+        next.assignments[agent] = assignment
+        preferences.storedAgentAccountDefaults = next.isEmpty ? nil : next
+    }
+
+    /// Drops every default `matches`, for the removal paths (`markAccountRemoved`, `removePool`).
+    private func clearAccountDefaults(where matches: (AccountAssignment) -> Bool) {
+        guard var defaults = preferences.storedAgentAccountDefaults else { return }
+        defaults.assignments = defaults.assignments.filter { !matches($0.value) }
+        preferences.storedAgentAccountDefaults = defaults.isEmpty ? nil : defaults
+    }
+
+    /// `agent`'s default if it still points at something that can run, else nil (the topmost
+    /// account); see `AccountList.effectiveDefault`. The removal paths clear stale defaults, so
+    /// the validation is defence in depth, as in `account(for:project:)`.
+    func effectiveAccountDefault(for agent: AgentID) -> AccountAssignment? {
+        preferences.accountList.effectiveDefault(accountDefault(for: agent), for: agent)
+    }
+
+    /// What `project` runs `agent` as: its own assignment, else the agent's default. nil is the
+    /// agent's topmost live account. Every "which login" question about a project goes through
+    /// here, so a project with no assignment under a pool default behaves as if it named the pool.
+    func effectiveAssignment(for agent: AgentID, project: String) -> AccountAssignment? {
+        projectSettings(project).accounts[agent] ?? effectiveAccountDefault(for: agent)
     }
 
     /// What the capability index's refresh bills (`CapacityPreferences.indexAccount`); nil is
@@ -201,7 +241,7 @@ final class PreferencesStore: ObservableObject {
     /// pool with no live account, or one that no longer exists, is BROKEN (nil) for the same
     /// reason a missing account is.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
-        switch preferences.projectSettings[Self.key(project)]?.accounts[agent] {
+        switch effectiveAssignment(for: agent, project: project) {
         case .account(let assigned)?:
             // A tombstone here is answered as nil — i.e. BROKEN — rather than by silently
             // falling through to the topmost account, which is the wrong-login bug this
@@ -362,6 +402,7 @@ final class PreferencesStore: ObservableObject {
         // Back to Default for the reason project assignments are cleared: an index that names a
         // removed account would refuse every weekly refresh until someone opened its pane.
         if indexAccount == .account(id) { indexAccount = nil }
+        clearAccountDefaults { $0 == .account(id) }
     }
 
     func projectSettings(_ path: String) -> ProjectSettings {
