@@ -40,6 +40,10 @@ final class IntakeCommandCodingTests: XCTestCase {
         try roundTrip(.intakeRemoveNote(id: id, token: token, noteID: noteID), op: "intake.removeNote")
     }
 
+    func testChooseRoundTrips() throws {
+        try roundTrip(.intakeChoose(id: id, token: token, preset: "featurePlan"), op: "intake.choose")
+    }
+
     func testScopeIsFleetWideForAllFour() {
         let me = UUID()
         let all: [FleetCommand] = [
@@ -47,7 +51,8 @@ final class IntakeCommandCodingTests: XCTestCase {
             .intakeDefaultPlay(id: id, token: token, mode: "step"),
             .intakeNote(id: id, token: token, noteID: noteID, kind: "comment", text: "x",
                         checkpoint: nil, block: nil, quote: nil),
-            .intakeRemoveNote(id: id, token: token, noteID: noteID)]
+            .intakeRemoveNote(id: id, token: token, noteID: noteID),
+            .intakeChoose(id: id, token: token, preset: "sketch")]
         for c in all {
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(me)), "\(c)")
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(id)), "\(c)")

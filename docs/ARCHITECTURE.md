@@ -1420,6 +1420,22 @@ The spine is live end to end and proven that way: a real client completes a TLS-
 against a real listener, takes a snapshot of a live `SessionStore`, follows its mutations,
 resumes after a drop and marks a session read — all inside `./scripts/test-unit.sh`.
 
+**The phone chooses fidelity and inspects rounds.** An intake waiting on a fidelity (`awaitingChoice`
+or `parked`) shows the four fidelities on the phone's intake screen, triage's recommendation marked
+with its reason. A tap asks for confirmation (planning starts paid agent rounds), then sends
+`intake.choose` (`FleetCommand.intakeChoose`, `preset` a `Preset` raw value). `IntakeService.phoneChoose`
+validates (`unknown_intake`, `intake_moved_on` for anything but those two states, `unknown_preset`,
+`no_agents` when a planning fidelity has no agent to run it) and calls `choose(_:preset:)`, the Start
+path with the stock `PresetExpansion` config. Read-only rounds inspector: `WireChoice.presets` carries
+`PresetExpansion.config(for:available:)` for each fidelity (computed on the Mac against
+`availableModels()`, so the phone shows what choosing would run), and `WireIntakeDetail.roundConfig` the
+intake's own configuration once shaping, a customized one included (`WireRoundConfig`/`WireSeat`/
+`WireModelChoice`, plain values with raw-string policies and personas). **Compatibility:** every new
+field is optional and additive. `WireIntakeDetail.choose == true` is the phone's only licence to send
+`intake.choose`, because an older Mac drops the socket on an unknown op; without it the phone keeps
+"choose on your Mac". A send nobody answers ends at `IntakeCommandModel`'s deadline with a message.
+Editing agents from the phone is out of scope.
+
 **The phone runs.** It takes a code off the Mac's screen — scanned, or twelve characters typed —
 finds the Mac over Bonjour or by racing remembered addresses, and shows the running fleet in the
 terminal's own idiom: one project section per open project, one row per session, renamed, marked

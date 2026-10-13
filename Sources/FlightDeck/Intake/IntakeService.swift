@@ -1251,6 +1251,25 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone's fidelity choice (`intakeChoose`): the same `choose(_:preset:)` the Mac's own
+    /// Start runs, with the stock `PresetExpansion` config. Only for an intake still waiting on
+    /// the choice — `.review` takes Single task alone on the Mac and is not offered from the phone.
+    /// A fidelity with planning rounds needs an agent that can run them, checked here because
+    /// `choose` would otherwise fail the whole intake for it, and the phone would be left with
+    /// an error it cannot act on instead of a refusal it can word.
+    func phoneChoose(_ id: UUID, token: UUID, preset: String) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        guard i.state == .awaitingChoice || i.state == .parked else { return refuse("intake_moved_on", id) }
+        guard let chosen = Preset(rawValue: preset) else { return refuse("unknown_preset", id) }
+        if chosen != .bead, PresetExpansion.config(for: chosen, available: availableModels()) == nil {
+            return refuse("no_agents", id)
+        }
+        accept(token, for: id)
+        choose(id, preset: chosen)
+        return nil
+    }
+
     /// A note from the phone (spec §6.5 `intakeNote`). The phone sends what it SHOWED — a block
     /// index and the rendered phrase — and the Mac builds the anchor from the markdown source,
     /// so the anchor is the same one the desktop's own highlight gesture would make. A phrase

@@ -1285,6 +1285,10 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneRemoveNote(id, token: token, noteID: noteID) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeChoose(let id, let token, let preset):
+            if let code = store.intakeService.phoneChoose(id, token: token, preset: preset) {
+                return .err(cid: cid, code: code)
+            }
         case .swarmPause(let project):
             guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
             guard store.swarmServiceIfBuilt?.pause(project: path) == true else { return .err(cid: cid, code: "no_swarm") }

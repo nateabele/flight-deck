@@ -745,9 +745,35 @@ page.
     before this: "Waiting for you" on both screens, exactly as before. Wrong: a decode failure,
     a blank session list, or a card with a button that does nothing.
 
+98. **Choose fidelity from the phone.** Start an intake on the Mac and leave it at the fidelity
+    choice. On the phone's intake screen the Fidelity section lists Single task, Sketch, Feature
+    plan and Full plan, with triage's pick marked "Recommended" beside its reason. Tap Full plan:
+    a confirmation says it starts paid agent rounds; Cancel does nothing. Tap again and Start:
+    within a couple of seconds the Mac's intake leaves the choice and begins shaping with the
+    Full plan configuration, and the phone's screen follows. Also try it on a parked intake. Wrong:
+    a tap that starts at once with no question, a second start from one tap, the Mac still
+    waiting after Start, or any wording that names the fidelity or an agent by an internal term.
+99. **Refusals in words.** Choose on the phone, but first choose on the Mac so the intake has
+    moved on: the phone says "This intake has moved on." and the screen catches up. Wrong: a raw
+    code or a stuck Start.
+100. **The round inspector while choosing.** Tap the info button beside each fidelity (not
+    Single task, which has none): a read-only list by stage (Draft, Synthesis, Refine, Encode,
+    Polish) naming each agent, its model and effort, a drafter's persona and any fallback, then
+    rounds, cross-check, fresh eyes + dedup and default play. It matches what the Mac's own
+    Rounds inspector shows for the same fidelity. Wrong: a missing agent, an editable control, or
+    the word "seat".
+101. **The round inspector while shaping.** Once started, a Rounds row appears on the intake
+    screen. Open it, then edit an agent or a cap in the Mac's Rounds inspector: the phone shows the
+    change within a poll, and the title reads "..., customized". Wrong: the phone showing the stock
+    configuration after a Mac edit.
+102. **Version skew for the chooser.** This phone against a Mac from before this: the Fidelity
+    section keeps "Choose fidelity and start on your Mac for now." with no buttons and no Rounds
+    row, and the phone stays connected. An older phone against this Mac shows the old text and
+    decodes the detail. Wrong: a chooser that does nothing, or a dropped connection.
+
 ## A second checklist: the iOS plumbing
 
-The ninety-seven items above test the *feature* — that pairing, replication, resume, revocation,
+The hundred and two items above test the *feature* — that pairing, replication, resume, revocation,
 typing into and answering a live agent, and watching and steering Flight Control behave. These fifteen test the *app*, and they are
 separated because they have a different character: each one was identified during review or
 execution as something no amount of reading or type-checking on the build machine could settle,

@@ -230,6 +230,34 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertEqual(acked, 0)
     }
 
+    func testChooseIsAnActionOfItsOwnAndSendsTheChooseCommand() {
+        let c = StubCommander(), m = model(c)
+        let id = intake
+        var acked = 0
+        m.send(.choose("sketch"), command: { .intakeChoose(id: id, token: $0, preset: "sketch") }, onAck: { acked += 1 })
+        XCTAssertEqual(m.inFlight, [.choose("sketch")])
+        guard case .intakeChoose(_, _, let preset) = c.commands[0] else { return XCTFail("\(c.commands)") }
+        XCTAssertEqual(preset, "sketch")
+        c.answer(.success(()))
+        XCTAssertEqual(acked, 1)
+    }
+
+    /// A Mac that predates the command never answers it: the deadline words that, no hang.
+    func testAChooseNobodyAnswersEndsWithAMessage() async throws {
+        let c = StubCommander(), m = model(c, timeout: .milliseconds(20))
+        let id = intake
+        m.send(.choose("sketch"), command: { .intakeChoose(id: id, token: $0, preset: "sketch") }, onAck: {})
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(m.inFlight.isEmpty)
+        XCTAssertEqual(m.message, "Couldn't reach your Mac.")
+    }
+
+    func testChooseRefusalsHaveWords() {
+        XCTAssertEqual(CommandCopy.message(for: .server(code: "no_agents")),
+                       "No agent is available on your Mac to run planning rounds.")
+        XCTAssertEqual(CommandCopy.message(for: .server(code: "intake_moved_on")), "This intake has moved on.")
+    }
+
     func testCopyTable() {
         let table: [(FleetRequestError?, String)] = [
             (nil, "Couldn't reach your Mac."),

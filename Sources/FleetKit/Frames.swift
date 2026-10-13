@@ -302,6 +302,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     case intakeNote(id: UUID, token: UUID, noteID: UUID, kind: String, text: String,
                     checkpoint: Int?, block: Int?, quote: String?)
     case intakeRemoveNote(id: UUID, token: UUID, noteID: UUID)
+    /// The phone choosing a fidelity (`preset` is a `Preset` raw value) for an intake waiting on
+    /// one; the Mac runs `IntakeService.choose`. **Sent only when the detail has `choose == true`**
+    /// — an older Mac drops the socket on this unknown op, as for the four above.
+    case intakeChoose(id: UUID, token: UUID, preset: String)
 
     /// Pause or resume project `project`'s swarm (L3-S §8). Idempotent by state, so no token.
     /// Sent only for a project whose snapshot carries `swarm`, which an older Mac never sends —
@@ -316,7 +320,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
         case block, approve, feedback
-        case command, stage, mode, noteID, kind, checkpoint, quote
+        case command, stage, mode, noteID, kind, checkpoint, quote, preset
     }
 
     private enum Op: String, Codable {
@@ -337,6 +341,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeDefaultPlay = "intake.defaultPlay"
         case intakeNote = "intake.note"
         case intakeRemoveNote = "intake.removeNote"
+        case intakeChoose = "intake.choose"
         case swarmPause = "swarm.pause"
         case swarmResume = "swarm.resume"
         case handoffConfirm = "handoff.confirm"
@@ -437,6 +442,11 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(noteID, forKey: .noteID)
+        case .intakeChoose(let id, let token, let preset):
+            try c.encode(Op.intakeChoose, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(preset, forKey: .preset)
         case .swarmPause(let project):
             try c.encode(Op.swarmPause, forKey: .op); try c.encode(project, forKey: .project)
         case .swarmResume(let project):
@@ -563,6 +573,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 noteID: try c.decode(UUID.self, forKey: .noteID)
+            )
+        case .intakeChoose:
+            self = .intakeChoose(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                preset: try c.decode(String.self, forKey: .preset)
             )
         case .swarmPause: self = .swarmPause(project: try c.decode(UUID.self, forKey: .project))
         case .swarmResume: self = .swarmResume(project: try c.decode(UUID.self, forKey: .project))

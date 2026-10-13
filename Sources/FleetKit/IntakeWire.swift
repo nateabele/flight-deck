@@ -73,19 +73,28 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// true from a Mac that accepts `intake.*` commands — the phone's ONLY licence to send them;
     /// an older Mac drops the socket on an unknown command. nil from a Phase-1 Mac.
     public var steer: Bool?
+    /// true from a Mac that accepts `intake.choose` — the phone's licence to offer the fidelity
+    /// chooser, separate from `steer` because a Mac that steers but predates this would drop
+    /// the socket on the unknown op. nil from such a Mac, and the phone says to choose on the Mac.
+    public var choose: Bool?
+    /// The round configuration the intake is actually running (a customized one included), once
+    /// a fidelity is chosen; nil before that, and from a Mac that predates the phone inspector.
+    public var roundConfig: WireRoundConfig?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
         progress: [WireProgressPhase] = [], board: WireBoard? = nil, agents: [WireAgent] = [],
         rounds: [WireRound] = [], questions: WireQuestions? = nil, choice: WireChoice? = nil,
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
-        headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil
+        headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil,
+        roundConfig: WireRoundConfig? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
         self.questions = questions; self.choice = choice; self.failure = failure
         self.pendingNotes = pendingNotes; self.halt = halt; self.headCheckpoint = headCheckpoint
-        self.servedAt = servedAt; self.steer = steer
+        self.servedAt = servedAt; self.steer = steer; self.choose = choose
+        self.roundConfig = roundConfig
     }
 }
 
@@ -332,13 +341,88 @@ public struct WireChoice: Codable, Equatable, Sendable {
     public var reason: String?
     public var chosen: String?
     public var roundsSummary: String?
+    /// What each fidelity would seat, in the order the Mac lists them; nil from a Mac that
+    /// predates the phone chooser, which the phone reads as "choose on the Mac".
+    public var presets: [WirePresetOption]?
 
     public init(
         recommended: String? = nil, reason: String? = nil, chosen: String? = nil,
-        roundsSummary: String? = nil
+        roundsSummary: String? = nil, presets: [WirePresetOption]? = nil
     ) {
         self.recommended = recommended; self.reason = reason; self.chosen = chosen
-        self.roundsSummary = roundsSummary
+        self.roundsSummary = roundsSummary; self.presets = presets
+    }
+}
+
+/// One fidelity on the chooser. `preset` is the `Preset` raw value, kept a string so a fidelity
+/// added on the Mac later renders degraded on an older phone. `config` is what the Mac would
+/// seat for it right now (`PresetExpansion`); nil for the single-task fidelity, which runs no
+/// planning rounds, and for a machine with no agent able to run them.
+public struct WirePresetOption: Codable, Equatable, Sendable {
+    public var preset: String
+    public var config: WireRoundConfig?
+
+    public init(preset: String, config: WireRoundConfig? = nil) {
+        self.preset = preset; self.config = config
+    }
+}
+
+/// An agent, model and effort — the Mac's `ModelChoice`. `agent` is the `AgentID` raw value and
+/// `agentName` its display name, so the phone never needs the Mac's agent table.
+public struct WireModelChoice: Codable, Equatable, Sendable {
+    public var agent: String
+    public var agentName: String?
+    public var model: String
+    public var effort: String
+
+    public init(agent: String, agentName: String? = nil, model: String, effort: String) {
+        self.agent = agent; self.agentName = agentName; self.model = model; self.effort = effort
+    }
+}
+
+/// One agent in a round configuration — the Mac's `Slot`. `persona` is the `DrafterPersona` raw
+/// value for a drafter, synthesizer or reviewer, `fallback` the availability retry.
+public struct WireSeat: Codable, Equatable, Sendable {
+    public var choice: WireModelChoice
+    public var persona: String?
+    public var fallback: WireModelChoice?
+
+    public init(choice: WireModelChoice, persona: String? = nil, fallback: WireModelChoice? = nil) {
+        self.choice = choice; self.persona = persona; self.fallback = fallback
+    }
+}
+
+/// The Mac's `RoundConfig` as plain values, for the phone's read-only inspector. `crossCheck` is
+/// the `CrossCheckPolicy` raw value and `defaultPlay` the `PlayMode` one. The phone shows an
+/// optional agent only when present, so a stage with no agent (Sketch has no polisher) simply
+/// has no row.
+public struct WireRoundConfig: Codable, Equatable, Sendable {
+    public var drafters: [WireSeat]
+    public var synthesizer: WireSeat?
+    public var reviewer: WireSeat?
+    public var crossReviewer: WireSeat?
+    public var crossCheck: String?
+    public var integrator: WireSeat
+    public var encoder: WireSeat
+    public var polisher: WireSeat?
+    public var refinementCap: Int
+    public var polishCap: Int
+    public var freshEyesAndDedup: Bool
+    public var defaultPlay: String
+    public var customized: Bool
+
+    public init(
+        drafters: [WireSeat], synthesizer: WireSeat? = nil, reviewer: WireSeat? = nil,
+        crossReviewer: WireSeat? = nil, crossCheck: String? = nil, integrator: WireSeat,
+        encoder: WireSeat, polisher: WireSeat? = nil, refinementCap: Int, polishCap: Int,
+        freshEyesAndDedup: Bool, defaultPlay: String, customized: Bool
+    ) {
+        self.drafters = drafters; self.synthesizer = synthesizer; self.reviewer = reviewer
+        self.crossReviewer = crossReviewer; self.crossCheck = crossCheck
+        self.integrator = integrator; self.encoder = encoder; self.polisher = polisher
+        self.refinementCap = refinementCap; self.polishCap = polishCap
+        self.freshEyesAndDedup = freshEyesAndDedup; self.defaultPlay = defaultPlay
+        self.customized = customized
     }
 }
 

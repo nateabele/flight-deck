@@ -7,6 +7,8 @@ struct IntakeScreen: View {
     let model: IntakeDetailModel
     let fleet: FleetModel
     @State private var confirmingStop = false
+    /// The fidelity a tap picked, held until the confirmation answers: it starts paid rounds.
+    @State private var confirmingFidelity: FidelityOption?
     private var commands: IntakeCommandModel { fleet.flightControl.commands(for: id) }
     private var frozenAt: Date? { if case .lost = fleet.state { return fleet.lastLive }; return nil }
 
@@ -78,6 +80,15 @@ struct IntakeScreen: View {
             }
         }
         .confirmationDialog(
+            confirmingFidelity.map { FidelityChooser.confirmation(for: $0).title } ?? "", isPresented: fidelityConfirmation,
+            titleVisibility: .visible, presenting: confirmingFidelity
+        ) { option in
+            Button(FidelityChooser.confirmation(for: option).button) { choose(option.preset) }
+            Button("Cancel", role: .cancel) {}
+        } message: { option in
+            Text(FidelityChooser.confirmation(for: option).message).font(.subheadline)
+        }
+        .confirmationDialog(
             TransportKeys.stopConfirmation(detail: d).title, isPresented: $confirmingStop, titleVisibility: .visible
         ) {
             Button("Stop Run", role: .destructive) { tape("stop") }
@@ -85,6 +96,39 @@ struct IntakeScreen: View {
         } message: {
             Text(TransportKeys.stopConfirmation(detail: d).message).font(.subheadline)
         }
+    }
+
+    private var fidelityConfirmation: Binding<Bool> {
+        Binding(get: { confirmingFidelity != nil }, set: { if !$0 { confirmingFidelity = nil } })
+    }
+
+    private func choose(_ preset: String) {
+        commands.send(.choose(preset), command: { .intakeChoose(id: id, token: $0, preset: preset) },
+                      onAck: { model.refresh() })
+    }
+
+    @ViewBuilder private func fidelityRow(_ option: FidelityOption, live: Bool, busy: Bool) -> some View {
+        HStack {
+            Button { confirmingFidelity = option } label: {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(option.name).font(.subheadline)
+                        if option.recommended { Text("Recommended").font(.caption).foregroundStyle(Color.accentColor) }
+                    }
+                    Text(option.summary).font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .disabled(!live || busy)
+            if option.hasRounds {
+                Button { fleet.path.append(IntakeRoute.rounds(intake: id, preset: option.preset)) } label: {
+                    Image(systemName: "info.circle").frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityLabel("Rounds for \(option.name)")
+            }
+        }
+        .buttonStyle(.borderless)
     }
 
     private func tape(_ command: String, stage: String? = nil) {
@@ -138,7 +182,12 @@ struct IntakeScreen: View {
                 }
                 if let reason = choice.reason { Text(reason).font(.subheadline).foregroundStyle(.secondary) }
                 if let rounds = choice.roundsSummary { Text(rounds).font(.caption).foregroundStyle(.secondary) }
-                Text("Choose fidelity and start on your Mac for now.").font(.caption).foregroundStyle(.secondary)
+                if let options = FidelityChooser.options(detail: d) {
+                    let busy = options.contains { commands.inFlight.contains(.choose($0.preset)) }
+                    ForEach(options) { fidelityRow($0, live: frozenAt == nil, busy: busy) }
+                } else {
+                    Text("Choose fidelity and start on your Mac for now.").font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         if d.summary.state == "review" {
@@ -150,6 +199,17 @@ struct IntakeScreen: View {
                 if let output = failure.output {
                     DisclosureGroup("Show output") { Text(output).font(.caption.monospaced()).textSelection(.enabled) }
                         .font(.subheadline)
+                }
+            }
+        }
+        if d.roundConfig != nil {
+            Section {
+                NavigationLink(value: IntakeRoute.rounds(intake: id, preset: nil)) {
+                    HStack {
+                        Text("Rounds").font(.subheadline)
+                        Spacer()
+                        if d.roundConfig?.customized == true { Text("customized").font(.caption).foregroundStyle(.secondary) }
+                    }
                 }
             }
         }

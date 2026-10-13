@@ -201,6 +201,51 @@ final class IntakeDetailProjectionTests: XCTestCase {
         XCTAssertEqual(controls.cyclePlanned, refineSlots)
     }
 
+    /// While the fidelity is open the detail carries what each one WOULD seat, from the same
+    /// `PresetExpansion` the Mac's Start runs, and no running configuration yet.
+    func testAChoosingDetailCarriesEachFidelitiesConfigAndTheChooseLicence() async throws {
+        let i = try seed(.awaitingChoice)
+        let svc = await makeService()
+        let d = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertEqual(d.choose, true)
+        XCTAssertNil(d.roundConfig)
+        let presets = try XCTUnwrap(d.choice?.presets)
+        XCTAssertEqual(presets.map(\.preset), ["bead", "sketch", "featurePlan", "fullPlan"])
+        XCTAssertNil(presets[0].config)
+        let full = try XCTUnwrap(presets[3].config)
+        XCTAssertEqual(full, IntakeDetailProjection.wireConfig(try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))))
+        XCTAssertEqual(full.drafters.count, 4)
+        XCTAssertEqual(full.drafters.map(\.persona), ["arbiter", "realist", "coverage", "stressTest"])
+        XCTAssertEqual(full.crossCheck, "firstAndLast")
+        XCTAssertNotNil(full.drafters[0].fallback)
+        XCTAssertTrue(full.freshEyesAndDedup)
+    }
+
+    func testAParkedDetailOffersTheSameChoice() async throws {
+        let i = try seed(.parked)
+        let svc = await makeService()
+        let d = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertEqual(d.choice?.presets?.count, 4)
+    }
+
+    /// Once shaping, the inspector shows the intake's own configuration, a customized one as it
+    /// stands, and the chooser is gone.
+    func testAShapingDetailCarriesItsOwnRoundConfigIncludingACustomizedOne() async throws {
+        var i = try seed(.shaping)
+        var config = try XCTUnwrap(i.roundConfig)
+        config.refinementCap = 7
+        config.customized = true
+        i.roundConfig = config
+        try IntakeStore(root: root).save(i)
+        let svc = await makeService()
+        let d = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertNil(d.choice)
+        XCTAssertEqual(d.roundConfig?.refinementCap, 7)
+        XCTAssertEqual(d.roundConfig?.customized, true)
+        XCTAssertEqual(d.roundConfig?.synthesizer?.choice.agent, "codex")
+        XCTAssertEqual(d.roundConfig?.synthesizer?.choice.agentName, config.synthesizer?.choice.agent.displayName)
+    }
+
     func testTheEtagIsStableWithControls() async throws {
         let (i, _) = try seedRunningDraft()
         let svc = await makeService()
