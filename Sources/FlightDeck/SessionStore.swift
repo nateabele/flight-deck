@@ -1297,44 +1297,76 @@ final class SessionStore: ObservableObject {
         notifier?.notify(sessionID: session.id, title: title, subtitle: session.title, body: body)
     }
 
-    /// Carries a frozen, idle tab's conversation from its spent account to `account` and resumes
+    /// Why a tab's conversation is being carried to another account, which decides how the old
+    /// agent is retired and what the user is told.
+    private enum RolloverOrigin {
+        /// A smart-sleep thaw found the account spent. The old agent is frozen (its surface
+        /// already gone) and the sleep controller still tracks it.
+        case thaw
+        /// The user asked (`/switch-account`). The old agent is live and idle, its surface up.
+        case requested
+    }
+
+    /// Carries an idle tab's conversation from its current account to `account` and resumes
     /// it there, in the same tab, under the same conversation id — the L3-U hand-off's account
     /// move done for a manual tab. Not `HandoffDriver` itself: that hands a swarm TASK to a new
     /// agent with a prompt pointing at the old transcript, a fresh conversation, and a manual
     /// tab has no task and must keep its conversation whole.
     ///
-    /// Ordered so nothing is lost on any failure: the copy is made while the frozen agent still
-    /// exists (a failed copy wakes it in place, on the spent account, with a notice); only then
-    /// is the old agent killed, the tab restamped and the agent resumed under the new home. The
-    /// draft read at the freeze is pasted back once the new composer is up (`pendingDrafts`).
-    private func rollOver(_ id: UUID, to account: AgentAccount, resolution: AccountResolution, draft: String) async {
+    /// Ordered so nothing is lost on any failure: the copy is made while the old agent still
+    /// exists (a failed copy leaves it where it is, on its own account, with a notice); only
+    /// then is the old agent killed, the tab restamped and the agent resumed under the new home.
+    /// The draft read before the old agent goes is pasted back once the new composer is up
+    /// (`pendingDrafts`).
+    private func rollOver(_ id: UUID, to account: AgentAccount, resolution: AccountResolution, draft: String,
+                          origin: RolloverOrigin = .thaw) async {
         defer { rollingOver.remove(id) }
+        // A failed move leaves the old agent running: a thawed one is woken where it sat, a
+        // live one was never stopped.
+        func stayPut() { if origin == .thaw { thawInPlace(id, notice: nil) } }
         guard let old = session(for: id), let transfer = old.agent.conversationTransfer,
               let from = self.account(for: old)
         else {
             accountResolver?.release(resolution)
-            return thawInPlace(id, notice: nil)
+            return stayPut()
         }
         let moved: Session
         do {
             moved = try await transfer.transfer(old, from: from.home, to: account.home)
         } catch {
             accountResolver?.release(resolution)
-            thawInPlace(id, notice: nil)
-            notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
-                             body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
+            stayPut()
+            switch origin {
+            case .thaw:
+                notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
+                                 body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
+            case .requested:
+                notifier?.notify(sessionID: id, title: "Could not move to “\(account.displayName)”", subtitle: old.title,
+                                 body: "Moving this conversation failed (\(error)), so it stays on “\(from.displayName)”.")
+            }
+            return
+        }
+        // The user typed while the copy ran: the copy is already stale, and killing the agent
+        // now would drop its turn. Only a live agent can have started one.
+        if origin == .requested, statuses[id]?.activity != .idle {
+            accountResolver?.release(resolution)
+            notifier?.notify(sessionID: id, title: "Did not move to “\(account.displayName)”", subtitle: old.title,
+                             body: "This conversation started a turn before it could move, so it stays on “\(from.displayName)”. Run /switch-account again when it is idle.")
             return
         }
         // Closed while the copy ran: nothing to resume, and the lease is nobody's.
         guard let at = locate(id) else {
             accountResolver?.release(resolution)
-            sleepController.forget(id)
+            if origin == .thaw { sleepController.forget(id) }
             return
         }
 
-        // Retire the frozen agent. Its surface went at the freeze; `terminate` SIGCONTs the
-        // stopped group before SIGTERM, so it dies rather than sitting stopped forever.
-        sleepController.forget(id)
+        // Retire the old agent. A frozen one lost its surface at the freeze, and `terminate`
+        // SIGCONTs the stopped group before SIGTERM, so it dies rather than sitting stopped
+        // forever; a live one still has its surface, which `tearDownSurface` drops. Whatever
+        // lease it held goes with it: the new account's is taken below.
+        if origin == .thaw { sleepController.forget(id) }
+        accountResolver?.release(holder: id)
         tearDownSurface(for: id)
         daemonControl.terminate(id)
         stopWatching(id)
@@ -1394,9 +1426,100 @@ final class SessionStore: ObservableObject {
         if !draft.isEmpty {
             pendingDrafts[id] = DeferredPrompt(text: draft, deadline: now().addingTimeInterval(Self.draftRestoreWindow))
         }
-        notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: updated.title,
-                         body: "This conversation moved to “\(account.displayName)” and resumed there.")
+        switch origin {
+        case .thaw:
+            notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: updated.title,
+                             body: "This conversation moved to “\(account.displayName)” and resumed there.")
+        case .requested:
+            notifier?.notify(sessionID: id, title: "Moved to “\(account.displayName)”", subtitle: updated.title,
+                             body: "You asked to move this conversation from “\(from.displayName)” to “\(account.displayName)”. It resumed there.")
+        }
         objectWillChange.send()
+    }
+
+    // MARK: - /switch-account
+
+    /// How long the move waits after the request that asked for it is answered. The asking
+    /// process is the one the move retires, so its reply has to reach it first; the CLI's exit
+    /// and the mod's `command.run` result are a few milliseconds behind the socket reply.
+    var accountSwitchDelay: Duration = .milliseconds(800)
+
+    /// What `/switch-account` offers this tab, or why it can't switch at all.
+    func accountChoices(for id: UUID) -> WireAccountChoices? {
+        guard let session = session(for: id), let resolver = accountResolver else { return nil }
+        return resolver.choices(agent: session.agent, project: session.workingDirectory,
+                                current: accountIsMissing(for: session) ? nil : account(for: session))
+    }
+
+    /// The refusals shared by every tab that cannot move right now, or nil when it can.
+    private func accountSwitchRefusal(for session: Session) -> String? {
+        let id = session.id
+        if session.agent.conversationTransfer == nil {
+            return "\(session.agent.displayName) cannot carry a conversation to another account."
+        }
+        // A swarm agent's account is the hand-off driver's to move (L3-U), as at a thaw.
+        if swarmServiceIfBuilt?.agentRecord(id) != nil {
+            return "This tab is a swarm agent; Flight Deck moves its account itself."
+        }
+        if sleepController.asleep.contains(id) {
+            return "This tab is asleep. Open it, then try again."
+        }
+        if rollingOver.contains(id) { return "This conversation is already moving to another account." }
+        if accountIsMissing(for: session) || account(for: session) == nil {
+            return "This tab has no account on file to move it from."
+        }
+        if statuses[id]?.activity != .idle {
+            return "This conversation is mid-turn. Wait until it is idle, then try again."
+        }
+        return nil
+    }
+
+    /// Handles `account.switch`: resolves `target`, answers, and only then schedules the move.
+    /// The answer is returned synchronously and the move starts `accountSwitchDelay` later, after
+    /// a re-check that the tab is still idle, because the claude process that asked is the one
+    /// the move kills. Nothing here ever kills anything on a refusal.
+    func requestAccountSwitch(_ id: UUID, target: String) -> WireAccountSwitchResult {
+        guard let session = session(for: id), let resolver = accountResolver else {
+            return WireAccountSwitchResult(ok: false, message: "No such tab.")
+        }
+        if let refusal = accountSwitchRefusal(for: session) { return WireAccountSwitchResult(ok: false, message: refusal) }
+        let current = account(for: session)
+        switch resolver.switchDecision(agent: session.agent, current: current, target: target) {
+        case .refuse(let message):
+            return WireAccountSwitchResult(ok: false, message: message)
+        case .stay(let account):
+            return WireAccountSwitchResult(ok: true, message: "Already on “\(account.displayName)”.")
+        case .move(let account, let note):
+            rollingOver.insert(id)
+            // Not inline: the reply must be on its way first.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: self?.accountSwitchDelay ?? .zero)
+                await self?.beginRequestedMove(id, to: account)
+            }
+            let message = "Moving this conversation to “\(account.displayName)”. It will resume there in a moment."
+            return WireAccountSwitchResult(ok: true, message: note.map { "\($0) \(message)" } ?? message,
+                                           to: account.displayName)
+        }
+    }
+
+    /// The second half of `requestAccountSwitch`, once the asking process has its answer:
+    /// re-checks the tab, reads its composer while the agent can still be read, and rolls over.
+    private func beginRequestedMove(_ id: UUID, to account: AgentAccount) async {
+        guard let session = session(for: id) else { rollingOver.remove(id); return }
+        let reader = injectorOverride ?? surfaces[id]
+        let draft = reader.flatMap { session.agent.textChannel?.draft($0) }
+        guard statuses[id]?.activity == .idle, let draft else {
+            rollingOver.remove(id)
+            notifier?.notify(sessionID: id, title: "Did not move to “\(account.displayName)”", subtitle: session.title,
+                             body: draft == nil
+                                ? "Flight Deck could not read this tab’s unsent text, so it stays put rather than risk losing it."
+                                : "This conversation started a turn before it could move, so it stays put. Run /switch-account again when it is idle.")
+            return
+        }
+        // No lease on the resolution: the tail of `rollOver` takes it with `reacquire`, which
+        // leases only when the project's assigned hosted pool lists the new account.
+        let resolution = AccountResolution(agent: session.agent, account: account, source: .assigned)
+        await rollOver(id, to: account, resolution: resolution, draft: draft, origin: .requested)
     }
 
     /// Pastes each carried draft into its resumed agent's composer, once that composer is on

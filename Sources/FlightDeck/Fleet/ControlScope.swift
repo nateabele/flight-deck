@@ -127,6 +127,15 @@ enum ControlScope {
             // Reads too: `host.info` crosses to the host, but asks it only for facts and
             // changes nothing there or here. An agent in any tab may need the toolchain.
             return true
+        case .accountList:
+            // Reads the choices the asking tab's agent has; changes nothing.
+            return true
+        case .accountSwitch(let session, _):
+            // Moves one tab's conversation, so it is a write to that tab: `.full` and a human
+            // shell reach any tab, `.ownSession` only the caller's own, `.readOnly` none.
+            if level == .full || caller == .human { return true }
+            guard case .session(let me) = caller, level == .ownSession else { return false }
+            return session == me
         case .openConversation:
             return level == .full || caller == .human
         case .delegate(let delegate):

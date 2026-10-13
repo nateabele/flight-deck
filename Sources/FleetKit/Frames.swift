@@ -780,11 +780,16 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case recipeCheck(cid: Int, problems: [String])
     /// The reply to `host.disk`.
     case hostDisk(cid: Int, [WireWorkspaceUsage])
+    /// The reply to `FleetRequest.accountList`. Unsequenced, like `page`.
+    case accountChoices(cid: Int, WireAccountChoices)
+    /// The reply to `FleetRequest.accountSwitch`. Unsequenced, like `page`; sent before the
+    /// move it announces begins.
+    case accountSwitched(cid: Int, WireAccountSwitchResult)
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
-        case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
+        case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage, choices, switched
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
@@ -793,6 +798,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
+        case accountChoices, accountSwitched
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -909,6 +915,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.hostDisk, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(usage, forKey: .usage)
+        case .accountChoices(let cid, let choices):
+            try c.encode(Tag.accountChoices, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(choices, forKey: .choices)
+        case .accountSwitched(let cid, let result):
+            try c.encode(Tag.accountSwitched, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(result, forKey: .switched)
         }
     }
 
@@ -1012,6 +1026,12 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .hostDisk:
                 self = .hostDisk(cid: try c.decode(Int.self, forKey: .cid),
                                  try c.decode([WireWorkspaceUsage].self, forKey: .usage))
+            case .accountChoices:
+                self = .accountChoices(cid: try c.decode(Int.self, forKey: .cid),
+                                       try c.decode(WireAccountChoices.self, forKey: .choices))
+            case .accountSwitched:
+                self = .accountSwitched(cid: try c.decode(Int.self, forKey: .cid),
+                                        try c.decode(WireAccountSwitchResult.self, forKey: .switched))
             }
             return
         }
@@ -1034,7 +1054,8 @@ public extension ServerFrame {
              .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
              .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
-             .recipeCheck(let cid, _), .hostDisk(let cid, _):
+             .recipeCheck(let cid, _), .hostDisk(let cid, _), .accountChoices(let cid, _),
+             .accountSwitched(let cid, _):
             return cid
         }
     }

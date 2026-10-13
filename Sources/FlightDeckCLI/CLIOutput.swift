@@ -75,6 +75,27 @@ enum CLIOutput {
         .joined(separator: "\n")
     }
 
+    /// `account list` for a human: each pool, its members indented beneath it, then the accounts
+    /// in no pool. `*` marks the account the tab runs as.
+    static func accountChoices(_ choices: WireAccountChoices) -> String {
+        func state(_ raw: String) -> String {
+            ["underSoft": "under soft", "overSoft": "over soft", "overHard": "over hard"][raw] ?? raw
+        }
+        func row(_ a: WireAccountChoice, indent: String) -> String {
+            "\(indent)\(a.isCurrent ? "*" : " ") \(a.displayName)\(a.email.map { " <\($0)>" } ?? "")  \(state(a.state))"
+        }
+        var lines: [String] = []
+        for pool in choices.pools {
+            lines.append("\(pool.label)  (pool \(pool.id)\(pool.isAssigned ? ", assigned to this project" : ""))")
+            lines += pool.members.map { row($0, indent: "  ") }
+        }
+        if !choices.accounts.isEmpty {
+            if !choices.pools.isEmpty { lines.append("No pool") }
+            lines += choices.accounts.map { row($0, indent: choices.pools.isEmpty ? "" : "  ") }
+        }
+        return lines.isEmpty ? "No accounts." : lines.joined(separator: "\n")
+    }
+
     /// "4m ago". POSIX locale so the output a script or test reads does not change with the
     /// user's language settings.
     static func relative(_ date: Date, now: Date) -> String {

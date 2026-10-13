@@ -1092,7 +1092,7 @@ public extension ServerFrame {
         case .snapshot, .event, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
              .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
-             .recipeCheck, .hostDisk:
+             .recipeCheck, .hostDisk, .accountChoices, .accountSwitched:
             return false
         }
     }
