@@ -40,6 +40,18 @@ final class TriageTests: XCTestCase {
         XCTAssertFalse(p.contains("agent instructions"), p)
         XCTAssertFalse(p.contains("README"), p)
     }
+    /// Triage pins the scope down with the human before it recommends (the maintainer, 2026-10-13): it
+    /// asks as many questions as it takes rather than as few as it can get away with, and an
+    /// answer that leaves the scope open earns another round instead of a forced guess.
+    func testTriageAsksAsManyQuestionsAsTheScopeNeeds() {
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: nil, readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertTrue(p.contains("Ask as many clarifying\n  questions as it takes"), p)
+        XCTAssertFalse(p.contains("do not ask anything"), p)
+        let answers = Triage.answersPrompt(questions: ["Which screens?"], answers: ["All of them"])
+        XCTAssertTrue(answers.contains("ask your\nfollow-up questions now (kind=questions)"), answers)
+    }
+
     func testPromptStatesPerOpRequiredFieldsAndFollowUpIsAnOp() {
         let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
                                      agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
