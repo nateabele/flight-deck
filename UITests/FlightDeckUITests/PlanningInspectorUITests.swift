@@ -197,16 +197,20 @@ final class PlanningInspectorUITests: XCTestCase {
         field.typeText("Add a dark mode")
         XCTAssertEqual(field.value as? String, "Add a dark mode")
 
-        element(app, "intake-composer-expand").click()
+        // By label: ProjectView's own "project-view" identifier replaces a SwiftUI control's
+        // identifier beneath it (the UI-test Mac's hierarchy showed the button as
+        // 'project-view'), so "intake-composer-expand" never matched. The text views keep
+        // theirs because AppKit sets them.
+        app.buttons["Expand the editor"].click()
         let expanded = element(app, "intake-intent-expanded-field")
         XCTAssertTrue(expanded.waitForExistence(timeout: 5), "the expanded editor never appeared")
         XCTAssertEqual(expanded.value as? String, "Add a dark mode", "expanding lost the draft")
         XCTAssertFalse(field.exists, "two editors are live on one draft")
-        XCTAssertTrue(element(app, "intake-composer-placeholder").exists, "the list shows no placeholder while expanded")
+        XCTAssertTrue(app.staticTexts["Editing in the main view"].exists,"the list shows no placeholder while expanded")
 
         expanded.click()
         expanded.typeText(" and a light one")
-        element(app, "intake-composer-collapse").click()
+        app.buttons["Collapse the editor"].click()
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the list's composer did not come back")
         XCTAssertEqual(field.value as? String, "Add a dark mode and a light one", "collapsing lost the typed text")
         XCTAssertFalse(expanded.exists, "the expanded editor is still on screen")
