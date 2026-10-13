@@ -186,13 +186,15 @@ final class ClaudePluginPayloadTests: XCTestCase {
 
     private var staged: [URL] = []
 
-    /// The usage mod is gone: the status line replaced it (`ClaudeStatusLine`). A stale
-    /// `modules` entry would make claude load a file that no longer ships, and a mod the engine
-    /// switched off would blank every claude meter with nothing here to notice.
-    func testHooksManifestLoadsNoModuleAndTheStatusLineShips() throws {
+    /// The usage mod is gone: the status line replaced it (`ClaudeStatusLine`). The one module the
+    /// manifest names is `/switch-account`'s, and it must be a file that ships: a stale `modules`
+    /// entry would make claude load a file that no longer ships, and a mod the engine switched
+    /// off would blank every claude meter with nothing here to notice.
+    func testHooksManifestLoadsOnlyTheSwitchAccountModuleAndTheStatusLineShips() throws {
         let root = try pluginRoot()
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("hooks/hooks.json"))) as? [String: Any])
-        XCTAssertNil(obj["modules"])
+        XCTAssertEqual(obj["modules"] as? [String], ["./switch-account.tsx"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/switch-account.tsx").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/register.ts").path))
         let script = try String(contentsOf: root.appendingPathComponent(ClaudeStatusLine.scriptPath), encoding: .utf8)
         XCTAssertTrue(script.contains("FLIGHT_DECK_USAGE_DIR"))

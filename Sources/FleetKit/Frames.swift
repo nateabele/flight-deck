@@ -780,6 +780,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case recipeCheck(cid: Int, problems: [String])
     /// The reply to `host.disk`.
     case hostDisk(cid: Int, [WireWorkspaceUsage])
+    /// The reply to `FleetRequest.accountList`. Unsequenced, like `page`.
+    case accountChoices(cid: Int, WireAccountChoices)
+    /// The reply to `FleetRequest.accountSwitch`. Unsequenced, like `page`; sent before the
+    /// move it announces begins.
+    case accountSwitched(cid: Int, WireAccountSwitchResult)
 
     // The replies to `FleetRequest.infra` (see `InfraControlWire.swift`). Unsequenced and sent
     // only to the local CLI that asked, like the delegation replies; `up` and `down` stream.
@@ -800,7 +805,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case t, seq, fleet, reason, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
-        case line, machine, machines, orphans, unreadable, checks
+        case line, machine, machines, orphans, unreadable, checks, choices, switched
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
@@ -810,6 +815,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
         case infraProgress, infraMachine, infraList, infraDoctor, infraDone
+        case accountChoices, accountSwitched
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -947,6 +953,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case .infraDone(let cid):
             try c.encode(Tag.infraDone, forKey: .t)
             try c.encode(cid, forKey: .cid)
+        case .accountChoices(let cid, let choices):
+            try c.encode(Tag.accountChoices, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(choices, forKey: .choices)
+        case .accountSwitched(let cid, let result):
+            try c.encode(Tag.accountSwitched, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(result, forKey: .switched)
         }
     }
 
@@ -1068,6 +1082,12 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                                     try c.decode([WireInfraCheck].self, forKey: .checks))
             case .infraDone:
                 self = .infraDone(cid: try c.decode(Int.self, forKey: .cid))
+            case .accountChoices:
+                self = .accountChoices(cid: try c.decode(Int.self, forKey: .cid),
+                                       try c.decode(WireAccountChoices.self, forKey: .choices))
+            case .accountSwitched:
+                self = .accountSwitched(cid: try c.decode(Int.self, forKey: .cid),
+                                        try c.decode(WireAccountSwitchResult.self, forKey: .switched))
             }
             return
         }
@@ -1091,7 +1111,8 @@ public extension ServerFrame {
              .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
              .recipeCheck(let cid, _), .hostDisk(let cid, _), .infraProgress(let cid, _),
-             .infraMachine(let cid, _), .infraList(let cid, _, _, _), .infraDoctor(let cid, _), .infraDone(let cid):
+             .infraMachine(let cid, _), .infraList(let cid, _, _, _), .infraDoctor(let cid, _), .infraDone(let cid),
+             .accountChoices(let cid, _), .accountSwitched(let cid, _):
             return cid
         }
     }

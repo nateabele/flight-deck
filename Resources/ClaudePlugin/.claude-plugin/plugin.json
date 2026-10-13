@@ -1,5 +1,6 @@
 {
   "name": "flight-deck",
   "version": "1.0.0",
-  "description": "Reports Claude Code lifecycle events and account usage to Flight Deck."
+  "description": "Reports Claude Code lifecycle events and account usage to Flight Deck, and adds /switch-account.",
+  "types": "./types/index.d.ts"
 }

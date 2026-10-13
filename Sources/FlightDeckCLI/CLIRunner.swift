@@ -85,6 +85,9 @@ final class CLIRunner {
     private var rawFrame: ClientFrame?
 
     private var wantsJSON: Bool { context.json || invocation.json || !context.isTTY }
+    /// `--json` asked for by name. The `account` verbs print prose, not JSON, to a pipe: the
+    /// `/switch-account` mod reads their stdout as the sentence to show, and asks for JSON by flag.
+    private var askedForJSON: Bool { context.json || invocation.json }
 
     init(invocation: CLIInvocation, transport: CLITransport, context: CLIContext,
          out: @escaping (String) -> Void, err: @escaping (String) -> Void,
@@ -300,6 +303,12 @@ final class CLIRunner {
             request(.hostList)
         case .hostInfo(let name):
             request(.hostInfo(name: name))
+        case .accountList(let token):
+            guard let id = sessionID(token) else { return }
+            request(.accountList(session: id))
+        case .accountSwitch(let token, let target):
+            guard let id = sessionID(token) else { return }
+            request(.accountSwitch(session: id, target: target))
         case .raw:
             raw()
         case .delegate(let command):
@@ -628,6 +637,12 @@ final class CLIRunner {
                 self.out(self.wantsJSON ? CLIOutput.json(hosts) : CLIOutput.table(hosts, now: Date()))
             case .hostInfo(_, let info):
                 self.out(self.wantsJSON ? CLIOutput.json(info) : CLIOutput.hostInfo(info))
+            case .accountChoices(_, let choices):
+                self.out(self.askedForJSON ? CLIOutput.json(choices) : CLIOutput.accountChoices(choices))
+            case .accountSwitched(_, let result):
+                // A refusal is the Mac saying no, like any `err`: message on stderr, exit 1.
+                if !result.ok { return self.fail("refused", result.message) }
+                self.out(self.askedForJSON ? CLIOutput.json(result) : result.message)
             case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
                  .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,

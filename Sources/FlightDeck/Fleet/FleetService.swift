@@ -716,6 +716,18 @@ final class FleetService: ObservableObject {
                     reply(.err(cid: cid, code: refusal.code, message: refusal.message))
                 }
             }
+        case .accountList(let session):
+            // Local callers only, like `delegate`: a phone has no tab to move.
+            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            guard let choices = store.accountChoices(for: session) else {
+                return reply(.err(cid: cid, code: "unknown_session"))
+            }
+            reply(.accountChoices(cid: cid, choices))
+        case .accountSwitch(let session, let target):
+            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            // Answered synchronously, and the move starts only after this reply (the store
+            // schedules it): the claude process that asked is the one the move kills.
+            reply(.accountSwitched(cid: cid, store.requestAccountSwitch(session, target: target)))
         case .delegate(let delegate):
             // Local callers only: a run belongs to the tab whose token started it, and a phone
             // has no tab and no token, so nothing it started could ever be owned, listed or

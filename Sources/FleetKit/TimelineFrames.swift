@@ -217,11 +217,18 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// for `delegate`'s reason. Its ops all begin `infra.`, which is how the decoder below
     /// tells the two apart.
     case infra(InfraRequest)
+    /// The accounts tab `session`'s agent could move to (`flightdeck account list`,
+    /// `/switch-account`). Answered with `WireAccountChoices`; reads only.
+    case accountList(session: UUID)
+    /// Moves tab `session`'s conversation to `target` — an account's email or name, or a pool's
+    /// label or id (`flightdeck account switch`). Answered with `WireAccountSwitchResult`
+    /// BEFORE the move starts: the agent that asked is the one the move retires.
+    case accountSwitch(session: UUID, target: String)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
         case query, conversationID, projectPath
-        case intake, ifNot, checkpoint, changes, name, agent
+        case intake, ifNot, checkpoint, changes, name, agent, target
     }
 
     private enum Op: String, Codable {
@@ -236,6 +243,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case intakePlan = "intake.plan"
         case hostList = "host.list"
         case hostInfo = "host.info"
+        case accountList = "account.list"
+        case accountSwitch = "account.switch"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -283,6 +292,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .hostInfo(let name):
             try c.encode(Op.hostInfo, forKey: .op)
             try c.encode(name, forKey: .name)
+        case .accountList(let session):
+            try c.encode(Op.accountList, forKey: .op)
+            try c.encode(session, forKey: .session)
+        case .accountSwitch(let session, let target):
+            try c.encode(Op.accountSwitch, forKey: .op)
+            try c.encode(session, forKey: .session)
+            try c.encode(target, forKey: .target)
         case .delegate(let request):
             try request.encode(to: encoder)
         case .infra(let request):
@@ -352,6 +368,11 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .hostList
         case .hostInfo:
             self = .hostInfo(name: try c.decode(String.self, forKey: .name))
+        case .accountList:
+            self = .accountList(session: try c.decode(UUID.self, forKey: .session))
+        case .accountSwitch:
+            self = .accountSwitch(session: try c.decode(UUID.self, forKey: .session),
+                                  target: try c.decode(String.self, forKey: .target))
         }
     }
 }
