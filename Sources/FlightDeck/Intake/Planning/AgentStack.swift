@@ -115,48 +115,59 @@ enum AgentStackModel {
 // MARK: - Glyph
 
 extension AgentID {
-    /// The agent's monogram in its glyph. Two letters, because one can't tell Claude from Codex,
-    /// and never a vendor's logo or mark: the repo is public, and a trademark in it is a
-    /// liability for no gain a tint and two letters don't already give.
-    var monogram: String {
+    /// The agent's provider mark, a template-rendered vector in `Assets.xcassets` so the badge
+    /// can colour it. Used nominatively, to say which provider an agent is, never to suggest
+    /// endorsement; each mark belongs to its owner. Drawn from `@lobehub/icons-static-svg` (MIT),
+    /// credited in the README. Codex wears the OpenAI knot, its vendor's mark.
+    var iconAsset: String {
         switch self {
-        case .claude: "Cl"
-        case .codex: "Cx"
-        case .grok: "Gk"
-        case .gemini: "Gm"
-        case .opencode: "Oc"
+        case .claude: "AgentClaude"
+        case .codex: "AgentCodex"
+        case .grok: "AgentGrok"
+        case .gemini: "AgentGemini"
+        case .opencode: "AgentOpenCode"
         }
     }
 
-    /// The glyph's tint: a system colour, so it follows the appearance and the accessibility
-    /// contrast setting, and no vendor's brand colour.
-    var tint: Color {
+    /// The disc behind the mark, each provider's own avatar background, picked so the mark
+    /// reads in light and dark appearance alike (a fixed colour, not a system one: the mark's
+    /// contrast against it is what must hold, not the window's).
+    fileprivate var discColor: Color {
         switch self {
-        case .claude: .orange
-        case .codex: .teal
-        case .grok: .purple
-        case .gemini: .blue
-        case .opencode: .green
+        case .claude: Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
+        case .gemini: .white
+        case .codex, .grok, .opencode: .black
+        }
+    }
+
+    fileprivate var markColor: Color {
+        switch self {
+        case .gemini: Color(red: 0x31 / 255, green: 0x86 / 255, blue: 0xFF / 255)
+        case .claude, .codex, .grok, .opencode: .white
         }
     }
 }
 
-/// One agent as a small tinted disc with its monogram — defined once and used wherever an agent
-/// is shown beside a round: the stacks, the Rounds editor's pickers, a finished round's seat list.
+/// One agent as a small circular provider icon — defined once and used wherever an agent is
+/// shown beside a round: the stacks, the Rounds editor's pickers, a finished round's seat list.
 struct AgentBadge: View {
     let agent: AgentID
     var size: CGFloat = 16
 
     var body: some View {
         Circle()
-            .fill(agent.tint.gradient)
+            .fill(agent.discColor)
             .overlay(
-                Text(agent.monogram)
-                    .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .minimumScaleFactor(0.5)
-                    .lineLimit(1)
+                Image(agent.iconAsset, bundle: Bundle(for: SessionStore.self))
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(agent.markColor)
+                    .frame(width: size * 0.6, height: size * 0.6)
             )
+            // A black or white disc is near the window colour in one appearance or the other;
+            // the hairline keeps it a visible circle on either.
+            .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
             .frame(width: size, height: size)
             .accessibilityLabel(agent.displayName)
     }
@@ -185,8 +196,8 @@ struct AgentStack: View {
 
     private var stack: some View {
         let (shown, overflow) = AgentStackModel.layout(AgentStackModel.agents(entries))
-        // Shallow on purpose: a two-letter monogram spans most of its disc, and at a quarter's
-        // overlap the next disc cut the second letter off ("Gk" read as "G").
+        // Shallow on purpose: the notch eats into the next badge's edge, and the mark is
+        // centred in a disc, so a deeper overlap crowds the neighbouring marks.
         let overlap = size * 0.15
         return HStack(spacing: -overlap) {
             ForEach(Array(shown.enumerated()), id: \.element) { index, agent in

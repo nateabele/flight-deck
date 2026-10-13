@@ -51,11 +51,11 @@ final class InspectorModesRenderTests: XCTestCase {
     }
 
     enum Option: String, CaseIterable {
-        /// Keynote/Pages: a text-only segmented control; filled tinted discs with white monograms.
+        /// Keynote/Pages: a text-only segmented control.
         case a = "A-text-segments-filled-monograms"
-        /// Icon-and-text segments; pale discs with tinted monograms.
+        /// Icon-and-text segments.
         case b = "B-icon-text-segments-soft-monograms"
-        /// Xcode: an icon-only tab strip; filled discs carrying an SF Symbol per agent.
+        /// Xcode: an icon-only tab strip.
         case c = "C-icon-tabs-symbol-discs"
     }
 
@@ -166,30 +166,10 @@ final class InspectorModesRenderTests: XCTestCase {
         }
     }
 
-    @ViewBuilder
+    /// Every option wears the real provider icons; the options differ only in the inspector's
+    /// chrome. (They once differed in badge style too, back when a badge was a tinted monogram.)
     private func badge(_ agent: AgentID, _ option: Option, size: CGFloat) -> some View {
-        switch option {
-        case .a: AgentBadge(agent: agent, size: size)
-        case .b:
-            Circle().fill(agent.tint.opacity(0.22))
-                .overlay(Text(agent.monogram).font(.system(size: size * 0.45, weight: .bold, design: .rounded))
-                    .foregroundStyle(agent.tint))
-                .frame(width: size, height: size)
-        case .c:
-            Circle().fill(agent.tint.gradient)
-                .overlay(Image(systemName: Self.symbol(agent)).font(.system(size: size * 0.5, weight: .bold)).foregroundStyle(.white))
-                .frame(width: size, height: size)
-        }
-    }
-
-    private static func symbol(_ agent: AgentID) -> String {
-        switch agent {
-        case .claude: "text.word.spacing"
-        case .codex: "terminal"
-        case .grok: "bolt"
-        case .gemini: "diamond"
-        case .opencode: "curlybraces"
-        }
+        AgentBadge(agent: agent, size: size)
     }
 
     @ViewBuilder
