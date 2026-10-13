@@ -8,10 +8,22 @@ struct ComposerStyle: Equatable {
     /// No gutter lanes and no minimum height — see `PlanTextView.compact`.
     var compact: Bool
 
-    static let expanded = ComposerStyle(scale: 1, compact: false)
-    static let inline = ComposerStyle(scale: 13 / PlanTheme.standard.body.pointSize, compact: true)
+    /// Heading sizes and the room above them, replacing the scaled plan's: at the list's width a
+    /// scaled `#` (about 21 pt) outweighs the request under it, so the inline box steps its
+    /// headings only a little above its body and keeps them close to the line before.
+    var headingSizes: [CGFloat]?
+    var headingSpaceBefore: [CGFloat]?
 
-    var theme: PlanTheme { PlanTheme.standard.scaled(by: scale) }
+    static let expanded = ComposerStyle(scale: 1, compact: false)
+    static let inline = ComposerStyle(scale: 13 / PlanTheme.standard.body.pointSize, compact: true,
+                                      headingSizes: [16, 15, 14, 13, 13, 13], headingSpaceBefore: [8, 8, 6, 4, 4, 4])
+
+    var theme: PlanTheme {
+        var theme = PlanTheme.standard.scaled(by: scale)
+        if let headingSizes { theme.headingSizes = headingSizes }
+        if let headingSpaceBefore { theme.headingSpaceBefore = headingSpaceBefore }
+        return theme
+    }
 }
 
 /// The Markdown-styled draft editor under every composer: the plan editor on `text`, committing
