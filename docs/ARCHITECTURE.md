@@ -2054,6 +2054,23 @@ moves the intake to `.shaping`, and appends the config's default play to the tap
 | Feature plan | 2 (arbiter, realist) | yes | 3 | 2 | — | ⏭ next major |
 | Full plan | 4 (arbiter, realist, coverage, stress-test) | yes | 5 | 6 | yes | ⏭ next major |
 
+*Which agents a preset seats.* Codex and Claude take the seats that run every round:
+- the drafters (codex first);
+- the synthesizer and the reviewer (codex);
+- the integrator and the polisher (claude);
+- the encoder (codex).
+
+Each falls back to the other.
+
+When Gemini and Grok are detected, they get seats that add a second family without slowing every round:
+- Gemini is the cross-reviewer.
+- Grok is the cross-reviewer only when there is no Gemini.
+- In a Full plan, Gemini takes the coverage drafter and Grok the stress-test drafter.
+
+Grok never reviews by default, because it was the slow seat in the four-family live round (745 s).
+
+OpenCode is offered in the Rounds editor but never seated by a preset.
+
 `TapePlanner` turns a config into the round sequence — draft, synthesis, refine 1…N, encode,
 polish 1…M, fresh-eyes, dedup — recomputed on every call rather than cached, so ＋ (extend) on
 a stage still running lengthens it and moves its major checkpoint to the new last round. The
