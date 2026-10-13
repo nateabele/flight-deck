@@ -116,9 +116,13 @@ enum IntakeDetailProjection {
 
         let answered = i.exchanges.compactMap { e in e.answers.map { WireExchange(questions: e.questions, answers: $0) } }
         let open = i.state == .needsAnswers ? i.exchanges.last.flatMap { $0.answers == nil ? $0.questions : nil } : nil
-        let choice: WireChoice? = i.state == .awaitingChoice ? WireChoice(
+        // Parked asks the same question as awaiting-choice (`IntakeService.choose` takes both). While
+        // it is asked, the chooser's per-fidelity configs are the inspector's content, not `roundConfig`.
+        let choosing = i.state == .awaitingChoice || i.state == .parked
+        let choice: WireChoice? = choosing ? WireChoice(
             recommended: i.recommended?.rawValue, reason: i.recommendationReason, chosen: i.chosenPreset?.rawValue,
-            roundsSummary: (i.chosenPreset ?? i.recommended).flatMap { p in i.roundConfig.map { RoundConfigEditor.summary(preset: p, config: $0) } }
+            roundsSummary: (i.chosenPreset ?? i.recommended).flatMap { p in i.roundConfig.map { RoundConfigEditor.summary(preset: p, config: $0) } },
+            presets: presetOptions(available: service.availableModels())
         ) : nil
         let failure = i.failure.map { reason in
             WireFailure(reason: reason, output: i.rawFailureOutput.map { tail($0, limit: failureOutputLimit) })
@@ -137,9 +141,42 @@ enum IntakeDetailProjection {
             questions: i.exchanges.isEmpty ? nil : WireQuestions(open: open, answered: answered),
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
             headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
-            steer: true)
+            steer: true, choose: true,
+            roundConfig: choosing ? nil : i.roundConfig.map(wireConfig))
         detail.etag = etag(detail)
         return detail
+    }
+
+    /// The four fidelities in the order the Mac's picker lists them, each with what it would seat
+    /// right now — the same `PresetExpansion` call the Mac's Start makes, so the phone shows what
+    /// choosing would run. Single task seats nothing.
+    static func presetOptions(available: AvailableModels) -> [WirePresetOption] {
+        [Preset.bead, .sketch, .featurePlan, .fullPlan].map { preset in
+            WirePresetOption(preset: preset.rawValue,
+                             config: PresetExpansion.config(for: preset, available: available).map(wireConfig))
+        }
+    }
+
+    static func wireChoice(_ c: ModelChoice) -> WireModelChoice {
+        WireModelChoice(agent: c.agent.rawValue, agentName: c.agent.displayName, model: c.model, effort: c.effort)
+    }
+
+    static func wireSeat(_ slot: Slot) -> WireSeat {
+        WireSeat(choice: wireChoice(slot.choice), persona: slot.persona.rawValue, fallback: slot.fallback.map(wireChoice))
+    }
+
+    /// A seat that is a bare `ModelChoice` (integrator, encoder, polisher) has no persona.
+    static func wireSeat(_ choice: ModelChoice) -> WireSeat { WireSeat(choice: wireChoice(choice)) }
+
+    static func wireConfig(_ c: RoundConfig) -> WireRoundConfig {
+        WireRoundConfig(
+            drafters: c.drafters.map(wireSeat), synthesizer: c.synthesizer.map(wireSeat),
+            reviewer: c.reviewer.map(wireSeat), crossReviewer: c.crossReviewer.map(wireSeat),
+            crossCheck: c.crossCheck?.rawValue, integrator: wireSeat(c.integrator),
+            encoder: wireSeat(c.encoder), polisher: c.polisher.map { wireSeat($0) },
+            refinementCap: c.refinementCap, polishCap: c.polishCap,
+            freshEyesAndDedup: c.freshEyesAndDedup, defaultPlay: c.defaultPlay.rawValue,
+            customized: c.customized)
     }
 
     private static func pendingRound(_ p: PendingStart?) -> PlannedRound? {

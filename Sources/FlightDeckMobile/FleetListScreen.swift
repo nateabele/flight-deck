@@ -163,6 +163,9 @@ struct FleetListScreen: View {
                                       flightControl: model.flightControl)
                 case .clarifications(let id):
                     ClarificationsScreen(intake: id, model: model.flightControl.detailModel(for: id), flightControl: model.flightControl)
+                case .rounds(let intake, let preset):
+                    RoundInspectorScreen(intake: intake, preset: preset, model: model.flightControl.detailModel(for: intake),
+                                         flightControl: model.flightControl)
                 case .plan(let intake, let checkpoint):
                     PlanOutlineScreen(intake: intake, checkpoint: checkpoint, flightControl: model.flightControl)
                 case .reader(let intake, let checkpoint, let block, let changes):

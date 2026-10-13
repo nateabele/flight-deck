@@ -101,7 +101,7 @@ enum ControlScope {
             return id == me
         case .viewing:
             return true
-        case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote:
+        case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeChoose:
             // An intake is a project's, not the asking session's: no session id names it.
             return false
         case .swarmPause, .swarmResume, .handoffConfirm, .handoffDecline:

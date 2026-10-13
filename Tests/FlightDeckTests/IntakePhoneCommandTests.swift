@@ -53,11 +53,11 @@ final class IntakePhoneCommandTests: XCTestCase {
 
     // MARK: fixtures (from IntakeDetailProjectionTests)
 
-    private func makeService() async -> IntakeService {
+    private func makeService(available: AvailableModels = .defaults) async -> IntakeService {
         let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
                                 processRunner: SilentProcessRunner(),
                                 triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
-                                availableModels: .defaults, runner: runner,
+                                availableModels: available, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
                                 readFile: { try? Data(contentsOf: $0) },
@@ -202,6 +202,70 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertNil(svc.phoneDefaultPlay(i.id, token: UUID(), mode: "toReview"))
         XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.roundConfig?.defaultPlay, .toReview)
         XCTAssertEqual(svc.phoneDefaultPlay(i.id, token: UUID(), mode: "sideways"), "unknown_mode")
+    }
+
+    // MARK: fidelity
+
+    /// An intake waiting on the choice, as triage leaves it: recommended, nothing chosen.
+    @discardableResult
+    private func seedChoice(_ state: IntakeState) throws -> Intake {
+        var i = Intake(projectPath: "/p", intent: "Plan the thing")
+        i.state = state
+        i.recommended = .featurePlan
+        try IntakeStore(root: root).save(i)
+        return i
+    }
+
+    func testChoosingAFidelityRunsTheStockConfigThroughChoose() async throws {
+        let i = try seedChoice(.awaitingChoice)
+        let svc = await makeService()
+        XCTAssertNil(svc.phoneChoose(i.id, token: UUID(), preset: "sketch"))
+        let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
+        XCTAssertEqual(after.state, .shaping)
+        XCTAssertEqual(after.chosenPreset, .sketch)
+        XCTAssertEqual(after.roundConfig, PresetExpansion.config(for: .sketch, available: .defaults))
+    }
+
+    func testAParkedIntakeCanBeChosenFromThePhone() async throws {
+        let i = try seedChoice(.parked)
+        let svc = await makeService()
+        XCTAssertNil(svc.phoneChoose(i.id, token: UUID(), preset: "fullPlan"))
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.chosenPreset, .fullPlan)
+    }
+
+    func testAChoiceIsRefusedOnceTheIntakeHasMovedOn() async throws {
+        let shaping = try seed(.shaping), review = try seed(.review)
+        let svc = await makeService()
+        XCTAssertEqual(svc.phoneChoose(shaping.id, token: UUID(), preset: "sketch"), "intake_moved_on")
+        // Review takes Single task on the Mac; the phone offers no choice there.
+        XCTAssertEqual(svc.phoneChoose(review.id, token: UUID(), preset: "bead"), "intake_moved_on")
+        XCTAssertEqual(svc.phoneChoose(UUID(), token: UUID(), preset: "sketch"), "unknown_intake")
+    }
+
+    func testAnUnknownFidelityIsRefusedWithoutBurningTheToken() async throws {
+        let i = try seedChoice(.awaitingChoice)
+        let svc = await makeService()
+        let token = UUID()
+        XCTAssertEqual(svc.phoneChoose(i.id, token: token, preset: "enormous"), "unknown_preset")
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.state, .awaitingChoice)
+        XCTAssertNil(svc.phoneChoose(i.id, token: token, preset: "sketch"))
+    }
+
+    func testAPlanningFidelityWithNoAgentIsRefusedNotFailed() async throws {
+        let i = try seedChoice(.awaitingChoice)
+        let svc = await makeService(available: AvailableModels(choices: [:]))
+        XCTAssertEqual(svc.phoneChoose(i.id, token: UUID(), preset: "fullPlan"), "no_agents")
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.state, .awaitingChoice)
+    }
+
+    func testARetriedChoiceUnderTheSameTokenIsAckedOnce() async throws {
+        let i = try seedChoice(.awaitingChoice)
+        let svc = await makeService()
+        let token = UUID()
+        XCTAssertNil(svc.phoneChoose(i.id, token: token, preset: "sketch"))
+        let lines = commandLines(i.id)
+        XCTAssertNil(svc.phoneChoose(i.id, token: token, preset: "sketch"))
+        XCTAssertEqual(commandLines(i.id), lines)
     }
 
     // MARK: notes

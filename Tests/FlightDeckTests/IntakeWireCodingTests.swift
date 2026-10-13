@@ -99,6 +99,65 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
     }
 
+    // MARK: phone fidelity + round inspector
+
+    static let seat = WireSeat(
+        choice: WireModelChoice(agent: "codex", agentName: "Codex", model: "gpt-6-sol", effort: "high"),
+        persona: "arbiter",
+        fallback: WireModelChoice(agent: "claude", agentName: "Claude", model: "opus", effort: "high"))
+
+    static let config = WireRoundConfig(
+        drafters: [seat], synthesizer: seat, reviewer: seat, crossReviewer: seat, crossCheck: "firstAndLast",
+        integrator: seat, encoder: seat, polisher: seat, refinementCap: 3, polishCap: 2,
+        freshEyesAndDedup: true, defaultPlay: "nextMajor", customized: true)
+
+    func testARoundConfigAndTheChoosersPresetsRoundTrip() throws {
+        let detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "Build it.",
+            choice: WireChoice(recommended: "featurePlan", reason: "Touches three modules.",
+                               presets: [WirePresetOption(preset: "bead"),
+                                         WirePresetOption(preset: "featurePlan", config: Self.config)]),
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200), steer: true, choose: true,
+            roundConfig: Self.config)
+        let data = try JSONEncoder().encode(detail)
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
+    }
+
+    func testChooseIsAdditiveAnOlderPayloadDecodesWithoutIt() throws {
+        // A detail from a Mac that predates the chooser and the inspector: none of the new keys.
+        let detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "Build it.",
+            choice: WireChoice(recommended: "sketch", reason: "Small."),
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200), steer: true)
+        let data = try JSONEncoder().encode(detail)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(json["choose"])
+        XCTAssertNil(json["roundConfig"])
+        XCTAssertNil((json["choice"] as? [String: Any])?["presets"])
+        let decoded = try JSONDecoder().decode(WireIntakeDetail.self, from: data)
+        XCTAssertNil(decoded.choose)
+        XCTAssertNil(decoded.roundConfig)
+        XCTAssertNil(decoded.choice?.presets)
+    }
+
+    /// An older phone's decoder ignores keys it does not know, so a newer Mac's payload still
+    /// decodes there: simulated by decoding the pre-chooser shape of `WireChoice` from the new JSON.
+    func testANewerPayloadStillDecodesAsTheOlderChoiceShape() throws {
+        struct OldChoice: Codable { var recommended: String?; var reason: String?; var chosen: String?; var roundsSummary: String? }
+        let new = WireChoice(recommended: "sketch", presets: [WirePresetOption(preset: "sketch", config: Self.config)])
+        let old = try JSONDecoder().decode(OldChoice.self, from: JSONEncoder().encode(new))
+        XCTAssertEqual(old.recommended, "sketch")
+    }
+
+    func testAConfigFromAMacWithNewerWordsStillDecodes() throws {
+        // Policy, play mode and persona are strings, never enums: a value added later must not throw.
+        var config = Self.config
+        config.crossCheck = "someNewPolicy"
+        config.defaultPlay = "someNewPlay"
+        let data = try JSONEncoder().encode(config)
+        XCTAssertEqual(try JSONDecoder().decode(WireRoundConfig.self, from: data).crossCheck, "someNewPolicy")
+    }
+
     func testABoardRoundTripsItsControls() throws {
         let board = WireBoard(
             nowName: "Refine 2", nowChip: "PAUSED", clockCaption: "PAUSED FOR", stopsAt: "Encode",

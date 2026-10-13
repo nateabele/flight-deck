@@ -9,4 +9,7 @@ enum IntakeRoute: Hashable {
     case plan(intake: UUID, checkpoint: Int?)
     case reader(intake: UUID, checkpoint: Int?, block: Int?, changes: Bool)
     case clarifications(UUID)
+    /// The read-only Rounds inspector: the intake's own configuration, or the one `preset` would
+    /// seat while the fidelity is still being chosen.
+    case rounds(intake: UUID, preset: String?)
 }
