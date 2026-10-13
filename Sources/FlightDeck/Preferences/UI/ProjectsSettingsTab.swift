@@ -30,9 +30,29 @@ struct ProjectsSettingsTab: View {
         )
     }
 
+    /// Folders added with "Add Folder…" that have no settings yet. Not persisted: a folder is
+    /// listed because it carries settings (the store drops an emptied record), so one with none
+    /// stays only until the user leaves it, as a project's empty record would not.
+    @State private var addedFolders: Set<String> = []
+
+    private var openPaths: Set<String> { Set(sessions.repos.map(\.url.standardizedFileURL.path)) }
+
     private var paths: [String] {
-        let open = sessions.repos.map(\.url.standardizedFileURL.path)
-        return Array(Set(open).union(preferences.configuredProjectPaths)).sorted()
+        Array(openPaths.union(preferences.configuredProjectPaths).union(addedFolders)).sorted()
+    }
+
+    private func addFolder() {
+        guard let chosen = FolderPicker.choose(prompt: "Add") else { return }
+        let path = chosen.standardizedFileURL.path
+        addedFolders.insert(path)
+        preferences.selectedProjectPath = path
+    }
+
+    /// Drops added folders that carry nothing and are not being edited.
+    private func pruneAddedFolders() {
+        addedFolders = addedFolders.filter {
+            $0 == selected || !preferences.projectSettings($0).isEmpty
+        }
     }
 
     var body: some View {
@@ -46,7 +66,14 @@ struct ProjectsSettingsTab: View {
             HSplitView {
                 List(paths, id: \.self, selection: selection) { path in
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(URL(fileURLWithPath: path).lastPathComponent)
+                        // A folder is a path with settings that is not an open project; its
+                        // account assignment cascades to everything beneath it.
+                        HStack(spacing: 4) {
+                            if !openPaths.contains(path) {
+                                Image(systemName: "folder").foregroundStyle(.secondary)
+                            }
+                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                        }
                         Text(path)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -66,6 +93,7 @@ struct ProjectsSettingsTab: View {
                         preferences.selectedProjectPath = nil
                     }
                 }
+                .onChange(of: selected) { _, _ in pruneAddedFolders() }
 
                 Group {
                     if let selected {
@@ -83,6 +111,9 @@ struct ProjectsSettingsTab: View {
 
             Divider()
             HStack {
+                Button("Add Folder…") { addFolder() }
+                    .help("Add a folder that is not an open project. Its account assignments apply to every project beneath it.")
+                    .accessibilityIdentifier("project-add-folder")
                 // HIG requires a suppressed alert to stay recoverable; this is the recovery.
                 // Phrased as the question rather than the suppression — a checkbox whose
                 // label is a negative is one people read backwards.
@@ -114,6 +145,7 @@ struct ProjectsSettingsTab: View {
                 Spacer()
                 Button("Remove Overrides") {
                     preferences.setProjectSettings(path, ProjectSettings())
+                    addedFolders.remove(path)
                 }
                 .disabled(settings.isEmpty)
                 .accessibilityIdentifier("project-remove-overrides")
@@ -156,7 +188,8 @@ struct ProjectsSettingsTab: View {
                         // and each bills its own assignment (unify brief R8).
                         let list = preferences.preferences.accountList
                         let choosable = AgentID.allCases.filter {
-                            Self.showsAccountPicker(for: $0, in: list, assigned: settings.accounts[$0])
+                            Self.showsAccountPicker(for: $0, in: list, assigned: settings.accounts[$0]
+                                ?? preferences.inheritedAssignment(for: $0, project: path)?.assignment)
                         }
                         if !choosable.isEmpty {
                             Section {
@@ -168,7 +201,7 @@ struct ProjectsSettingsTab: View {
                             } header: {
                                 Text("Accounts")
                             } footer: {
-                                Text("A pool gives each new tab and planning run the first of its accounts under the pool's soft limit.")
+                                Text("A pool gives each new tab and planning run the first of its accounts under the pool's soft limit. Projects and folders beneath this path use this choice unless they set their own.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -261,16 +294,29 @@ struct ProjectsSettingsTab: View {
     /// pools: the user's pools in list order, and last the agent's default pool (its unpooled
     /// accounts), when it has one. Local pools are left out: they lease an endpoint slot, not an
     /// account a tab could sign in as.
+    ///
+    /// When an ancestor folder sets the agent's account (`inherited`), the unset row names that
+    /// instead — "Inherit from Field (Team pool)" — since clearing the override falls back to the
+    /// folder's choice, not the agent default.
     static func accountOptions(for agent: AgentID, in list: AccountList,
-                               agentDefault: AccountAssignment? = nil) -> [AccountOption] {
+                               agentDefault: AccountAssignment? = nil,
+                               inherited: (assignment: AccountAssignment, folder: String)? = nil) -> [AccountOption] {
         let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
-        let defaultTitle: String? = switch list.effectiveDefault(agentDefault, for: agent) {
-        case .account(let id)?: accounts.first { $0.id == id }?.displayName
-        case .pool(let id)?: list.pool(id).map { AccountBilling.poolName($0.label) }
-        case nil: accounts.first?.displayName
+        func name(_ assignment: AccountAssignment?) -> String? {
+            switch assignment {
+            case .account(let id)?: accounts.first { $0.id == id }?.displayName
+            case .pool(let id)?: list.pool(id).map { AccountBilling.poolName($0.label) }
+            case nil: accounts.first?.displayName
+            }
         }
-        var options = [AccountOption(value: nil, title: defaultTitle.map { "Default (\($0))" } ?? "Default",
-                                     isPool: false)]
+        let unsetTitle: String
+        if let inherited {
+            let folder = URL(fileURLWithPath: inherited.folder).lastPathComponent
+            unsetTitle = "Inherit from \(folder)" + (name(inherited.assignment).map { " (\($0))" } ?? "")
+        } else {
+            unsetTitle = name(list.effectiveDefault(agentDefault, for: agent)).map { "Default (\($0))" } ?? "Default"
+        }
+        var options = [AccountOption(value: nil, title: unsetTitle, isPool: false)]
         options += accounts.map { AccountOption(value: .account($0.id), title: $0.displayName, isPool: false) }
         let effective = list.effectivePools().filter { $0.agent == agent && $0.kind == .hosted }
         options += effective.filter { !$0.isDefault }.map { AccountOption(value: .pool($0.id), title: $0.label, isPool: true) }
@@ -290,7 +336,9 @@ struct ProjectsSettingsTab: View {
 
     private func accountPicker(for path: String, agent: AgentID) -> some View {
         AccountAssignmentPicker(options: Self.accountOptions(for: agent, in: preferences.preferences.accountList,
-                                                             agentDefault: preferences.accountDefault(for: agent)),
+                                                             agentDefault: preferences.accountDefault(for: agent),
+                                                             inherited: preferences.inheritedAssignment(for: agent, project: path)
+                                                                 .map { ($0.assignment, $0.source) }),
                                 selection: accountBinding(for: path, agent: agent),
                                 identifier: "project-account-picker-\(agent.rawValue)")
     }

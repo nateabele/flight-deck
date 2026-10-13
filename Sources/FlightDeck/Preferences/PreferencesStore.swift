@@ -212,11 +212,33 @@ final class PreferencesStore: ObservableObject {
         preferences.accountList.effectiveDefault(accountDefault(for: agent), for: agent)
     }
 
-    /// What `project` runs `agent` as: its own assignment, else the agent's default. nil is the
-    /// agent's topmost live account. Every "which login" question about a project goes through
-    /// here, so a project with no assignment under a pool default behaves as if it named the pool.
+    /// What `project` runs `agent` as: its own assignment, else the nearest ancestor folder's
+    /// (`inheritedAssignment`), else the agent's default. nil is the agent's topmost live
+    /// account. Every "which login" question about a project goes through here, so a project
+    /// with no assignment under a pool default, or under a folder that names a pool, behaves as
+    /// if it named the pool. Only the account assignment cascades; options, default agent,
+    /// flywheel and drawer state stay per-path.
     func effectiveAssignment(for agent: AgentID, project: String) -> AccountAssignment? {
-        projectSettings(project).accounts[agent] ?? effectiveAccountDefault(for: agent)
+        projectSettings(project).accounts[agent]
+            ?? inheritedAssignment(for: agent, project: project)?.assignment
+            ?? effectiveAccountDefault(for: agent)
+    }
+
+    /// The assignment `agent` picks up for `project` from the nearest ancestor folder that sets
+    /// one, with that folder's standardized path; nil when no ancestor sets one. Ignores the
+    /// path's own setting, so the Projects pane can name what clearing an override falls back
+    /// to. Ancestry is by path component (`/a/foo` is not above `/a/foobar`), and any path with
+    /// a record can be an ancestor: a folder added in Settings, or a project whose worktrees
+    /// live beneath it.
+    func inheritedAssignment(for agent: AgentID, project: String) -> (assignment: AccountAssignment, source: String)? {
+        var url = URL(fileURLWithPath: Self.key(project), isDirectory: true)
+        while url.path != "/" {
+            url = url.deletingLastPathComponent().standardizedFileURL
+            if let assignment = preferences.projectSettings[url.path]?.accounts[agent] {
+                return (assignment, url.path)
+            }
+        }
+        return nil
     }
 
     /// What the capability index's refresh bills (`CapacityPreferences.indexAccount`); nil is
