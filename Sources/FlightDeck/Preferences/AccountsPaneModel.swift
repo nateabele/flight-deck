@@ -33,9 +33,16 @@ enum AccountsPaneModel {
     struct Group: Identifiable, Equatable {
         var agent: AgentID
         var rows: [Row]
-        /// The login a project with no assignment for this agent runs as (the first live
-        /// account, pool members included) — tagged "Default" in the list.
+        /// The account a project with no assignment for this agent runs as — tagged "Default" in
+        /// the list: the account the user chose, else the first live one (pool members included).
+        /// nil when the default is a pool (`defaultPoolID`) or the agent has no account.
         var defaultAccountID: UUID?
+        /// The pool a project with no assignment runs in, when the user made a pool the default.
+        var defaultPoolID: PoolID?
+        /// Whether the user chose the default (Make Default) rather than it being the topmost.
+        var isDefaultExplicit: Bool { defaultChoice != nil }
+        /// The user's choice, already validated (`AccountList.effectiveDefault`).
+        var defaultChoice: AccountAssignment?
         var id: AgentID { agent }
     }
 
@@ -45,7 +52,8 @@ enum AccountsPaneModel {
     /// something the user can act on), and a stored `<agent>-default` pool entry — it only
     /// carries the default pool's settings, which the group header edits; drawn as a row it
     /// would be an empty pool that every unpooled account silently belongs to.
-    static func groups(_ list: AccountList, collapsed: Set<PoolID> = []) -> [Group] {
+    static func groups(_ list: AccountList, defaults: [AgentID: AccountAssignment] = [:],
+                       collapsed: Set<PoolID> = []) -> [Group] {
         AgentID.allCases.map { agent in
             var rows: [Row] = []
             for entry in list.entries where entry.agent == agent {
@@ -61,9 +69,46 @@ enum AccountsPaneModel {
                     break
                 }
             }
+            let chosen = list.effectiveDefault(defaults[agent], for: agent)
             let first = list.accounts.first { $0.agent == agent && !$0.isRemoved }
-            return Group(agent: agent, rows: rows, defaultAccountID: first?.id)
+            return Group(agent: agent, rows: rows, defaultAccountID: chosen == nil ? first?.id : chosen?.accountID,
+                         defaultPoolID: chosen?.poolID, defaultChoice: chosen)
         }
+    }
+
+    // MARK: Default
+
+    /// What "Make Default" on a row would store, or nil when the row offers none: gemini (one
+    /// account, so nothing to choose), a removed account, a local pool (it leases an endpoint
+    /// slot, not a login), or the row that already IS the chosen default. The synthesized
+    /// `<agent>-default` pseudo-pool has no row, so it never offers it.
+    static func makeDefaultTarget(_ row: Row, in group: Group) -> AccountAssignment? {
+        guard group.agent != .gemini else { return nil }
+        let target: AccountAssignment
+        switch row {
+        case .account(let a) where !a.isRemoved: target = .account(a.id)
+        case .member(let a, _) where !a.isRemoved: target = .account(a.id)
+        case .pool(let p) where p.kind == .hosted && !p.isDefault: target = .pool(p.id)
+        default: return nil
+        }
+        return target == group.defaultChoice ? nil : target
+    }
+
+    /// Whether "Use Topmost as Default" is offered: only while the user's choice is in force.
+    static func canClearDefault(in group: Group) -> Bool { group.isDefaultExplicit && group.agent != .gemini }
+
+    /// The line under an agent's group.
+    static func footer(for group: Group, in list: AccountList) -> String {
+        if group.agent == .gemini { return "Gemini signs in through the system keychain, so it has one account." }
+        if let id = group.defaultPoolID, let pool = list.pool(id) {
+            return "Projects that haven't chosen an account use the “\(pool.label)” pool."
+        }
+        guard let account = list.accounts.first(where: { $0.id == group.defaultAccountID }) else {
+            return "Projects use the agent's own sign-in."
+        }
+        return group.isDefaultExplicit
+            ? "Projects that haven't chosen an account use “\(account.displayName)”."
+            : "Projects that haven't chosen an account use “\(account.displayName)”, the topmost."
     }
 
     // MARK: Drag and drop

@@ -43,14 +43,17 @@ struct AccountAssignmentPicker: View {
     }
 }
 
-/// The capability index's choices: Projects' list for claude, with Default naming the pool an
-/// unset assignment leases from (`AccountResolver.defaultIndexPool`) — the index's Default is a
-/// pool, not the topmost account a project's Default is, and the menu must say which.
+/// The capability index's choices: Projects' list for claude, with Default naming what an
+/// unset assignment bills: the agent's own default when one is set (Projects' wording already
+/// says so), else the pool it leases from (`AccountResolver.defaultIndexPool`) — the index's
+/// Default is a pool, not the topmost account a project's Default is, and the menu must say which.
 enum IndexAccountChoices {
-    static func options(for agent: AgentID, in list: AccountList) -> [AccountAssignmentOption] {
-        var options = ProjectsSettingsTab.accountOptions(for: agent, in: list)
+    static func options(for agent: AgentID, in list: AccountList,
+                        agentDefault: AccountAssignment? = nil) -> [AccountAssignmentOption] {
+        var options = ProjectsSettingsTab.accountOptions(for: agent, in: list, agentDefault: agentDefault)
         let pools = list.effectivePools()
-        if let id = AccountResolver.defaultIndexPool(for: agent, in: pools),
+        if list.effectiveDefault(agentDefault, for: agent) == nil,
+           let id = AccountResolver.defaultIndexPool(for: agent, in: pools),
            let pool = pools.first(where: { $0.id == id }) {
             options[0].title = "Default (\(AccountBilling.poolName(pool.label)))"
         }

@@ -287,7 +287,8 @@ struct CapabilityIndexPane: View {
             HStack {
                 Text("Account")
                 Spacer()
-                AccountAssignmentPicker(options: IndexAccountChoices.options(for: .claude, in: preferences.preferences.accountList),
+                AccountAssignmentPicker(options: IndexAccountChoices.options(for: .claude, in: preferences.preferences.accountList,
+                                                                           agentDefault: preferences.accountDefault(for: .claude)),
                                         selection: $preferences.indexAccount,
                                         identifier: "index-account-picker")
             }
