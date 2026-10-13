@@ -77,6 +77,28 @@ Built and unit-tested (`AgentAccountDefaultTests`) with no GUI run: the SwiftUI 
 - Removing a pool that is the default says nothing about the default in the confirmation text
   (projects assigned to it are counted; the agent default is not).
 
+## Account assignments cascade from folders (2026-10-13) — unverified
+
+Built and unit-tested (`FolderAccountCascadeTests`: resolution order, per-agent independence,
+component-wise ancestry, standardization, worktrees, removal clearing folder records, resolver
+lease / `thawPlan` / `reacquire`, `/switch-account` `isAssigned`, picker titles, round trip) with
+no GUI run: the Add Folder… panel, the folder icon rows and the "Inherit from …" menu title are
+unseen, as is the prune of an empty added folder.
+- **GUI check.** Settings → Projects → Add Folder…, choose a folder that holds two open projects
+  and is not itself one. It appears with a folder icon and is selected. Under Accounts pick a pool
+  for claude. Select a project beneath it: its claude picker reads "Inherit from <folder> (<pool>)"
+  and a new claude tab there takes a lease (Flight Control → Capacity). Pick an account in that
+  project: the tab uses it, and choosing "Inherit from …" again clears the override. Select
+  another row before assigning anything to a freshly added folder: it disappears. The sidebar
+  "Configure…" badge and the New Session menu's checkmark on the child should show the folder's
+  account.
+- The cascade is by path, so a worktree stored OUTSIDE its project's directory does not inherit
+  the project's assignment (only an ancestor folder's, if the paths line up).
+- The Accounts pane's "N projects use this pool" count includes folder records but not the
+  projects that only inherit.
+- An older build ignores nothing new here: folders are ordinary `projectSettings` entries, so it
+  shows them as projects and applies them only to the exact path.
+
 ## Host keys in the legacy keychain (open, 2026-10-10)
 
 A build signed by any identity other than the one that created a host's key prompts for that key

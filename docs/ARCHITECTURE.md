@@ -1112,10 +1112,21 @@ Make Default there — stored as `Preferences.storedAgentAccountDefaults` (`Agen
 `{accounts: {agent: uuid}, pools: {agent: poolID}}`, a key an older build ignores; absent means the
 topmost live account, so nobody sees a change until they choose). It applies to every project
 with no assignment for that agent: `PreferencesStore.effectiveAssignment(for:project:)` is the
-project's assignment, else `effectiveAccountDefault` (the default, if it still names a live
-account or a pool with a live member, else nothing). A default is cleared with the thing it names
+project's assignment, else its nearest ancestor folder's (below), else `effectiveAccountDefault`
+(the default, if it still names a live account or a pool with a live member, else nothing). A default is cleared with the thing it names
 (`markAccountRemoved`, `removePool`); moving an account between pools leaves it the default, being
 the same account.
+Assignments **cascade down folders**: a path with no assignment for an agent takes the one on its
+nearest ancestor that sets it (`PreferencesStore.inheritedAssignment(for:project:)`, which also
+returns the source folder), before the agent default applies. Ancestry is path-component-wise on
+standardized paths, so `/a/foo` is not above `/a/foobar`, and a worktree under a project inherits
+that project's. A folder is just another `projectSettings` record, keyed by its path, so the
+removal paths above clear it too. Only `accounts` cascades; `defaultAgent`, options, flywheel and
+the drawer stay per-path. Settings → Projects lists open projects plus every path with a record,
+and "Add Folder…" adds a folder that is not an open project so it can carry settings (listed with
+a folder icon; one with no settings drops out once deselected). In a path's account picker the
+unset row reads "Inherit from <folder> (<account or pool>)" when an ancestor sets that agent, else
+"Default (…)".
 
 **One resolver turns an assignment into a login.** `AccountResolver` (`Agents/AccountResolver.swift`,
 `SessionStore.accountResolver`, built on `UsageService.shared.ledger`) answers which account a
@@ -2050,7 +2061,7 @@ last round of each stage is a **major** checkpoint (⏭'s stop). Release is neve
 the tape stops at release review and the existing release flow takes over unchanged.
 
 *Which accounts planning bills (unify brief R9).* Every planning seat bills the project's
-assignment for its agent (Settings → Projects) — an account, or a pool leased through the
+assignment for its agent (Settings → Projects, own or inherited from a parent folder) — an account, or a pool leased through the
 `CapacityLedger` (first under soft) — and with no assignment the agent's first live account, as
 a new tab would; an agent with no account record runs in its CLI's built-in home. There is no
 per-seat account: `ModelChoice` no longer carries one (an old `account` key decodes and is
