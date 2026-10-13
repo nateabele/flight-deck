@@ -134,6 +134,70 @@ final class ProjectViewIntakeListLiveTests: XCTestCase {
         return widths
     }
 
+    /// A half-written request outlives the view it was typed in: a switch to another project, or
+    /// to an agent's tab, re-creates `ProjectView` and used to drop its `@State` draft. Each
+    /// project keeps its own, and the expanded composer comes back expanded.
+    func testTheComposerDraftSurvivesSwitchingAwayAndBack() throws {
+        let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
+                                 preferences: prefs, intakesRoot: root)
+        let tag = UUID().uuidString
+        store.newSession(in: URL(fileURLWithPath: "/w/draft-a-\(tag)", isDirectory: true))
+        store.newSession(in: URL(fileURLWithPath: "/w/draft-b-\(tag)", isDirectory: true))
+        let a = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("draft-a-\(tag)") })
+        let b = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("draft-b-\(tag)") })
+        let session = try XCTUnwrap(store.selectedSessionID)
+        for repo in [a, b] {
+            var settings = prefs.projectSettings(repo.url.path)
+            settings.flywheelEnabled = true
+            prefs.setProjectSettings(repo.url.path, settings)
+        }
+        let service = store.intakeService
+        restoreDefaults = {
+            for repo in [a, b] {
+                service.setDraft("", inProject: repo.url.path)
+                service.setComposerExpanded(false, inProject: repo.url.path)
+            }
+        }
+        store.selectProject(a.id)
+        let window = host(RootView(store: store, preferences: prefs))
+        settle(1)
+        let field = { (id: String) throws -> PlanNSTextView in
+            try XCTUnwrap(self.find(PlanNSTextView.self, in: try XCTUnwrap(window.contentView), where: {
+                $0.accessibilityIdentifier() == id
+            }), "no \(id)")
+        }
+        let inline = "intake-intent-field"
+
+        try field(inline).insertText("Half a request", replacementRange: NSRange(location: 0, length: 0))
+        settle(0.3)
+        XCTAssertEqual(service.draft(forProject: a.url.path), "Half a request")
+
+        store.selectProject(b.id)
+        settle()
+        XCTAssertEqual(try field(inline).string, "", "one project's draft never shows in another's composer")
+
+        store.selectProject(a.id)
+        settle()
+        XCTAssertEqual(try field(inline).string, "Half a request", "the draft came back with its project")
+
+        store.selectSession(session)
+        settle()
+        XCTAssertNil(window.contentView.flatMap { find(PlanNSTextView.self, in: $0, where: { $0.accessibilityIdentifier() == inline }) },
+                     "an agent's tab replaces the project view")
+        store.selectProject(a.id)
+        settle()
+        XCTAssertEqual(try field(inline).string, "Half a request", "and back from an agent's tab")
+
+        service.setComposerExpanded(true, inProject: a.url.path)
+        store.selectProject(b.id)
+        settle()
+        store.selectProject(a.id)
+        settle()
+        XCTAssertEqual(try field("intake-intent-expanded-field").string, "Half a request",
+                       "the composer reopened expanded, with its draft")
+    }
+
     private func seedShaping(project: String) throws {
         var intake = Intake(projectPath: project, intent: "Plan the thing")
         intake.state = .shaping
@@ -175,9 +239,9 @@ final class ProjectViewIntakeListLiveTests: XCTestCase {
         return event.map(window.performKeyEquivalent(with:)) ?? false
     }
 
-    private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
-        if let match = view as? T { return match }
-        for sub in view.subviews { if let match = find(type, in: sub) { return match } }
+    private func find<T: NSView>(_ type: T.Type, in view: NSView, where matches: (T) -> Bool = { _ in true }) -> T? {
+        if let match = view as? T, matches(match) { return match }
+        for sub in view.subviews { if let match = find(type, in: sub, where: matches) { return match } }
         return nil
     }
 }

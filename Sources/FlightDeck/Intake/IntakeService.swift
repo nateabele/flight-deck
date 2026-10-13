@@ -295,6 +295,15 @@ final class IntakeService: ObservableObject {
     /// `projectKey`. Here for the reason `inspectorProjects` is: as `ProjectView` `@State` the
     /// list sprang back open on every switch to another project or tab and back.
     @Published private(set) var collapsedListProjects: Set<String> = []
+    /// Each project's unsent request in the composer, keyed by `projectKey`, and the projects
+    /// whose composer is expanded into the detail pane. Here for the reason `inspectorProjects`
+    /// is: as `ProjectView` `@State` a half-written request was lost on every switch to another
+    /// project or tab and back. Deliberately NOT `@Published`: the draft is written on every
+    /// keystroke, and a publish here redraws every view observing this service (see
+    /// `inspectorModeStore`). `ProjectView` reads these once, when it is created, and writes
+    /// its own `@State` back through `setDraft` / `setComposerExpanded`.
+    private var drafts: [String: String] = [:]
+    private var expandedComposerProjects: Set<String> = []
     /// Plans the human archived — read from each intake directory's `archived` marker at launch
     /// (`IntakeStore.archivedMarker` says why a marker and not an `intake.json` field). Archived
     /// plans leave `intakes(forProject:)`, so the list, the attention badge, the phone's plan list
@@ -363,6 +372,10 @@ final class IntakeService: ObservableObject {
     private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
     /// `UserDefaults` key for `showArchivedProjects`, persisted as an array of paths.
     private static let showArchivedDefaultsKey = "IntakeListShowArchivedByProject"
+    /// `UserDefaults` key for `drafts`, persisted as `[path: text]`.
+    private static let draftDefaultsKey = "IntakeDraftByProject"
+    /// `UserDefaults` key for `expandedComposerProjects`, persisted as an array of paths.
+    private static let expandedComposerDefaultsKey = "IntakeComposerExpandedByProject"
     /// Moves an intake's directory to the Trash — `FileManager.trashItem` in the app, a recorder
     /// in tests, so no test run ever fills the human's Trash.
     private let trashItem: (URL) throws -> Void
@@ -540,6 +553,8 @@ final class IntakeService: ObservableObject {
         inspectorProjects = Set(defaults.stringArray(forKey: Self.inspectorDefaultsKey) ?? [])
         collapsedListProjects = Set(defaults.stringArray(forKey: Self.collapsedListDefaultsKey) ?? [])
         showArchivedProjects = Set(defaults.stringArray(forKey: Self.showArchivedDefaultsKey) ?? [])
+        drafts = (defaults.dictionary(forKey: Self.draftDefaultsKey) as? [String: String]) ?? [:]
+        expandedComposerProjects = Set(defaults.stringArray(forKey: Self.expandedComposerDefaultsKey) ?? [])
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -779,6 +794,35 @@ final class IntakeService: ObservableObject {
         guard collapsedListProjects.contains(key) != collapsed else { return }
         if collapsed { collapsedListProjects.insert(key) } else { collapsedListProjects.remove(key) }
         defaults.set(collapsedListProjects.sorted(), forKey: Self.collapsedListDefaultsKey)
+    }
+
+    /// `project`'s unsent request, empty when there is none.
+    func draft(forProject project: String) -> String {
+        drafts[Self.projectKey(project)] ?? ""
+    }
+
+    /// Records `project`'s unsent request and persists it, so neither a switch away nor a
+    /// relaunch loses it. An empty draft is removed rather than stored, and a write that
+    /// changes nothing is dropped.
+    func setDraft(_ text: String, inProject project: String) {
+        let key = Self.projectKey(project)
+        guard draft(forProject: project) != text else { return }
+        drafts[key] = text.isEmpty ? nil : text
+        defaults.set(drafts, forKey: Self.draftDefaultsKey)
+    }
+
+    /// Whether `project`'s composer is expanded into the detail pane (`ExpandedIntakeComposer`).
+    func composerExpanded(forProject project: String) -> Bool {
+        expandedComposerProjects.contains(Self.projectKey(project))
+    }
+
+    /// Expands or collapses `project`'s composer and persists it, as `setIntakeListCollapsed`
+    /// does the list.
+    func setComposerExpanded(_ expanded: Bool, inProject project: String) {
+        let key = Self.projectKey(project)
+        guard expandedComposerProjects.contains(key) != expanded else { return }
+        if expanded { expandedComposerProjects.insert(key) } else { expandedComposerProjects.remove(key) }
+        defaults.set(expandedComposerProjects.sorted(), forKey: Self.expandedComposerDefaultsKey)
     }
 
     // MARK: - Archive and Trash
