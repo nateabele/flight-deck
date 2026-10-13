@@ -23,16 +23,22 @@ struct RoundInspectorScreen: View {
                 ForEach(inspector.stages) { stage in
                     Section(stage.title) {
                         ForEach(stage.agents) { agent in
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text(agent.role).font(.subheadline)
-                                    if let persona = agent.persona {
-                                        Text(persona).font(.caption).foregroundStyle(.secondary)
+                            HStack(alignment: .top, spacing: 10) {
+                                AgentIcon(agent: agent.agent, size: 28)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text(agent.role).font(.subheadline)
+                                        if let persona = agent.persona {
+                                            Text(persona).font(.caption).foregroundStyle(.secondary)
+                                        }
                                     }
-                                }
-                                Text(agent.line).font(.caption).foregroundStyle(.secondary)
-                                if let fallback = agent.fallback {
-                                    Text(fallback).font(.caption).foregroundStyle(.secondary)
+                                    Text(agent.line).font(.caption).foregroundStyle(.secondary)
+                                    if let fallback = agent.fallback {
+                                        HStack(spacing: 4) {
+                                            if let other = agent.fallbackAgent { AgentIcon(agent: other, size: 14) }
+                                            Text(fallback).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
                                 }
                             }
                             .accessibilityElement(children: .combine)

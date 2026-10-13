@@ -1,4 +1,5 @@
 import FleetKit
+import UIKit
 import XCTest
 @testable import FlightDeckMobile
 
@@ -32,6 +33,20 @@ final class RoundInspectorModelTests: XCTestCase {
         XCTAssertEqual(m.stages[0].agents[0].fallback, "Falls back to Claude · opus · high")
         XCTAssertEqual(m.stages[2].agents.map(\.role), ["Reviewer", "Cross-check agent", "Integrator"])
         XCTAssertNil(m.stages[2].agents[0].persona, "general says nothing")
+    }
+
+    /// Each agent row and its fallback carry the agent's id, and every agent the Mac can seat
+    /// has an icon in this app's catalog; an id this build doesn't know draws none.
+    func testEveryAgentHasAnIcon() {
+        let m = RoundInspectorModel.make(preset: "featurePlan", config: full())
+        XCTAssertEqual(m.stages[0].agents.map(\.agent), ["codex", "claude"])
+        XCTAssertEqual(m.stages[0].agents.map(\.fallbackAgent), ["claude", "codex"])
+        XCTAssertNil(m.stages[1].agents[0].fallbackAgent)
+        for agent in ["claude", "codex", "grok", "gemini", "opencode"] {
+            XCTAssertTrue(AgentIcon.known(agent), agent)
+            XCTAssertNotNil(UIImage(named: "Agent\(agent == "opencode" ? "OpenCode" : agent.capitalized)"), agent)
+        }
+        XCTAssertFalse(AgentIcon.known("newagent"))
     }
 
     func testCapsPolicyAndDefaultPlay() {
