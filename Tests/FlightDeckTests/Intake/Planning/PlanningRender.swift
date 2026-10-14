@@ -55,6 +55,7 @@ enum PlanningRender {
         }
         window.childWindows?.forEach { window.removeChildWindow($0); $0.orderOut(nil) }
         window.orderOut(nil)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
     }
 }

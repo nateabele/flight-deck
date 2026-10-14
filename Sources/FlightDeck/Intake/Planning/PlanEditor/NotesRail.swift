@@ -223,6 +223,9 @@ final class PlanNotesController: ObservableObject {
     @Published var tapeNotes: [TapeNote] = [] { didSet { if tapeNotes != oldValue { prune() } } }
     @Published private var sent: [PlanNote] = []
     @Published private var removed: Set<UUID> = []
+    /// Types the human changed that the tape does not show yet: a `.setNoteKind` is only a
+    /// queued command until a runner folds it, and the rail would flip back meanwhile.
+    @Published private var retyped: [UUID: NoteKind] = [:]
 
     /// Queues a command for this intake's runner; bound by the detail pane.
     var send: (TapeCommand) -> Void = { _ in }
@@ -253,8 +256,14 @@ final class PlanNotesController: ObservableObject {
     /// tape doesn't hold yet.
     var notes: [TapeNote] {
         let onTape = Set(tapeNotes.map(\.id))
-        return tapeNotes.filter { !removed.contains($0.id) }
-            + sent.filter { !onTape.contains($0.id) && !removed.contains($0.id) }.map { TapeNote(note: $0, consumedBy: nil) }
+        return (tapeNotes.filter { !removed.contains($0.id) }
+            + sent.filter { !onTape.contains($0.id) && !removed.contains($0.id) }.map { TapeNote(note: $0, consumedBy: nil) })
+            .map { entry in
+                guard entry.consumedBy == nil, let kind = retyped[entry.id] else { return entry }
+                var entry = entry
+                entry.note.kind = kind
+                return entry
+            }
     }
 
     var pendingCount: Int { notes.filter { $0.consumedBy == nil }.count }
@@ -337,8 +346,39 @@ final class PlanNotesController: ObservableObject {
                         anchor: draft.anchor))
     }
 
+    /// The draft's field losing focus: sent when it says something, so clicking back into the
+    /// plan doesn't leave it hanging. An empty draft stays open — the human may only have gone
+    /// for the type pop-up before typing — and goes with Esc, Cancel, or the next one begun.
+    func draftLostFocus() {
+        guard let draft, NotesRailModel.draftCommits(kind: draft.kind, text: draft.text) else { return }
+        commitDraft()
+    }
+
     /// Esc: nothing is sent.
     func cancelDraft() { draft = nil }
+
+    /// Whether note `id` takes `kind` now: it is the draft, or pending and able to say something
+    /// as that type. A consumed note can't be retyped: the round that read it read it as it was,
+    /// no later round reads it again, and rewriting the record would only falsify it.
+    func canSetKind(_ id: UUID, to kind: NoteKind) -> Bool {
+        if draft?.id == id { return true }
+        guard let entry = notes.first(where: { $0.id == id }), entry.consumedBy == nil else { return false }
+        return entry.note.accepts(kind: kind)
+    }
+
+    /// The type pop-up on any card, at any time and without the field focused. The draft just
+    /// changes; a committed pending note changes at once — shown now, sent as `.setNoteKind`, and
+    /// undoable like the other note edits.
+    func setKind(_ id: UUID, to kind: NoteKind) {
+        if draft?.id == id { draft?.kind = kind; return }
+        guard canSetKind(id, to: kind), let old = notes.first(where: { $0.id == id })?.note.kind, old != kind else { return }
+        retyped[id] = kind
+        marksChanged()
+        send(.setNoteKind(id, kind))
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { $0.setKind(id, to: old) }
+        undoManager.setActionName("Change Note Type")
+    }
 
     func remove(_ id: UUID) {
         let note = notes.first { $0.id == id }?.note
@@ -381,6 +421,14 @@ final class PlanNotesController: ObservableObject {
         let onTape = Set(tapeNotes.map(\.id))
         sent.removeAll { onTape.contains($0.id) }
         removed = removed.filter { onTape.contains($0) }
+        // Settled once the tape shows the type, or the note has gone or been read; kept while
+        // the note is still only a sent copy the tape doesn't hold.
+        let held = Dictionary(tapeNotes.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+        let queued = Set(sent.map(\.id))
+        retyped = retyped.filter { id, kind in
+            if let entry = held[id] { return entry.consumedBy == nil && entry.note.kind != kind }
+            return queued.contains(id)
+        }
         marksChanged()
     }
 
@@ -521,7 +569,9 @@ private struct NotesLane: View {
             } else {
                 let consumedBy = card.consumed ? controller.notes.first { $0.id == card.id }?.consumedBy : nil
                 NoteCard(card: card, readBy: consumedBy.flatMap(roundName),
-                         onRemove: card.consumed ? nil : { controller.remove(card.id) })
+                         onRemove: card.consumed ? nil : { controller.remove(card.id) },
+                         canChange: { controller.canSetKind(card.id, to: $0) },
+                         onChange: { controller.setKind(card.id, to: $0) })
             }
         }
         .background(GeometryReader { geo in
@@ -559,11 +609,16 @@ private struct KindTag: View {
     let kind: NoteKind
     /// A Highlight is an empty comment; it says what the human did.
     var highlight = false
+    /// The pop-up arrows of a tag that can be changed.
+    var changeable = false
 
     /// The kind's symbol and word on a neutral capsule — the only place a card says its kind.
     var body: some View {
-        Label(highlight ? "Highlight" : NoteStyle.label(kind), systemImage: highlight ? "highlighter" : NoteStyle.symbol(kind))
-            .labelStyle(.titleAndIcon)
+        HStack(spacing: 4) {
+            Label(highlight ? "Highlight" : NoteStyle.label(kind), systemImage: highlight ? "highlighter" : NoteStyle.symbol(kind))
+                .labelStyle(.titleAndIcon)
+            if changeable { Image(systemName: "chevron.up.chevron.down").imageScale(.small) }
+        }
             .font(.system(size: 10.5, weight: .semibold))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 7)
@@ -572,10 +627,47 @@ private struct KindTag: View {
     }
 }
 
+/// A card's type tag as a pop-up: any pending note's type changes from here without the text
+/// field having focus. A note a round has read shows the same tag disabled, saying why in its
+/// help — the control is never silently gone.
+private struct KindMenu: View {
+    let card: NoteCardModel
+    let canChange: (NoteKind) -> Bool
+    let onChange: (NoteKind) -> Void
+
+    static let lockedHelp = "A round has already read this note, and no later round reads it again, so changing its type would change nothing."
+
+    var body: some View {
+        Menu {
+            ForEach(NoteStyle.kinds, id: \.self) { kind in
+                Button { onChange(kind) } label: {
+                    Label(NoteStyle.label(kind), systemImage: kind == card.kind ? "checkmark" : NoteStyle.symbol(kind))
+                }
+                .disabled(!canChange(kind))
+            }
+        } label: {
+            KindTag(kind: card.kind, highlight: card.kind == .comment && card.note.isEmpty, changeable: true)
+        }
+        // `.button` with a plain button style keeps the tag's own capsule; `.borderlessButton`
+        // draws only the label's text and drops its shape.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(card.consumed)
+        .help(card.consumed ? Self.lockedHelp : "Change the note type")
+        .accessibilityLabel("Note type")
+        .accessibilityValue(NoteStyle.label(card.kind))
+        .accessibilityIdentifier("note-kind-menu")
+    }
+}
+
 private struct NoteCard: View {
     let card: NoteCardModel
     let readBy: String?
     let onRemove: (() -> Void)?
+    let canChange: (NoteKind) -> Bool
+    let onChange: (NoteKind) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -592,7 +684,7 @@ private struct NoteCard: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: 6) {
-                KindTag(kind: card.kind, highlight: card.kind == .comment && card.note.isEmpty)
+                KindMenu(card: card, canChange: canChange, onChange: onChange)
                 if let readBy { Text("Read by \(readBy)").font(.caption).foregroundStyle(.tertiary) }
                 Spacer(minLength: 0)
                 if let onRemove {
@@ -678,9 +770,10 @@ private struct NoteDraftCard: View {
         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6)))
         .shadow(color: Color.accentColor.opacity(0.25), radius: 3)
         .onAppear { if focusOnAppear { DispatchQueue.main.async { focused = true } } }
-        // Blur commits (or drops an empty draft) — clicking back into the plan to select the
-        // next passage must not leave this one hanging unsent.
-        .onChange(of: focused) { was, now in if was && !now { controller.commitDraft() } }
+        // Blur sends a draft that says something — clicking back into the plan to select the
+        // next passage must not leave it hanging unsent. The committed card keeps its type
+        // pop-up, so nothing locks when the field loses focus.
+        .onChange(of: focused) { was, now in if was && !now { controller.draftLostFocus() } }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("note-draft")
     }

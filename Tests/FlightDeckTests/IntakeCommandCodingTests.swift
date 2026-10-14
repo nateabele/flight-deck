@@ -40,6 +40,13 @@ final class IntakeCommandCodingTests: XCTestCase {
         try roundTrip(.intakeRemoveNote(id: id, token: token, noteID: noteID), op: "intake.removeNote")
     }
 
+    func testSetNoteKindRoundTripsAndIsFleetWide() throws {
+        try roundTrip(.intakeSetNoteKind(id: id, token: token, noteID: noteID, kind: "question"), op: "intake.setNoteKind")
+        let command = FleetCommand.intakeSetNoteKind(id: id, token: token, noteID: noteID, kind: "question")
+        XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(id)))
+        XCTAssertTrue(ControlScope.permits(command, level: .full, caller: .session(UUID())))
+    }
+
     func testChooseRoundTrips() throws {
         try roundTrip(.intakeChoose(id: id, token: token, preset: "featurePlan"), op: "intake.choose")
     }

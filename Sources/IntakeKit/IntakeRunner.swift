@@ -299,7 +299,7 @@ private actor TapeKeeper {
                 // ⏹ then a fresh ▶ in the same batch: the later command wins.
                 stop = false
                 TapePlanner.apply(envelope.command, to: &tape)
-            case .pause, .note, .removeNote, .extend, .trim:
+            case .pause, .note, .removeNote, .setNoteKind, .extend, .trim:
                 TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
                 applyEdit(checkpoint: checkpoint, markdown: markdown)

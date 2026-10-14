@@ -325,7 +325,9 @@ public struct Tape: Codable, Equatable, Sendable {
 /// only channel between them, so the shape is fixed on purpose rather than left to whatever
 /// the compiler happens to generate.
 ///
-/// - `note` queues a `PlanNote` for the next round; `removeNote` withdraws a still-pending one.
+/// - `note` queues a `PlanNote` for the next round; `removeNote` withdraws a still-pending one;
+///   `setNoteKind` retypes a still-pending one (a runner that predates it drops the line as an
+///   unknown kind, and the note keeps the type it was queued with).
 /// - `extend` adds rounds to a refine or polish cycle; `trim` removes ones that haven't started
 ///   (a separate kind rather than a negative `by`: a build without `trim` drops the line as an
 ///   unknown kind, where it would fold a negative extend unclamped, below rounds already run).
@@ -336,14 +338,15 @@ public struct Tape: Codable, Equatable, Sendable {
 public enum TapeCommand: Codable, Equatable, Sendable {
     case step, nextMajor, toReview, pause, stop, extend(Stage, by: Int), trim(Stage, by: Int)
     case note(PlanNote), removeNote(UUID), editPlan(checkpoint: Int, markdown: String)
+    case setNoteKind(UUID, NoteKind)
 
     /// The old free-text ✎ — now an unanchored comment. Its id is derived from the text (see
     /// `PlanNote.legacy`), so it equals itself however many times it is built or decoded.
     public static func annotate(_ text: String) -> TapeCommand { .note(.legacy(text)) }
 
     /// `annotate` is decode-only: a `commands.jsonl` written before `PlanNote` may still hold one.
-    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan }
-    private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown }
+    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan, setNoteKind }
+    private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown, noteKind }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -356,6 +359,8 @@ public enum TapeCommand: Codable, Equatable, Sendable {
         case .annotate: self = .annotate(try c.decode(String.self, forKey: .text))
         case .note: self = .note(try c.decode(PlanNote.self, forKey: .note))
         case .removeNote: self = .removeNote(try c.decode(UUID.self, forKey: .id))
+        case .setNoteKind:
+            self = .setNoteKind(try c.decode(UUID.self, forKey: .id), try c.decode(NoteKind.self, forKey: .noteKind))
         case .editPlan:
             self = .editPlan(checkpoint: try c.decode(Int.self, forKey: .checkpoint),
                              markdown: try c.decode(String.self, forKey: .markdown))
@@ -380,6 +385,10 @@ public enum TapeCommand: Codable, Equatable, Sendable {
         case .removeNote(let id):
             try c.encode(Kind.removeNote, forKey: .kind)
             try c.encode(id, forKey: .id)
+        case .setNoteKind(let id, let kind):
+            try c.encode(Kind.setNoteKind, forKey: .kind)
+            try c.encode(id, forKey: .id)
+            try c.encode(kind, forKey: .noteKind)
         case .editPlan(let checkpoint, let markdown):
             try c.encode(Kind.editPlan, forKey: .kind)
             try c.encode(checkpoint, forKey: .checkpoint)

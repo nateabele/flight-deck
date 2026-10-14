@@ -156,6 +156,34 @@ final class NotesRailRenderTests: XCTestCase {
         XCTAssertEqual(controller.summary.tooltip, "Sends your 1 edit and 1 note")
     }
 
+    /// The rail with committed notes, each wearing its type pop-up, one of them read by a round
+    /// (disabled, its help saying why). Written beside `FD_NOTES_RENDER` as
+    /// `<name>-types-light.png` and `<name>-types-dark.png`.
+    func testRenderCommittedNoteTypeControls() throws {
+        guard let path = ProcessInfo.processInfo.environment["FD_NOTES_RENDER"] else {
+            throw XCTSkip("set FD_NOTES_RENDER to a PNG path to render the notes rail")
+        }
+        let plan = "# Plan\n\nJobs are offered in drive-time order.\n\nCheck-ins replay oldest-first.\n\nPaused stays.\n"
+        func anchor(_ quote: String) -> NoteAnchor { NoteAnchor(checkpoint: 2, selecting: plan.range(of: quote)!, in: plan) }
+        let pending = PlanNote(kind: .question, note: "What happens when two devices check in the same job?", anchor: anchor("oldest-first"))
+        let highlight = PlanNote(kind: .comment, note: "", anchor: anchor("drive-time order"))
+        let read = PlanNote(kind: .mustChange, note: "Drop paused.", anchor: anchor("Paused stays"))
+        let controller = PlanNotesController()
+        controller.tapeNotes = [TapeNote(note: read, consumedBy: 1), TapeNote(note: pending, consumedBy: nil),
+                                TapeNote(note: highlight, consumedBy: nil)]
+        controller.checkpoint = 2
+        // Where the editor would have found each quote, so no card reads "can't find this text".
+        controller.editorChanged(plan, located: Dictionary(uniqueKeysWithValues: [read, pending, highlight].map {
+            ($0.id, NSRange($0.anchor!.locate(in: plan)!, in: plan)) }))
+        let view = NotesRail(controller: controller, roundName: { _ in "Refine 1" }, focusesDraft: false)
+            .frame(width: 340)
+            .padding(20)
+        let base = URL(fileURLWithPath: path).deletingPathExtension().path
+        try PlanningRender.write(view, size: NSSize(width: 380, height: 520), to: URL(fileURLWithPath: base + "-types-dark.png"))
+        try PlanningRender.write(view, size: NSSize(width: 380, height: 520), to: URL(fileURLWithPath: base + "-types-light.png"),
+                                 appearance: .aqua)
+    }
+
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let match = view as? T { return match }
         for sub in view.subviews { if let match = find(type, in: sub) { return match } }

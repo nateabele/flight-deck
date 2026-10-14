@@ -1104,7 +1104,7 @@ final class IntakeService: ObservableObject {
             publishTape(id, read: latestTapes[id] ?? tapeStore(id).loadTape())
         }
         switch command {
-        case .note, .removeNote, .editPlan: return
+        case .note, .removeNote, .setNoteKind, .editPlan: return
         // A pause or stop withdraws the play that was starting: left pending, a runner that
         // reads the stop first and exits without a beat would leave "starting" up for good.
         case .pause:
@@ -1137,7 +1137,7 @@ final class IntakeService: ObservableObject {
     private static func startsRounds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview: true
-        case .pause, .stop, .extend, .trim, .note, .removeNote, .editPlan: false
+        case .pause, .stop, .extend, .trim, .note, .removeNote, .setNoteKind, .editPlan: false
         }
     }
 
@@ -1351,6 +1351,20 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone retyping a note it (or the Mac) has queued — only while it is still pending: a
+    /// round that has read a note read it as the type it had, and no later round reads it again.
+    /// A type the note's words can't carry (a Question with nothing written) is `empty_note`.
+    func phoneSetNoteKind(_ id: UUID, token: UUID, noteID: UUID, kind: String) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        if let refusal = notShaping(id) { return refusal }
+        guard let noteKind = NoteKind(rawValue: kind) else { return refuse("unknown_kind", id) }
+        guard let note = pendingNotes(id).first(where: { $0.id == noteID }) else { return refuse("note_consumed", id) }
+        guard note.accepts(kind: noteKind) else { return refuse("empty_note", id) }
+        accept(token, for: id)
+        if note.kind != noteKind { send(id, .setNoteKind(noteID, noteKind)) }
+        return nil
+    }
+
     /// `id`'s notes no round has read yet: the tape's pending notes with the queued note commands
     /// no runner has acked folded on top. `TapeOverlay` does not fold notes, so a note sent a
     /// moment ago is only a line in `commands.jsonl` until a runner reads it — and withdrawing it
@@ -1361,6 +1375,8 @@ final class IntakeService: ObservableObject {
             switch queued.command {
             case .note(let note): notes.append(note)
             case .removeNote(let withdrawn): notes.removeAll { $0.id == withdrawn }
+            case .setNoteKind(let noteID, let kind):
+                if let i = notes.firstIndex(where: { $0.id == noteID }), notes[i].accepts(kind: kind) { notes[i].kind = kind }
             default: break
             }
         }

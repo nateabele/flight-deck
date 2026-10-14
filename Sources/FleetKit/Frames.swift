@@ -302,6 +302,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     case intakeNote(id: UUID, token: UUID, noteID: UUID, kind: String, text: String,
                     checkpoint: Int?, block: Int?, quote: String?)
     case intakeRemoveNote(id: UUID, token: UUID, noteID: UUID)
+    /// The phone retyping a pending note (`kind` is a `NoteKind` raw value, decoded unjudged).
+    /// **Sent only when the detail has `noteKind == true`** — an older Mac drops the socket on
+    /// this unknown op, so the phone falls back to delete and re-add.
+    case intakeSetNoteKind(id: UUID, token: UUID, noteID: UUID, kind: String)
     /// The phone choosing a fidelity (`preset` is a `Preset` raw value) for an intake waiting on
     /// one; the Mac runs `IntakeService.choose`. **Sent only when the detail has `choose == true`**
     /// — an older Mac drops the socket on this unknown op, as for the four above.
@@ -341,6 +345,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeDefaultPlay = "intake.defaultPlay"
         case intakeNote = "intake.note"
         case intakeRemoveNote = "intake.removeNote"
+        case intakeSetNoteKind = "intake.setNoteKind"
         case intakeChoose = "intake.choose"
         case swarmPause = "swarm.pause"
         case swarmResume = "swarm.resume"
@@ -442,6 +447,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(noteID, forKey: .noteID)
+        case .intakeSetNoteKind(let id, let token, let noteID, let kind):
+            try c.encode(Op.intakeSetNoteKind, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(noteID, forKey: .noteID)
+            try c.encode(kind, forKey: .kind)
         case .intakeChoose(let id, let token, let preset):
             try c.encode(Op.intakeChoose, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -573,6 +584,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 noteID: try c.decode(UUID.self, forKey: .noteID)
+            )
+        case .intakeSetNoteKind:
+            self = .intakeSetNoteKind(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                noteID: try c.decode(UUID.self, forKey: .noteID),
+                kind: try c.decode(String.self, forKey: .kind)
             )
         case .intakeChoose:
             self = .intakeChoose(

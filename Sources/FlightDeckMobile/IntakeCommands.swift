@@ -14,7 +14,7 @@ protocol IntakeCommanding: AnyObject {
 
 /// One thing a person can ask of an intake; identifies a send for the in-flight set.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), choose(String)
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String)
 }
 
 enum CommandCopy {

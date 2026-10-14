@@ -144,6 +144,12 @@ public enum TapePlanner {
             // Only a pending note can be withdrawn: one a round already consumed is part of
             // that round's record, and the prompt it shaped can't be taken back.
             tape.pendingNotes.removeAll { $0.id == id }
+        case .setNoteKind(let id, let kind):
+            // Only a pending note: a consumed one is the record of what a round read, and no
+            // later round reads it again, so retyping it would change nothing but the record.
+            if let i = tape.pendingNotes.firstIndex(where: { $0.id == id }), tape.pendingNotes[i].accepts(kind: kind) {
+                tape.pendingNotes[i].kind = kind
+            }
         case .editPlan:
             // A file, not tape state: the runner writes it (`TapeStore.writeUserEdits`), since
             // this function only folds a command into the tape value.

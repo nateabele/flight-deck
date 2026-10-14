@@ -412,4 +412,35 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertFalse(queuedNotes(i.id).contains { $0.id == noteID })
         XCTAssertEqual(svc.phoneRemoveNote(i.id, token: UUID(), noteID: UUID()), "note_consumed")
     }
+
+    // MARK: retyping a note
+
+    func testRetypingAPendingNoteQueuesItOnceAndFoldsIntoThePendingView() async throws {
+        let (i, _) = try seedPlan()
+        let svc = await makeService()
+        let noteID = UUID()
+        XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "Which provider?",
+                                   checkpoint: nil, block: nil, quote: nil))
+        let token = UUID()
+        XCTAssertNil(svc.phoneSetNoteKind(i.id, token: token, noteID: noteID, kind: "question"))
+        XCTAssertTrue(tapeStore(i.id).commands(after: 0).contains { $0.command == .setNoteKind(noteID, .question) })
+        let before = commandLines(i.id)
+        XCTAssertNil(svc.phoneSetNoteKind(i.id, token: token, noteID: noteID, kind: "question"), "a retry under the same token is acked")
+        XCTAssertEqual(commandLines(i.id), before)
+        // The queued note is retyped, then the next retype sees that and queues nothing for the same type.
+        XCTAssertNil(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: noteID, kind: "question"))
+        XCTAssertEqual(commandLines(i.id), before, "already that type: nothing to queue")
+    }
+
+    func testRetypingRefusesWhatCannotBeDone() async throws {
+        let (i, _) = try seedPlan()
+        let svc = await makeService()
+        let noteID = UUID()
+        XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "",
+                                   checkpoint: nil, block: nil, quote: nil))
+        XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: noteID, kind: "nonsense"), "unknown_kind")
+        XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: noteID, kind: "question"), "empty_note")
+        XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: UUID(), kind: "question"), "note_consumed",
+                       "no pending note by that id: a round has read it")
+    }
 }
