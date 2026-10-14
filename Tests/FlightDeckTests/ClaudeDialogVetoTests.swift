@@ -19,13 +19,13 @@ final class ClaudeDialogVetoTests: XCTestCase {
         try TimelineFixtureTests.text("\(name).captured", in: "Claude")
     }
 
-    /// Twenty-one of these twenty-four carry `Esc to cancel`. The two review screens,
+    /// Twenty-two of these twenty-five carry `Esc to cancel`. The two review screens,
     /// `question-two-review` and `question-typed-checkbox-review`, do not — their footer is
     /// `❯ 1. Submit answers` / `  2. Cancel`, caught only by the marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
     /// Nor does `login-method` (claude 2.1.296's `/login` menu): it ends on its last row.
     ///
     /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
-    /// predicate to the same twenty-four screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// predicate to the same twenty-five screens — see its `testEveryDialogCaptureIsRefused`. One
     /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
     /// which is the whole reason the list is shared instead of copied.
     static let dialogs = [
@@ -41,6 +41,9 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-typed-checkbox-review",
         // claude 2.1.296's first-run `/login` menu — `login.captured.provenance.json`.
         "login-method",
+        // claude 2.1.296's usage-limit menu, opened as `/rate-limit-options` —
+        // `rate-limit.captured.provenance.json`.
+        "rate-limit-options",
     ]
 
     /// Screens that are neither a dialog the veto must catch nor a composer it must pass: claude's

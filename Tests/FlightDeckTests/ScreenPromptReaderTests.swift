@@ -67,6 +67,33 @@ final class ScreenPromptReaderTests: XCTestCase {
         XCTAssertEqual(ChoiceDialog.focusedRow(inViewport: screen, marker: ChoiceDialog.claudeMarker), 0)
     }
 
+    // MARK: - The rate-limit menu (captured)
+
+    /// **The menu claude opens by itself on a usage limit** (`rate-limit.captured.provenance.json`,
+    /// opened by typing `/rate-limit-options`). The echoed `❯ /rate-limit-options` above it carries
+    /// the marker with no number, which must not become a row or the cursor.
+    func testTheRateLimitMenuIsReadWithItsRowsItsCursorAndItsQuestion() throws {
+        let screen = try captured("rate-limit-options.captured")
+        let menu = try XCTUnwrap(self.menu(screen))
+
+        XCTAssertEqual(menu.prompt, "What do you want to do?")
+        XCTAssertEqual(menu.focused, 0)
+        XCTAssertEqual(menu.rows.map(\.label),
+                       ["Stop and wait for limit to reset", "Switch to usage credits"])
+        for (index, row) in menu.rows.enumerated() {
+            XCTAssertTrue(ChoiceDialog.row(index, reads: row.label, inViewport: screen,
+                                           marker: ChoiceDialog.claudeMarker), row.label)
+        }
+
+        let open = try XCTUnwrap(ScreenPromptReader.read(inViewport: screen))
+        guard case .question(let call, let questions) = open else {
+            return XCTFail("a menu is a question, got \(open)")
+        }
+        XCTAssertTrue(ScreenPromptID.isMenu(call), call)
+        XCTAssertEqual(questions.map(\.question), ["What do you want to do?"])
+        XCTAssertTrue(questions[0].isAnswerable)
+    }
+
     // MARK: - Identity
 
     /// **A change of menu is a wire change; a cursor move is not.** The id is a digest of the

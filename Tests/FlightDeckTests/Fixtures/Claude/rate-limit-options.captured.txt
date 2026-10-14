@@ -1,0 +1,14 @@
+uuu ▐▛███▛█Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Projects/flight-deck/scripts/livefuzz/capture-workspace
+
+
+❯ /rate-limit-options
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  What do you want to do?
+
+  ❯ 1. Stop and wait for limit to reset
+    2. Switch to usage credits
+
+  Enter to confirm · Esc to cancel
