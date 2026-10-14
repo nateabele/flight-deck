@@ -31,7 +31,7 @@ public struct GeminiProfile: AgentProfile {
         }
     }
 
-    /// No effort knob: every agy model id already names its effort (`gemini-3.1-pro-high`,
+    /// No effort knob: every agy model id already names its effort (`gemini-3.8-flash-high`,
     /// `-low`), and agy resolves `--model` and `--effort` as ONE selection (a bad model reports
     /// `invalid model selection (--model "…" --effort "")`, probed 2026-10-07). A second knob
     /// could only contradict the id, so the editor hides it and the model picks the effort.
@@ -41,9 +41,11 @@ public struct GeminiProfile: AgentProfile {
                             defaultPlanningEffort: "", effortValues: [])
     }
 
-    /// The strongest Gemini `agy models` offered an AI Pro account on 2026-10-07 (the Pro line
-    /// tops out at 3.1; 3.6–3.8 are Flash). The id carries its effort (`-high`).
-    public static let defaultPlanningModel = "gemini-3.1-pro-high"
+    /// The strongest Gemini `agy models` offers. On 2026-10-07 that was `gemini-3.1-pro-high`;
+    /// by 2026-10-13 3.8 Flash had superseded 3.1 Pro and agy (1.3.4) listed no Pro model at all,
+    /// refusing `--model gemini-3.1-pro-high` as unknown — so a tab launched on the old default
+    /// failed. The id carries its effort (`-high`).
+    public static let defaultPlanningModel = "gemini-3.8-flash-high"
 
     /// Only these ids belong to this harness. `agy` also serves Claude and GPT-OSS models
     /// (probed 2026-10-07: `claude-opus-5-5-high`, `gpt-oss-120b-medium`), but the harness's
