@@ -218,8 +218,40 @@ struct PosixDaemonControl: DaemonControlling {
         terminateCore(pid: pid, socketPath: path, pidfilePath: path + ".pid")
     }
 
+    /// **A missing pidfile is not a missing daemon.** Daemons spawned before fd-abduco wrote
+    /// pidfiles (2026-09-27) have none, and `/switch-account` once "terminated" such a tab by
+    /// unlinking its socket alone: the old `claude` lived on unreachable under the old account,
+    /// its registry row kept the tab anchored to it, and every question the resumed agent asked
+    /// read `busy` and never reached a phone. `peerPID` cannot stand in — the kernel answers the
+    /// launcher that called `listen()`, which exited at the fork — so the daemon is found by the
+    /// argv it was started with. Every match is torn down: two can claim one path once a socket
+    /// has been unlinked and rebound over a live one, and the stale one is unreachable anyway.
     private func terminateCore(socketPath: String, pidfilePath: String) {
-        terminateCore(pid: readPID(pidfilePath: pidfilePath), socketPath: socketPath, pidfilePath: pidfilePath)
+        if let pid = readPID(pidfilePath: pidfilePath), kill(pid, 0) == 0 {
+            return terminateCore(pid: pid, socketPath: socketPath, pidfilePath: pidfilePath)
+        }
+        let servers = Self.serverPIDs(socketPath: socketPath)
+        guard !servers.isEmpty else {
+            return terminateCore(pid: nil, socketPath: socketPath, pidfilePath: pidfilePath)
+        }
+        for pid in servers {
+            Self.logger.notice("no live pidfile for \(socketPath, privacy: .public); terminating daemon pid \(pid, privacy: .public) found by argv")
+            terminateCore(pid: pid, socketPath: socketPath, pidfilePath: pidfilePath)
+        }
+    }
+
+    /// Live fd-abduco servers created on `socketPath` — `-c` for a tab, `-n` for an intake
+    /// runner. A server double-forks onto launchd, so its children are the whole search space;
+    /// the `-a` clients a surface runs never match.
+    static func serverPIDs(socketPath: String) -> [pid_t] {
+        ProcessTree().children(of: 1).sorted().filter { pid in
+            guard let argv = ProcessArguments.argv(of: pid), let first = argv.first,
+                  first.hasSuffix("fd-abduco"),
+                  let flag = argv.firstIndex(where: { ["-c", "-n", "-A"].contains($0) }),
+                  argv.index(after: flag) < argv.count
+            else { return false }
+            return argv[argv.index(after: flag)] == socketPath
+        }
     }
 
     /// Shared by every `terminate` overload — `pid` is either read from a pidfile (the normal
