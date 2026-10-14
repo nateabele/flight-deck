@@ -1384,6 +1384,11 @@ final class SessionStore: ObservableObject {
         updated.transcriptPath = moved.transcriptPath
         repos[at.repo].sessions[at.session] = updated
         statuses.removeValue(forKey: id)
+        // The anchor named the retired process. Kept, it is followed for as long as that pid's
+        // row survives — and if the kill above missed, that is forever: the tab read the old
+        // agent's status, never `waiting`, and the new agent's questions never reached a phone.
+        // Dropped, the next tick matches by conversation and the newest process wins.
+        anchors.removeValue(forKey: id)
         resetComposerReadiness(for: id, conversation: updated.pinnedConversationID)
         // After the restamp: each asks whether any tab is still on the OLD account, keyed the
         // way the stacks are (`instance(for:)`, which can collapse a built-in account to nil).

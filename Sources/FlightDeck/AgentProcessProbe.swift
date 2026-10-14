@@ -58,4 +58,28 @@ enum ProcessArguments {
         guard index > start else { return nil }
         return String(decoding: bytes[start..<index], as: UTF8.self)
     }
+
+    /// `pid`'s whole argv, argv[0] first, from the same `KERN_PROCARGS2` layout `argv0` reads;
+    /// nil when the process is gone or not readable by this user. Only the first `argc` strings
+    /// after the executable path are argv — the environment follows them.
+    static func argv(of pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+        let bytes = buffer.prefix(size)
+        let argc = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        var index = MemoryLayout<Int32>.size
+        while index < bytes.count, bytes[index] != 0 { index += 1 }
+        while index < bytes.count, bytes[index] == 0 { index += 1 }
+        var arguments: [String] = []
+        while arguments.count < argc, index < bytes.count {
+            let start = index
+            while index < bytes.count, bytes[index] != 0 { index += 1 }
+            arguments.append(String(decoding: bytes[start..<index], as: UTF8.self))
+            index += 1
+        }
+        return arguments
+    }
 }

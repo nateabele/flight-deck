@@ -406,6 +406,29 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertFalse(notice.title.contains("over its limit"))
     }
 
+    /// The "Concept Codes" report (2026-10-13): the old agent outlived the move — its daemon had
+    /// no pidfile — and its registry row kept the tab anchored to it. The resumed agent's
+    /// question read as the old one's idle `shell`, and no phone was ever offered it.
+    func testAMovedTabFollowsTheResumedAgentEvenWhileTheOldOneLingers() async {
+        let rig = rig()
+        let id = rig.tab.pinnedConversationID
+        let old = ClaudeStatusFile.Entry(pid: 34307, sessionID: id, activity: .idle, waitingFor: nil,
+                                         startedAt: 1, procStart: "old")
+        rig.store.applyRegistry([old.pid: old])
+        rig.store.injectorOverride = Composer("❯")
+        XCTAssertTrue(rig.store.requestAccountSwitch(rig.tab.id, target: "Second").ok)
+        await settle(rig)
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+
+        let lingering = ClaudeStatusFile.Entry(pid: 34307, sessionID: id, activity: .idle, waitingFor: nil,
+                                               startedAt: 1, procStart: "old", reportsBackgroundWork: true)
+        let resumed = ClaudeStatusFile.Entry(pid: 17193, sessionID: id, activity: .waiting,
+                                             waitingFor: "input needed", startedAt: 2, procStart: "new")
+        rig.store.applyRegistry([lingering.pid: lingering, resumed.pid: resumed])
+        XCTAssertEqual(rig.store.statuses[rig.tab.id]?.activity, .waiting,
+                       "the tab reads the resumed agent, not the one the move retired")
+    }
+
     func testAMoveToAnAccountOutsideTheAssignedPoolHoldsNoLease() async {
         let rig = rig()
         XCTAssertFalse(rig.store.accountResolver?.leases(heldBy: rig.tab.id).isEmpty ?? true, "precondition: leased on first")

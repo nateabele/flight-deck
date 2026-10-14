@@ -125,6 +125,25 @@ final class DaemonControlTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: pidfilePath))
     }
 
+    /// A daemon from before fd-abduco wrote pidfiles has none. `terminate` used to unlink its
+    /// socket and return, leaving the agent alive and unreachable — the account-switch bug
+    /// where the old `claude` kept the tab anchored to it. It must find the server by argv.
+    func testTerminateKillsADaemonWhosePidfileIsGone() throws {
+        let binary = try realFdAbducoBinary()
+        let socketPath = daemon.socketPath(for: sessionID)
+        try spawnDaemon(binary: binary, socketPath: socketPath)
+        let pidfilePath = daemon.pidfilePath(for: sessionID)
+        let server = try waitForPidfile(pidfilePath)
+        spawnedPIDs.append(server)
+        try FileManager.default.removeItem(atPath: pidfilePath)
+        XCTAssertEqual(PosixDaemonControl.serverPIDs(socketPath: socketPath), [server])
+
+        control.terminate(sessionID)
+
+        XCTAssertNotEqual(kill(server, 0), 0, "the server is dead, not orphaned")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+    }
+
     // MARK: - readPID guard against non-positive / garbage pidfiles
 
     /// Regression coverage for the pidfile-parsing guard in `readPID`: `kill(pid, 0)` treats
