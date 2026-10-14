@@ -369,16 +369,22 @@ falls back to this Mac.
 `test-opencode-live.sh` and `test-hostd-linux-interop.sh` pin `FD_TEST_LOCAL=1`: they need this
 Mac's credentials and docker, and open no window.
 
-**Differs on the UI-test Mac (macOS 15.7; this Mac is on 26).** These fail there, deterministically,
-and are OS behavior, not the remote setup:
-`FleetSlotAttributionTests` (2) and `FleetDeviceNamingTests.testRenamingThePhoneItselfShowsUpOnTheNextAttach`
-(`FleetPSKIdentities.take` keyed by the TLS metadata's `ObjectIdentifier` finds no record for the
-second connection, so its slot is `nil`), `HostTransportLoopbackTests.testRevokingOneControllerLeavesTheOtherConnected`
-(rebuilding the listener resets the surviving connection) and
-`ProjectViewIntakeListLiveTests.testCollapseSlidesOverTheDetailAndIsRememberedPerProject` (toolbar
-geometry and per-frame width changes). The app's deployment target is macOS 14, so the first two
-groups may be real bugs on 14/15. `HostLinkTests.testServerStopMarksOfflineAndRestartRecovers` also
-failed once in a full run and passed alone.
+**macOS 15.7 on the UI-test Mac (this Mac is on 26; the app targets 14).** Five tests failed only
+there, and each was a real difference between the OSes, which is why that Mac is worth running on:
+
+- `FleetSlotAttributionTests`, `FleetDeviceNamingTests.testRenamingThePhoneItselfShowsUpOnTheNextAttach`,
+  `HostTransportLoopbackTests.testRevokingOneControllerLeavesTheOtherConnected` and
+  `HostLinkTests.testServerStopMarksOfflineAndRestartRecovers` (it failed 17 of 20 runs alone):
+  one product bug. macOS 15 resumes TLS sessions, and a resumed session skips PSK selection, so
+  `FleetPSKIdentities` never hears of the connection and `slot(of:)` is nil (a phone unattributed;
+  the macOS hostd drops the connection, which read as "listener rebuild resets the survivor").
+  Fixed in `FleetTLS.parameters` by turning resumption and tickets off on identity-recording
+  listeners. Cancelling an `NWListener` does not reset accepted connections on 15.
+- `ProjectViewIntakeListLiveTests.testCollapseSlidesOverTheDetailAndIsRememberedPerProject`: the
+  toolbar's trailing inset is 4 pt narrower on 15 (the test now compares against the other items),
+  and the detail pane did resize every frame there, because `.animation(nil, value:)` does not stop
+  an ambient `withAnimation`. The column now carries its own animation and the toggle sets state
+  with none.
 
 ### The UI suite runs on another Mac
 

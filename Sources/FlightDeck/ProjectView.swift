@@ -301,6 +301,12 @@ struct ProjectView: View {
         .overlay(alignment: .trailing) {
             IntakesColumnEdge(width: $paneWidth, range: Self.paneWidths, resizable: !collapsed)
         }
+        // The column's own animation, scoped to the column. The toggle must not wrap its state
+        // change in `withAnimation`: that makes the animation ambient, and on macOS 15 the
+        // detail pane's `.animation(nil, value:)` (`intakeSplitView`) did not stop it taking the
+        // padding change frame by frame (nine widths in one toggle, the plan editor re-laid on
+        // each). With no ambient animation there is nothing for the detail to opt out of.
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: collapsed)
     }
 
     private var expandedList: some View {
@@ -364,9 +370,7 @@ struct ProjectView: View {
         // Read at the press, as the inspector toggle does: the chord's action is kept from an
         // earlier body pass, and a captured value would re-apply the same state on every ⌥⌘S.
         let collapse = !intakeService.intakeListCollapsed(forProject: projectPath)
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-            intakeService.setIntakeListCollapsed(collapse, inProject: projectPath)
-        }
+        intakeService.setIntakeListCollapsed(collapse, inProject: projectPath)
     }
 
     // MARK: - Archive and Move to Trash
