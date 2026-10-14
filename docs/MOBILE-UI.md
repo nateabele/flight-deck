@@ -104,9 +104,10 @@ Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` wor
 - **The proxy's host name must not be the phone's own.** `Mobile3.local` is already claimed,
   and `dns-sd` reports `Name in use, please choose another`. That error is also a clue: the
   phone's *host* record does get through, and only the service advert is lost.
-- **The proxy goes stale.** It hard-codes the phone's IP, port and `authTag`. When any of them
-  changes, the phone goes back to `unavailable`. Kill the `dns-sd -P` process, re-run step 2 and
-  register again.
+- **The proxy goes stale.** It hard-codes the phone's IP, port, service UUID and `authTag`. When
+  any of them changes, the phone goes back to `unavailable`. On 2026-10-14 the IP was unchanged
+  but the UUID and `authTag` were both new, so re-run step 2 from the PTR query rather than
+  reusing the old UUID. Kill the `dns-sd -P` process and register again.
 - **The real fix is the network.** Turn off multicast filtering, IGMP snooping or client
   isolation on the router, or keep the phone off a guest network. The proxy routes around the
   router; it does not fix it.
