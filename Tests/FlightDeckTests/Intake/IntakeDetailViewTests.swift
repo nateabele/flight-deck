@@ -32,4 +32,24 @@ final class IntakeDetailViewTests: XCTestCase {
         XCTAssertEqual(IntakeDetailView.roundLabel(index: 1, exchange: TriageExchange(questions: ["a"], answers: ["1"])),
                        "Round 2 · 1 question")
     }
+
+    /// Detection lands after launch, often with the plan already on screen and its config seeded
+    /// from the codex/claude fallback. The fresh detection re-seeds it with the agents now signed
+    /// in; a config the human edited is left alone.
+    func testDetectedAgentsReseedAnUneditedConfigOnly() throws {
+        let detected = AvailableModels(choices: [
+            .codex: .init(agent: .codex, model: "gpt-6-sol", effort: "high"),
+            .claude: .init(agent: .claude, model: "opus", effort: "high"),
+            .gemini: .init(agent: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
+            .grok: .init(agent: .grok, model: "grok-4.7", effort: "medium")])
+        let stale = PresetExpansion.config(for: .fullPlan, available: .defaults)
+        let fresh = try XCTUnwrap(IntakeDetailView.reseeded(stale, preset: .fullPlan, available: detected))
+        XCTAssertEqual(fresh.drafters.map(\.choice.agent), [.codex, .claude, .gemini, .grok])
+        XCTAssertEqual(fresh.crossReviewer?.choice.agent, .gemini)
+
+        var edited = try XCTUnwrap(stale)
+        edited.customized = true
+        XCTAssertEqual(IntakeDetailView.reseeded(edited, preset: .fullPlan, available: detected), edited,
+                       "the human's own edits survive a re-detection")
+    }
 }

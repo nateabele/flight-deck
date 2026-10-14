@@ -721,6 +721,19 @@ struct IntakeDetailView: View {
         }
         .task(id: intake.id) { selectedPreset = intake.recommended ?? .bead; seedConfig() }
         .onChange(of: selectedPreset) { seedConfig() }
+        // Detection lands after launch, often after this plan is already on screen: seeded from
+        // the stock fallback (codex and claude), the editor would keep a config without Gemini or
+        // Grok and Start would run it. Re-seed when the detected agents change — but never over
+        // the human's own edits.
+        .onChange(of: service.availableModelsCache) {
+            editedConfig = Self.reseeded(editedConfig, preset: selectedPreset, available: service.availableModels())
+        }
+    }
+
+    /// The config to show once the detected agents change: the preset's fresh expansion, unless
+    /// the human has edited the one in hand (`customized`), which is kept as it is.
+    static func reseeded(_ current: RoundConfig?, preset: Preset, available: AvailableModels) -> RoundConfig? {
+        current?.customized == true ? current : PresetExpansion.config(for: preset, available: available)
     }
 
     /// Re-seeded whenever the preset changes, so an edit to Full plan's config never leaks
