@@ -257,8 +257,9 @@ final class GrokProfileTests: XCTestCase {
         let config = RoundConfig(drafters: [Slot(codex)], synthesizer: nil, reviewer: Slot(codex), integrator: codex,
                                  encoder: codex, polisher: nil, refinementCap: 1, polishCap: 0, freshEyesAndDedup: false,
                                  defaultPlay: .toReview, customized: false)
-        let switched = RoundConfigEditor.switchingAgent(config, at: .reviewer, to: .grok, available: available)
-        XCTAssertEqual(switched.reviewer?.choice, grok)
+        let switched = RoundConfigEditor.selecting(config, at: .init(keyPath: .reviewer), agent: .grok, model: grok.model, available: available)
+        XCTAssertEqual(switched.reviewer?.choice, ModelChoice(agent: .grok, model: grok.model, effort: "medium"),
+                       "the agent's planning effort, not the effort the old agent had")
     }
 
     /// A claude+grok pair is cross-family (coverage counts Grok as its own family).

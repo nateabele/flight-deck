@@ -99,7 +99,7 @@ final class FinishedRoundsModelTests: XCTestCase {
         XCTAssertEqual(refine.sections, ["Scope", "Rollout plan"], "every section, not the card's first three")
         XCTAssertEqual(refine.notesApplied, ["Keep the dispatcher override"])
         XCTAssertEqual(refine.seats.map(\.label), ["reviewer", "integrator"])
-        XCTAssertEqual(refine.seats.map(\.model), ["codex gpt-6-sol", "codex gpt-6-sol"])
+        XCTAssertEqual(refine.seats.map(\.model), ["Codex > GPT 6 Sol", "Codex > GPT 6 Sol"])
         XCTAssertEqual(details[0].facts.map(\.value), ["—", "3 drafts", "—", "—"])
     }
 

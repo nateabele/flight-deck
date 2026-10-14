@@ -99,7 +99,7 @@ final class PlanningAccountsTests: XCTestCase {
         XCTAssertNil(claude.lease)
         XCTAssertEqual(claude.account?.id, store.account(for: .claude, project: project)?.id, "the same answer a new tab gets")
         XCTAssertEqual(try resolver.acquire(.codex, project: project).get().account?.id, codex.id)
-        XCTAssertEqual(resolver.billing(.claude, project: project), AccountBilling(text: "Personal"))
+        XCTAssertEqual(resolver.billing(.claude, project: project), AccountBilling(text: "Personal", choice: .account(personal.id)))
     }
 
     func testAnAssignedAccountIsBilled() throws {
@@ -140,7 +140,7 @@ final class PlanningAccountsTests: XCTestCase {
         let ledger = ledger(for: store)
         overSoft(work, in: ledger)
         let resolver = AccountResolver(preferences: store, ledger: ledger)
-        XCTAssertEqual(resolver.billing(.claude, project: project), AccountBilling(text: "Team pool"))
+        XCTAssertEqual(resolver.billing(.claude, project: project), AccountBilling(text: "Team pool", choice: .pool("team")))
         let resolved = try resolver.acquire(.claude, project: project).get()
         XCTAssertEqual(resolved.account?.id, spare.id, "Work is over soft, so Spare is leased")
         XCTAssertEqual(resolved.label, "Team pool · Spare")
@@ -247,8 +247,9 @@ final class PlanningAccountsTests: XCTestCase {
     }
 
     func testTheEditorLineReadsBills() {
-        XCTAssertEqual(RoundConfigEditor.billingLine(AccountBilling(text: "Team pool")), "Bills: Team pool")
-        XCTAssertNil(RoundConfigEditor.billingLine(nil))
+        let choice = ModelChoice(agent: .claude, model: "opus", effort: "high")
+        XCTAssertEqual(RoundConfigEditor.accountRow(AccountMenu(projectDefault: "Team pool"), choice: choice),
+                       .line("Account: Team pool"))
         XCTAssertEqual(AccountBilling.poolName("Night pool"), "Night pool", "never 'pool pool'")
     }
 
@@ -293,7 +294,7 @@ final class PlanningAccountsTests: XCTestCase {
     /// One shaping intake in `project` whose rounds run claude (pooled) and codex; `clock` drives
     /// the controller, so spawn grace and heartbeat freshness are under the test's control.
     private func rig(_ assignments: [AgentID: AccountAssignment] = [.claude: .pool("team")],
-                     store: PreferencesStore? = nil, ledger: CapacityLedger? = nil,
+                     store: PreferencesStore? = nil, ledger: CapacityLedger? = nil, config: RoundConfig? = nil,
                      control: Control = Control(), clock: @escaping () -> Date) throws -> Rig {
         let store = store ?? preferences(assignments)
         let ledger = ledger ?? self.ledger(for: store)
@@ -315,7 +316,7 @@ final class PlanningAccountsTests: XCTestCase {
             intake.state = .shaping
             let claudeB = ModelChoice(agent: .claude, model: "B", effort: "high")
             let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
-            intake.roundConfig = RoundConfig(drafters: [Slot(codexA, fallback: claudeB)], synthesizer: nil, reviewer: nil,
+            intake.roundConfig = config ?? RoundConfig(drafters: [Slot(codexA, fallback: claudeB)], synthesizer: nil, reviewer: nil,
                                              integrator: codexA, encoder: codexA, polisher: nil, refinementCap: 1,
                                              polishCap: 1, freshEyesAndDedup: false, defaultPlay: .step, customized: false)
             try intakeStore.save(intake)
@@ -347,6 +348,64 @@ final class PlanningAccountsTests: XCTestCase {
     /// A crash leaves the tape mid-round with a live socket but no heartbeat. Once out of spawn
     /// grace the runner reads as gone: its lease is released, and the respawn re-leases — the
     /// rollover point, which lands on Spare now that Work is over soft.
+    /// A role's own pool is leased through the ledger exactly as a project pool is, recorded under
+    /// `overrides`, and given back with the runner. The project's claude account is not resolved at
+    /// all, since no seat uses it.
+    func testAPoolOverrideLeasesThroughTheLedgerAndIsReleasedWithTheRunner() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
+        let pinned = ModelChoice(agent: .claude, model: "opus", effort: "high", account: .pool("team"))
+        let cfg = RoundConfig(drafters: [Slot(codexA, fallback: pinned)], synthesizer: nil, reviewer: nil,
+                              integrator: codexA, encoder: codexA, polisher: nil, refinementCap: 1,
+                              polishCap: 1, freshEyesAndDedup: false, defaultPlay: .step, customized: false)
+        let rig = try rig([.claude: .account(personal.id)], config: cfg, clock: { now })
+        rig.spawner.onSpawn = { self.goLive(rig) }
+        XCTAssertNoThrow(try rig.controller.ensureRunning(rig.id).get())
+        let file = try XCTUnwrap(RunnerAccounts.load(from: rig.directory))
+        XCTAssertEqual(Set(file.agents.keys), [.codex], "every claude seat holds its own account")
+        let entry = try XCTUnwrap(file.overrides?["pool:team"])
+        XCTAssertEqual(entry.accountID, work.id, "first under soft in Team")
+        XCTAssertNotNil(entry.lease)
+        XCTAssertEqual(file.entry(for: pinned)?.accountID, work.id)
+        XCTAssertEqual(rig.ledger.activeLeases(pool: "team").count, 1)
+
+        now += 60
+        rig.control.liveSockets.removeAll()
+        rig.controller.syncAccountLeases([rig.id])
+        XCTAssertEqual(rig.ledger.activeLeases(pool: "team").count, 0, "released with the runner")
+    }
+
+    func testAnAccountOverrideBillsThatAccountWhileOtherSeatsKeepTheProjectsAssignment() throws {
+        let claudeDefault = ModelChoice(agent: .claude, model: "opus", effort: "high")
+        let claudeSpare = ModelChoice(agent: .claude, model: "sonnet", effort: "high", account: .account(spare.id))
+        let cfg = RoundConfig(drafters: [Slot(claudeDefault, fallback: nil)], synthesizer: nil, reviewer: Slot(claudeSpare),
+                              integrator: claudeDefault, encoder: claudeDefault, polisher: nil, refinementCap: 1,
+                              polishCap: 0, freshEyesAndDedup: false, defaultPlay: .step, customized: false)
+        let rig = try rig([.claude: .account(personal.id)], config: cfg, clock: { Date(timeIntervalSince1970: 1_000) })
+        rig.spawner.onSpawn = { self.goLive(rig) }
+        XCTAssertNoThrow(try rig.controller.ensureRunning(rig.id).get())
+        let file = try XCTUnwrap(RunnerAccounts.load(from: rig.directory))
+        XCTAssertEqual(file.entry(for: claudeDefault)?.accountID, personal.id)
+        XCTAssertEqual(file.entry(for: claudeSpare)?.accountID, spare.id)
+        XCTAssertEqual(file.entry(for: claudeSpare)?.home, spare.home)
+        XCTAssertNil(file.entry(for: ModelChoice(agent: .claude, model: "x", effort: "", account: .account(work.id))),
+                     "an account no seat named has no entry: the executor pauses the seat")
+        XCTAssertEqual(rig.ledger.activeLeases(pool: "team").count, 0)
+    }
+
+    func testARemovedOverrideAccountRefusesTheStartAndSpawnsNothing() throws {
+        let gone = ModelChoice(agent: .claude, model: "opus", effort: "high", account: .account(UUID()))
+        let cfg = RoundConfig(drafters: [Slot(gone)], synthesizer: nil, reviewer: nil, integrator: gone, encoder: gone,
+                              polisher: nil, refinementCap: 1, polishCap: 0, freshEyesAndDedup: false,
+                              defaultPlay: .step, customized: false)
+        let rig = try rig([:], config: cfg, clock: { Date(timeIntervalSince1970: 1_000) })
+        guard case .failure(.accountUnavailable(let why)) = rig.controller.ensureRunning(rig.id) else {
+            return XCTFail("a role's removed account must refuse the start")
+        }
+        XCTAssertTrue(why.contains("no longer exists"), why)
+        XCTAssertEqual(rig.spawner.spawns, 0)
+    }
+
     func testACrashedRunnerReleasesAndItsRespawnRollsOver() throws {
         var now = Date(timeIntervalSince1970: 1_000)
         let rig = try rig(clock: { now })
@@ -377,7 +436,7 @@ final class PlanningAccountsTests: XCTestCase {
         guard case .failure(.accountUnavailable(let why)) = rig.controller.ensureRunning(rig.id) else {
             return XCTFail("expected an account refusal")
         }
-        XCTAssertTrue(why.contains("Codex account assigned to this project no longer exists"), why)
+        XCTAssertTrue(why.contains("Codex account chosen for this project no longer exists"), why)
         XCTAssertEqual(rig.spawner.spawns, 0)
         XCTAssertEqual(rig.ledger.activeLeases(pool: "team").count, 0, "the claude lease taken first is handed back")
         XCTAssertNil(RunnerAccounts.load(from: rig.directory))

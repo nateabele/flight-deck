@@ -62,7 +62,7 @@ final class LiveSeatsTests: XCTestCase {
                        "a run the config doesn't predict is still shown, after the expected seats")
         let seat = rows[1].model
         XCTAssertEqual(seat.glyph, .fallback)
-        XCTAssertEqual(seat.identity, "claude → codex · gpt-6-sol")
+        XCTAssertEqual(seat.identity, "Claude → Codex > GPT 6 Sol")
         XCTAssertEqual(seat.headline, "Questioning whether offline replay can reorder check-ins")
         XCTAssertEqual(seat.elapsed, 30, "the fallback's own clock, not the failed attempt's")
     }

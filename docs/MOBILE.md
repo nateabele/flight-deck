@@ -763,7 +763,9 @@ page.
     code or a stuck Start.
 100. **The round inspector while choosing.** Tap the info button beside each fidelity (not
     Single task, which has none): a read-only list by stage (Draft, Synthesis, Refine, Encode,
-    Polish) naming each agent, its model and effort, a drafter's persona and any fallback, then
+    Polish) naming each agent and model the way the Mac does ("Claude > Opus 5.5", never an id),
+    its effort, "Account: ..." for a role that holds its own account or pool, a drafter's persona
+    and any fallback, then
     rounds, cross-check, fresh eyes + dedup and default play. It matches what the Mac's own
     Rounds inspector shows for the same fidelity. Wrong: a missing agent, an editable control, or
     the word "seat".

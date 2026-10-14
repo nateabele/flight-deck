@@ -16,6 +16,13 @@ private final class FakeHeadlessRunner: HeadlessRunner, @unchecked Sendable {
     }
 }
 
+private final class DetectionCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func bump() { lock.withLock { value += 1 } }
+    var count: Int { lock.withLock { value } }
+}
+
 /// Records the account each triage turn was bound to (unify brief R9).
 private final class AccountRecordingHeadlessRunner: HeadlessRunner, @unchecked Sendable {
     private(set) var accounts: [AgentAccountRef?] = []
@@ -43,6 +50,7 @@ private final class StubAccountResolver: AccountResolving {
         asked.append((agent, project))
         return result
     }
+    func acquire(_ choice: AccountChoice, agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError> { result }
     func release(_ lease: AccountLease) { released.append(lease) }
     func adopt(_ lease: AccountLease) {}
 }
@@ -168,6 +176,45 @@ final class IntakeServiceTests: XCTestCase {
 
     /// Unify brief R9: triage bills the project's account for its agent, binds that home, records
     /// the account on its activity, and hands a pool lease back when the turn ends.
+    /// The start of an intake refreshes the model lists: detection runs again (which re-reads claude's
+    /// and codex's lists per account, and grok/gemini/opencode's through the detection), off the
+    /// main actor. A host with no refresher (every test but this) spawns nothing.
+    func testStartingAnIntakeRefreshesTheModelLists() async throws {
+        let detections = DetectionCount()
+        let reads = DetectionCount()
+        let work = AccountChoice.account(UUID())
+        let targets = ModelListTargets(accounts: [.init(agent: .codex, choice: work, home: URL(fileURLWithPath: "/h/work"), bound: true)])
+        let svc = IntakeService(store: IntakeStore(root: root), headless: FakeHeadlessRunner([Self.codex(Self.questions)]),
+                                processRunner: MutableRunner([:]),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
+                                detectAgents: { detections.bump(); return .defaults })
+        svc.modelRefresher = ModelListRefresher(
+            store: ModelListStore(directory: root.appendingPathComponent("model-lists")),
+            runClaude: { _, _ in nil },
+            readCache: { _, _ in reads.bump(); return [ModelOption(id: "gpt-6-sol", name: "GPT 6 Sol")] }, log: { _ in })
+        svc.modelListTargets = { targets }
+        XCTAssertEqual(detections.count, 0, "a supplied cache means no launch detection")
+        svc.capture(intent: "Add a note", project: "/p")
+        await svc.recheckAgents().value   // joins the detection capture started
+        XCTAssertEqual(detections.count, 1)
+        XCTAssertEqual(reads.count, 1)
+        XCTAssertEqual(svc.modelLists[work.key]?.map(\.name), ["GPT 6 Sol"])
+        XCTAssertEqual(svc.availableModels(project: nil).optionsByAccount[work.key]?.first?.id, "gpt-6-sol")
+    }
+
+    func testStartingAnIntakeOnAHostWithNoRefresherDetectsNothing() async throws {
+        let detections = DetectionCount()
+        let svc = IntakeService(store: IntakeStore(root: root), headless: FakeHeadlessRunner([Self.codex(Self.questions)]),
+                                processRunner: MutableRunner([:]),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
+                                detectAgents: { detections.bump(); return .defaults })
+        svc.capture(intent: "Add a note", project: "/p")
+        await svc.task(for: svc.intakes[0].id)?.value
+        XCTAssertEqual(detections.count, 0)
+    }
+
     func testTriageBillsTheProjectsAccountAndReleasesItsLease() async throws {
         let home = root.appendingPathComponent("accounts/cx")
         let account = AgentAccount(agent: .codex, displayName: "CX", home: home)

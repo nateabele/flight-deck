@@ -2278,6 +2278,13 @@ final class SessionStore: ObservableObject {
         // before `FlightDeckApp` attaches routing — and must still see it.
         service.encodeRouting = { [weak self] in self?.flightControlRouting }
         service.accountResolver = accounts
+        // The model menus' lists, read from each CLI and kept in the state directory. Only the app
+        // names a state directory, so a store a test builds spawns no CLI to list models.
+        if intakesRoot != nil, let preferences {
+            service.modelRefresher = ModelListRefresher(store: ModelListStore(directory: root.appendingPathComponent("model-lists", isDirectory: true)))
+            service.modelListTargets = { [weak preferences] in preferences.map(ModelListTargets.init) ?? ModelListTargets() }
+            service.loadCachedModelLists()
+        }
         // Every member of a planning pool over its hard limit: the same banner a tab posts
         // (`fileLease`), keyed by the intake so a second start replaces rather than stacks it.
         let postNotice: (UUID, String, AccountNotice) -> Void = { [weak self] id, project, notice in

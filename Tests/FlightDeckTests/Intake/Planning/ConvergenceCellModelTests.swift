@@ -106,7 +106,7 @@ final class ConvergenceCellModelTests: XCTestCase {
         XCTAssertEqual(c.trend.restartRound, 3)
         let cell = try XCTUnwrap(ConvergenceCellModel(cycles: [c]))
         XCTAssertEqual(cell.discontinuities, [2])
-        XCTAssertTrue(cell.cardLines.contains("Reviewer changed at R3 (codex gpt-6-sol → claude opus); the trend restarts there"),
+        XCTAssertTrue(cell.cardLines.contains("Reviewer changed at R3 (Codex > GPT 6 Sol → Claude > Opus); the trend restarts there"),
                       "\(cell.cardLines)")
         XCTAssertFalse(cell.cardLines[0].contains("changed at R3"), "the series line must not say it twice: \(cell.cardLines[0])")
         // The verdict word survives the swap: the cell still says what the restarted trend is

@@ -179,7 +179,7 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(card.slots.map(\.label), ["drafter · arbiter", "drafter · realist", "drafter · coverage"])
         XCTAssertEqual(card.slots[0].diagnosis, nil)
         XCTAssertEqual(card.slots[1].diagnosis,
-                       "Ran codex gpt-6-sol instead of claude opus — auth expired: claude login expired. Run `claude /login`")
+                       "Ran Codex > GPT 6 Sol instead of Claude > Opus — auth expired: claude login expired. Run `claude /login`")
         XCTAssertEqual(card.slots[2].diagnosis,
                        "Failed — timed out: no output for 20 minutes. Retry the round")
     }

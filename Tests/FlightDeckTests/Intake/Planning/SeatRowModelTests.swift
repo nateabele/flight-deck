@@ -31,7 +31,7 @@ final class SeatRowModelTests: XCTestCase {
                                     activity: nil, record: nil, roundRecord: nil, now: epoch)
         XCTAssertEqual(row.glyph, .queued)
         XCTAssertEqual(row.role, "arbiter")
-        XCTAssertEqual(row.identity, "codex · gpt-6-sol · high", "what it WILL run is already known from the config")
+        XCTAssertEqual(row.identity, "Codex > GPT 6 Sol · high", "what it WILL run is already known from the config")
         XCTAssertNil(row.headline)
         XCTAssertNil(row.action)
         XCTAssertEqual(row.elapsed, 0)
@@ -122,9 +122,9 @@ final class SeatRowModelTests: XCTestCase {
         let a = activity(.codex, startedAt: epoch) // the fallback attempt, already under way
         let row = SeatRowModel.make(run: "draft-0-drafter-0-fallback", slot: nil, requested: slot, activity: a,
                                     record: nil, roundRecord: nil, now: epoch.addingTimeInterval(5))
-        XCTAssertEqual(row.identity, "claude → codex · gpt-6-sol")
+        XCTAssertEqual(row.identity, "Claude → Codex > GPT 6 Sol")
         XCTAssertEqual(row.glyph, .fallback)
-        XCTAssertEqual(row.exception, .fallback("fell back to codex"),
+        XCTAssertEqual(row.exception, .fallback("fell back to Codex"),
                        "no diagnosis exists for a fallback that's still running (or that succeeded) — never invent one")
     }
 
@@ -139,7 +139,7 @@ final class SeatRowModelTests: XCTestCase {
         let row = SeatRowModel.make(run: "draft-0-drafter-0-fallback", slot: outcome, requested: Slot(claude, fallback: codex),
                                     activity: a, record: nil, roundRecord: nil, now: epoch)
         XCTAssertEqual(row.glyph, .failed, "the fallback attempt itself still failed")
-        XCTAssertEqual(row.identity, "claude → codex · gpt-6-sol")
+        XCTAssertEqual(row.identity, "Claude → Codex > GPT 6 Sol")
     }
 
     // MARK: - Failed

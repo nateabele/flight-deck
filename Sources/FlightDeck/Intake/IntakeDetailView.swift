@@ -983,8 +983,8 @@ struct IntakeDetailView: View {
     private var roundsEditor: some View {
         if let config = editedConfig {
             RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
-                              available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
-                              codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
+                              available: service.availableModels(project: intake.projectPath),
+                              accounts: service.planningAccountMenus(project: intake.projectPath),
                               recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() },
                               highlight: roundsReveal?.section, selection: $roundPick)
         }
@@ -1001,7 +1001,8 @@ struct IntakeDetailView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 RoundConfigEditor(preset: intake.chosenPreset ?? .featurePlan, config: .constant(config),
-                                  available: service.availableModels(), readOnly: true, highlight: roundsReveal?.section,
+                                  available: service.availableModels(project: intake.projectPath),
+                                  accounts: service.planningAccountMenus(project: intake.projectPath), readOnly: true, highlight: roundsReveal?.section,
                                   tape: finalTape, selection: $roundPick)
             }
         }

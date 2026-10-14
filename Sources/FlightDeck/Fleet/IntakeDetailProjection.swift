@@ -67,7 +67,7 @@ enum IntakeDetailProjection {
             duration: finished && model.elapsed > 0 ? model.elapsed : nil, fallback: fallback, failure: failure)
     }
 
-    static func round(_ c: Checkpoint) -> WireRound {
+    static func round(_ c: Checkpoint, available: AvailableModels = .defaults) -> WireRound {
         let slots = c.record.slots
         let outcome = slots.contains { $0.status == .failed } ? "failed"
             : slots.contains { $0.status == .substituted } ? "fallback" : "ok"
@@ -79,7 +79,8 @@ enum IntakeDetailProjection {
             verdicts: c.record.tally.map { WireVerdicts(agreed: $0.agree, somewhat: $0.somewhat, declined: $0.disagree) },
             note: c.record.note, sectionsChanged: c.record.sectionsChanged,
             agents: slots.map { s in
-                WireRoundAgent(role: s.role, ran: "\(s.used.agent.rawValue) · \(s.used.model) · \(s.used.effort)",
+                WireRoundAgent(role: s.role, ran: ([available.modelLabel(agent: s.used.agent, model: s.used.model, account: s.used.account)]
+                                   + (s.used.effort.isEmpty ? [] : [s.used.effort])).joined(separator: " · "),
                                status: s.status.rawValue, detail: s.diagnosis?.detail)
             },
             // Located against no blocks: the round list names the notes; the plan screen pins them.
@@ -89,6 +90,9 @@ enum IntakeDetailProjection {
     @MainActor
     static func detail(_ id: UUID, project: UUID, service: IntakeService, servedAt: Date) -> WireIntakeDetail? {
         guard let i = service.intakes.first(where: { $0.id == id }) else { return nil }
+        let available = service.availableModels(project: i.projectPath)
+        let menus = service.planningAccountMenus(project: i.projectPath)
+        let naming = Naming(available: available) { choice in menus.values.lazy.compactMap { $0.title(for: choice) }.first }
         let tape = service.tapes[id]
         let files = service.seats.files(id)
         let summary = IntakeSummaryProjection.summary(i, tape: tape, seats: files,
@@ -122,7 +126,7 @@ enum IntakeDetailProjection {
         let choice: WireChoice? = choosing ? WireChoice(
             recommended: i.recommended?.rawValue, reason: i.recommendationReason, chosen: i.chosenPreset?.rawValue,
             roundsSummary: (i.chosenPreset ?? i.recommended).flatMap { p in i.roundConfig.map { RoundConfigEditor.summary(preset: p, config: $0) } },
-            presets: presetOptions(available: service.availableModels())
+            presets: presetOptions(available: service.availableModels(), naming: naming)
         ) : nil
         let failure = i.failure.map { reason in
             WireFailure(reason: reason, output: i.rawFailureOutput.map { tail($0, limit: failureOutputLimit) })
@@ -137,12 +141,12 @@ enum IntakeDetailProjection {
             etag: "", project: project, summary: summary, intent: i.intent,
             progress: progress.map { WireProgressPhase(label: $0.label, detail: $0.detail) },
             board: board, agents: agents,
-            rounds: (tape?.checkpoints ?? []).reversed().map(round),
+            rounds: (tape?.checkpoints ?? []).reversed().map { round($0, available: available) },
             questions: i.exchanges.isEmpty ? nil : WireQuestions(open: open, answered: answered),
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
             headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
             steer: true, choose: true,
-            roundConfig: choosing ? nil : i.roundConfig.map(wireConfig))
+            roundConfig: choosing ? nil : i.roundConfig.map { wireConfig($0, naming: naming) })
         detail.etag = etag(detail)
         return detail
     }
@@ -150,36 +154,50 @@ enum IntakeDetailProjection {
     /// The four fidelities in the order the Mac's picker lists them, each with what it would seat
     /// right now — the same `PresetExpansion` call the Mac's Start makes, so the phone shows what
     /// choosing would run. Single task seats nothing.
-    static func presetOptions(available: AvailableModels) -> [WirePresetOption] {
+    static func presetOptions(available: AvailableModels, naming: Naming? = nil) -> [WirePresetOption] {
         [Preset.bead, .sketch, .featurePlan, .fullPlan].map { preset in
             WirePresetOption(preset: preset.rawValue,
-                             config: PresetExpansion.config(for: preset, available: available).map(wireConfig))
+                             config: PresetExpansion.config(for: preset, available: available).map { wireConfig($0, naming: naming ?? Naming(available: available)) })
         }
     }
 
-    static func wireChoice(_ c: ModelChoice) -> WireModelChoice {
-        WireModelChoice(agent: c.agent.rawValue, agentName: c.agent.displayName, model: c.model, effort: c.effort)
+    /// Names a role's model and account for the wire: `available` supplies the model's name (the
+    /// CLI's own, else derived), `accountName` the name of an account or pool a role holds itself.
+    struct Naming {
+        var available: AvailableModels = .defaults
+        var accountName: (AccountChoice) -> String? = { _ in nil }
     }
 
-    static func wireSeat(_ slot: Slot) -> WireSeat {
-        WireSeat(choice: wireChoice(slot.choice), persona: slot.persona.rawValue, fallback: slot.fallback.map(wireChoice))
+    static func wireChoice(_ c: ModelChoice, naming: Naming = Naming()) -> WireModelChoice {
+        WireModelChoice(agent: c.agent.rawValue, agentName: c.agent.displayName, model: c.model, effort: c.effort,
+                        modelName: naming.available.displayName(agent: c.agent, model: c.model, account: c.account),
+                        account: c.account.flatMap(naming.accountName))
+    }
+
+    static func wireSeat(_ slot: Slot, naming: Naming = Naming()) -> WireSeat {
+        WireSeat(choice: wireChoice(slot.choice, naming: naming), persona: slot.persona.rawValue,
+                 fallback: slot.fallback.map { wireChoice($0, naming: naming) })
     }
 
     /// A seat that is a bare `ModelChoice` (integrator, encoder, polisher) has no persona.
-    static func wireSeat(_ choice: ModelChoice) -> WireSeat { WireSeat(choice: wireChoice(choice)) }
+    static func wireSeat(_ choice: ModelChoice, naming: Naming = Naming()) -> WireSeat {
+        WireSeat(choice: wireChoice(choice, naming: naming))
+    }
 
-    static func wireConfig(_ c: RoundConfig) -> WireRoundConfig {
-        WireRoundConfig(
-            drafters: c.drafters.map(wireSeat), synthesizer: c.synthesizer.map(wireSeat),
-            reviewer: c.reviewer.map(wireSeat), crossReviewer: c.crossReviewer.map(wireSeat),
-            crossCheck: c.crossCheck?.rawValue, integrator: wireSeat(c.integrator),
-            encoder: wireSeat(c.encoder), polisher: c.polisher.map { wireSeat($0) },
+    static func wireConfig(_ c: RoundConfig, naming: Naming = Naming()) -> WireRoundConfig {
+        func seat(_ s: Slot) -> WireSeat { wireSeat(s, naming: naming) }
+        func seat(_ m: ModelChoice) -> WireSeat { wireSeat(m, naming: naming) }
+        return WireRoundConfig(
+            drafters: c.drafters.map(seat), synthesizer: c.synthesizer.map(seat),
+            reviewer: c.reviewer.map(seat), crossReviewer: c.crossReviewer.map(seat),
+            crossCheck: c.crossCheck?.rawValue, integrator: seat(c.integrator),
+            encoder: seat(c.encoder), polisher: c.polisher.map { seat($0) },
             refinementCap: c.refinementCap, polishCap: c.polishCap,
             freshEyesAndDedup: c.freshEyesAndDedup, defaultPlay: c.defaultPlay.rawValue,
             customized: c.customized,
-            reviewers: c.reviewers.flatMap { $0.isEmpty ? nil : $0.map(wireSeat) },
-            integrators: c.integrators.flatMap { $0.isEmpty ? nil : $0.map { wireSeat($0) } },
-            polishers: c.polishers.flatMap { $0.isEmpty ? nil : $0.map { wireSeat($0) } })
+            reviewers: c.reviewers.flatMap { $0.isEmpty ? nil : $0.map(seat) },
+            integrators: c.integrators.flatMap { $0.isEmpty ? nil : $0.map { seat($0) } },
+            polishers: c.polishers.flatMap { $0.isEmpty ? nil : $0.map { seat($0) } })
     }
 
     private static func pendingRound(_ p: PendingStart?) -> PlannedRound? {

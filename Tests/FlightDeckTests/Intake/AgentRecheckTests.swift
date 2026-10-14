@@ -176,10 +176,10 @@ final class AgentRecheckTests: XCTestCase {
     /// gave it: the row keeps the agent, labelled unavailable, instead of a blank picker.
     func testAChosenAgentThatBecameUnavailableStaysInItsPicker() {
         let lost = signedOut
-        XCTAssertEqual(RoundConfigEditor.pickerAgents(in: lost, chosen: .grok), lost.agents + [.grok])
-        XCTAssertEqual(RoundConfigEditor.agentLabel(.grok, available: lost), "grok (unavailable)")
-        XCTAssertEqual(RoundConfigEditor.pickerAgents(in: signedIn, chosen: .grok), signedIn.agents)
-        XCTAssertEqual(RoundConfigEditor.agentLabel(.grok, available: signedIn), "grok")
+        XCTAssertTrue(RoundConfigEditor.menuAgents(in: lost, chosen: .grok).contains(.grok))
+        XCTAssertNotNil(RoundConfigEditor.unavailableReason(.grok, available: lost), "listed, but disabled")
+        XCTAssertTrue(RoundConfigEditor.menuAgents(in: signedIn, chosen: .grok).contains(.grok))
+        XCTAssertNil(RoundConfigEditor.unavailableReason(.grok, available: signedIn))
     }
 }
 

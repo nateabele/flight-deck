@@ -374,9 +374,17 @@ public struct WireModelChoice: Codable, Equatable, Sendable {
     public var agentName: String?
     public var model: String
     public var effort: String
+    /// The model's name as the Mac shows it ("Opus 5.5"), so the phone never shows an id. nil from
+    /// a Mac that predates it: the phone then falls back to `model`.
+    public var modelName: String?
+    /// The name of the account or pool this role bills when it holds its own; nil bills the
+    /// project's assignment, which the phone does not name.
+    public var account: String?
 
-    public init(agent: String, agentName: String? = nil, model: String, effort: String) {
+    public init(agent: String, agentName: String? = nil, model: String, effort: String,
+                modelName: String? = nil, account: String? = nil) {
         self.agent = agent; self.agentName = agentName; self.model = model; self.effort = effort
+        self.modelName = modelName; self.account = account
     }
 }
 
