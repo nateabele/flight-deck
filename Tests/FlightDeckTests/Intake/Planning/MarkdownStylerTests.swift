@@ -217,11 +217,10 @@ final class MarkdownStylerTests: XCTestCase {
         let blocks = MarkdownStyler.blocks(text)
         MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: nil, theme: .standard)
 
-        let clock = ContinuousClock()
-        var worst = Duration.zero
+        var worst = 0.0
         var reveal: Int?
         for location in stride(from: 0, to: storage.length, by: storage.length / 40) {
-            let elapsed = clock.measure {
+            let elapsed = threadCPUSeconds {
                 let next = MarkdownStyler.blockIndex(at: location, in: blocks)
                 MarkdownStyler.restyle(storage, blocks: blocks, indices: [reveal, next].compactMap { $0 },
                                        revealBlock: next, theme: .standard)
@@ -229,18 +228,18 @@ final class MarkdownStylerTests: XCTestCase {
             }
             worst = max(worst, elapsed)
         }
-        XCTAssertLessThan(worst, .milliseconds(16), "worst caret-block restyle: \(worst)")
+        XCTAssertLessThan(worst, 0.016, "worst caret-block restyle: \(worst * 1000) ms CPU")
 
         // The keystroke path (full re-parse, diff, restyle what changed) — reported, and held
         // to the same frame budget.
-        let keystroke = clock.measure {
+        let keystroke = threadCPUSeconds {
             let edited = (text as NSString).replacingCharacters(in: NSRange(location: 20, length: 0), with: "x")
             let fresh = MarkdownStyler.blocks(edited)
             let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: NSRange(location: 20, length: 1), delta: 1)
             XCTAssertEqual(changed.count, 1)
         }
-        XCTAssertLessThan(keystroke, .milliseconds(16), "keystroke re-parse: \(keystroke)")
-        print("PlanEditor timing: worst caret restyle \(worst), keystroke re-parse \(keystroke)")
+        XCTAssertLessThan(keystroke, 0.016, "keystroke re-parse: \(keystroke * 1000) ms CPU")
+        print("PlanEditor timing: worst caret restyle \(worst * 1000) ms CPU, keystroke re-parse \(keystroke * 1000) ms CPU")
     }
 
     private func hidden(_ storage: NSTextStorage, at location: Int) -> Bool {

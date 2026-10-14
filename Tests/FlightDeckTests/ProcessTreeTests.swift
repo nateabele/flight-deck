@@ -19,10 +19,10 @@ final class ProcessTreeTests: XCTestCase {
         p.arguments = ["-c", "sleep 30 & wait"]
         try p.run()
 
-        // Long enough for `sh` to have forked `sleep`; the descendant assertions below rely on
-        // the same pause.
-        Thread.sleep(forTimeInterval: 0.3)
+        // Until `sh` has forked `sleep`; the descendant assertions below rely on it.
         let tree = ProcessTree()
+        let forked = Date().addingTimeInterval(10)
+        while tree.descendants(of: p.processIdentifier).isEmpty, Date() < forked { usleep(5_000) }
         let doomed = tree.descendants(of: p.processIdentifier)
         addTeardownBlock {
             for descendant in doomed where tree.isAlive(descendant) {

@@ -76,7 +76,7 @@ final class InspectorMenuTests: XCTestCase {
         return host
     }
 
-    private func turn() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    private func turn() { settleMainRunLoop() }
 
     func testTheItemsFillTheShellWithTheirChords() {
         XCTAssertEqual(shell.items.filter { !$0.isHidden }.map(\.title), ["Notes", "Rounds"])

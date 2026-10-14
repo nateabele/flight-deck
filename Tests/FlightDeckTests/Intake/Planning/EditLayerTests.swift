@@ -162,12 +162,11 @@ final class EditLayerTests: XCTestCase {
         editedLines.insert("- a new item", at: 1203)
         editedLines.remove(at: 1800)
         let edited = editedLines.joined(separator: "\n")
-        let clock = ContinuousClock()
         var marks: [EditMark] = []
-        let elapsed = clock.measure { marks = EditLayer.marks(generated: generated, edited: edited).marks }
+        let cpu = threadCPUSeconds { marks = EditLayer.marks(generated: generated, edited: edited).marks }
         XCTAssertFalse(marks.isEmpty)
-        print("EditLayer timing: marks on 2000 lines \(elapsed)")
-        XCTAssertLessThan(elapsed, .milliseconds(16))
+        print("EditLayer timing: marks on 2000 lines \(cpu * 1000) ms CPU")
+        XCTAssertLessThan(cpu, 0.016)
     }
 }
 
@@ -249,7 +248,7 @@ extension EditLayerTests {
         container.revert.show(0)
         XCTAssertFalse(container.revert.button.isHidden)
         container.revert.button.performClick(nil)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        spinRunLoop { !commits.all.isEmpty && coordinator.hunks.count == 1 }
         XCTAssertEqual(container.textView.string, "# Plan\n\nalpha\nbeta\ngamma\ndelta\n")
         XCTAssertEqual(commits.all, ["# Plan\n\nalpha\nbeta\ngamma\ndelta\n"])
         XCTAssertEqual(coordinator.hunks.count, 1)

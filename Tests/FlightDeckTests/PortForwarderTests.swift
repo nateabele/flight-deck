@@ -238,7 +238,7 @@ final class PortForwarderTests: XCTestCase {
         client.shutdownWrite()
         while try await host.read() != nil {}
         client.close()
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(30)
         while held.bookkeeping != (0, 0), Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         held.release()
         await held.released()

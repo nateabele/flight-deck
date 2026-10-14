@@ -216,8 +216,8 @@ final class DelegateSkillTests: XCTestCase {
         let started = Date()
         await CodexDelegateSkill.installBundledOffMainActor(
             codexHome: tempHome, bundle: Bundle(for: Self.self), timeoutSeconds: 0.2, debugBuild: false,
-            perform: { _, _ in Thread.sleep(forTimeInterval: 3); return .current })
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+            perform: { _, _ in Thread.sleep(forTimeInterval: 30); return .current })
+        XCTAssertLessThan(Date().timeIntervalSince(started), 20, "returned at the 0.2 s deadline, not after the 30 s stall")
     }
 }
 

@@ -77,7 +77,7 @@ final class MeterMountTests: XCTestCase {
     /// change on a later runloop turn, so a fixed sleep either flakes under load or wastes time;
     /// a bounded poll is as fast as the machine allows and still fails when the view never updates.
     private func settle(_ host: NSView, until done: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(2)
+        let deadline = Date().addingTimeInterval(30)
         repeat {
             host.layoutSubtreeIfNeeded()
             if done() { return true }

@@ -34,7 +34,7 @@ final class PlanEditorW4Tests: XCTestCase {
     }
 
     /// The undo group typing opens closes at the end of the run-loop turn; commits hop a turn.
-    private func drain() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    private func drain() { settleMainRunLoop() }
 
     @MainActor
     private func type(_ s: String, at location: Int, in view: NSTextView) {
@@ -358,7 +358,7 @@ final class PlanEditorW4Tests: XCTestCase {
         let geometry = NotesGeometry()
         for _ in 0..<50 { geometry.bump() }
         XCTAssertEqual(geometry.beat, 0, "coalesced to the next frame")
-        RunLoop.main.run(until: Date().addingTimeInterval(NotesGeometry.frame * 2))
+        spinRunLoop { geometry.beat >= 1 }
         XCTAssertEqual(geometry.beat, 1)
     }
 

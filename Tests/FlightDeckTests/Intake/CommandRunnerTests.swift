@@ -148,15 +148,25 @@ final class CommandRunnerTests: XCTestCase {
     /// and under xctest that left `sleep 30` running through a SIGTERM (observed 1.035s to
     /// die — exactly the SIGKILL delay — before `POSIX_SPAWN_SETSIGDEF|SETSIGMASK`).
     func testProcessGroupCancellationLandsOnSIGTERM() async throws {
+        // The shell records the SIGTERM it receives. A child that never saw it died to the
+        // SIGKILL fallback a second later, which is what the old wall-clock bound told apart
+        // and what a loaded machine blurred.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("fd-term-\(UUID().uuidString)")
+        let ready = FileManager.default.temporaryDirectory.appendingPathComponent("fd-ready-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker); try? FileManager.default.removeItem(at: ready) }
+        let script = "trap 'echo term > \'\(marker.path)\'; exit 0' TERM; echo up > '\(ready.path)'; sleep 30 & wait"
         let t = Task {
-            try await SystemCommandRunner().run(executable: "sleep", arguments: ["30"], cwd: URL(fileURLWithPath: "/tmp"),
+            try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script], cwd: URL(fileURLWithPath: "/tmp"),
                                                 environment: env, processGroup: true, onSpawn: nil)
         }
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        let cancelledAt = Date()
+        var waited = 0
+        while !FileManager.default.fileExists(atPath: ready.path), waited < 1000 {
+            try await Task.sleep(nanoseconds: 20_000_000); waited += 1
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path), "the shell installed its trap")
         t.cancel()
         _ = try? await t.value
-        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 0.5)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "SIGTERM reached the child; it did not die to the SIGKILL fallback")
     }
 
     /// The leader exits on SIGTERM, but a descendant that ignores it and detached its streams
@@ -179,10 +189,10 @@ final class CommandRunnerTests: XCTestCase {
         let cancelledAt = Date()
         t.cancel()
         _ = try? await t.value
-        while kill(child, 0) == 0, Date().timeIntervalSince(cancelledAt) < 1.5 { try await Task.sleep(nanoseconds: 20_000_000) }
+        while kill(child, 0) == 0, Date().timeIntervalSince(cancelledAt) < 20 { try await Task.sleep(nanoseconds: 20_000_000) }
         let survived = kill(child, 0) == 0
         if survived { kill(child, SIGKILL) }
-        XCTAssertFalse(survived, "a TERM-ignoring descendant outlived ⏹ by 1.5s")
+        XCTAssertFalse(survived, "a TERM-ignoring descendant outlived ⏹ by 20s")
     }
 }
 

@@ -9,7 +9,7 @@ import XCTest
 final class NewSessionMenuTests: XCTestCase {
     private typealias Row = NewSessionMenuModel.Row
 
-    private func pump() { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+    private func pump() { settleMainRunLoop(0.1) }
 
     /// No accounts: a fresh store seeds one per agent from this Mac's own logins, which would make
     /// the rows depend on the machine running the test.

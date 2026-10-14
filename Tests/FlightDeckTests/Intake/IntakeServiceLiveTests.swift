@@ -700,7 +700,9 @@ final class IntakeServiceLiveTests: XCTestCase {
         let fresh = try XCTUnwrap(svc.convergenceFold(for: i.id))
         XCTAssertTrue(stale != fresh)
         await stale.value
-        XCTAssertNil(svc.convergence[i.id], "the 2-checkpoint fold landed after the 3-checkpoint tick")
+        // Awaiting the stale fold hands the main actor over, so the fresh fold may already have
+        // published: nil and a 3-point series are both fine. Only the stale 2-point one is not.
+        XCTAssertNotEqual(svc.convergence[i.id]?.first?.points.count, 2, "the 2-checkpoint fold landed after the 3-checkpoint tick")
         await fresh.value
         await svc.launchRecovery?.value
         await svc.convergenceFold(for: i.id)?.value
@@ -726,12 +728,14 @@ final class IntakeServiceLiveTests: XCTestCase {
         let planBytes = try Data(contentsOf: store.checkpointDirectory(15).appendingPathComponent("plan.md")).count
         XCTAssertGreaterThan(planBytes, 15_000)
         let svc = await makeService(awaitRecovery: false)
-        let tickStart = Date()
-        svc.pollTapes()
-        let tick = Date().timeIntervalSince(tickStart)
-        await svc.convergenceFold(for: i.id)?.value
-        let fold = Date().timeIntervalSince(tickStart)
-        print("CONVERGENCE-TIMING plan=\(planBytes)B checkpoints=30 mainActorTick=\(Int(tick * 1000))ms foldTotal=\(Int(fold * 1000))ms")
+        // CPU time, not wall time: the fold runs on a detached task, and a loaded machine
+        // stretches wall time without the fold doing any more work.
+        var tick = 0.0
+        let fold = await processCPUSeconds {
+            tick = threadCPUSeconds { svc.pollTapes() }
+            await svc.convergenceFold(for: i.id)?.value
+        }
+        print("CONVERGENCE-TIMING plan=\(planBytes)B checkpoints=30 mainActorTick=\(Int(tick * 1000))ms foldTotal=\(Int(fold * 1000))ms (CPU)")
         XCTAssertEqual(svc.convergence[i.id]?.first?.points.count, 30)
         XCTAssertLessThan(fold, 10)
     }

@@ -90,7 +90,7 @@ final class ToolsMenuControllerTests: XCTestCase {
         return main
     }
 
-    private func turn() { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+    private func turn() { settleMainRunLoop(0.1) }
 
     private func shell(_ main: NSMenu) -> NSMenu { main.items.first { $0.submenu?.title == "Tools" }!.submenu! }
 

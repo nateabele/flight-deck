@@ -46,7 +46,8 @@ final class DelegationLifecycleTests: XCTestCase {
     }
 
     private func until(_ what: String = "condition", _ condition: () -> Bool) async throws {
-        for _ in 0..<2000 where !condition() { try await Task.sleep(nanoseconds: 1_000_000) }
+        let deadline = Date().addingTimeInterval(30)
+        while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
         XCTAssertTrue(condition(), "timed out waiting for \(what)")
     }
 
@@ -196,7 +197,7 @@ final class DelegationLifecycleTests: XCTestCase {
         service = makeService(registry)
         XCTAssertEqual(service.registry.runs.map(\.id), ["r2", "r3"])
         XCTAssertEqual(hosts.forgotten.map(\.id), ["r1"], "its output copy")
-        try await until("files deleted") { !FileManager.default.fileExists(atPath: bundle.path) }
+        try await until("files deleted") { !FileManager.default.fileExists(atPath: bundle.path) && !FileManager.default.fileExists(atPath: patch.path) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: patch.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: keptBundle.path))
     }

@@ -339,7 +339,7 @@ final class PlanningRenderTests: XCTestCase {
         window.contentView = host
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
-        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        settleRenders()
 
         // A seat beat: the integrator's activity file moves on.
         let activity = TapeStore(intakeDirectory: store.directory(for: intake.id)).runDirectory("refine-2-integrator")
@@ -350,7 +350,8 @@ final class PlanningRenderTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(30)], ofItemAtPath: activity.path)
         RenderProbe.reset()
         service.pollTapes()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        spinRunLoop { (RenderProbe.counts["liveCard"] ?? 0) > 0 }
+        settleRenders()
         host.layoutSubtreeIfNeeded()
         let beat = RenderProbe.counts
         XCTAssertEqual(service.seatActivities[intake.id]?["refine-2-integrator"]?.headline, "Checking the ranking against §2")
@@ -360,9 +361,11 @@ final class PlanningRenderTests: XCTestCase {
         }
 
         // A publish the pane observes: the pane re-evaluates, its value-typed parts don't.
+        settleRenders()
         RenderProbe.reset()
         service.select(intake.id, inProject: intake.projectPath)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        spinRunLoop { (RenderProbe.counts["detail"] ?? 0) > 0 }
+        settleRenders()
         host.layoutSubtreeIfNeeded()
         let publish = RenderProbe.counts
         XCTAssertGreaterThan(publish["detail"] ?? 0, 0, "the probe sees the pane redraw: \(publish)")

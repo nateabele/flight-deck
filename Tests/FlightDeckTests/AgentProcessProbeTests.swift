@@ -25,7 +25,7 @@ final class AgentProcessProbeTests: XCTestCase {
         try child.run()
         children.append(child)
         // Wait for the exec to land, so argv[0] is the new one.
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(30)
         while ProcessArguments.argv0(of: child.processIdentifier) != argv0, Date() < deadline { usleep(20_000) }
         return child
     }

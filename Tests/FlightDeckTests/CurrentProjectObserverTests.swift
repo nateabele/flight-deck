@@ -17,8 +17,8 @@ final class CurrentProjectObserverTests: XCTestCase {
     /// .main)` gets a turn to fire — Combine's zero-interval debounce still schedules through
     /// the run loop rather than firing synchronously, which is the entire point (see the
     /// observer's own doc comment on why a synchronous read would be stale).
-    private func pump() {
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    private func pump(until condition: () -> Bool) {
+        spinRunLoop(until: condition)
     }
 
     func testTheObserverStartsAtTheStoresCurrentProject() {
@@ -43,7 +43,7 @@ final class CurrentProjectObserverTests: XCTestCase {
         XCTAssertEqual(observer.path, "/a")
 
         store.selectedSessionID = b.id
-        pump()
+        pump { observer.path == "/b" }
 
         XCTAssertEqual(observer.path, "/b", "the observer must track the newly active project")
     }
@@ -70,7 +70,7 @@ final class CurrentProjectObserverTests: XCTestCase {
         )
 
         store.selectedSessionID = b.id
-        pump()
+        pump { observer.path == "/b" }
 
         XCTAssertEqual(
             preferences.agentOrder(forProject: observer.path ?? "").map(\.id), [.codex, .claude],

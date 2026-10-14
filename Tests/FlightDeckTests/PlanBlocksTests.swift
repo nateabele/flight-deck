@@ -113,7 +113,8 @@ final class PlanBlocksTests: XCTestCase {
     /// it: each block's "occurs exactly once" check scanned the whole plan with
     /// `String.range(of:)`, 3.9s optimised on an M-series Mac (0.16s after). This synthetic one
     /// has 5,540 blocks and took 25s unoptimised before the fix, 0.8s after; the bound is loose
-    /// because this suite runs unoptimised on a machine that is often busy. Synthetic rather
+    /// because this suite runs unoptimised, and it is CPU time, not wall time, so a busy
+    /// machine cannot fail it. Synthetic rather
     /// than the plan that hit it, which belongs to another project.
     func testAPlanOfThreeHundredKilobytesSplitsWithoutFreezing() {
         var sections: [String] = []
@@ -136,11 +137,10 @@ final class PlanBlocksTests: XCTestCase {
             i += 1
         }
         let plan = sections.joined(separator: "\n\n")
-        let started = Date()
-        let blocks = PlanBlocks.split(plan).blocks
-        let elapsed = Date().timeIntervalSince(started)
+        var blocks: [PlanBlocks.Block] = []
+        let cpu = threadCPUSeconds { blocks = PlanBlocks.split(plan).blocks }
         XCTAssertGreaterThan(blocks.count, 3_000)
-        XCTAssertLessThan(elapsed, 3.0, "split took \(elapsed)s")
+        XCTAssertLessThan(cpu, 3.0, "split used \(cpu)s of CPU")
     }
 
     /// The count the targets rest on: matches do not overlap, it stops at the limit, and a
