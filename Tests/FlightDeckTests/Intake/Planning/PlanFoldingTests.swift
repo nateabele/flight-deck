@@ -248,13 +248,22 @@ final class PlanReadingPositionTests: XCTestCase {
         scroll.contentView.scroll(to: NSPoint(x: 0, y: heading5.minY - 100 + 60))
         XCTAssertEqual(coordinator.readingHeading()?.heading.title, "5. Section 5")
         coordinator.readingMoved()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        settle { reading.section == "5. Section 5" }
         XCTAssertEqual(reading.section, "5. Section 5", "published for the pinned board")
         reading.jump()
         XCTAssertNil(coordinator.readingHeading(), "clicked: the heading is back on screen, under the block")
         let visible = container.textView.convert(scroll.contentView.bounds, from: scroll.contentView)
         XCTAssertEqual(heading5.minY - visible.minY, 112, accuracy: 3, "just under the 100 pt block")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        settle { reading.section == nil }
         XCTAssertNil(reading.section)
+    }
+
+    /// `readingMoved` publishes on a later main-queue turn, and one `RunLoop.run(until:)` of a
+    /// fixed length returns after a single source fires or its time is up, either of which can
+    /// come before that turn when the machine is busy. So this spins until the publish has
+    /// landed; the assertion after it is what fails if it never does.
+    private func settle(_ landed: () -> Bool) {
+        let deadline = Date().addingTimeInterval(10)
+        while !landed(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     }
 }
