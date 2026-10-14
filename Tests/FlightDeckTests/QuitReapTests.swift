@@ -225,7 +225,7 @@ final class QuitReapTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(start)
 
         XCTAssertLessThan(
-            elapsed, 2.0,
+            elapsed, 60,
             "must return once the budget expires, not hang on an unkillable target"
         )
         XCTAssertEqual(

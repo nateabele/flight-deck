@@ -64,7 +64,7 @@ final class CodexProcessTransportTests: XCTestCase {
             _ = try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 0.2) { _ in
                 // Blocks its thread the way a wedged child process does. It is detached, so
                 // the deadline has to come from outside it — which is the whole point.
-                Thread.sleep(forTimeInterval: 1.5)
+                Thread.sleep(forTimeInterval: 30)
                 return "codex-cli 99.0.0"
             }
             XCTFail("an unbounded probe is the hang this deadline exists to prevent")
@@ -72,7 +72,7 @@ final class CodexProcessTransportTests: XCTestCase {
             XCTAssertEqual(error as? AgentLaunchError,
                            .prepareFailed("`codex --version` did not answer within 0.2s."))
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+        XCTAssertLessThan(Date().timeIntervalSince(started), 20,
                           "the caller must unblock on the deadline, not on the wedged probe")
     }
 

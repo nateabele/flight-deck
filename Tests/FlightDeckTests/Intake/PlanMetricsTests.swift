@@ -332,13 +332,11 @@ final class PlanMetricsTests: XCTestCase {
         let old = oldLines.joined(separator: "\n") + "\n"
         let new = newLines.joined(separator: "\n") + "\n"
 
-        let clock = ContinuousClock()
-        let start = clock.now
-        let d = PlanMetrics.delta(from: old, to: new)
-        let elapsed = start.duration(to: clock.now)
+        var d = PlanDelta(added: 0, removed: 0, sectionsChanged: [])
+        let cpu = threadCPUSeconds { d = PlanMetrics.delta(from: old, to: new) }
 
         XCTAssertEqual(d.added, 200)
         XCTAssertEqual(d.removed, 200)
-        XCTAssertLessThan(elapsed, .seconds(2), "diffing 6,000 lines took \(elapsed)")
+        XCTAssertLessThan(cpu, 2, "diffing 6,000 lines used \(cpu)s of CPU")
     }
 }

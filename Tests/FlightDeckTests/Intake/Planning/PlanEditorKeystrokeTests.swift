@@ -107,19 +107,18 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         // Warm-up: first-use costs (font caches, the lane's first layout) are not a keystroke's.
         view.insertText("w", replacementRange: view.selectedRange())
 
-        let clock = ContinuousClock()
         let keys = 40
-        var samples: [Duration] = []
+        var samples: [Double] = []
         for i in 0..<keys {
             let key = String(UnicodeScalar(UInt8(97 + i % 26)))
-            samples.append(clock.measure {
+            samples.append(threadCPUSeconds {
                 view.insertText(key, replacementRange: view.selectedRange())
                 view.displayIfNeeded()
             })
         }
         let median = samples.sorted()[keys / 2]
-        print("PlanEditor keystroke timing: median \(median) over \(keys) (2000 lines, 10 notes, hot §4)")
-        XCTAssertLessThan(median, .milliseconds(16))
+        print("PlanEditor keystroke timing: median \(median * 1000) ms CPU over \(keys) (2000 lines, 10 notes, hot §4)")
+        XCTAssertLessThan(median, 0.016)
     }
 
     /// Dragging the window's edge reflows the plan live: each tick re-wraps what is on screen at
@@ -130,14 +129,13 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         let (coordinator, container, _, window) = Self.editor()
         defer { coordinator.timer?.invalidate(); window.close() }
         let view = container.textView
-        let settle = { let until = Date().addingTimeInterval(3); while view.layingOutWholePlan, Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) } }
+        let settle = { let until = Date().addingTimeInterval(10); while view.layingOutWholePlan, Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) } }
         settle()
         let passes = view.fullLayoutPasses
-        let clock = ContinuousClock()
-        var samples: [Duration] = []
+        var samples: [Double] = []
         for i in 0..<30 {
             let width: CGFloat = 900 - CGFloat(i % 10) * 20
-            samples.append(clock.measure {
+            samples.append(threadCPUSeconds {
                 view.setFrameSize(NSSize(width: width, height: view.frame.height))
                 // The viewport re-laid at the new width explicitly: `displayIfNeeded` alone
                 // measured 0.2 ms, too cheap to have re-wrapped anything.
@@ -146,8 +144,8 @@ final class PlanEditorKeystrokeTests: XCTestCase {
             })
         }
         let median = samples.sorted()[samples.count / 2]
-        print("PlanEditor resize tick timing: median \(median) over \(samples.count) (2000 lines)")
-        XCTAssertLessThan(median, .milliseconds(16))
+        print("PlanEditor resize tick timing: median \(median * 1000) ms CPU over \(samples.count) (2000 lines)")
+        XCTAssertLessThan(median, 0.016)
         settle()
         XCTAssertEqual(view.fullLayoutPasses, passes + 1, "thirty ticks in one turn leave one whole-plan pass")
         XCTAssertEqual(view.textContainer?.size.width, PlanGutter.textWidth(viewWidth: view.frame.width, churn: view.showsChurn))

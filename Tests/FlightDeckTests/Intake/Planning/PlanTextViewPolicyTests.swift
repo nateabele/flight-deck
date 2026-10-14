@@ -76,7 +76,7 @@ final class PlanTextViewPolicyTests: XCTestCase {
     }
 
     /// Commits and `onShowIncoming` hop to the next main-queue turn.
-    private func drain() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    private func drain() { settleMainRunLoop() }
 
     /// Undo history belongs to the text it was typed into: replayed after a new head was
     /// loaded, ⌘Z would splice stale ranges into it — and the idle timer commit the result.

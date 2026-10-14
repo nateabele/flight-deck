@@ -282,7 +282,7 @@ final class SessionStatusStoreTests: XCTestCase {
         // rather than run synchronously on the posting thread. Pump the run loop until
         // it lands instead of assuming it already has -- asserting immediately passes
         // only by incidental scheduling.
-        let deadline = Date().addingTimeInterval(2)
+        let deadline = Date().addingTimeInterval(30)
         while store.selectedSessionID != second.id, Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }

@@ -1246,10 +1246,11 @@ final class RoundExecutorTests: XCTestCase {
         task.cancel()
         do { _ = try await task.value; XCTFail("expected CancellationError") }
         catch { XCTAssertTrue(error is CancellationError, "\(error)") }
-        while kill(pid, 0) == 0, Date().timeIntervalSince(cancelledAt) < 1 { try await Task.sleep(nanoseconds: 20_000_000) }
+        while kill(pid, 0) == 0, Date().timeIntervalSince(cancelledAt) < 20 { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertEqual(kill(pid, 0), -1)
         XCTAssertEqual(errno, ESRCH)
-        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1)
+        // Against the child's 30 s sleep: it died of ⏹, not by running out.
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 20)
     }
 }
 

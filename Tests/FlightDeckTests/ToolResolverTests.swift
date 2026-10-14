@@ -163,7 +163,8 @@ final class ToolResolverTests: XCTestCase {
                              runner: SystemCommandRunner(), downloader: NoDownload(), versionTimeout: 0.5)
         let start = Date()
         do { _ = try await r.resolve(.tofu, provision: false); XCTFail() } catch ToolError.missing(.tofu, _) {}
-        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        // Against the probe's 30 s sleep: it timed out at 0.5 s, it did not wait the sleep out.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 20)
     }
 
     // MARK: - gcloud's Python

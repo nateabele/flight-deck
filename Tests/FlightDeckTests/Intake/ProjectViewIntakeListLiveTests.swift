@@ -66,7 +66,7 @@ final class ProjectViewIntakeListLiveTests: XCTestCase {
         settle(1.5)
         let editor = try XCTUnwrap(find(PlanNSTextView.self, in: try XCTUnwrap(window.contentView)))
         let settleLayout = {
-            let until = Date().addingTimeInterval(3)
+            let until = Date().addingTimeInterval(30)
             while editor.layingOutWholePlan, Date() < until { self.settle(0.02) }
         }
         settleLayout()

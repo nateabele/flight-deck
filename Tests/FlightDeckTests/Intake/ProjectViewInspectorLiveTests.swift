@@ -138,6 +138,7 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
             modes.selectedSegment = segment
             XCTAssertTrue(modes.sendAction(modes.action, to: modes.target), "the control's click reaches SwiftUI")
             background = 0
+            spinRunLoop { (RenderProbe.counts["inspector"] ?? 0) > 0 }
             settle(0.3)
             XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), ["Notes", "Rounds"][segment])
             if background == 0 { clean.append(RenderProbe.counts) }
@@ -157,7 +158,7 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     func testOpeningTheInspectorSettlesWithEveryColumnDrawn() throws {
         let (_, _, _, _, window) = try openTwoShapingProjects()
         XCTAssertTrue(pressInspectorChord(in: window))
-        settle(2.0)
+        settleRenders()
         RenderProbe.reset()
         settle(2.0)
         let idle = RenderProbe.counts

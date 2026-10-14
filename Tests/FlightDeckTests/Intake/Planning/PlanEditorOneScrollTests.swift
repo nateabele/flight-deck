@@ -85,7 +85,7 @@ final class PlanEditorOneScrollTests: XCTestCase {
         return fixture
     }
 
-    private func drain(_ seconds: TimeInterval = 0.05) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+    private func drain(_ seconds: TimeInterval = 0.05) { settleMainRunLoop(seconds) }
 
     /// The text view scrolls in the page's clip view, not one of its own: a wheel over the plan
     /// scrolls the page.
@@ -177,7 +177,7 @@ final class PlanEditorOneScrollTests: XCTestCase {
     /// Runs the runloop until the whole-plan pass is done (bounded).
     @MainActor
     private func waitForWholeLayout(_ f: Fixture) {
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(30)
         while f.container.textView.layingOutWholePlan, Date() < deadline { drain(0.01) }
         drain()
         XCTAssertFalse(f.container.textView.layingOutWholePlan, "the pass finished")

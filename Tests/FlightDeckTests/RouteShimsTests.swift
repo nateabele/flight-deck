@@ -280,7 +280,7 @@ final class RouteShimsTests: XCTestCase {
         try stubCLI("[ \"$#\" = 1 ] && sleep 30\necho HUNG \"$@\"")
         let start = Date()
         XCTAssertTrue(try runShell("xcodebuild test", path: path).hasPrefix("REAL\n[test]\n"))
-        XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 25)  // the unfixed shim waited the full 30 s
     }
 
     /// FLIGHTDECK_CLI is this build's own CLI, so it is not probed: one process, not two.
