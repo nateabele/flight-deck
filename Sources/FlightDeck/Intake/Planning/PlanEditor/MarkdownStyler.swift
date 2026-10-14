@@ -93,6 +93,32 @@ struct PlanTheme {
     var codeVerticalPadding: CGFloat = 8
     var quoteIndent: CGFloat = 16
 
+    // MARK: Tables
+
+    /// The text width a table is laid out in — the editor's text container less its line padding.
+    /// Zero until the editor knows it (`PlanTable` then assumes a pane's width).
+    var contentWidth: CGFloat = 0
+    /// Inside a grid cell: side, then top and bottom.
+    var tablePadding = CGSize(width: 10, height: 6)
+    var tableRadius: CGFloat = 6
+    /// Room a grid keeps above and below itself.
+    var tableSpaceBefore: CGFloat = 4
+    var tableSpaceAfter: CGFloat = 12
+    /// The grid's lines and the header's wash, quiet in light and dark alike. Providers, not
+    /// `withAlphaComponent` on a system colour: that resolves at once, in whatever appearance the
+    /// theme was made in, and stays there.
+    var tableBorder = PlanTheme.wash(dark: 0.16, light: 0.14)
+    var tableHeaderRule = PlanTheme.wash(dark: 0.3, light: 0.3)
+    var tableHeaderBackground = PlanTheme.wash(dark: 0.07, light: 0.06)
+
+    /// White on the dark window, black on the light one, at the given opacities.
+    static func wash(dark: CGFloat, light: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white.withAlphaComponent(dark) : NSColor.black.withAlphaComponent(light)
+        }
+    }
+
     static let standard = PlanTheme()
 
     /// This theme with every size and every space scaled by `factor`, so a smaller editor keeps
@@ -114,6 +140,10 @@ struct PlanTheme {
         theme.codePadding *= factor
         theme.codeVerticalPadding *= factor
         theme.quoteIndent *= factor
+        theme.tablePadding = CGSize(width: tablePadding.width * factor, height: tablePadding.height * factor)
+        theme.tableRadius *= factor
+        theme.tableSpaceBefore *= factor
+        theme.tableSpaceAfter *= factor
         return theme
     }
 
@@ -126,9 +156,9 @@ struct PlanTheme {
     func font(for kind: MarkdownBlock.Kind) -> NSFont {
         switch kind {
         case .heading(let level): heading(level)
-        case .code, .table: mono
+        case .code: mono
         case .blank: gap
-        case .paragraph, .listItem, .quote: body
+        case .paragraph, .listItem, .quote, .table: body
         }
     }
 
@@ -344,7 +374,7 @@ enum MarkdownStyler {
     /// Inline syntax on one line, by precedence: code spans first (nothing inside them is
     /// Markdown), then links, bold, italic — each pass skipping characters an earlier pass
     /// claimed, so the `*` of a `**` is never also read as an italic delimiter.
-    private static func inline(_ u: [UInt16], _ a: Int, _ b: Int, spans: inout [MarkdownSpan], syntax: inout [NSRange]) {
+    static func inline(_ u: [UInt16], _ a: Int, _ b: Int, spans: inout [MarkdownSpan], syntax: inout [NSRange]) {
         // Most plan lines have no inline syntax at all; skip them before allocating the mask.
         // `<` for an autolink, `://` for a bare URL.
         guard b - a >= 2 else { return }
@@ -532,21 +562,25 @@ enum MarkdownStyler {
 
     /// Styles the whole text. Syntax is hidden everywhere except in `revealBlock` — the one
     /// holding the caret — where it shows, quieter than the words.
-    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, theme: PlanTheme) {
+    ///
+    /// `alsoRevealed` are blocks shown as source without the caret in them — a table the edit
+    /// layer has to draw a deleted cell's words in.
+    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, alsoRevealed: Set<Int> = [], theme: PlanTheme) {
         storage.beginEditing()
         storage.setAttributes(baseAttributes(theme.body, theme), range: NSRange(location: 0, length: storage.length))
-        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, theme) }
+        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock || alsoRevealed.contains(i), theme) }
         storage.endEditing()
     }
 
     /// Restyles only `indices` — a caret move touches the block it left and the one it
     /// entered, never the rest of the plan.
-    static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, theme: PlanTheme) {
+    static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, alsoRevealed: Set<Int> = [],
+                        theme: PlanTheme) {
         storage.beginEditing()
         for i in Set(indices) where blocks.indices.contains(i) {
             let block = blocks[i]
             storage.setAttributes(baseAttributes(theme.font(for: block.kind), theme), range: paragraphRange(block, storage))
-            style(storage, block, revealed: i == revealBlock, theme)
+            style(storage, block, revealed: i == revealBlock || alsoRevealed.contains(i), theme)
         }
         storage.endEditing()
     }
@@ -571,7 +605,7 @@ enum MarkdownStyler {
         switch block.kind {
         case .heading, .paragraph, .blank, .table:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
-            if case .table = block.kind { styleTable(storage, block, theme) }
+            if case .table = block.kind { styleTable(storage, block, revealed: revealed, theme) }
         case .quote:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
             storage.addAttribute(.foregroundColor, value: theme.quoteText, range: block.range)
@@ -653,13 +687,31 @@ enum MarkdownStyler {
         NSFontManager.shared.convert(font, toHaveTrait: trait)
     }
 
-    /// Pipe tables as a monospace block with aligned columns. The source can't be padded (it
-    /// is the plan), so each cell shorter than its column's widest gets the missing width as
-    /// kern on its last character. A full grid layout is out of scope; this keeps columns
-    /// readable without touching a byte.
-    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, _ theme: PlanTheme) {
+    /// A pipe table. Off the caret it is a grid: every row's source line is hidden and held to the
+    /// row's laid-out height, and `EditLayerFragment` draws the row's cells in that room
+    /// (`PlanTableLayout`) — the plan's bytes are as typed, the grid is drawing. With the caret
+    /// in it, or when it is not a table at all (no delimiter row), the source shows: in
+    /// monospace with the columns lined up by kern, if it fits the editor's width; as wrapped
+    /// body text if it doesn't. The source can't be padded (it is the plan), so a cell shorter
+    /// than its column's widest gets the missing width as kern on its last character.
+    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, _ theme: PlanTheme) {
         let u = Array(storage.mutableString.substring(with: block.range).utf16)
         let base = block.range.location
+        if !revealed, let table = PlanTable.parse(u) {
+            let layout = PlanTableLayout.cached(table, u, theme: theme, available: theme.contentWidth > 0 ? theme.contentWidth : 600)
+            for (i, row) in table.rows.enumerated() {
+                let start = base + row.line.location
+                let range = NSRange(location: start, length: min(row.line.length + 1, storage.length - start))
+                let style = NSMutableParagraphStyle()
+                style.minimumLineHeight = layout.rows[i].height
+                style.maximumLineHeight = layout.rows[i].height
+                if i == 0 { style.paragraphSpacingBefore = theme.tableSpaceBefore }
+                if i == table.rows.count - 1 { style.paragraphSpacing = theme.tableSpaceAfter }
+                storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear, .paragraphStyle: style,
+                                       .planTableRow: PlanTableRowRef(layout: layout, row: i)], range: range)
+            }
+            return
+        }
         // Each row's pipe offsets, split on newlines.
         var rows: [[Int]] = [[]]
         for (i, c) in u.enumerated() {
@@ -674,8 +726,14 @@ enum MarkdownStyler {
             }
         }
         let advance = theme.monoAdvance
+        let aligned = widths.reduce(1) { $0 + $1 + 1 }
+        let fits = theme.contentWidth <= 0 || CGFloat(aligned) * advance <= theme.contentWidth
+        if fits {
+            storage.addAttribute(.font, value: theme.mono, range: NSRange(location: base, length: min(block.range.length + 1, storage.length - base)))
+        }
         for pipes in rows {
             for p in pipes { storage.addAttribute(.foregroundColor, value: theme.syntax, range: NSRange(location: base + p, length: 1)) }
+            guard fits else { continue }
             for col in 0..<max(pipes.count - 1, 0) {
                 let pad = widths[col] - (pipes[col + 1] - pipes[col] - 1)
                 guard pad > 0 else { continue }
