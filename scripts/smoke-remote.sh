@@ -81,9 +81,9 @@ fi
 TOKEN="$(hostname -s)-$$-$(date +%s)"
 LOCKED=0
 
-acquire_lock() {
-  remote "$REMOTE_DIR" "$TOKEN" "$THROTTLE" <<'REMOTE'
-dir=$1 token=$2 throttle=$3
+acquire_lock_once() {
+  remote "$REMOTE_DIR" "$TOKEN" "$THROTTLE" "$1" <<'REMOTE'
+dir=$1 token=$2 throttle=$3 max=$4
 mkdir -p "$dir"; cd "$dir"
 waited=0
 until mkdir .lock 2>/dev/null; do
@@ -92,7 +92,7 @@ until mkdir .lock 2>/dev/null; do
     rm -rf .lock; continue
   fi
   if [ "$waited" -eq 0 ]; then echo "[smoke] UI-test Mac busy ($(cat .lock/owner 2>/dev/null)); waiting up to 20 min…" >&2; fi
-  if [ "$waited" -ge 1200 ]; then echo "error: UI-test Mac still busy after 20 min" >&2; exit 3; fi
+  if [ "$waited" -ge "$max" ]; then exit 3; fi
   sleep 10; waited=$((waited + 10))
 done
 echo "$token" > .lock/owner
@@ -156,6 +156,7 @@ REMOTE
 }
 trap cleanup EXIT
 
+source scripts/lib-remote-lock.sh
 echo "[smoke] locking ${HOST}…"
 acquire_lock 2>&1 | tee -a "$LOG" >&2 || true
 # `tee` hides the remote's exit status, so the lock is confirmed by reading it back.
