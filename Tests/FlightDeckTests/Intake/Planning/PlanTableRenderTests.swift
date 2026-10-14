@@ -121,7 +121,7 @@ final class PlanTableRenderTests: XCTestCase {
         }
     }
 
-    private static func write(_ f: PlanTableEditorTests.Fixture, width: CGFloat, to url: URL) throws {
+    static func write(_ f: PlanTableEditorTests.Fixture, width: CGFloat, to url: URL) throws {
         let height = ceil(f.container.contentHeight) + 8
         f.window.setContentSize(NSSize(width: width, height: height))
         f.container.frame = NSRect(x: 0, y: 0, width: width, height: height)

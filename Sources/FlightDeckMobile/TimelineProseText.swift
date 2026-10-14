@@ -21,6 +21,10 @@ enum TimelineProseText {
         static let code: CGFloat = 0.92
         static let lineSpacing: CGFloat = 0.12
         static let paragraphSpacing: CGFloat = 0.7
+        /// A plan's, set for reading in the serif: about a 1.4 line pitch and a wider gap
+        /// between paragraphs. Timeline prose keeps the numbers above.
+        static let planLineSpacing: CGFloat = 0.45
+        static let planParagraphSpacing: CGFloat = 0.8
         static let headingSpacingBefore: CGFloat = 0.8
         static let headingSpacingAfter: CGFloat = 0.25
         /// `.heading1` … `.heading6`, flattened exactly as the theme flattens them: below h3 a
@@ -49,7 +53,8 @@ enum TimelineProseText {
     static func attributed(
         _ markdown: String,
         base: UIFont = .preferredFont(forTextStyle: .body),
-        color: UIColor = .label
+        color: UIColor = .label,
+        serif: Bool = false
     ) -> NSAttributedString {
         let parsed: AttributedString
         do {
@@ -89,12 +94,13 @@ enum TimelineProseText {
             let font = font(size: isCode ? base.pointSize * Em.code : size,
                             bold: heading != nil || inline.contains(.stronglyEmphasized),
                             italic: inline.contains(.emphasized),
-                            monospaced: isCode)
+                            monospaced: isCode,
+                            serif: serif && heading == nil)
 
             var attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: isCode ? UIColor(TimelineMarkdown.codeTint) : color,
-                .paragraphStyle: paragraphStyle(base: base, heading: heading),
+                .paragraphStyle: paragraphStyle(base: base, heading: heading, serif: serif),
             ]
             if isCode { attributes[.backgroundColor] = UIColor(TimelineMarkdown.codeWash) }
             if inline.contains(.strikethrough) {
@@ -140,10 +146,14 @@ enum TimelineProseText {
         }
     }
 
-    private static func font(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> UIFont {
+    private static func font(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool, serif: Bool = false) -> UIFont {
+        let weight: UIFont.Weight = bold ? .semibold : .regular
         var font = monospaced
-            ? UIFont.monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
-            : UIFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+            ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+            : UIFont.systemFont(ofSize: size, weight: weight)
+        if serif, !monospaced, let descriptor = font.fontDescriptor.withDesign(.serif) {
+            font = UIFont(descriptor: descriptor, size: size)
+        }
         if italic, let descriptor = font.fontDescriptor.withSymbolicTraits(.traitItalic) {
             font = UIFont(descriptor: descriptor, size: size)
         }
@@ -152,11 +162,11 @@ enum TimelineProseText {
 
     /// Line spacing and the gap under a block, both relative to the base size so they track
     /// Dynamic Type — the rule docs/MOBILE.md item 29 exists to enforce.
-    private static func paragraphStyle(base: UIFont, heading: Int?) -> NSParagraphStyle {
+    private static func paragraphStyle(base: UIFont, heading: Int?, serif: Bool) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.lineSpacing = base.pointSize * Em.lineSpacing
+        style.lineSpacing = base.pointSize * (serif ? Em.planLineSpacing : Em.lineSpacing)
         style.paragraphSpacing = base.pointSize
-            * (heading == nil ? Em.paragraphSpacing : Em.headingSpacingAfter)
+            * (heading == nil ? (serif ? Em.planParagraphSpacing : Em.paragraphSpacing) : Em.headingSpacingAfter)
         if heading != nil { style.paragraphSpacingBefore = base.pointSize * Em.headingSpacingBefore }
         return style
     }

@@ -7,12 +7,14 @@ import SwiftUI
 /// timeline cannot disagree about a table.
 struct RichBlockView: View {
     let text: String
+    /// A plan's block: the reading serif. The conversation timeline's stays sans.
+    var serif = false
 
     var body: some View {
         if let table = PipeTable.parse(text) {
-            PlanTableView(source: text, table: table)
+            PlanTableView(source: text, table: table, serif: serif)
         } else {
-            Markdown(text).markdownTheme(TimelineMarkdown.theme)
+            Markdown(text).markdownTheme(serif ? TimelineMarkdown.planTheme : TimelineMarkdown.theme)
         }
     }
 }
@@ -35,6 +37,7 @@ struct RichBlockView: View {
 struct PlanTableView: View {
     let source: String
     let table: PipeTable
+    var serif = false
 
     @State private var height: CGFloat = 0
 
@@ -45,9 +48,9 @@ struct PlanTableView: View {
                 PlanTableGridLayout(columns: table.columnCount, available: proxy.size.width) {
                     ForEach(rows.indices, id: \.self) { r in
                         ForEach(0..<table.columnCount, id: \.self) { c in
-                            PlanTableCell(text: rows[r][c], header: r == 0, alignment: table.alignments[c],
+                            PlanTableCell(text: rows[r][c], header: r == 0, serif: serif, alignment: table.alignments[c],
                                           lastColumn: c == table.columnCount - 1, lastRow: r == rows.count - 1)
-                            PlanTableCell(text: Self.longestWord(rows[r][c]), header: r == 0, alignment: .left,
+                            PlanTableCell(text: Self.longestWord(rows[r][c]), header: r == 0, serif: serif, alignment: .left,
                                           lastColumn: true, lastRow: true)
                                 .layoutValue(key: PlanTableProbeKey.self, value: true)
                                 .hidden().accessibilityHidden(true)
@@ -128,13 +131,15 @@ private struct PlanTableHeightKey: PreferenceKey {
 private struct PlanTableCell: View {
     let text: AttributedString
     let header: Bool
+    let serif: Bool
     let alignment: PipeTable.Alignment
     let lastColumn: Bool
     let lastRow: Bool
 
     var body: some View {
         Text(text)
-            .font(.subheadline)
+            .font(.system(.subheadline, design: serif ? .serif : .default))
+            .lineSpacing(serif ? 3 : 0)
             .fontWeight(header ? .semibold : nil)
             .multilineTextAlignment(alignment == .center ? .center : alignment == .right ? .trailing : .leading)
             .textSelection(.enabled)

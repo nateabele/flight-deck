@@ -26,6 +26,8 @@ struct SelectableProseView: UIViewRepresentable {
     /// notes. Empty when nothing is behind the text to act on (a plan the maintainer cannot annotate):
     /// the menu is then the system's own, with no item that does nothing.
     var actions: [ProseAction] = []
+    /// A plan's prose: the reading serif and a looser rhythm. A conversation's keeps the system sans.
+    var serif = false
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -52,6 +54,7 @@ struct SelectableProseView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.actions = actions
+        context.coordinator.serif = serif
         context.coordinator.apply(markdown, to: view)
     }
 
@@ -68,15 +71,17 @@ struct SelectableProseView: UIViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
         let width = proposal.width ?? uiView.bounds.width
         guard width > 0, width < .greatestFiniteMagnitude else { return nil }
+        context.coordinator.serif = serif
         context.coordinator.apply(markdown, to: uiView)
         let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: ceil(size.height))
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(actions: actions) }
+    func makeCoordinator() -> Coordinator { Coordinator(actions: actions, serif: serif) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var actions: [ProseAction]
+        var serif: Bool
 
         /// The last markdown parsed, and what it parsed to. `sizeThatFits` and `updateUIView`
         /// both need the attributed string and SwiftUI calls them in either order and more than
@@ -86,6 +91,7 @@ struct SelectableProseView: UIViewRepresentable {
         private var cachedAttributed: NSAttributedString?
         /// Invalidates the cache when the text size changes, since the base font is baked in.
         private var cachedCategory: UIContentSizeCategory?
+        private var cachedSerif = false
 
         /// Whether `cachedAttributed` has already been handed to `view`, tracked explicitly
         /// rather than by reading `view.attributedText` back and comparing. `UITextView`
@@ -104,18 +110,20 @@ struct SelectableProseView: UIViewRepresentable {
         /// can see the guard above short-circuit without timing anything.
         private(set) var assignmentCount = 0
 
-        init(actions: [ProseAction]) {
+        init(actions: [ProseAction], serif: Bool = false) {
             self.actions = actions
+            self.serif = serif
         }
 
         /// Put `markdown` into `view`, parsing only when it is genuinely new, and assigning
         /// only when what would be assigned has not already been.
         func apply(_ markdown: String, to view: UITextView) {
             let category = view.traitCollection.preferredContentSizeCategory
-            if cachedMarkdown != markdown || cachedCategory != category || cachedAttributed == nil {
-                cachedAttributed = TimelineProseText.attributed(markdown)
+            if cachedMarkdown != markdown || cachedCategory != category || cachedSerif != serif || cachedAttributed == nil {
+                cachedAttributed = TimelineProseText.attributed(markdown, serif: serif)
                 cachedMarkdown = markdown
                 cachedCategory = category
+                cachedSerif = serif
                 appliedCachedAttributed = false
             }
             guard let attributed = cachedAttributed, !appliedCachedAttributed else { return }

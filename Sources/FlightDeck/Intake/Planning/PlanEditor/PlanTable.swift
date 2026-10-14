@@ -203,7 +203,7 @@ final class PlanTableLayout: NSObject {
         }
         before[b - a] = chars.count
 
-        let font = header ? NSFont.systemFont(ofSize: theme.body.pointSize, weight: .semibold) : theme.body
+        let font = header ? PlanTheme.serif(theme.body.pointSize, weight: .semibold) : theme.body
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byWordWrapping
         para.lineSpacing = theme.lineSpacing * 0.5
@@ -215,11 +215,11 @@ final class PlanTableLayout: NSObject {
             guard range.length > 0 else { continue }
             switch span.kind {
             case .bold:
-                text.addAttribute(.font, value: header ? NSFont.systemFont(ofSize: font.pointSize, weight: .bold)
+                text.addAttribute(.font, value: header ? PlanTheme.serif(font.pointSize, weight: .bold)
                                   : NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask), range: range)
             case .italic: text.addAttribute(.font, value: NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask), range: range)
             case .code:
-                text.addAttributes([.font: NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular),
+                text.addAttributes([.font: theme.codeSpan(in: font),
                                     .backgroundColor: theme.codeBackground], range: range)
             case .link: text.addAttribute(.foregroundColor, value: theme.link, range: range)
             }
