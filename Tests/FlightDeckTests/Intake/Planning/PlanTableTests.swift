@@ -1,4 +1,5 @@
 import AppKit
+import FleetKit
 import IntakeKit
 import XCTest
 @testable import FlightDeck
@@ -96,28 +97,28 @@ final class PlanTableParseTests: XCTestCase {
     // MARK: Column widths
 
     func testColumnsKeepTheirNaturalWidthWhenTheTableFits() {
-        XCTAssertEqual(PlanTableLayout.columnWidths(natural: [60, 120, 80], minimum: [40, 50, 40], available: 600), [60, 120, 80],
+        XCTAssertEqual(PipeTable.columnWidths(natural: [60, 120, 80], minimum: [40, 50, 40], available: 600), [60, 120, 80],
                        "content width, not stretched to the pane")
     }
 
     func testLongColumnsShareTheRoomAndShortOnesStayNarrow() {
         // The maintainer's table: a short Area column and two sentence-length ones, in 680 pt.
-        let widths = PlanTableLayout.columnWidths(natural: [58, 1500, 700], minimum: [58, 90, 100], available: 680)
+        let widths = PipeTable.columnWidths(natural: [58, 1500, 700], minimum: [58, 90, 100], available: 680)
         XCTAssertEqual(widths[0], 58, accuracy: 0.01, "the short column keeps its natural width")
         XCTAssertEqual(widths.reduce(0, +), 680, accuracy: 0.5, "the table fills the room")
         XCTAssertEqual(widths[1], widths[2], accuracy: 0.5, "the long columns are capped at one shared level")
         XCTAssertGreaterThan(widths[1], 200)
         // A medium column under the cap keeps its natural width too.
-        let mixed = PlanTableLayout.columnWidths(natural: [120, 1500, 1500], minimum: [60, 90, 90], available: 600)
+        let mixed = PipeTable.columnWidths(natural: [120, 1500, 1500], minimum: [60, 90, 90], available: 600)
         XCTAssertEqual(mixed[0], 120, accuracy: 0.01)
         XCTAssertEqual(mixed.reduce(0, +), 600, accuracy: 0.5)
     }
 
     func testNoColumnGoesBelowItsLongestWordUntilNothingFits() {
-        let widths = PlanTableLayout.columnWidths(natural: [400, 400], minimum: [150, 50], available: 300)
+        let widths = PipeTable.columnWidths(natural: [400, 400], minimum: [150, 50], available: 300)
         XCTAssertGreaterThanOrEqual(widths[0], 150)
         XCTAssertEqual(widths.reduce(0, +), 300, accuracy: 0.5)
-        let squeezed = PlanTableLayout.columnWidths(natural: [400, 400], minimum: [300, 300], available: 300)
+        let squeezed = PipeTable.columnWidths(natural: [400, 400], minimum: [300, 300], available: 300)
         XCTAssertEqual(squeezed, [150, 150], "when even the words don't fit, all shrink together")
     }
 
@@ -151,6 +152,45 @@ final class PlanTableParseTests: XCTestCase {
         XCTAssertNil(layout.sourceOffset(row: 2, at: CGPoint(x: layout.width + 5, y: 5)))
         XCTAssertNil(layout.sourceOffset(row: 1, at: CGPoint(x: 5, y: 0)), "the delimiter row has nothing to click")
         XCTAssertGreaterThan(row.height, 0)
+    }
+}
+
+/// The shared rule (FleetKit): what the phone's reader and the editor both lay a table out by.
+final class PipeTableFitTests: XCTestCase {
+    func testFitKeepsWordsWholeByGivingPaddingBack() {
+        // Five columns whose longest words need 360 pt with 10 pt padding each side, in 340: the
+        // padding shrinks to 6 (320 pt) and no word breaks.
+        let fit = PipeTable.fit(natural: [80, 90, 70, 60, 80], longestWord: [60, 60, 50, 40, 50], available: 340,
+                                padding: 10, minimumContent: 20, breakWords: false)
+        XCTAssertEqual(fit.padding, 6, accuracy: 0.001)
+        XCTAssertFalse(fit.overflows)
+        XCTAssertEqual(fit.widths.reduce(0, +), 340, accuracy: 0.5)
+        for (width, word) in zip(fit.widths, [60.0, 60, 50, 40, 50]) { XCTAssertGreaterThanOrEqual(width, word + 12) }
+    }
+
+    func testWhenWordsMayNotBreakTheTableOverflowsAndSaysSo() {
+        let fit = PipeTable.fit(natural: [200, 200, 200], longestWord: [120, 120, 120], available: 250,
+                                padding: 10, minimumContent: 20, breakWords: false)
+        XCTAssertTrue(fit.overflows, "scrolls rather than breaking a word")
+        XCTAssertGreaterThan(fit.widths.reduce(0, +), 250)
+        let broken = PipeTable.fit(natural: [200, 200, 200], longestWord: [120, 120, 120], available: 250,
+                                   padding: 10, minimumContent: 20, breakWords: true)
+        XCTAssertFalse(broken.overflows)
+        XCTAssertEqual(broken.widths.reduce(0, +), 250, accuracy: 0.5)
+    }
+
+    func testATableThatFitsIsItsContentWide() {
+        let fit = PipeTable.fit(natural: [40, 100], longestWord: [40, 30], available: 600, padding: 10, minimumContent: 20, breakWords: false)
+        XCTAssertEqual(fit.widths, [60, 120])
+        XCTAssertEqual(fit.padding, 10)
+    }
+
+    func testOneParserForBothSides() throws {
+        let table = try XCTUnwrap(PipeTable.parse("| a | b \\| c |\n|:--|--:|\n| 1 | 2 | 3 |"))
+        XCTAssertEqual(table.alignments, [.left, .right, .left])
+        XCTAssertEqual(table.rows.map(\.cells.count), [2, 2, 3])
+        XCTAssertEqual(PipeTable.display("b \\| c"), "b | c")
+        XCTAssertNil(PipeTable.parse("| a |\n| b |"))
     }
 }
 
