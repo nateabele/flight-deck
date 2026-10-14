@@ -21,6 +21,23 @@ enum NoteComposer {
     static func notesAllowed(detail: WireIntakeDetail?) -> Bool {
         detail?.steer == true && detail?.summary.state == "shaping"
     }
+
+    /// Whether a note's type can be changed from its row: it must still be pending (a round
+    /// that has read a note read it as what it was), the intake must take notes, and the Mac
+    /// must understand `intake.setNoteKind` — an older one drops the socket on the unknown op.
+    static func canRetype(_ note: WireNote, detail: WireIntakeDetail?) -> Bool {
+        !note.consumed && notesAllowed(detail: detail) && detail?.noteKind == true
+    }
+
+    /// The types the row's menu offers: the five a note can be, without the composer's
+    /// Highlight (which is a comment with no words, so it is the Comment item when empty).
+    static let retypeKinds = kinds.filter { $0.id != "highlight" }
+
+    /// Whether a note with `text` can become `kind` and still say something: the Mac's rule
+    /// (`PlanNote.accepts(kind:)`) — every type needs words but Comment and Delete.
+    static func accepts(kind: String, text: String) -> Bool {
+        kind == "comment" || kind == "delete" || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 extension NoteComposer {
@@ -108,6 +125,27 @@ struct NoteOutbox: Equatable {
 
     mutating func remove(_ id: UUID) { entries.removeAll { $0.draft.id == id } }
 
+    /// Types the reader changed that the plan does not show yet, by note id. The plan's notes
+    /// are the tape's pending ones, and a retype is only a queued command until a runner folds
+    /// it — so the head re-requested on the ack can still carry the old type.
+    private var retyped: [UUID: String] = [:]
+
+    /// Change a note's type. A note the plan does not list yet carries it in its draft, so its
+    /// card and a retry both say the new one; a plan note is relabelled by `listing`.
+    mutating func retype(_ id: UUID, to kind: String) {
+        retyped[id] = kind
+        if let i = entries.firstIndex(where: { $0.draft.id == id }) { entries[i].draft.kind = kind }
+    }
+
+    /// The plan's notes with this reader's acked ones and its retypes on top: what to draw.
+    func listing(_ planNotes: [WireNote]) -> [WireNote] {
+        (planNotes + sentNotes).map { note in
+            var note = note
+            if let kind = retyped[note.id], !note.consumed { note.kind = kind }
+            return note
+        }
+    }
+
     /// A Delete that failed. Refused as `note_consumed`, it can never succeed — a round has read
     /// the note, or the Mac never had it — so the card goes rather than offering a Delete that
     /// fails forever. Any other failure leaves it for another try.
@@ -119,5 +157,8 @@ struct NoteOutbox: Equatable {
     mutating func reconcile(with notes: [WireNote]) {
         let listed = Set(notes.map(\.id))
         entries.removeAll { listed.contains($0.draft.id) }
+        // Settled once the plan shows the type (or the note is gone or was read): from here the
+        // plan is the record.
+        retyped = retyped.filter { id, kind in notes.contains { $0.id == id && !$0.consumed && $0.kind != kind } }
     }
 }

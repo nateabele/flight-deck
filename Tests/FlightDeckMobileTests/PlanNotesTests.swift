@@ -151,4 +151,66 @@ final class PlanNotesTests: XCTestCase {
         XCTAssertNil(menu(actions: [ProseAction(title: "Reply", systemImage: "x") { _ in }],
                           range: NSRange(location: 0, length: 0)))
     }
+
+    // MARK: Retyping a note
+
+    private func note(_ kind: String = "comment", text: String = "Which provider?", consumed: Bool = false) -> WireNote {
+        WireNote(id: UUID(), kind: kind, text: text, consumed: consumed)
+    }
+
+    private func detail(steer: Bool? = true, noteKind: Bool? = true, state: String = "shaping") -> WireIntakeDetail {
+        WireIntakeDetail(etag: "", project: UUID(),
+                         summary: WireIntakeSummary(id: UUID(), title: "t", state: state, needsAttention: false, createdAt: Date()),
+                         intent: "", servedAt: Date(), steer: steer, noteKind: noteKind)
+    }
+
+    /// Offered only for a pending note on a Mac that understands the command: an older Mac drops
+    /// the socket on the unknown op, and a round that read a note read it as what it was.
+    func testRetypingIsOfferedOnlyWhereTheMacTakesIt() {
+        XCTAssertTrue(NoteComposer.canRetype(note(), detail: detail()))
+        XCTAssertFalse(NoteComposer.canRetype(note(consumed: true), detail: detail()))
+        XCTAssertFalse(NoteComposer.canRetype(note(), detail: detail(noteKind: nil)), "an older Mac")
+        XCTAssertFalse(NoteComposer.canRetype(note(), detail: detail(state: "paused")))
+        XCTAssertFalse(NoteComposer.canRetype(note(), detail: nil))
+    }
+
+    func testATypeNeedsWordsExceptCommentAndDelete() {
+        XCTAssertTrue(NoteComposer.accepts(kind: "question", text: "Why?"))
+        XCTAssertFalse(NoteComposer.accepts(kind: "question", text: "  \n"))
+        XCTAssertTrue(NoteComposer.accepts(kind: "delete", text: ""))
+        XCTAssertTrue(NoteComposer.accepts(kind: "comment", text: ""))
+        XCTAssertEqual(NoteComposer.retypeKinds.map(\.id), ["comment", "question", "mustChange", "replace", "delete"])
+    }
+
+    /// The plan the head returns may still carry the old type while the Mac's runner has the
+    /// retype queued; the reader shows the new one until the plan agrees.
+    func testARetypeShowsUntilThePlanAgreesThenTheOutboxLetsGo() {
+        var outbox = NoteOutbox()
+        let n = note()
+        outbox.retype(n.id, to: "question")
+        XCTAssertEqual(outbox.listing([n]).map(\.kind), ["question"])
+        outbox.reconcile(with: [n])
+        XCTAssertEqual(outbox.listing([n]).map(\.kind), ["question"], "plan still says comment")
+        var agreed = n; agreed.kind = "question"
+        outbox.reconcile(with: [agreed])
+        var later = n; later.kind = "delete"
+        XCTAssertEqual(outbox.listing([later]).map(\.kind), ["delete"], "from here the plan is the record")
+    }
+
+    func testARetypeNeverRewritesANoteARoundHasRead() {
+        var outbox = NoteOutbox()
+        let read = note(consumed: true)
+        outbox.retype(read.id, to: "delete")
+        XCTAssertEqual(outbox.listing([read]).map(\.kind), ["comment"])
+    }
+
+    func testRetypingAnUnsentNoteChangesItsDraftSoARetrySendsTheNewType() {
+        var outbox = NoteOutbox()
+        let d = NoteDraft(target: NoteDraftTarget(block: nil, quote: nil), showing: 1, kind: "comment", text: "Why?")
+        outbox.submit(d)
+        outbox.retype(d.id, to: "question")
+        XCTAssertEqual(outbox.unsent.map(\.kind), ["question"])
+        outbox.acked(d.id)
+        XCTAssertEqual(outbox.listing([]).map(\.kind), ["question"])
+    }
 }

@@ -77,6 +77,10 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// chooser, separate from `steer` because a Mac that steers but predates this would drop
     /// the socket on the unknown op. nil from such a Mac, and the phone says to choose on the Mac.
     public var choose: Bool?
+    /// true from a Mac that accepts `intake.setNoteKind` — the phone's licence to retype a note
+    /// from its row. nil from an older Mac, which would drop the socket on the unknown op; the
+    /// phone then offers nothing it can't send.
+    public var noteKind: Bool?
     /// The round configuration the intake is actually running (a customized one included), once
     /// a fidelity is chosen; nil before that, and from a Mac that predates the phone inspector.
     public var roundConfig: WireRoundConfig?
@@ -86,14 +90,14 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         progress: [WireProgressPhase] = [], board: WireBoard? = nil, agents: [WireAgent] = [],
         rounds: [WireRound] = [], questions: WireQuestions? = nil, choice: WireChoice? = nil,
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
-        headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil,
+        headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
         roundConfig: WireRoundConfig? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
         self.questions = questions; self.choice = choice; self.failure = failure
         self.pendingNotes = pendingNotes; self.halt = halt; self.headCheckpoint = headCheckpoint
-        self.servedAt = servedAt; self.steer = steer; self.choose = choose
+        self.servedAt = servedAt; self.steer = steer; self.choose = choose; self.noteKind = noteKind
         self.roundConfig = roundConfig
     }
 }

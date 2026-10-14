@@ -145,7 +145,7 @@ enum IntakeDetailProjection {
             questions: i.exchanges.isEmpty ? nil : WireQuestions(open: open, answered: answered),
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
             headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
-            steer: true, choose: true,
+            steer: true, choose: true, noteKind: true,
             roundConfig: choosing ? nil : i.roundConfig.map { wireConfig($0, naming: naming) })
         detail.etag = etag(detail)
         return detail

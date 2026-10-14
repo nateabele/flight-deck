@@ -61,7 +61,7 @@ struct PlanReaderScreen: View {
                     let showDiff = changes && loadedChanges == true
                     let blocks = PlanBlocks.split(plan.markdown).blocks
                     let added = Set(showDiff ? (plan.added ?? []) : [])
-                    let allNotes = plan.notes + outbox.sentNotes
+                    let allNotes = outbox.listing(plan.notes)
                     LazyVStack(alignment: .leading, spacing: 10) {
                         removed(after: nil, plan, show: showDiff)
                         ForEach(blocks, id: \.index) { block in
@@ -126,7 +126,7 @@ struct PlanReaderScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     messageRow
-                    ForEach(((plan?.notes ?? []) + outbox.sentNotes).filter { $0.blockIndex == item.id }, id: \.id) { n in noteCard(n) }
+                    ForEach(outbox.listing(plan?.notes ?? []).filter { $0.blockIndex == item.id }, id: \.id) { n in noteCard(n) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
@@ -225,10 +225,10 @@ struct PlanReaderScreen: View {
 
     private func noteCard(_ n: WireNote) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(OutlineStyle.kindName(n.kind, text: n.text)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            kindLabel(n)
             if let q = n.quote { Text("“\(q)”").font(.subheadline).italic().foregroundStyle(.secondary) }
             if !n.text.isEmpty { Text(n.text).font(.body) }
-            if n.consumed { Text("Read by a round").font(.caption).foregroundStyle(.secondary) }
+            if n.consumed { Text("Read by a round, so its type can't change.").font(.caption).foregroundStyle(.secondary) }
             if !n.consumed && notesAllowed {
                 let deleting = commands.inFlight.contains(.removeNote(n.id))
                 Button(role: .destructive) { confirmingDelete = n.id } label: {
@@ -248,6 +248,43 @@ struct PlanReaderScreen: View {
         }
     }
 
+    /// The note's type: a menu while it can still change, plain words once it can't. A pending
+    /// note on a Mac that predates `intake.setNoteKind` says where to change it instead.
+    @ViewBuilder private func kindLabel(_ n: WireNote) -> some View {
+        let name = OutlineStyle.kindName(n.kind, text: n.text)
+        if NoteComposer.canRetype(n, detail: detailModel.detail) {
+            retypeMenu(current: n.kind, text: n.text, name: name, busy: commands.inFlight.contains(.noteKind(n.id))) { retype(n.id, to: $0) }
+        } else {
+            Text(name).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if !n.consumed && notesAllowed {
+                Text("Change the type on your Mac.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func retypeMenu(current: String, text: String, name: String, busy: Bool,
+                            choose: @escaping (String) -> Void) -> some View {
+        Menu {
+            ForEach(NoteComposer.retypeKinds, id: \.id) { kind in
+                Button { choose(kind.id) } label: {
+                    if kind.id == current { Label(kind.title, systemImage: "checkmark") } else { Text(kind.title) }
+                }
+                .disabled(!NoteComposer.accepts(kind: kind.id, text: text))
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(busy ? "Changing…" : name)
+                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+            }
+            .font(.caption.weight(.semibold))
+            .frame(minHeight: 44)
+        }
+        .tint(.secondary)
+        .disabled(busy)
+        .accessibilityLabel("Note type: \(name)")
+        .accessibilityHint("Change what kind of note this is")
+    }
+
     /// A dialog's `isPresented` for one note out of the id awaiting confirmation.
     private func confirming(_ state: Binding<UUID?>, _ id: UUID) -> Binding<Bool> {
         Binding(get: { state.wrappedValue == id }, set: { if !$0 { state.wrappedValue = nil } })
@@ -259,8 +296,16 @@ struct PlanReaderScreen: View {
     private func unsentCard(_ d: NoteDraft) -> some View {
         let sending = commands.inFlight.contains(.note(d.id))
         return VStack(alignment: .leading, spacing: 6) {
-            Text(OutlineStyle.kindName(NoteComposer.wire(kind: d.kind).kind, text: d.text))
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if sending {
+                Text(OutlineStyle.kindName(NoteComposer.wire(kind: d.kind).kind, text: d.text))
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            } else {
+                // Not sent yet: the type is the draft's own, so changing it needs no Mac.
+                retypeMenu(current: NoteComposer.wire(kind: d.kind).kind, text: d.text,
+                           name: OutlineStyle.kindName(NoteComposer.wire(kind: d.kind).kind, text: d.text), busy: false) {
+                    outbox.retype(d.id, to: $0)
+                }
+            }
             if let q = d.target.quote { Text("“\(q)”").font(.subheadline).italic().foregroundStyle(.secondary) }
             if !d.text.isEmpty { Text(d.text).font(.body) }
             if sending {
@@ -299,6 +344,17 @@ struct PlanReaderScreen: View {
                         checkpoint: d.checkpoint, block: d.target.block, quote: d.target.quote)
         }, onAck: {
             outbox.acked(d.id)
+            reloadHead()
+        })
+    }
+
+    /// Change a pending note's type. A note still in the outbox changes there at once, so its
+    /// card is right before the answer; the plan's own note changes when the head is re-requested.
+    private func retype(_ noteID: UUID, to kind: String) {
+        commands.send(.noteKind(noteID), command: {
+            .intakeSetNoteKind(id: intake, token: $0, noteID: noteID, kind: kind)
+        }, onAck: {
+            outbox.retype(noteID, to: kind)
             reloadHead()
         })
     }

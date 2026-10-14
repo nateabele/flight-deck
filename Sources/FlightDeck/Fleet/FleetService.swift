@@ -1363,6 +1363,10 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneRemoveNote(id, token: token, noteID: noteID) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeSetNoteKind(let id, let token, let noteID, let kind):
+            if let code = store.intakeService.phoneSetNoteKind(id, token: token, noteID: noteID, kind: kind) {
+                return .err(cid: cid, code: code)
+            }
         case .intakeChoose(let id, let token, let preset):
             if let code = store.intakeService.phoneChoose(id, token: token, preset: preset) {
                 return .err(cid: cid, code: code)

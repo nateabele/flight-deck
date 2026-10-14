@@ -70,6 +70,49 @@ final class PlanEditsTests: XCTestCase {
                        [.note(note), .removeNote(note.id), .editPlan(checkpoint: 2, markdown: "# Plan\n\nline \"quoted\"\n")])
     }
 
+    // MARK: - Retyping a note
+
+    func testSetNoteKindRoundTripsThroughTheCommandsFile() throws {
+        let command = TapeCommand.setNoteKind(UUID(), .mustChange)
+        let data = try JSONEncoder().encode(command)
+        XCTAssertEqual(try JSONDecoder().decode(TapeCommand.self, from: data), command)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("\n"))
+    }
+
+    func testSetNoteKindRetypesAPendingNoteInPlaceAndKeepsItsWords() {
+        var tape = Tape()
+        let a = PlanNote(kind: .comment, note: "why sqlite?", anchor: NoteAnchor(checkpoint: 1, quote: "sqlite"))
+        let b = PlanNote(kind: .comment, note: "other")
+        tape.pendingNotes = [a, b]
+        TapePlanner.apply(.setNoteKind(a.id, .question), to: &tape)
+        XCTAssertEqual(tape.pendingNotes.map(\.kind), [.question, .comment])
+        XCTAssertEqual(tape.pendingNotes[0].note, "why sqlite?")
+        XCTAssertEqual(tape.pendingNotes[0].anchor, a.anchor)
+        TapePlanner.apply(.setNoteKind(UUID(), .delete), to: &tape)
+        XCTAssertEqual(tape.pendingNotes.map(\.kind), [.question, .comment], "an unknown id changes nothing")
+    }
+
+    /// A round that read a note read it as what it was; the record is not rewritten.
+    func testSetNoteKindLeavesAConsumedNoteAlone() {
+        let read = PlanNote(kind: .comment, note: "x")
+        var tape = Tape(checkpoints: [Checkpoint(id: 1, stage: .refine, round: 1, major: false,
+                                                 createdAt: Date(timeIntervalSince1970: 0),
+                                                 record: RoundRecord(annotations: [read]))])
+        TapePlanner.apply(.setNoteKind(read.id, .delete), to: &tape)
+        XCTAssertEqual(tape.checkpoints[0].record.annotations.map(\.kind), [.comment])
+        XCTAssertEqual(tape.pendingNotes, [])
+    }
+
+    func testSetNoteKindRefusesATypeTheWordsCannotCarry() {
+        var tape = Tape()
+        let highlight = PlanNote(kind: .comment, note: "")
+        tape.pendingNotes = [highlight]
+        TapePlanner.apply(.setNoteKind(highlight.id, .question), to: &tape)
+        XCTAssertEqual(tape.pendingNotes[0].kind, .comment, "a Question with nothing written says nothing")
+        TapePlanner.apply(.setNoteKind(highlight.id, .delete), to: &tape)
+        XCTAssertEqual(tape.pendingNotes[0].kind, .delete)
+    }
+
     // MARK: - Applying commands
 
     func testNoteAndRemoveNoteApply() {
@@ -336,6 +379,18 @@ final class PlanEditsTests: XCTestCase {
         }
         XCTAssertTrue(RoundPrompts.integrate(planFile: "/w/plan.md", changesFile: "/w/c.json", humanEdits: diff)
             .contains("These edits are authoritative"))
+    }
+
+    /// A note retyped before the next round runs is read by that round as its new type.
+    func testARetypedNoteIsPromptedAsItsNewType() {
+        var tape = Tape()
+        let note = PlanNote(kind: .comment, note: "why a websocket?",
+                            anchor: NoteAnchor(checkpoint: 3, quote: "Push over a websocket.", section: "## Sync"))
+        tape.pendingNotes = [note]
+        TapePlanner.apply(.setNoteKind(note.id, .question), to: &tape)
+        let p = RoundPrompts.review(context(notes: tape.pendingNotes), planFile: "/p/plan.md", round: 1)
+        XCTAssertTrue(p.contains("[question] in section \"## Sync\""), p)
+        XCTAssertTrue(p.contains("Question (answer it in the plan): why a websocket?"), p)
     }
 
     func testNoEditsAndNoNotesAddNothing() {

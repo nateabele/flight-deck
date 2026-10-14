@@ -172,6 +172,13 @@ public struct PlanNote: Codable, Equatable, Sendable, Identifiable {
         self.anchor = anchor
     }
 
+    /// Whether this note can be `kind` and still say something: every kind needs words except
+    /// Delete (which may explain itself) and a comment (an empty one is a Highlight). The one
+    /// rule the Mac's rail, the phone command and the tape fold share for a change of type.
+    public func accepts(kind: NoteKind) -> Bool {
+        kind == .comment || kind == .delete || !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// An old free-text annotation as an unanchored comment. The id is derived from the text
     /// (and its position, where there is one) rather than random: the app and the runner each
     /// decode the same legacy `tape.json` or `commands.jsonl` line independently, and a random
