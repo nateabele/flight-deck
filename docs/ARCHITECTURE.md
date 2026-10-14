@@ -491,8 +491,12 @@ copied to `$CODEX_HOME/skills/flightdeck-delegate/` (`CodexDelegateSkill`, which
 user edited or deleted alone; a Debug build skips the copy, so it never writes the real `~/.codex`). Probe P1 showed a skill added under `--plugin-dir` does not appear in
 a running claude until `/reload-plugins`, and under fd-abduco a tab's claude outlives an app update.
 So at launch the app fingerprints the bundled plugin (`PluginReload`); when it changed, every claude
-tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
-the status registry says idle and after any queued rename or prompt. The command flips the registry row
+tab whose daemon was already live becomes stale. The stale set is kept in `UserDefaults` across runs.
+A stale tab is sent `/reload-plugins` through the gated `inject` only when the user activates it
+(selected, app frontmost), only while the status registry says idle, and after any queued rename or
+prompt. The store then reads the box back. If the command is still there, the Return was lost: the
+store clears every copy, puts back any draft behind them, and tries again at the tab's next
+activation. The command flips the registry row
 busy for about 90 ms; for a few seconds after sending it the store ignores that tab's idle/busy
 edges, so the reload neither marks the tab unread nor resets its "active N min ago".
 

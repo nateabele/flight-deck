@@ -90,17 +90,47 @@ final class PluginReloadTests: XCTestCase {
 
     func testAdoptedTabsNeedAReloadOnlyWhenThePluginChanged() {
         let a = UUID(), b = UUID()
-        XCTAssertEqual(PluginReload(adopted: [a, b], pluginChanged: true).pending, [a, b])
-        XCTAssertTrue(PluginReload(adopted: [a, b], pluginChanged: false).pending.isEmpty)
+        XCTAssertEqual(PluginReload(adopted: [a, b], pluginChanged: true).stale, [a, b])
+        XCTAssertTrue(PluginReload(adopted: [a, b], pluginChanged: false).stale.isEmpty)
     }
 
-    func testATabLeavesTheQueueOnceSentOrForgotten() {
+    /// The previous run's record only counts for tabs whose claude is still the same process.
+    func testStillStaleCarriesOverOnlyForAdoptedTabs() {
+        let kept = UUID(), relaunched = UUID(), done = UUID()
+        let reload = PluginReload(adopted: [kept, done], pluginChanged: false, stillStale: [kept, relaunched])
+        XCTAssertEqual(reload.stale, [kept])
+    }
+
+    func testATabLeavesOnlyWhenTheBoxReadsBackEmptyOrItIsForgotten() {
         let a = UUID(), b = UUID()
         var reload = PluginReload(adopted: [a, b], pluginChanged: true)
         reload.sent(a, at: Date())
-        reload.forget(b)
+        XCTAssertFalse(reload.needsReload(a), "not retyped while its box is unchecked")
+        reload.checked(a, submitted: false)
+        XCTAssertFalse(reload.needsReload(a), "a lost Return waits for the next activation")
+        reload.activated()
+        XCTAssertTrue(reload.needsReload(a))
+        reload.sent(a, at: Date())
+        reload.checked(a, submitted: true)
+        reload.activated()
         XCTAssertFalse(reload.needsReload(a))
-        XCTAssertFalse(reload.needsReload(b))
+        reload.forget(b)
+        XCTAssertEqual(reload.stale, [])
+    }
+
+    func testLeftoverStripsEveryLeadingCopyAndKeepsTheDraft() {
+        XCTAssertEqual(PluginReload.leftover(in: "/reload-plugins"), "")
+        XCTAssertEqual(PluginReload.leftover(in: "/reload-plugins/reload-plugins/reload-plugins"), "")
+        XCTAssertEqual(PluginReload.leftover(in: "/reload-plugins /reload-pluginsfix it"), "fix it")
+        XCTAssertNil(PluginReload.leftover(in: ""), "an empty box means it was submitted")
+        XCTAssertNil(PluginReload.leftover(in: "fix it /reload-plugins"), "the user's own text")
+    }
+
+    func testTheStaleRecordRoundTripsPerBuild() {
+        let a = UUID()
+        PluginReload.recordStale([a], in: defaults, debug: true)
+        XCTAssertEqual(PluginReload.staleTabs(in: defaults, debug: true), [a])
+        XCTAssertEqual(PluginReload.staleTabs(in: defaults, debug: false), [])
     }
 
     func testOnlyIdleBusyEdgesInsideTheWindowAreMasked() {
