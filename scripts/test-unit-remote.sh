@@ -6,6 +6,7 @@
 #   FD_TEST_SHARDS=N                    parallel xctest processes for a full run
 #   FD_SKIP_BUILD=1                     reuse the last build-for-testing here
 #   FD_SKIP_MENUBAR=1                   leave out the menu-bar lane of a full run
+#   FD_REMOTE_LOAD_RUNS=N               repeat the run N times under CPU burners (two per core)
 #
 # Why another machine: the suite is not headless. *LiveTests classes open real windows (a
 # ParkedWindow at -10000 plus orderFrontRegardless), NSHostingView renders run, and the menu-bar
@@ -217,7 +218,7 @@ fi
 # --- Run -------------------------------------------------------------------
 # The knobs travel as NAME=VALUE arguments, never spliced into a command string.
 ENVARGS=(FD_TEST_LOCAL=1 FD_SKIP_BUILD=1 FD_MENUBAR_PREBUILT=1)
-for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR; do
+for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS; do
   [ -n "${!name:-}" ] && ENVARGS+=("$name=${!name}")
 done
 echo "[unit] running${FD_TEST_FILTER:+ $FD_TEST_FILTER} on the UI-test Mac…"
@@ -226,7 +227,19 @@ set +e
 # as a local run; the per-shard logs come back below.
 remote "$ROOT" "$SHIM" "${ENVARGS[@]}" <<'REMOTE' 2>&1 | tee -a "$LOG"
 cd "$1"; shim="$HOME/$2"; shift 2
-env FD_XCTEST_SHIM="$shim" "$@" ./scripts/test-unit.sh
+# FD_REMOTE_LOAD_RUNS=N: run N times under two CPU burners per core, to reproduce load-only flakes.
+runs=1
+for arg in "$@"; do case $arg in FD_REMOTE_LOAD_RUNS=*) runs=${arg#*=}; load=1 ;; esac; done
+if [ -n "${load:-}" ]; then
+  for _ in $(seq $(( $(sysctl -n hw.ncpu) * 2 ))); do yes >/dev/null & done
+  trap 'kill $(jobs -p) 2>/dev/null' EXIT
+fi
+rc=0
+for run in $(seq "$runs"); do
+  [ "$runs" -gt 1 ] && echo "[unit] load run $run/$runs"
+  env FD_XCTEST_SHIM="$shim" "$@" ./scripts/test-unit.sh || rc=1
+done
+exit $rc
 REMOTE
 rc=${PIPESTATUS[0]}
 set -e
