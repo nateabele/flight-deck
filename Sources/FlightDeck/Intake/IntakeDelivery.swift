@@ -71,7 +71,7 @@ struct IntakeDelivery {
                     let body = DeliveryPlanner.mailBody(for: rating, bead: bead, reason: reason, outcome: outcome)
                     var argv = ["mail", "send", "--project", project, "--from", fdName, "--to", to,
                                 "--subject", DeliveryPlanner.subject(for: rating, bead: bead), "--body", body,
-                                "--thread-id", "bead:\(bead)", "--topic", "fd-intake"]
+                                "--thread-id", "task:\(bead)", "--topic", "fd-intake"]
                     if DeliveryPlanner.isUrgent(rating) { argv += ["--importance", "high", "--ack-required"] }
                     if let warning = await run(argv, cwd: project, describing: "am mail send to \(to) for \(bead)") {
                         warnings.append(warning)
@@ -117,7 +117,7 @@ struct IntakeDelivery {
     private static func reclaimFailedInjectText(bead: String, reason: String) -> String {
         "Stop work on \(bead): \(reason). Flight Deck could not reclaim it — " +
         "set it back to open yourself (`br update \(bead) --status open --assignee \"\"`) " +
-        "or reply on the Agent Mail thread bead:\(bead)."
+        "or reply on the Agent Mail thread task:\(bead)."
     }
 
     /// Runs one `am`/`br` invocation and turns a non-zero exit or a thrown error into a

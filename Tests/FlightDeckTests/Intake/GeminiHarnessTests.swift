@@ -309,10 +309,12 @@ final class SchemaRepairRetryTests: XCTestCase {
     }
     private let invalid = Diagnosis(category: .invalidOutput, detail: "missing field plan\nsecond error", action: "")
 
-    func testOneRetryResumingTheSameSession() {
+    func testOneRetryResumingTheSameSession() throws {
         let retry = SchemaRepair.retry(profile: SchemaLess(), failure: invalid, sessionID: "S1", access: .readOnly, isRepair: false)
         XCTAssertEqual(retry, SchemaRepair.Retry(resumeSessionID: "S1",
-            prompt: "Your reply did not validate: missing field plan. Reply again with only the corrected JSON."))
+            prompt: SchemaRepair.prompt(firstError: "missing field plan")))
+        XCTAssertTrue(try XCTUnwrap(retry).prompt.hasPrefix(
+            "Your reply did not validate: missing field plan. Reply again with only the corrected JSON."))
     }
 
     func testNeverMoreThanOne() {

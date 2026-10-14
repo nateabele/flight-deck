@@ -16,6 +16,20 @@ final class TriageTests: XCTestCase {
         guard case .recommendation(let p, _, let cs) = try Triage.decode(d) else { return XCTFail() }
         XCTAssertEqual(p, .bead); XCTAssertEqual(cs?.ops.count, 1)
     }
+    /// What agents are told to emit now: `singleTask` and `createTask`. Same result as the old
+    /// spellings the test above keeps decoding.
+    func testDecodesTheNamesAgentsAreNowOffered() throws {
+        let d = Data(#"""
+        {"kind":"recommendation","questions":null,"preset":"singleTask","reason":"one file",
+         "changeSet":{"graphObservedAt":"2026-09-26T20:00:00Z","ops":[
+          {"op":"createTask","tempId":"n1","title":"T","type":"task","priority":2,"description":"d","acceptance":null,"labels":[],
+           "from":null,"to":null,"kind":null,"id":null,"set":null,"pre":null,"delivery":null,"reason":null,"of":null}]}}
+        """#.utf8)
+        guard case .recommendation(let p, _, let cs) = try Triage.decode(d) else { return XCTFail() }
+        XCTAssertEqual(p, .bead)
+        guard case .createBead(let t)? = cs?.ops.first else { return XCTFail() }
+        XCTAssertEqual(t.tempId, "n1")
+    }
     func testProseOutputFails() {
         XCTAssertThrowsError(try Triage.decode(Data("Sure, here's my plan".utf8)))
     }

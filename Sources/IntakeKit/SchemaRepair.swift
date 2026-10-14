@@ -51,14 +51,15 @@ public enum SchemaRepair {
 
     /// The resume after a turn that ended without an answer: say why, and ask for the answer
     /// without the tool use that was denied.
-    public static let answerlessPrompt = "Your last turn ended without an answer because a tool you tried was denied: "
+    public static let answerlessPrompt = AgentVocabulary.closing(
+        "Your last turn ended without an answer because a tool you tried was denied: "
         + "this run is read-only, so writing files or running commands that change anything is not allowed. "
-        + "Without using any tool that writes or changes anything, reply now with the JSON answer."
+        + "Without using any tool that writes or changes anything, reply now with the JSON answer.")
 
     /// The repair turn's whole prompt (spec §3.4 step 4). Only the first error: a list invites
     /// the model to fix some and re-break others, and one is enough to say what went wrong.
     public static func prompt(firstError: String) -> String {
         let first = firstError.split(whereSeparator: \.isNewline).first.map(String.init) ?? firstError
-        return "Your reply did not validate: \(first). Reply again with only the corrected JSON."
+        return AgentVocabulary.closing("Your reply did not validate: \(first). Reply again with only the corrected JSON.")
     }
 }

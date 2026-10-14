@@ -29,6 +29,23 @@ public struct GraphSnapshot: Codable, Equatable, Sendable {
     public var edges: Set<DepEdge>
     public init(beads: [String: BeadSnapshot] = [:], edges: Set<DepEdge> = []) { self.beads = beads; self.edges = edges }
 
+    /// The file an agent reads calls its entries `tasks`. A snapshot written before that
+    /// (`beads`) still decodes, so a saved triage or round directory keeps resuming.
+    private enum Key: String, CodingKey { case tasks, beads, edges }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        beads = try c.decodeIfPresent([String: BeadSnapshot].self, forKey: .tasks)
+            ?? c.decode([String: BeadSnapshot].self, forKey: .beads)
+        edges = try c.decode(Set<DepEdge>.self, forKey: .edges)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode(beads, forKey: .tasks)
+        try c.encode(edges, forKey: .edges)
+    }
+
     private struct ListEnvelope: Decodable {
         struct Issue: Decodable {
             let id: String; let title: String; let status: String
