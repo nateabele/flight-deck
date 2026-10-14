@@ -29,8 +29,27 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
         let agents = store.agentOrder(forProject: project)
         return NewSessionAffordance.menu(
             agents: agents, preferences: store.preferences,
-            resolved: store.resolvedAccounts(for: agents, project: project)
+            resolved: store.resolvedAccounts(for: agents, project: project),
+            pools: store.assignedPoolLabels(for: agents, project: project)
         )
+    }
+
+    /// A pool project's phone menu leads with the pool, ticked, and tapping it names no
+    /// account — so the Mac leases from the pool exactly as ⌘N does.
+    func testAPoolProjectsPoolRowLaunchesThroughThePool() {
+        let work = account(.claude, "Work")
+        let personal = account(.claude, "Personal")
+        let store = PreferencesStore(persistence: nil)
+        store.preferences.accountList = AccountList(entries: [
+            .pool(AccountPool(id: "team", label: "Team", agent: .claude, members: [work, personal])),
+        ])
+        store.preferences.storedProjectSettings = [project: ProjectSettings(accounts: [.claude: .pool("team")])]
+        let options = rows(store)
+        XCTAssertEqual(options.map(\.accountName), ["Team", "Work", "Personal"])
+        XCTAssertEqual(options.map(\.isDefault), [true, false, false])
+        XCTAssertEqual(NewSessionOptionsProjection.account(forAgent: "claude", index: 0, in: entries(store)), .pool)
+        XCTAssertEqual(NewSessionOptionsProjection.account(forAgent: "claude", index: 2, in: entries(store)),
+                       .account(personal.id))
     }
 
     private func rows(_ store: PreferencesStore) -> [WireNewSessionOption] {
@@ -98,7 +117,7 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
         let store = preferences([work, personal])
         XCTAssertEqual(
             NewSessionOptionsProjection.account(forAgent: "claude", index: 1, in: entries(store)),
-            personal.id
+            .account(personal.id)
         )
     }
 

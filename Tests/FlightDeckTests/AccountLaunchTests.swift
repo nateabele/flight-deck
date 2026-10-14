@@ -275,6 +275,30 @@ final class AccountLaunchTests: XCTestCase {
                        "createSession leases once, not again inside newSession")
     }
 
+    /// ⌘N in a pool project launches through the pool. Its menu row used to name the pool's
+    /// first member as the account, which skipped the lease and opened every tab on that
+    /// member, however far over its limit it was.
+    func testTheNewSessionChordOnAPoolProjectLeasesInsteadOfNamingTheFirstMember() async throws {
+        let (store, ledger, first, second, _) = pooled()
+        ledger.ingest(reading(first, 0.99))
+        ledger.ingest(reading(second, 0.1))
+        let preferences = try XCTUnwrap(store.preferences)
+        let rows = NewSessionMenuModel.rows(project: projectURL.path, preferences: preferences)
+        guard case .submenu(_, let leaves)? = rows.first else { return XCTFail("expected a submenu, got \(rows)") }
+        let chorded = leaves.compactMap { row -> (String, UUID?, Bool)? in
+            guard case .item(let title, _, let account, let checked, [.command]?) = row else { return nil }
+            return (title, account, checked)
+        }
+        XCTAssertEqual(chorded.count, 1)
+        XCTAssertEqual(chorded.first?.0, "Team", "the pool row wears ⌘N")
+        XCTAssertNil(chorded.first?.1, "the pool row names no account")
+        XCTAssertEqual(chorded.first?.2, true)
+
+        let id = try await store.createSession(agent: .claude, in: projectURL.path, account: chorded.first?.1).get()
+        XCTAssertEqual(store.repos.flatMap(\.sessions).first { $0.id == id }?.accountID, second.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [second.id])
+    }
+
     /// No member under hard: the tab still opens, on the member with most headroom, and the
     /// user is told — never blocked silently, never moved off the pool.
     func testWhenEveryMemberIsOverHardTheTabStartsAndTheUserIsTold() throws {

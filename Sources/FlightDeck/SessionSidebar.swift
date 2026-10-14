@@ -678,7 +678,8 @@ struct SessionSidebar: View {
         let agents = preferences.agentOrder(forProject: project)
         let entries = NewSessionAffordance.menu(
             agents: agents, preferences: preferences.preferences,
-            resolved: preferences.resolvedAccounts(for: agents, project: project)
+            resolved: preferences.resolvedAccounts(for: agents, project: project),
+            pools: preferences.assignedPoolLabels(for: agents, project: project)
         )
         // Same chord placement the File menu renders, from the same rule: the File menu
         // (`NewSessionMenuModel`) and this dropdown both read `NewSessionAffordance.chords`, so the two can't drift
@@ -688,13 +689,20 @@ struct SessionSidebar: View {
             switch entry {
             case .agent(let agent, let account, let isResolved):
                 newSessionMenuRow(agent: agent, account: account, isResolved: isResolved,
-                                  flat: true, modifiers: chords[account])
+                                  flat: true, modifiers: chords[.account(account)])
+            case .pool(let agent, let label):
+                newSessionMenuRow(agent: agent, pool: label, flat: true, modifiers: chords[.pool(agent)])
             case .submenu(let agent, let rows):
                 Menu("New \(agent.displayName) Session") {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                        if case .agent(let agent, let account, let isResolved) = row {
+                        switch row {
+                        case .agent(let agent, let account, let isResolved):
                             newSessionMenuRow(agent: agent, account: account, isResolved: isResolved,
-                                              flat: false, modifiers: chords[account])
+                                              flat: false, modifiers: chords[.account(account)])
+                        case .pool(let agent, let label):
+                            newSessionMenuRow(agent: agent, pool: label, flat: false, modifiers: chords[.pool(agent)])
+                        case .submenu:
+                            EmptyView()
                         }
                     }
                 }
@@ -725,6 +733,25 @@ struct SessionSidebar: View {
             Task { await store.createFromMenu(agent: agent, account: account) }
         } label: {
             if isResolved && !flat { Label(name, systemImage: "checkmark") } else { Text(name) }
+        }
+        if let modifiers {
+            row.keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(modifiers))
+        } else {
+            row
+        }
+    }
+
+    /// The pool row: launches with no account named, so the project's pool leases the member
+    /// with headroom. Always what ⌘N does, so it is ticked whenever it is nested.
+    @ViewBuilder
+    private func newSessionMenuRow(
+        agent: AgentID, pool label: String, flat: Bool, modifiers: NSEvent.ModifierFlags?
+    ) -> some View {
+        let name = flat ? "New \(agent.displayName) Session" : label
+        let row = Button {
+            Task { await store.createFromMenu(agent: agent, account: nil) }
+        } label: {
+            if flat { Text(name) } else { Label(name, systemImage: "checkmark") }
         }
         if let modifiers {
             row.keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(modifiers))

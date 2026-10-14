@@ -200,6 +200,6 @@ final class AccountTombstoneTests: XCTestCase {
             resolved: [.claude: work.id]
         )
         XCTAssertEqual(after, [.agent(.claude, account: work.id, isResolved: true)])
-        XCTAssertEqual(NewSessionAffordance.chords(for: after, agents: agents)[work.id], [.command])
+        XCTAssertEqual(NewSessionAffordance.chords(for: after, agents: agents)[.account(work.id)], [.command])
     }
 }

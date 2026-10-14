@@ -74,8 +74,15 @@ enum NewSessionAffordance {
     /// default is a mouse-only act, not a rebind. An agent absent from `accounts` entirely
     /// (nothing logged in yet) contributes no row at all, rather than a dead one nothing can
     /// launch.
+    ///
+    /// An agent the project bills to a POOL leads with a `.pool` row, which launches with no
+    /// account named so `AccountResolver` leases the member with headroom. It is always the
+    /// resolved row: no single account is what ⌘N runs as, so no account row is ticked. Before
+    /// this row existed the tick and the chord sat on the pool's first member, and ⌘N launched
+    /// that member by name — past the lease, however far over its limit it was.
     enum MenuEntry: Equatable {
         case agent(AgentID, account: UUID, isResolved: Bool)
+        case pool(AgentID, label: String)
         indirect case submenu(AgentID, [MenuEntry])
 
         /// Which agent this row (or submenu) belongs to, regardless of case — lets callers
@@ -83,21 +90,37 @@ enum NewSessionAffordance {
         var agent: AgentID {
             switch self {
             case .agent(let agent, _, _): return agent
+            case .pool(let agent, _): return agent
             case .submenu(let agent, _): return agent
             }
         }
     }
 
+    /// A row that can wear a chord: one account, or an agent's pool.
+    enum Leaf: Hashable {
+        case account(UUID)
+        case pool(AgentID)
+    }
+
+    /// `pools` names, per agent, the pool the project bills it to (its label). Such an agent's
+    /// `resolved` entry is ignored: the pool, not an account, is what ⌘N launches.
     static func menu(
-        agents: [AgentSettings], accounts: [AgentAccount], resolved: [AgentID: UUID]
+        agents: [AgentSettings], accounts: [AgentAccount], resolved: [AgentID: UUID],
+        pools: [AgentID: String] = [:]
     ) -> [MenuEntry] {
         agents.compactMap { settings in
             let mine = accounts.filter { $0.agent == settings.id }
             guard !mine.isEmpty else { return nil }
+            let pool = pools[settings.id]
             let rows = mine.map {
-                MenuEntry.agent(settings.id, account: $0.id, isResolved: resolved[settings.id] == $0.id)
+                MenuEntry.agent(settings.id, account: $0.id,
+                                isResolved: pool == nil && resolved[settings.id] == $0.id)
             }
-            return mine.count == 1 ? rows[0] : .submenu(settings.id, rows)
+            guard let pool else { return mine.count == 1 ? rows[0] : .submenu(settings.id, rows) }
+            // One account and a pool: the flat row still launches through the pool, so the
+            // lease is taken and counted like any other pool tab's.
+            let head = MenuEntry.pool(settings.id, label: pool)
+            return mine.count == 1 ? head : .submenu(settings.id, [head] + rows)
         }
     }
 
@@ -109,32 +132,37 @@ enum NewSessionAffordance {
     /// and `SessionSidebar` both call this instead of `menu(accounts:)` directly so that mistake
     /// can't happen at either site — or a future third one.
     static func menu(
-        agents: [AgentSettings], preferences: Preferences, resolved: [AgentID: UUID]
+        agents: [AgentSettings], preferences: Preferences, resolved: [AgentID: UUID],
+        pools: [AgentID: String] = [:]
     ) -> [MenuEntry] {
-        menu(agents: agents, accounts: preferences.liveAccounts, resolved: resolved)
+        menu(agents: agents, accounts: preferences.liveAccounts, resolved: resolved, pools: pools)
     }
 
     /// Which account, inside a multi-account submenu's rows, should carry the flat
     /// keyboard shortcut that used to sit on the agent's own (now-nested) menu item.
     ///
     /// The resolved row wins — the same one the checkmark already marks, so the chord and
-    /// the visible default never disagree. If nothing is resolved (an unreachable state
-    /// today, since `resolved` always names one account when any exist), the first row
-    /// still gets it: an agent slot bound by `slots(for:)` must always answer somewhere,
-    /// never go silently dead because nothing happened to be marked resolved.
-    static func shortcutLeaf(in rows: [MenuEntry]) -> UUID? {
+    /// the visible default never disagree. A pool row is always resolved. If nothing is
+    /// resolved (an unreachable state today, since `resolved` always names one account when
+    /// any exist), the first row still gets it: an agent slot bound by `slots(for:)` must
+    /// always answer somewhere, never go silently dead because nothing happened to be marked
+    /// resolved.
+    static func shortcutLeaf(in rows: [MenuEntry]) -> Leaf? {
         for row in rows {
-            if case .agent(_, let account, let isResolved) = row, isResolved {
-                return account
+            switch row {
+            case .pool(let agent, _): return .pool(agent)
+            case .agent(_, let account, true): return .account(account)
+            default: continue
             }
         }
-        if case .agent(_, let account, _) = rows.first {
-            return account
+        switch rows.first {
+        case .agent(_, let account, _)?: return .account(account)
+        case .pool(let agent, _)?: return .pool(agent)
+        default: return nil
         }
-        return nil
     }
 
-    /// The chord each account row should display, keyed by account.
+    /// The chord each row should display, keyed by account (or by agent, for a pool row).
     ///
     /// Placement is not re-derived here: `slots(for:)` already decides which agents carry a
     /// chord at all (list position, capped at three), and `shortcutLeaf(in:)` already decides
@@ -142,21 +170,23 @@ enum NewSessionAffordance {
     /// dropdown and the File menu render the same chords from one rule instead of each
     /// keeping its own copy of the placement logic and drifting apart.
     ///
-    /// An account absent from the result carries no chord: a leaf that is not the shortcut
+    /// A leaf absent from the result carries no chord: a leaf that is not the shortcut
     /// leaf, or any agent past the third. Built with `reduce` for the same reason
     /// `NewSessionMenuModel` does — nothing enforces one row per `AgentID`, and a duplicate must
     /// not crash the menu, so last position wins.
     static func chords(
         for entries: [MenuEntry], agents: [AgentSettings]
-    ) -> [UUID: NSEvent.ModifierFlags] {
+    ) -> [Leaf: NSEvent.ModifierFlags] {
         let byAgent = slots(for: agents).reduce(into: [AgentID: NSEvent.ModifierFlags]()) {
             $0[$1.agent] = $1.modifiers
         }
-        return entries.reduce(into: [UUID: NSEvent.ModifierFlags]()) { result, entry in
+        return entries.reduce(into: [Leaf: NSEvent.ModifierFlags]()) { result, entry in
             guard let modifiers = byAgent[entry.agent] else { return }
             switch entry {
             case .agent(_, let account, _):
-                result[account] = modifiers
+                result[.account(account)] = modifiers
+            case .pool(let agent, _):
+                result[.pool(agent)] = modifiers
             case .submenu(_, let rows):
                 if let leaf = shortcutLeaf(in: rows) { result[leaf] = modifiers }
             }
