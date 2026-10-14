@@ -3,7 +3,18 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
-# Headless unit-test runner for FlightDeckTests.
+# The suite runs on the dedicated UI-test Mac by default (scripts/test-unit-remote.sh), because it
+# is not headless: *LiveTests classes open real windows (a ParkedWindow at -10000 plus
+# orderFrontRegardless), NSHostingView renders run, and the menu-bar lane puts up a SwiftUI app.
+# Run here they take windows and focus on the developer's screen. Everything below this line is
+# the LOCAL path: FD_TEST_LOCAL=1. test-unit-remote.sh sets it for the copy it runs ON the
+# UI-test Mac, which is also what keeps the hand-off from recursing. The remote script fails
+# outright when the host is unreachable rather than falling through to here.
+if [ "${FD_TEST_LOCAL:-}" != 1 ]; then
+  exec ./scripts/test-unit-remote.sh "$@"
+fi
+
+# Unit-test runner for FlightDeckTests.
 #
 # Why this exists: FlightDeckTests is an app-hosted unit-test bundle (it depends
 # on the FlightDeck application target so it can `@testable import FlightDeck`).
@@ -20,7 +31,7 @@ cd "$(dirname "$0")/.."
 #
 # UI tests (FlightDeckUITests) genuinely drive the app and still require
 # scripts/smoke.sh + a one-time UI-automation TCC grant; this script is only for
-# the headless unit suite.
+# the in-process unit suite.
 
 #
 # Knobs (all optional):
@@ -30,6 +41,11 @@ cd "$(dirname "$0")/.."
 #   FD_TEST_SHARDS=N                    parallel xctest processes for a full run (default 6;
 #                                       1 = the old serial run).
 #   FD_SKIP_BUILD=1                     reuse the last build-for-testing as is.
+#   FD_SKIP_MENUBAR=1                   leave out the menu-bar lane of a full run.
+#   FD_TEST_LOCAL=1                     run on THIS Mac instead of the UI-test Mac (it opens windows).
+#   FD_XCTEST_SHIM=<dir>                use <dir>/xctest and the test frameworks beside it instead of
+#                                       this machine's Xcode. Set by test-unit-remote.sh only: the
+#                                       UI-test Mac's Xcode is older than the one that built the bundle.
 #
 # scripts/test-serial-classes.txt lists classes that flake under parallel shards (a wall-clock
 # deadline, a Task-scheduling interleaving, or the shared mDNSResponder daemon — see its header).
@@ -72,13 +88,18 @@ APPFRAMEWORKS="$PWD/${PRODUCTS}/Flight Deck.app/Contents/Frameworks"
 # resolved path is under /Applications/Xcode.app, which isn't SIP-restricted, so invoking
 # it directly lets the variable survive.
 XCTEST="$(xcrun --find xctest)"
+SHIM_PATH=""
+if [ -n "${FD_XCTEST_SHIM:-}" ]; then
+  XCTEST="$FD_XCTEST_SHIM/xctest"
+  SHIM_PATH=":$FD_XCTEST_SHIM"  # last: the bundle's own frameworks still win, XCTest comes from here
+fi
 
 # Contents/Frameworks joins the search path for FleetKit.framework, which the test bundle
 # links but does not embed. Without it `xctest` aborts at load with an @rpath failure that
 # reads like a missing symbol rather than a missing directory.
 run_xctest() {  # $1: an -XCTest selector, or empty for the whole bundle
   if [ -n "$1" ]; then set -- -XCTest "$1"; else set --; fi
-  DYLD_LIBRARY_PATH="$APPMACOS" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS" \
+  DYLD_LIBRARY_PATH="$APPMACOS$SHIM_PATH" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS$SHIM_PATH" \
     "$XCTEST" "$@" "$BUNDLE"
 }
 
