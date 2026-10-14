@@ -81,6 +81,10 @@ final class DelegationLifecycleTests: XCTestCase {
     func testUnknownRunFromTheHostEndsTheRunAsDied() async throws {
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
         let id = try await started(frames)
+        // The watcher subscribes from a Task of its own after `delegateStarted`, and the fake
+        // drops a `fail` that finds no open stream, as it does an `emit` to nobody; a host
+        // answers `run.attach` with `unknown_run` only once the watcher has asked.
+        try await until("the watcher's attach") { self.mini.subscribers("h1") > 0 }
         mini.fail("h1", DelegationError(code: "unknown_run", message: "mini has no such run"))
         try await until("the run's end") { frames.all.contains(where: self.isTerminal) }
         XCTAssertEqual(frames.all.last, .delegateExit(cid: 1, status: 125))
