@@ -519,6 +519,44 @@ final class PlanTableEditorTests: XCTestCase {
         XCTAssertGreaterThan(narrow.height, wide.height, "narrower cells wrap more")
     }
 
+    /// The breadcrumb finds the section being read from where the headings are laid out: a
+    /// table above them is hidden source taking the grid's height, so a heading below it is
+    /// where the layout says, not where its source lines would put it.
+    func testReadingPositionStillFindsTheSectionBelowATable() throws {
+        let table = "| a | b |\n|---|---|\n" + (1...12).map { "| row \($0) | " + String(repeating: "words ", count: 30) + " |" }.joined(separator: "\n")
+        let text = (1...6).map { n in
+            "## \(n). Section \(n)\n\n" + String(repeating: "Words in section \(n) that fill a paragraph. ", count: 12) + (n == 2 ? "\n\n" + table : "")
+        }.joined(separator: "\n\n")
+        let view = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {})
+        let coordinator = view.makeCoordinator()
+        let container = PlanEditorContainer(onShow: {})
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 700, height: 600), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
+        scroll.documentView = container
+        window.contentView = scroll
+        coordinator.textView = container.textView
+        container.textView.delegate = coordinator
+        container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
+        coordinator.load(text)
+        container.frame = NSRect(x: 0, y: 0, width: 700, height: 600)
+        container.layoutSubtreeIfNeeded()
+        let until = Date().addingTimeInterval(3)
+        repeat { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) } while container.textView.layingOutWholePlan && Date() < until
+        container.frame = NSRect(x: 0, y: 0, width: 700, height: container.contentHeight)
+        container.layoutSubtreeIfNeeded()
+        coordinator.reading = PlanReadingPosition()
+        container.textView.obscuredTop = 100
+        let ns = text as NSString
+        let heading3 = try XCTUnwrap(container.textView.caretRect(at: ns.range(of: "## 3. Section 3").location))
+        let tableRect = container.textView.segmentRects(ns.range(of: "| a | b |")).first
+        XCTAssertGreaterThan(heading3.minY, try XCTUnwrap(tableRect).maxY, "the heading is below the table in the layout")
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: heading3.minY - 100 + 60))
+        XCTAssertEqual(coordinator.readingHeading()?.heading.title, "3. Section 3")
+    }
+
     // MARK: Edit layer
 
     func testAnInsertedRowStaysAGridAndAChangedCellShowsItsSource() throws {
