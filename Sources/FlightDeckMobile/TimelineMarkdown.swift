@@ -61,7 +61,18 @@ enum TimelineMarkdown {
             : UIColor(red: 0.45, green: 0.30, blue: 0.75, alpha: 0.09)
     })
 
-    static let theme = Theme()
+    static let theme = makeTheme(plan: false)
+
+    /// The same theme for a plan: the system serif for the reading text, a looser line pitch and
+    /// more room between blocks. Headings stay sans, code stays monospaced.
+    static let planTheme = makeTheme(plan: true)
+
+    private static func makeTheme(plan: Bool) -> Theme {
+        let lineSpacing: CGFloat = plan ? 0.45 : 0.12
+        let blockGap: CGFloat = plan ? 0.8 : 0.7
+        let itemGap: CGFloat = plan ? 0.3 : 0.15
+        return Theme()
+        .text { FontFamily(plan ? .system(.serif) : .system()) }
         // Inline code: the tool card's font, one step down, because a `git status` inside a
         // sentence is the same kind of thing as a `git status` in a command panel — now with
         // a tint and a wash behind it, so a span is findable at a glance instead of being
@@ -97,11 +108,11 @@ enum TimelineMarkdown {
         .paragraph { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.12))
+                .relativeLineSpacing(.em(lineSpacing))
                 // Less than `.basic`'s full `1em` blank line. A phone column is narrow enough
                 // that a paragraph break is legible at two thirds of a line, and the rows are
                 // clamped — every point spent on air is a point of the answer not shown.
-                .markdownMargin(top: .zero, bottom: .em(0.7))
+                .markdownMargin(top: .zero, bottom: .em(blockGap))
         }
         // A leading rule rather than `.basic`'s 2em indent. Indentation alone is invisible
         // once a quote wraps, and 2em of a 393pt column is a lot to give up.
@@ -114,7 +125,7 @@ enum TimelineMarkdown {
                     .markdownTextStyle { ForegroundColor(.secondary) }
             }
             .fixedSize(horizontal: false, vertical: true)
-            .markdownMargin(top: .zero, bottom: .em(0.7))
+            .markdownMargin(top: .zero, bottom: .em(blockGap))
         }
         // The tool card's shape — same 10pt continuous corner, same monospaced footnote — but
         // the Mac terminal's colours, because the text inside is highlighted in that
@@ -145,20 +156,20 @@ enum TimelineMarkdown {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Color(.separator), lineWidth: 0.5)
                 )
-                .markdownMargin(top: .zero, bottom: .em(0.7))
+                .markdownMargin(top: .zero, bottom: .em(blockGap))
         }
         .listItem { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .markdownMargin(top: .em(0.15))
+                .markdownMargin(top: .em(itemGap))
         }
         .list { configuration in
-            configuration.label.markdownMargin(top: .zero, bottom: .em(0.7))
+            configuration.label.markdownMargin(top: .zero, bottom: .em(blockGap))
         }
         .table { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .markdownMargin(top: .zero, bottom: .em(0.7))
+                .markdownMargin(top: .zero, bottom: .em(blockGap))
         }
         .tableCell { configuration in
             configuration.label
@@ -173,6 +184,7 @@ enum TimelineMarkdown {
         .thematicBreak {
             Divider().markdownMargin(top: .em(0.4), bottom: .em(0.9))
         }
+    }
 
     /// Every heading level, one shape: semibold, a little air above it and almost none below,
     /// so it sits with the block it introduces rather than floating between two.
@@ -183,6 +195,7 @@ enum TimelineMarkdown {
             .fixedSize(horizontal: false, vertical: true)
             .markdownMargin(top: .em(0.8), bottom: .em(0.25))
             .markdownTextStyle {
+                FontFamily(.system())
                 FontWeight(.semibold)
                 FontSize(.em(size))
             }

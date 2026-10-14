@@ -48,13 +48,18 @@ final class MarkdownStylerTests: XCTestCase {
         XCTAssertEqual(blocks[0].spans.map { ns.substring(with: $0.range) }, ["scope"])
     }
 
-    /// The reading typography: a 15 pt body whose leading is `lineSpacing`, so the caret is the
+    /// The reading typography: a 16 pt serif body whose leading is `lineSpacing`, so the caret is the
     /// text's height and not the padded line's; a blank line is a gap, not a whole empty line;
     /// a code block's lines are marked first/last for the box behind them.
     @MainActor
     func testReadingTypographyKeepsTheCaretToTheText() {
         let theme = PlanTheme.standard
-        XCTAssertEqual(theme.body.pointSize, 15)
+        XCTAssertEqual(theme.body.pointSize, 16)
+        XCTAssertTrue(theme.body.fontName.contains("NewYork"), "prose is set in the system serif, not the sans: \(theme.body.fontName)")
+        XCTAssertFalse(theme.heading(2).fontName.contains("NewYork"), "headings stay in the sans")
+        let natural0 = ceil(theme.body.ascender - theme.body.descender + theme.body.leading)
+        XCTAssertEqual((natural0 + theme.lineSpacing) / natural0, 1.42, accuracy: 0.03, "a line pitch of about 1.4")
+        XCTAssertGreaterThan(theme.paragraphSpacing, theme.itemSpacing, "paragraphs sit further apart than a list's items")
         let text = "Para one that is long enough to wrap in a narrow view, several times over, yes.\n\n```\ncode\nmore\n```\nend"
         let storage = NSTextStorage(string: text)
         MarkdownStyler.apply(to: storage, blocks: MarkdownStyler.blocks(text), revealBlock: nil, theme: theme)
@@ -79,11 +84,11 @@ final class MarkdownStylerTests: XCTestCase {
         MarkdownStyler.apply(to: view.textStorage!, blocks: MarkdownStyler.blocks(text), revealBlock: nil, theme: theme)
         let caret = view.caretRect(at: 30)!
         let natural = ceil(theme.body.ascender - theme.body.descender + theme.body.leading)
-        XCTAssertEqual(caret.height, natural, accuracy: 1, "caret height = the text's line, not the padded 22.5 pt pitch")
+        XCTAssertEqual(caret.height, natural, accuracy: 1, "caret height = the text's line, not the padded 27 pt pitch")
         let tops = Set((0..<78).compactMap { view.caretRect(at: $0)?.minY }).sorted()
         XCTAssertGreaterThan(tops.count, 2, "the paragraph wraps")
         for (a, b) in zip(tops, tops.dropFirst()) {
-            XCTAssertEqual(b - a, natural + theme.lineSpacing, accuracy: 1, "wrapped lines sit a 1.5 pitch apart")
+            XCTAssertEqual(b - a, natural + theme.lineSpacing, accuracy: 1, "wrapped lines sit a 1.4 pitch apart")
         }
     }
 

@@ -39,14 +39,22 @@ struct MarkdownBlock: Hashable {
 /// Fonts, colours and spacing for the rendered plan. A struct rather than constants so a render
 /// test or a later density setting can swap it without touching the styler.
 ///
-/// Set for reading, not for density: a 15 pt proportional body at a 1.5 line pitch, a clear
-/// heading scale with its room above, and a plan's blank lines drawn as gaps rather than full
-/// empty lines. The 13 pt body with every Markdown blank line a whole line tall read as a wall
-/// of text broken by random holes (the maintainer: "still really dense").
+/// Set for reading, not for density: a 16 pt serif body (New York) at about a 1.4 line pitch, a
+/// clear heading scale in the system sans with its room above, and a plan's blank lines drawn as
+/// gaps rather than full empty lines. The 13 pt body with every Markdown blank line a whole line
+/// tall read as a wall of text broken by random holes (the maintainer: "still really dense").
 struct PlanTheme {
-    /// 15 pt, not the body text style: macOS has no Dynamic Type, so `.body` is always 13 pt —
-    /// the size that read as dense.
-    var body = NSFont.systemFont(ofSize: 15)
+    /// The system serif (New York) at `size` — the reading face for prose. Headings stay in the
+    /// system sans, code in the monospace.
+    static func serif(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let sans = NSFont.systemFont(ofSize: size, weight: weight)
+        return sans.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: size) } ?? sans
+    }
+
+    /// 16 pt serif, not the body text style: macOS has no Dynamic Type, so `.body` is always
+    /// 13 pt — the size that read as dense. New York is narrower in the x-height than SF at the
+    /// same point size (7.1 pt against 7.9 at 15), so it takes a point more to sit as large.
+    var body = PlanTheme.serif(16)
     var mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     var headingSizes: [CGFloat] = [24, 20, 17, 15, 15, 15]
     var text = NSColor.labelColor
@@ -70,22 +78,22 @@ struct PlanTheme {
 
     // MARK: Spacing
 
-    /// Leading between wrapped lines, as `lineSpacing` — a 15 pt body's 18 pt line becomes a
-    /// 22.5 pt pitch. Not `lineHeightMultiple` or a minimum line height: measured on TextKit 2,
+    /// Leading between wrapped lines, as `lineSpacing` — a 16 pt body's 19 pt line becomes a
+    /// 27 pt pitch (1.42). Not `lineHeightMultiple` or a minimum line height: measured on TextKit 2,
     /// both grow the caret to the padded line (27 and 22 pt tall) with the glyphs sat at its
     /// bottom, where `lineSpacing` keeps the caret the text's own 18 pt.
-    var lineSpacing: CGFloat = 4.5
+    var lineSpacing: CGFloat = 8
     /// After a paragraph, before whatever follows it.
-    var paragraphSpacing: CGFloat = 6
+    var paragraphSpacing: CGFloat = 9
     /// Between list items.
-    var itemSpacing: CGFloat = 4
+    var itemSpacing: CGFloat = 4.5
     /// A blank line's font: the gap between blocks the plan's blank lines make — about half a
     /// line — rather than a whole empty line on top of the paragraph spacing. Its caret is as
     /// short as the gap; typing into it makes it a paragraph at once.
-    var gap = NSFont.systemFont(ofSize: 7)
+    var gap = NSFont.systemFont(ofSize: 9)
     /// Room a heading keeps above and below itself, by level.
-    var headingSpaceBefore: [CGFloat] = [14, 24, 16, 12, 12, 12]
-    var headingSpaceAfter: CGFloat = 4
+    var headingSpaceBefore: [CGFloat] = [16, 28, 19, 14, 14, 14]
+    var headingSpaceAfter: CGFloat = 6
     /// A list's items sit this far in; wrapped lines hang under the item's text.
     var listIndent: CGFloat = 4
     /// A fenced block's inner padding: side indent, and the room its (hidden) fences give it.
@@ -127,7 +135,7 @@ struct PlanTheme {
     func scaled(by factor: CGFloat) -> PlanTheme {
         guard factor != 1 else { return self }
         var theme = self
-        theme.body = NSFont.systemFont(ofSize: body.pointSize * factor)
+        theme.body = PlanTheme.serif(body.pointSize * factor)
         theme.mono = NSFont.monospacedSystemFont(ofSize: mono.pointSize * factor, weight: .regular)
         theme.headingSizes = headingSizes.map { $0 * factor }
         theme.gap = NSFont.systemFont(ofSize: gap.pointSize * factor)
@@ -151,6 +159,12 @@ struct PlanTheme {
 
     func heading(_ level: Int) -> NSFont {
         .systemFont(ofSize: headingSizes[min(max(level, 1), 6) - 1], weight: level == 1 ? .bold : .semibold)
+    }
+
+    /// Inline code in a run of `font`: a little under its size, because monospace sets wider and
+    /// taller than the serif beside it.
+    func codeSpan(in font: NSFont) -> NSFont {
+        .monospacedSystemFont(ofSize: font.pointSize - 2, weight: .regular)
     }
 
     func font(for kind: MarkdownBlock.Kind) -> NSFont {
@@ -629,7 +643,7 @@ enum MarkdownStyler {
             case .bold: storage.addAttribute(.font, value: convert(font, .boldFontMask), range: span.range)
             case .italic: storage.addAttribute(.font, value: convert(font, .italicFontMask), range: span.range)
             case .code:
-                storage.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular), range: span.range)
+                storage.addAttribute(.font, value: theme.codeSpan(in: font), range: span.range)
                 storage.addAttribute(.backgroundColor, value: theme.codeBackground, range: span.range)
             case .link:
                 // Tinted, not underlined: an editor's links are text first — the underline is

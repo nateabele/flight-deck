@@ -62,13 +62,13 @@ struct PlanReaderScreen: View {
                     let blocks = PlanBlocks.split(plan.markdown).blocks
                     let added = Set(showDiff ? (plan.added ?? []) : [])
                     let allNotes = outbox.listing(plan.notes)
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: PlanReaderStyle.blockSpacing) {
                         removed(after: nil, plan, show: showDiff)
                         ForEach(blocks, id: \.index) { block in
                             let notes = allNotes.filter { $0.blockIndex == block.index }
                             let unsent = outbox.unsent.filter { $0.target.block == block.index }
                             HStack(alignment: .top, spacing: 8) {
-                                VStack(alignment: .leading, spacing: 6) {
+                                VStack(alignment: .leading, spacing: PlanReaderStyle.segmentSpacing) {
                                     ForEach(Array(PlanReaderStyle.segments(of: block.text).enumerated()), id: \.offset) { _, segment in
                                         segmentView(segment, block: block.index, plan: plan)
                                     }
@@ -197,26 +197,18 @@ struct PlanReaderScreen: View {
     /// quotes stay MarkdownUI, which cannot be an attributed run, with system selection on; a table is
     /// its own grid (`PlanTableView`).
     /// **Note…** quotes the selection as rendered; the Mac finds it in the block's source.
-    @ViewBuilder private func segmentView(_ segment: TimelineSegment, block: Int, plan: WireIntakePlan) -> some View {
-        switch segment {
-        case .prose(let text):
-            SelectableProseView(markdown: text, actions: notesAllowed ? [
-                ProseAction(title: "Note…", systemImage: "text.bubble") { quote in
-                    draft = NoteDraft(target: NoteDraftTarget(block: block, quote: quote), showing: plan.checkpoint)
-                },
-            ] : [])
-        case .code(let language, let text):
-            Markdown(TimelineSegment.fenced(language: language, text))
-                .markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
-        case .richBlock(let text):
-            RichBlockView(text: text).textSelection(.enabled)
-        }
+    private func segmentView(_ segment: TimelineSegment, block: Int, plan: WireIntakePlan) -> some View {
+        PlanSegmentView(segment: segment, actions: notesAllowed ? [
+            ProseAction(title: "Note…", systemImage: "text.bubble") { quote in
+                draft = NoteDraft(target: NoteDraftTarget(block: block, quote: quote), showing: plan.checkpoint)
+            },
+        ] : [])
     }
 
     @ViewBuilder private func removed(after index: Int?, _ plan: WireIntakePlan, show: Bool) -> some View {
         if show {
             ForEach(Array((plan.removed ?? []).filter { $0.after == index }.enumerated()), id: \.offset) { _, r in
-                Text(r.text).font(.subheadline).strikethrough().foregroundStyle(.secondary)
+                Text(r.text).font(.system(.subheadline, design: .serif)).strikethrough().foregroundStyle(.secondary)
                     .padding(.horizontal, 6).background(RoundedRectangle(cornerRadius: 4).fill(Color.red.opacity(0.08)))
                     .accessibilityLabel("Removed: \(r.text)")
             }
@@ -396,10 +388,33 @@ struct PlanReaderScreen: View {
     }
 }
 
+/// One segment of a plan block as the reader draws it: prose and tables in the plan's reading
+/// serif, code in the terminal's monospace.
+struct PlanSegmentView: View {
+    let segment: TimelineSegment
+    var actions: [ProseAction] = []
+
+    var body: some View {
+        switch segment {
+        case .prose(let text):
+            SelectableProseView(markdown: text, actions: actions, serif: true)
+        case .code(let language, let text):
+            Markdown(TimelineSegment.fenced(language: language, text))
+                .markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
+        case .richBlock(let text):
+            RichBlockView(text: text, serif: true).textSelection(.enabled)
+        }
+    }
+}
+
 /// What the plan reader draws for a block, decided apart from SwiftUI so it can be tested.
 /// Follows `TimelineStyle`: the timeline's segmenter is the one place that knows what an
 /// attributed run can express.
 enum PlanReaderStyle {
+    /// Between one block and the next, and between the segments inside a block.
+    static let blockSpacing: CGFloat = 14
+    static let segmentSpacing: CGFloat = 8
+
     /// A block's segments: `.prose` becomes selectable text, the rest stays MarkdownUI.
     static func segments(of blockText: String) -> [TimelineSegment] {
         TimelineSegmenter.segments(of: blockText)
