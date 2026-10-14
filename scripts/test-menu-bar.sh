@@ -18,6 +18,10 @@ cd "$(dirname "$0")/.."
 #
 # Knobs: FD_SKIP_BUILD=1 reuses the last Debug build (run after test-unit.sh / build.sh).
 #        FD_MENUBAR_BEFORE=1 compiles the pre-fix command set (only builds against 956ee992).
+#        FD_MENUBAR_BUILD_ONLY=1 compiles the harness and stops. Opens nothing.
+#        FD_MENUBAR_PREBUILT=1 runs the harness as already compiled, never touching swiftc.
+#        test-unit-remote.sh uses the pair: the harness is compiled on THIS Mac with this Xcode,
+#        and run on the UI-test Mac, whose older Xcode could not compile it.
 
 P="DerivedData/Build/Products/Debug"
 APP="$P/Flight Deck.app/Contents"
@@ -32,6 +36,9 @@ OUT="DerivedData/menubar-harness"
 mkdir -p "$OUT"
 FLAGS=(-Onone)
 [ -n "${FD_MENUBAR_BEFORE:-}" ] && FLAGS+=(-D BEFORE)
+if [ -n "${FD_MENUBAR_PREBUILT:-}" ]; then
+  [ -x "$OUT/MenuBarHarness" ] || { echo "error: FD_MENUBAR_PREBUILT=1 but no $OUT/MenuBarHarness" >&2; exit 1; }
+else
 xcrun swiftc -parse-as-library -target arm64-apple-macos14 "${FLAGS[@]}" \
   -I "$P" -F "$P" -F "$APP/Frameworks" \
   -Xcc -fmodule-map-file="$P/include/module.modulemap" -Xcc -I"Sources/FlightDeck/GhosttyEmbed" \
@@ -40,6 +47,8 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos14 "${FLAGS[@]}" \
   -Xlinker -rpath -Xlinker "$PWD/$APP/MacOS" -Xlinker -rpath -Xlinker "$PWD/$APP/Frameworks" \
   -Xlinker -rpath -Xlinker "$PWD/$P" \
   -o "$OUT/MenuBarHarness" 2>"$OUT/build.log" || { grep -E "error:" "$OUT/build.log" >&2; exit 1; }
+fi
+[ -n "${FD_MENUBAR_BUILD_ONLY:-}" ] && exit 0
 
 # 120 s is generous: the run itself is ~30 s.
 status=0
