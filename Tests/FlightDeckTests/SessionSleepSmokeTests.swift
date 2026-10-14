@@ -104,11 +104,18 @@ final class SessionSleepSmokeTests: XCTestCase {
     /// Polls `resolver.agentProcessGroup(daemonPID:)` — the same real call the controller itself
     /// drives — until the daemon's child (the agent) has forked and landed in its own process
     /// group, up to a couple of seconds (mirroring `DaemonControlTests.waitForPidfile`'s budget).
+    ///
+    /// "Forked" is not "landed": between the fork and the child's `setpgid` the agent is still in
+    /// the DAEMON's group, and the resolver answers with that group right away. Taking it would
+    /// make the controller walk the daemon's own group, find the agent as a live descendant, and
+    /// (correctly) refuse to sleep it — a flake whenever the poll lands in that window, which a
+    /// loaded machine widens. So the answer only counts once it differs from the daemon's group.
     private func waitForAgentGroup(
         resolver: AgentGroupResolving, daemonPID: pid_t
     ) throws -> pid_t {
         for _ in 0..<40 {
-            if let pgid = resolver.agentProcessGroup(daemonPID: daemonPID) { return pgid }
+            if let pgid = resolver.agentProcessGroup(daemonPID: daemonPID),
+               pgid != getpgid(daemonPID) { return pgid }
             usleep(50_000)
         }
         throw TimedOut("agent process group under daemon pid \(daemonPID) never resolved")
