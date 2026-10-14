@@ -351,7 +351,7 @@ final class AccountLaunchTests: XCTestCase {
         let store = makeStore(preferences, persistence: persistence)
         store.accountResolver = AccountResolver(preferences: preferences, ledger: ledger)
         var running = false
-        store.agentProcessRunning = { _ in running }
+        store.agentProcessRunning = { _, _ in running }
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         ledger.ingest(reading(first, 0.1))   // a fresh lease would pick `first`
 
@@ -374,7 +374,7 @@ final class AccountLaunchTests: XCTestCase {
         var clock = Date()
         store.now = { clock }
         var running = true
-        store.agentProcessRunning = { _ in running }
+        store.agentProcessRunning = { _, _ in running }
         let session = store.newSession(in: projectURL)
         XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
 
@@ -393,13 +393,42 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [session.accountID])
     }
 
+    /// The scheduled sweep probes off the main thread — the probe reads a pidfile and walks the
+    /// process tree, and main is where the fleet server answers the phone — and applies what
+    /// it found back on main.
+    func testTheScheduledSweepProbesOffMainAndAppliesOnIt() async {
+        let (store, ledger, _, _, _) = pooled()
+        var clock = Date()
+        store.now = { clock }
+        final class Flag: @unchecked Sendable { var value = -1 }
+        let probedOnMain = Flag()
+        store.agentProcessRunning = { _, _ in
+            probedOnMain.value = Thread.isMainThread ? 1 : 0
+            return false
+        }
+        _ = store.newSession(in: projectURL)
+        store.reconcileTabLeases()   // starts the grace
+        clock += SessionStore.tabLeaseReleaseGrace + SessionStore.tabLeaseSweepInterval
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
+
+        store.maintenanceTickForTesting()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "the answer is still on its way")
+        let deadline = Date().addingTimeInterval(5)
+        while !ledger.activeLeases(pool: "team").isEmpty, Date() < deadline {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [], "released once the probe landed")
+        XCTAssertEqual(probedOnMain.value, 0, "probed off main")
+    }
+
     /// A tab explicitly started on an account outside its project's pool runs on no pool; a
     /// sweep must not count it against one.
     func testARunningTabOnAnAccountOutsideItsPoolTakesNoLease() {
         let (store, ledger, _, _, _) = pooled()
         let outside = AgentAccount(agent: .claude, displayName: "Outside", home: home("outside"))
         store.preferences?.preferences.accounts.append(outside)
-        store.agentProcessRunning = { _ in true }
+        store.agentProcessRunning = { _, _ in true }
         _ = store.newSession(in: projectURL, account: outside.id)
         store.reconcileTabLeases()
         XCTAssertEqual(ledger.activeLeases(pool: "team"), [])

@@ -33,6 +33,47 @@ final class SubagentWatcherTests: XCTestCase {
         return w
     }
 
+    /// The clock's beat runs on the main queue, and so does every phone request the fleet
+    /// server answers. A tick must hand the folder listing off and return, or 65 sessions'
+    /// scans hold the phone's requests for as long as the disk takes (44s measured).
+    func testATickScansOffTheMainThreadAndPublishesOnIt() async throws {
+        try write("a0aaaaaa", records: [open])
+        let clock = WatchClock(appIsActive: { true })
+        let published = expectation(description: "published")
+        var publishedOnMain: Bool?
+        let w = SubagentWatcher(directory: dir, clock: clock, startedAt: { .distantPast },
+                                keepDoneSince: { nil }, onChange: { _ in
+                                    publishedOnMain = Thread.isMainThread
+                                    published.fulfill()
+                                })
+        w.start()
+        clock.fire()
+        XCTAssertTrue(w.tree.nodes.isEmpty, "the tick returns before the scan has run")
+        await fulfillment(of: [published], timeout: 5)
+        XCTAssertEqual(publishedOnMain, true)
+        XCTAssertEqual(w.lastScanRanOnMain, false)
+        XCTAssertEqual(w.tree.nodes.count, 1)
+        w.stop()
+    }
+
+    /// A rescan asked for while a scan is in flight is run after it, not dropped: the fold
+    /// asks for one when it sees a launch, and losing it would leave the tree a launch behind.
+    func testARescanRequestedMidScanRunsAfterIt() async throws {
+        let clock = WatchClock(appIsActive: { true })
+        var trees: [SubagentTree] = []
+        let second = expectation(description: "second publish")
+        let w = SubagentWatcher(directory: dir, clock: clock, startedAt: { .distantPast },
+                                keepDoneSince: { nil }, onChange: { tree in
+                                    trees.append(tree)
+                                    if tree.nodes.count == 1 { second.fulfill() }
+                                })
+        w.requestRescan()
+        try write("a0aaaaaa", records: [open])
+        w.requestRescan()
+        await fulfillment(of: [second], timeout: 5)
+        XCTAssertEqual(w.tree.nodes.count, 1)
+    }
+
     func testAScanBuildsTheTreeAndReportsIt() throws {
         try write("a0aaaaaa", type: "general-purpose", records: [open])
         try write("a1bbbbbb", parent: "a0aaaaaa", records: [open])

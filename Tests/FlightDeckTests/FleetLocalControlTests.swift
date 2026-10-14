@@ -35,6 +35,23 @@ final class FleetLocalControlTests: XCTestCase {
         return client
     }
 
+    /// The point of `FleetService.socketQueue`: a `hello` is answered with the main thread
+    /// blocked solid. With 65 tabs polling on main and the app deprioritised, a `flightdeck ls`
+    /// once waited 44s for main, and a phone has 8s to get its `hello` answered before it
+    /// gives up. The client runs on its own queue, so nothing here needs main to move.
+    func testAHelloIsAnsweredWhileTheMainThreadIsBlocked() throws {
+        let client = FleetClient(localCaller: nil, queue: DispatchQueue(label: "test.client"))
+        self.client = client
+        let snapshot = DispatchSemaphore(value: 0)
+        client.onFrame = { frame in
+            if case .snapshot = frame { snapshot.signal() }
+        }
+        client.connect(toLocal: path, lastSeq: 0)
+        // Blocks main, the thread this test runs on, until the snapshot arrives or 5s pass.
+        XCTAssertEqual(snapshot.wait(timeout: .now() + 5), .success,
+                       "hello waited for the main thread")
+    }
+
     func testALocalClientSeesTheFleetAndItsChanges() async throws {
         let store = harness.store
         let renamed = expectation(description: "renamed event")

@@ -8,7 +8,7 @@ import Foundation
 enum ConversationPin {
     /// One `claude` process. `pid` alone is not an identity — macOS recycles pids — so it
     /// is always paired with the process start time the registry reports.
-    struct Anchor: Equatable {
+    struct Anchor: Hashable {
         let pid: pid_t
         let procStart: String
     }

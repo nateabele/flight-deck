@@ -141,7 +141,7 @@ final class ClaudeRuntime: AgentRuntime {
         }
         sources[id] = Source(subscribers: subscribers, watcher: watcher, subagents: subagents)
         subagents?.start()
-        subagents?.rescan()
+        subagents?.requestRescan()
         return token
     }
 
@@ -150,7 +150,7 @@ final class ClaudeRuntime: AgentRuntime {
     /// launched before this attach, which the fold (it starts at end of file) never will.
     private func fold(_ count: Int, for id: UUID) {
         sources[id]?.foldCount = count
-        sources[id]?.subagents?.rescan()
+        sources[id]?.subagents?.requestRescan()
         emitCount(for: id)
     }
 

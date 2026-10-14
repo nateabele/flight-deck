@@ -115,6 +115,7 @@ final class SleepLeaseRolloverTests: XCTestCase {
         let daemons = Daemons(), notices = Notices(), provider = Provider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences, daemonControl: daemons)
+        store.sleepProbeQueue = nil   // probe inline, so one `tick()` freezes
         store.launchFailureReporter = Reporter()
         store.statusRootOverride = dir("status")
         store.hookEventDirectoryOverride = dir("hooks")
@@ -157,7 +158,7 @@ final class SleepLeaseRolloverTests: XCTestCase {
 
     func testFreezingAnAgentReleasesItsLeaseAtOnce() {
         let rig = rig()
-        rig.store.agentProcessRunning = { _ in true }
+        rig.store.agentProcessRunning = { _, _ in true }
         XCTAssertEqual(rig.tab.accountID, rig.first.id)
         XCTAssertEqual(rig.store.accountResolver?.leases(heldBy: rig.tab.id).map(\.account.id), [rig.first.id],
                        "precondition: the tab leases first")

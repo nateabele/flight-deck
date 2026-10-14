@@ -5,6 +5,7 @@ struct SleepInputs {
     var activity: (UUID) -> SessionActivity?     // nil => no live agent
     var selectedID: () -> UUID?
     var reportsBackgroundWork: (UUID) -> Bool
+    /// Called on `probeQueue` when the controller has one, so it must not touch the store.
     var daemonPID: (UUID) -> pid_t?
 }
 
@@ -42,6 +43,17 @@ final class SessionSleepController {
     private let evaluationInterval: TimeInterval
     private var lastEvaluation: Date?
 
+    /// Where the expensive half runs, when set: the pidfile reads and process walks go there,
+    /// and their answers come back to main to be judged against the tabs as they are by then.
+    /// Nil runs them inline, which is what this file's tests construct.
+    ///
+    /// Off main in production because main is also where the fleet server answers the phone,
+    /// and a pidfile read is disk I/O: with the app deprioritised (display asleep, another app
+    /// in front) every read waits behind everyone else's (2026-10-14).
+    private let probeQueue: DispatchQueue?
+    /// A round's probes are out on `probeQueue`; the next round waits for them.
+    private var probing = false
+
     private(set) var asleep: Set<UUID> = []
     private var idleSince: [UUID: Date] = [:]
 
@@ -51,21 +63,23 @@ final class SessionSleepController {
          rebuildSurface: @escaping (UUID) -> Void = { _ in },
          onFreeze: @escaping (UUID) -> Void = { _ in },
          sleepEnabled: @escaping () -> Bool = { true },
-         evaluationInterval: TimeInterval = 0, now: @escaping () -> Date) {
+         evaluationInterval: TimeInterval = 0, probeQueue: DispatchQueue? = nil,
+         now: @escaping () -> Date) {
         self.policy = policy; self.daemonControl = daemonControl; self.inspector = inspector
         self.resolver = resolver; self.inputs = inputs
         self.tearDownSurface = tearDownSurface; self.rebuildSurface = rebuildSurface
         self.onFreeze = onFreeze
         self.sleepEnabled = sleepEnabled; self.evaluationInterval = evaluationInterval
-        self.now = now
+        self.probeQueue = probeQueue; self.now = now
     }
 
     func tick() {
         guard sleepEnabled() else { return }   // live Off gate
         let t = now()
         let candidates = inputs.candidates()
-        let evaluate = lastEvaluation.map { t.timeIntervalSince($0) >= evaluationInterval } ?? true
+        let evaluate = !probing && (lastEvaluation.map { t.timeIntervalSince($0) >= evaluationInterval } ?? true)
         if evaluate { lastEvaluation = t }
+        var due: [UUID] = []
         for id in candidates where !asleep.contains(id) {
             let activity: SessionActivity
             switch inputs.activity(id) {
@@ -82,24 +96,79 @@ final class SessionSleepController {
             // already does; `SleepPolicy` requires all of them, so the real values can only
             // turn that into ineligible, never the other way. A tab that is selected, busy,
             // reporting work or not yet idle long enough costs no syscall at all.
-            var candidate = SleepCandidate(
-                id: id, activity: activity,
-                isSelected: inputs.selectedID() == id,
-                reportsBackgroundWork: inputs.reportsBackgroundWork(id),
-                hasLiveDescendants: false,
-                idleSince: idleSince[id],
-                isDaemonized: true,
-                isAsleep: false
-            )
-            guard policy.evaluate(candidate, now: t) == .sleep else { continue }
-            let daemon = inputs.daemonPID(id)
-            candidate.isDaemonized = daemon != nil
-            candidate.hasLiveDescendants = daemon.map(hasLiveDescendants(daemon:)) ?? false
-            if policy.evaluate(candidate, now: t) == .sleep { sleep(id) }
+            if cheapCandidate(id, activity: activity, now: t) != nil { due.append(id) }
         }
         let known = Set(candidates)
         idleSince = idleSince.filter { known.contains($0.key) }   // forget vanished sessions
         asleep.formIntersection(known)   // forget sessions closed while asleep
+        guard !due.isEmpty else { return }
+        let daemonPID = inputs.daemonPID, resolver = self.resolver, inspector = self.inspector
+        guard let probeQueue else {
+            return settle(Self.probe(due, daemonPID: daemonPID, resolver: resolver, inspector: inspector))
+        }
+        probing = true
+        probeQueue.async { [weak self] in
+            let probes = Self.probe(due, daemonPID: daemonPID, resolver: resolver, inspector: inspector)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.probing = false
+                    self.settle(probes)
+                }
+            }
+        }
+    }
+
+    /// The candidate with both expensive fields filled with the values that PASS their
+    /// predicates, or nil when even that does not sleep. Cheap gates first: `SleepPolicy`
+    /// requires all of them, so the real values can only turn "sleep" into ineligible, never
+    /// the other way. A tab that is selected, busy, reporting work or not yet idle long enough
+    /// costs no syscall at all.
+    private func cheapCandidate(_ id: UUID, activity: SessionActivity, now t: Date) -> SleepCandidate? {
+        let candidate = SleepCandidate(
+            id: id, activity: activity,
+            isSelected: inputs.selectedID() == id,
+            reportsBackgroundWork: inputs.reportsBackgroundWork(id),
+            hasLiveDescendants: false,
+            idleSince: idleSince[id],
+            isDaemonized: true,
+            isAsleep: false
+        )
+        return policy.evaluate(candidate, now: t) == .sleep ? candidate : nil
+    }
+
+    private struct Probe {
+        let id: UUID
+        let daemon: pid_t?
+        let hasLiveDescendants: Bool
+    }
+
+    private nonisolated static func probe(
+        _ ids: [UUID], daemonPID: (UUID) -> pid_t?,
+        resolver: AgentGroupResolving, inspector: ProcessInspecting
+    ) -> [Probe] {
+        ids.map { id in
+            let daemon = daemonPID(id)
+            return Probe(id: id, daemon: daemon, hasLiveDescendants: daemon.map {
+                hasLiveDescendants(daemon: $0, resolver: resolver, inspector: inspector)
+            } ?? false)
+        }
+    }
+
+    /// Judges the probes against the tabs as they are now, not as they were when the probes
+    /// started: a tab woken, selected, closed or busy since is re-asked the cheap questions
+    /// first, and only one that still passes them all sleeps.
+    private func settle(_ probes: [Probe]) {
+        guard sleepEnabled() else { return }
+        let t = now()
+        let known = Set(inputs.candidates())
+        for probe in probes where known.contains(probe.id) && !asleep.contains(probe.id) {
+            guard let live = inputs.activity(probe.id), live == .idle || live == .waiting,
+                  var candidate = cheapCandidate(probe.id, activity: live, now: t) else { continue }
+            candidate.isDaemonized = probe.daemon != nil
+            candidate.hasLiveDescendants = probe.hasLiveDescendants
+            if policy.evaluate(candidate, now: t) == .sleep { sleep(probe.id) }
+        }
     }
 
     /// Walk the AGENT tree (daemon's child), NOT the attach-client surface shell:
@@ -108,7 +177,9 @@ final class SessionSleepController {
     ///
     /// Takes the daemon pid rather than the session id so the pidfile `tick` just read is not
     /// read a second time here.
-    private func hasLiveDescendants(daemon: pid_t) -> Bool {
+    private nonisolated static func hasLiveDescendants(
+        daemon: pid_t, resolver: AgentGroupResolving, inspector: ProcessInspecting
+    ) -> Bool {
         guard let pgid = resolver.agentProcessGroup(daemonPID: daemon) else { return false }
         return !inspector.descendants(of: pgid).isEmpty
     }

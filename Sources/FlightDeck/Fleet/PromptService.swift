@@ -267,7 +267,7 @@ final class PromptService {
               let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
         // Never nil: an unpolled derive always settles inline.
-        let result = attributingSubagents(session, derive(session, polled: false))
+        let result = attributingSubagents(session, derive(session, polled: false), polled: false)
             ?? .failure("prompt_changed")
         recordOffer(session, result, reader: reader)
         return result
@@ -281,7 +281,7 @@ final class PromptService {
               agent.dialogDriver != nil,
               let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
-        let result = attributingSubagents(session, derive(session, polled: true))
+        let result = attributingSubagents(session, derive(session, polled: true), polled: true)
         recordOffer(session, result, reader: reader)
         return result
     }
@@ -337,8 +337,15 @@ final class PromptService {
     /// so the parent's derivation offers whatever tool the main agent has in flight — a running
     /// call, not a dialog. "The Plan" (2026-10-09) showed four of those in three minutes, and
     /// an Allow tap on one approved the subagent's dialog, a different command.
+    ///
+    /// **`polled`, the subagent folder is read off the main actor.** Listing it and stamping
+    /// every file is a directory walk per waiting tab per registry tick — part of what filled
+    /// the main thread with 65 tabs open (2026-10-14). The poll serves the last answer that
+    /// walk gave and starts the next; see `polledSubagentHoldsOpenCall`. Either answer is a
+    /// refusal, so a stale one can only ever be the wrong refusal for a tick, never an
+    /// answerable call.
     private func attributingSubagents(
-        _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
+        _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?, polled: Bool
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
         if let attributed = attributedSubagentPrompt(session) {
             attributedAgents[session] = attributed.agent
@@ -349,7 +356,9 @@ final class PromptService {
             return result
         }
         attributedAgents[session] = nil
-        return subagentHoldsOpenCall(session) ? .failure("subagent_prompt") : result
+        let holds = polled ? polledSubagentHoldsOpenCall(session) : subagentHoldsOpenCall(session)
+        guard let holds else { return nil }
+        return holds ? .failure("subagent_prompt") : result
     }
 
     /// The hook log's subagent dialog, confirmed still unresolved in that subagent's own file.
@@ -406,13 +415,73 @@ final class PromptService {
     /// bookkeeping lines that crowd the parent's tail, so its open call is its last record.
     private func subagentHoldsOpenCall(_ session: UUID) -> Bool {
         guard case .success(let read) = preflight(session),
-              let dir = read.reader.subagentTranscripts(for: read.url),
+              let scans = Self.scanSubagents(read, since: agentStartedAt(session),
+                                             previous: subagentScans[session] ?? [:], tail: tail)
+        else { return false }
+        subagentScans[session] = scans
+        return scans.values.contains { $0.open }
+    }
+
+    /// `subagentHoldsOpenCall` for the registry tick: the walk runs on `subagentScanQueue` and
+    /// this returns the answer the last one gave, nil before there has been one. A walk that
+    /// lands a different answer fires `onPolledSettled`, so the change reaches the wire
+    /// without waiting a tick; one that lands the same answer fires nothing, or every poll
+    /// would schedule the next.
+    private func polledSubagentHoldsOpenCall(_ session: UUID) -> Bool? {
+        let known = subagentScans[session].map { $0.values.contains { $0.open } }
+        guard !subagentScanning.contains(session),
+              case .success(let read) = preflight(session) else { return known }
+        // No folder, no subagents: answered here with the one `stat`, which is most tabs, and
+        // which keeps a tab that never ran one from waiting a round trip for a known "no".
+        guard let dir = read.reader.subagentTranscripts(for: read.url),
+              FileManager.default.fileExists(atPath: dir.path) else {
+            subagentScans[session] = [:]
+            return false
+        }
+        subagentScanning.insert(session)
+        let since = agentStartedAt(session), previous = subagentScans[session] ?? [:]
+        let tail = self.tail
+        Self.subagentScanQueue.async { [weak self] in
+            let scans = Self.scanSubagents(read, since: since, previous: previous, tail: tail) ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.subagentScanning.remove(session)
+                    // A tab that stopped waiting meanwhile had its entry dropped by `derive`;
+                    // writing this back would serve it as the next episode's first answer.
+                    guard self.store.status(for: session)?.activity == .waiting else { return }
+                    self.subagentScans[session] = scans
+                    if scans.values.contains(where: { $0.open }) != known { self.onPolledSettled?() }
+                }
+            }
+        }
+        return known
+    }
+
+    /// Tabs with a subagent walk running on `subagentScanQueue`. At most one per tab.
+    private var subagentScanning: Set<UUID> = []
+
+    /// Serial: the walks are many small reads, and 65 tabs' worth at once would only contend.
+    private static let subagentScanQueue = DispatchQueue(
+        label: "dev.flightdeck.prompt-subagents", qos: .utility
+    )
+
+    /// The walk itself, free of `self` so it can run anywhere: every `jsonl` in the subagent
+    /// folder written since `since`, re-reading only those whose stamp moved from `previous`.
+    /// Nil when there is no folder to read.
+    ///
+    /// Not an early return on the first open file: every live file's stamp is recorded, so the
+    /// next walk re-reads only the files that changed.
+    private nonisolated static func scanSubagents(
+        _ read: TranscriptRead, since: Date?,
+        previous: [URL: (stamp: TranscriptStamp, open: Bool)],
+        tail: @Sendable (URL, Int) -> (lines: [SourceLine], hasMore: Bool)
+    ) -> [URL: (stamp: TranscriptStamp, open: Bool)]? {
+        guard let dir = read.reader.subagentTranscripts(for: read.url),
               let files = try? FileManager.default.contentsOfDirectory(
                   at: dir, includingPropertiesForKeys: nil
               )
-        else { return false }
-        let since = agentStartedAt(session)
-        let previous = subagentScans[session] ?? [:]
+        else { return nil }
         var scans: [URL: (stamp: TranscriptStamp, open: Bool)] = [:]
         for file in files where file.pathExtension == "jsonl" {
             guard let stamp = TranscriptStamp(of: file) else { continue }
@@ -421,14 +490,10 @@ final class PromptService {
                 scans[file] = hit
                 continue
             }
-            let lines = tail(file, Self.tailRecords).lines
-            let open = read.reader.openPrompt(inSubagentTail: lines) != nil
-            scans[file] = (stamp, open)
+            let lines = tail(file, tailRecords).lines
+            scans[file] = (stamp, read.reader.openPrompt(inSubagentTail: lines) != nil)
         }
-        // Not an early return on the first open file: every live file's stamp is recorded this
-        // pass, so the next tick re-reads only the files that changed.
-        subagentScans[session] = scans
-        return scans.values.contains { $0.open }
+        return scans
     }
 
     /// The scheduled side's read, cached on the transcript's stamp.
