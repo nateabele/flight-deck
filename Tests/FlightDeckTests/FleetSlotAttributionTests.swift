@@ -125,4 +125,21 @@ final class FleetSlotAttributionTests: XCTestCase {
             "the device that stayed lost its slot to the one that left"
         )
     }
+
+    /// A device that connects again is attributed again. Network.framework can resume a TLS
+    /// session instead of shaking hands anew (macOS 15 does), and a resumed session skips PSK
+    /// selection, so the identity table never hears of the connection and the slot comes back
+    /// nil. The listener turns resumption off; this is the proof it stays off.
+    func testReconnectingDevicesAreAttributedEveryTime() async throws {
+        let first = FleetDeviceKey.mint()
+        let second = FleetDeviceKey.mint()
+        let port = try await startServer(keys: [first, second])
+
+        for key in [first, second, first, second, first] { await attach(key, to: port) }
+
+        XCTAssertEqual(
+            attributed, [first.slot, second.slot, first.slot, second.slot, first.slot],
+            "a later connection of a device was not attributed to its slot"
+        )
+    }
 }

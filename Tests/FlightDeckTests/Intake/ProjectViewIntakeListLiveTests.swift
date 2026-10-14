@@ -73,9 +73,17 @@ final class ProjectViewIntakeListLiveTests: XCTestCase {
         // The two sides mirror each other: the list's toggle on the left, the inspector's at the
         // window's far right — `.primaryAction` lands there under `NavigationSplitView`, after
         // the flexible space, measured rather than read off the placement's docs.
-        let inspectorToggle = try XCTUnwrap(window.toolbar?.items.first { $0.label.hasSuffix("Inspector") }?.view)
-        XCTAssertGreaterThan(inspectorToggle.convert(inspectorToggle.bounds, to: nil).maxX, window.frame.width - 24,
-                             "the inspector toggle is the trailing-most toolbar item")
+        // Against the other items and the window's edge with a margin, not a pinned inset: the
+        // toolbar's trailing padding is OS chrome (4 pt narrower on macOS 15 than on 26).
+        let toolbarItems = try XCTUnwrap(window.toolbar?.items)
+        let inspectorToggle = try XCTUnwrap(toolbarItems.first { $0.label.hasSuffix("Inspector") }?.view)
+        let inspectorMaxX = inspectorToggle.convert(inspectorToggle.bounds, to: nil).maxX
+        XCTAssertGreaterThan(inspectorMaxX, window.frame.width - 40,
+                             "the inspector toggle sits at the window's far right")
+        for other in toolbarItems.compactMap(\.view) where other !== inspectorToggle && other.window != nil {
+            XCTAssertGreaterThan(inspectorMaxX, other.convert(other.bounds, to: nil).maxX,
+                                 "the inspector toggle is the trailing-most toolbar item")
+        }
         let expandedWidth = editor.frame.width
         let expandedX = editor.convert(editor.bounds, to: nil).minX
         let passes = editor.fullLayoutPasses

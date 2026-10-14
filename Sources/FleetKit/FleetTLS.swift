@@ -245,6 +245,19 @@ public enum FleetTLS {
                 }
                 complete(hint)
             }, identities.queue)
+
+            // **Every connection must take a full handshake, or the block above never sees it.**
+            // A resumed TLS session skips PSK selection: the server rebuilds the session from
+            // its cache or ticket and the block does not fire, so no record is filed and
+            // `take` finds nothing — the connection is unattributable (`slot(of:)` is nil; the
+            // macOS hostd drops it outright). Network.framework on macOS 15 resumes: a
+            // controller that reconnects, or a host restarted on its port while a controller
+            // redials, resumes its old session. Measured on 15.7 with two PSKs on one
+            // listener: the block fired for the first handshake and then only for every other
+            // one; with both switches below, for every one. macOS 26 never showed it. A LAN
+            // reconnect costs one handshake more.
+            sec_protocol_options_set_tls_resumption_enabled(sec, false)
+            sec_protocol_options_set_tls_tickets_enabled(sec, false)
         }
 
         for key in keys {
