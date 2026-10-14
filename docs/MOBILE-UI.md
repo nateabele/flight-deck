@@ -150,10 +150,19 @@ Break one of these and the render will tell you eventually; better to know first
   rows inherited it and their neighbours did not, in the same list, which is what sent
   `FleetListScreen` back from testing once already.
 - **Prose is drawn by two renderers now, and they scale off the same numbers.**
-  `TimelineMarkdown.theme` (MarkdownUI) draws code blocks, tables, lists and quotes;
+  `TimelineMarkdown.theme` (MarkdownUI) draws code blocks, lists and quotes (a table is `PlanTableView`, below);
   `TimelineProseText` draws paragraphs as attributed text so they can be selected. Every
   multiplier in the second is named after the style it came from in the first. Change one,
   change both, and re-run the comparison render.
+
+- **A pipe table is its own grid, and its widths are the Mac's.** `PlanTableView` (reached through
+  `RichBlockView`, which the plan reader and the timeline both use) lays a table out with
+  `PipeTable.fit` in FleetKit — the rule the Mac's plan editor uses — so a one-word column stays
+  narrow beside two sentence columns. MarkdownUI's table, which this replaced, broke words to fit
+  equal columns. A table whose longest words cannot share the phone's width keeps them whole and
+  scrolls sideways; it is not stacked into cards, which would be a different document from the
+  Mac's. `PlanTableRenderHarness` draws it (an empty `DerivedData/plan-table-renders-ios/.render`
+  file turns it on, since the scheme's environment is not reachable from the command line).
 
 ## SwiftUI traps this codebase has actually hit
 

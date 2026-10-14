@@ -518,8 +518,7 @@ struct TimelineSegmentView: View {
                 .markdownTheme(TimelineMarkdown.theme)
                 .modifier(CopyAction(text: text))
         case .richBlock(let text):
-            Markdown(text)
-                .markdownTheme(TimelineMarkdown.theme)
+            RichBlockView(text: text)
                 .modifier(CopyAction(text: text))
         }
     }

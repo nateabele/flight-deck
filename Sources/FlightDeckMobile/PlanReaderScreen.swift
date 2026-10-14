@@ -193,8 +193,9 @@ struct PlanReaderScreen: View {
         }
     }
 
-    /// Prose is selectable attributed text (the timeline's own renderer); code, tables, lists
-    /// and quotes stay MarkdownUI, which cannot be an attributed run, with system selection on.
+    /// Prose is selectable attributed text (the timeline's own renderer); code, lists and
+    /// quotes stay MarkdownUI, which cannot be an attributed run, with system selection on; a table is
+    /// its own grid (`PlanTableView`).
     /// **Note…** quotes the selection as rendered; the Mac finds it in the block's source.
     @ViewBuilder private func segmentView(_ segment: TimelineSegment, block: Int, plan: WireIntakePlan) -> some View {
         switch segment {
@@ -208,7 +209,7 @@ struct PlanReaderScreen: View {
             Markdown(TimelineSegment.fenced(language: language, text))
                 .markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
         case .richBlock(let text):
-            Markdown(text).markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
+            RichBlockView(text: text).textSelection(.enabled)
         }
     }
 

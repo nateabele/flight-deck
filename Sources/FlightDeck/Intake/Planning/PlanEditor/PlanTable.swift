@@ -1,18 +1,17 @@
 import AppKit
+import FleetKit
 
-/// A GitHub-style pipe table, parsed from the source of one table block (`MarkdownBlock.kind ==
-/// .table`): a header row, a `|---|:--:|` delimiter row, then body rows. Offsets are UTF-16 units
+/// A pipe table in the editor: `PipeTable`'s rows and cells (FleetKit, shared with the phone's
+/// reader), each cell with the inline Markdown the rest of the editor styles — bold, italic,
+/// `code`, links — found by the same pass (`MarkdownStyler.inline`). Offsets are UTF-16 units
 /// from the start of the block's text, so the same table anywhere in the plan parses the same.
-///
-/// A block with no delimiter row on its second line is not a table (GFM says so too) and `parse`
-/// returns nil: the editor shows its lines as plain source.
 struct PlanTable {
-    enum Alignment { case left, center, right }
+    typealias Alignment = PipeTable.Alignment
 
     struct Cell {
         /// The cell's content, trimmed of the spaces around it.
         let range: NSRange
-        /// Inline Markdown inside it (`MarkdownStyler`'s own pass), and the delimiters it hides.
+        /// Inline Markdown inside it, and the delimiters it hides.
         let spans: [MarkdownSpan]
         let syntax: [NSRange]
     }
@@ -24,76 +23,24 @@ struct PlanTable {
     }
 
     let rows: [Row]
-    /// One per column, left unless the delimiter row says otherwise (`:--`, `--:`, `:-:`).
     let alignments: [Alignment]
     var columnCount: Int { alignments.count }
     /// The delimiter row: never drawn.
-    static let delimiterRow = 1
+    static let delimiterRow = PipeTable.delimiterRow
 
+    /// Nil when it is not a table (no delimiter row): the editor shows its lines as plain source.
     static func parse(_ u: [UInt16]) -> PlanTable? {
-        var lines: [NSRange] = []
-        var start = 0
-        for i in 0...u.count where i == u.count || u[i] == 10 {
-            lines.append(NSRange(location: start, length: i - start))
-            start = i + 1
-        }
-        guard lines.count >= 2, let alignments = delimiter(u, lines[1]) else { return nil }
-        var rows: [Row] = []
-        for (i, line) in lines.enumerated() {
-            var cells: [Cell] = []
-            for range in split(u, line) {
+        guard let table = PipeTable.parse(u) else { return nil }
+        let rows = table.rows.enumerated().map { i, row in
+            Row(line: row.line, cells: row.cells.map { range in
                 var spans: [MarkdownSpan] = []
                 var syntax: [NSRange] = []
                 // The delimiter row's cells are never drawn; their dashes are not Markdown.
                 if i != delimiterRow { MarkdownStyler.inline(u, range.location, NSMaxRange(range), spans: &spans, syntax: &syntax) }
-                cells.append(Cell(range: range, spans: spans, syntax: syntax))
-            }
-            rows.append(Row(line: line, cells: cells))
+                return Cell(range: range, spans: spans, syntax: syntax)
+            })
         }
-        let columns = max(rows.map(\.cells.count).max() ?? 0, alignments.count)
-        return PlanTable(rows: rows, alignments: alignments + Array(repeating: .left, count: columns - alignments.count))
-    }
-
-    /// The cells of a line: the trimmed spans between unescaped pipes, less the empty piece a
-    /// leading or trailing pipe leaves.
-    private static func split(_ u: [UInt16], _ line: NSRange) -> [NSRange] {
-        let end = NSMaxRange(line)
-        var i = line.location
-        while i < end, isSpace(u[i]) { i += 1 }
-        if i < end, u[i] == 124 { i += 1 }
-        var cells: [NSRange] = []
-        var from = i
-        while i <= end {
-            if i == end || (u[i] == 124 && u[i - 1] != 92) {
-                var a = from, b = i
-                while a < b, isSpace(u[a]) { a += 1 }
-                while b > a, isSpace(u[b - 1]) { b -= 1 }
-                // After the last pipe there is nothing, not an empty cell.
-                if i < end || b > a { cells.append(NSRange(location: a, length: b - a)) }
-                from = i + 1
-            }
-            i += 1
-        }
-        return cells
-    }
-
-    private static func isSpace(_ c: UInt16) -> Bool { c == 32 || c == 9 || c == 13 }
-
-    /// The alignments the delimiter line `line` declares; nil when it is not a delimiter row.
-    private static func delimiter(_ u: [UInt16], _ line: NSRange) -> [Alignment]? {
-        let cells = split(u, line)
-        guard !cells.isEmpty else { return nil }
-        var out: [Alignment] = []
-        for cell in cells {
-            var a = cell.location, b = NSMaxRange(cell)
-            let left = a < b && u[a] == 58
-            let right = b > a + (left ? 1 : 0) && u[b - 1] == 58
-            if left { a += 1 }
-            if right { b -= 1 }
-            guard b > a, (a..<b).allSatisfy({ u[$0] == 45 }) else { return nil }
-            out.append(left && right ? .center : right ? .right : .left)
-        }
-        return out
+        return PlanTable(rows: rows, alignments: table.alignments)
     }
 }
 
@@ -196,22 +143,11 @@ final class PlanTableLayout: NSObject {
                 longest[c] = max(longest[c], ceil(longestWord(cell.text)))
             }
         }
-        /// The columns at a cell padding: the table's own width is the room it has, and only when
-        /// even every column's longest word won't fit does it give up some padding, then words.
-        func fit(_ padX: CGFloat) -> (widths: [CGFloat], needsBreaks: Bool) {
-            let floorWidth = 2 * padX + theme.body.pointSize * 1.5
-            let n = natural.map { max($0 + 2 * padX, floorWidth) }
-            let m = zip(longest, n).map { min(max($0 + 2 * padX, floorWidth), $1) }
-            return (columnWidths(natural: n, minimum: m, available: available), m.reduce(0, +) > available)
-        }
-        var padX = basePad.width
-        var fitted = fit(padX)
-        for squeeze in [0.6, 0.4] where fitted.needsBreaks {
-            padX = basePad.width * squeeze
-            fitted = fit(padX)
-        }
-        let widths = fitted.widths
-        let pad = CGSize(width: padX, height: basePad.height)
+        let fitted = PipeTable.fit(natural: natural.map(Double.init), longestWord: longest.map(Double.init),
+                                   available: Double(available), padding: Double(basePad.width),
+                                   minimumContent: Double(theme.body.pointSize * 1.5), breakWords: true)
+        let widths = fitted.widths.map { CGFloat($0) }
+        let pad = CGSize(width: CGFloat(fitted.padding), height: basePad.height)
 
         var rows: [Row] = []
         var top: CGFloat = 0
@@ -228,34 +164,6 @@ final class PlanTableLayout: NSObject {
             top += hidden ? hiddenHeight : height
         }
         return PlanTableLayout(rows: rows, columns: widths, alignments: table.alignments, padding: pad)
-    }
-
-    /// Column widths for `available` points: a column keeps its natural width unless the table
-    /// is too wide for the room; then the long columns are capped at one shared width — the
-    /// "water level" at which the table fits — and the short ones stay as they are. No column
-    /// goes below its `minimum` (its longest word) unless even those won't fit, when they all
-    /// shrink together. A table with room to spare is as wide as its content, not stretched.
-    static func columnWidths(natural: [CGFloat], minimum: [CGFloat], available: CGFloat) -> [CGFloat] {
-        guard !natural.isEmpty else { return [] }
-        if natural.reduce(0, +) <= available { return natural }
-        let floors = zip(natural, minimum).map { min($0, $1) }
-        let floorTotal = floors.reduce(0, +)
-        // A level `L` at which `Σ min(width, max(floor, L))` is the room: the cap of the long columns.
-        func level(_ total: (CGFloat) -> CGFloat, upTo top: CGFloat) -> CGFloat {
-            var lo: CGFloat = 0, hi = top
-            for _ in 0..<40 {
-                let mid = (lo + hi) / 2
-                if total(mid) > available { hi = mid } else { lo = mid }
-            }
-            return lo
-        }
-        if floorTotal >= available {
-            // Not even the words fit: the widest words break first, and the short ones stay whole.
-            let cap = level({ level in floors.reduce(0) { $0 + min($1, level) } }, upTo: floors.max() ?? 0)
-            return floors.map { min($0, cap) }
-        }
-        let cap = level({ level in zip(natural, floors).reduce(0) { $0 + min($1.0, max($1.1, level)) } }, upTo: natural.max() ?? 0)
-        return zip(natural, floors).map { min($0, max($1, cap)) }
     }
 
     private static func measure(_ text: NSAttributedString, width: CGFloat) -> CGSize {
