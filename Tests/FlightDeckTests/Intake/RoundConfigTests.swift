@@ -168,6 +168,8 @@ final class RoundConfigTests: XCTestCase {
         let slots = cfg.drafters + [cfg.synthesizer, cfg.reviewer, cfg.crossReviewer].compactMap { $0 }
         return slots.flatMap { [$0.choice] + [$0.fallback].compactMap { $0 } }
             + [cfg.integrator, cfg.encoder] + [cfg.polisher].compactMap { $0 }
+            + cfg.reviewerRotation.flatMap { [$0.choice] + [$0.fallback].compactMap { $0 } }
+            + cfg.integratorRotation + cfg.polisherRotation
     }
 
     /// Detected Gemini and Grok get seats by default (the maintainer, 2026-10-13): Gemini cross-checks
@@ -235,6 +237,133 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertTrue(cfg.crossChecks)
     }
 
+
+    // MARK: - Rotations
+
+    private var noGemini: AvailableModels {
+        AvailableModels(choices: [.codex: choice(.codex, "gpt-6-sol"), .claude: choice(.claude, "opus"),
+                                  .grok: choice(.grok, "grok-4.7")])
+    }
+
+    private func agents(_ list: [ModelChoice]?) -> [AgentID]? { list?.map(\.agent) }
+
+    /// A Full plan with every agent: the reviewer alternates codex and claude (each falling back
+    /// to the other), the integrator claude and codex, and the polisher claude, gemini, codex.
+    /// Grok and OpenCode are in no rotation. Entry 0 is the single field an older reader sees.
+    func testFullPlanRotatesWithEveryAgent() throws {
+        let full = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: everyAgent))
+        XCTAssertEqual(full.reviewers?.map(\.choice.agent), [.codex, .claude])
+        XCTAssertEqual(full.reviewers?.map(\.fallback?.agent), [.claude, .codex])
+        XCTAssertEqual(agents(full.integrators), [.claude, .codex])
+        XCTAssertEqual(agents(full.polishers), [.claude, .gemini, .codex])
+        XCTAssertEqual(full.reviewers?.first, full.reviewer)
+        XCTAssertEqual(full.integrators?.first, full.integrator)
+        XCTAssertEqual(full.polishers?.first, full.polisher)
+        XCTAssertEqual(full.polishers?[1].model, "gemini-3.1-pro-high", "the detected model")
+        XCTAssertEqual(full.crossReviewer?.choice.agent, .gemini, "the cross-reviewer stays Gemini")
+        XCTAssertEqual(full.drafters.map(\.choice.agent), [.codex, .claude, .gemini, .grok], "drafters unchanged")
+        let feature = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: everyAgent))
+        XCTAssertEqual(feature.reviewers?.map(\.choice.agent), [.codex, .claude])
+        XCTAssertEqual(agents(feature.integrators), [.claude, .codex])
+        XCTAssertEqual(agents(feature.polishers), [.claude, .gemini, .codex])
+        for cfg in [full, feature] {
+            XCTAssertFalse(seats(cfg).contains { $0.agent == .grok && $0 != cfg.drafters.last?.choice }, "Grok only drafts")
+            XCTAssertFalse(seats(cfg).contains { $0.agent == .opencode })
+            XCTAssertFalse((cfg.reviewerRotation.map(\.choice) + cfg.integratorRotation + cfg.polisherRotation).contains { $0.agent == .grok })
+        }
+    }
+
+    /// Without Gemini the polisher goes claude, codex; Sketch rotates its reviewer and integrator
+    /// and has no polisher.
+    func testRotationsWithoutGeminiAndInSketch() throws {
+        let full = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: noGemini))
+        XCTAssertEqual(agents(full.polishers), [.claude, .codex])
+        XCTAssertEqual(full.reviewers?.map(\.choice.agent), [.codex, .claude])
+        let sketch = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: everyAgent))
+        XCTAssertEqual(sketch.reviewers?.map(\.choice.agent), [.codex, .claude])
+        XCTAssertEqual(agents(sketch.integrators), [.claude, .codex])
+        XCTAssertNil(sketch.polishers)
+        XCTAssertNil(sketch.polisher)
+    }
+
+    /// One family on the machine, Gemini or not: no rotations, exactly as before.
+    func testASingleFamilyHasNoRotations() throws {
+        let geminiToo = AvailableModels(choices: [.claude: choice(.claude, "opus"), .gemini: choice(.gemini, "gemini-3.1-pro-high")])
+        let codexGemini = AvailableModels(choices: [.codex: choice(.codex, "gpt-6-sol"), .gemini: choice(.gemini, "gemini-3.1-pro-high")])
+        for available in [codexOnly, claudeOnly, geminiToo, codexGemini] {
+            for preset in [Preset.sketch, .featurePlan, .fullPlan] {
+                let cfg = try XCTUnwrap(PresetExpansion.config(for: preset, available: available))
+                XCTAssertNil(cfg.reviewers); XCTAssertNil(cfg.integrators); XCTAssertNil(cfg.polishers)
+            }
+        }
+    }
+
+    /// The headline: every agent detected, no one family runs more than half of a Full plan's
+    /// post-encode rounds, and Claude no longer runs every integrator round.
+    func testNoFamilyRunsMoreThanHalfOfFullPlansPostEncodeRounds() throws {
+        let full = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: everyAgent))
+        let rounds = TapePlanner.plannedRounds(config: full, tape: .empty)
+        let afterEncode = rounds.drop(while: { $0.stage != .encode }).dropFirst()
+        XCTAssertEqual(afterEncode.count, 8)
+        let polishers = afterEncode.map { RoundParticipants.of($0, config: full).first!.slot!.choice.agent }
+        XCTAssertEqual(polishers, [.claude, .gemini, .codex, .claude, .gemini, .codex, .claude, .gemini])
+        for family in Set(polishers) {
+            XCTAssertLessThanOrEqual(polishers.filter { $0 == family }.count, afterEncode.count / 2, "\(family)")
+        }
+        let integrators = rounds.filter { $0.stage == .refine }.map {
+            RoundParticipants.of($0, config: full).first { $0.role == "integrator" }!.slot!.choice.agent
+        }
+        XCTAssertEqual(integrators, [.claude, .codex, .claude, .codex, .claude])
+        // Fresh eyes is never the family that ran the round just before it.
+        XCTAssertNotEqual(polishers[6], polishers[5])
+        // No refine round pairs a family with itself.
+        for round in rounds where round.stage == .refine {
+            let seats = RoundParticipants.of(round, config: full)
+            let reviewer = seats.first { $0.role == "reviewer" }!.slot!.choice.agent
+            let integrator = seats.first { $0.role == "integrator" }!.slot!.choice.agent
+            XCTAssertNotEqual(reviewer, integrator, "refine \(round.round)")
+        }
+    }
+
+    /// An intake.json from before rotations has none of the three keys and keeps its one agent
+    /// for every round; a rotation round-trips.
+    func testRotationsDecodeAbsentAndRoundTrip() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: everyAgent))
+        let again = try IntakeJSON.decoder.decode(RoundConfig.self, from: IntakeJSON.encoder.encode(cfg))
+        XCTAssertEqual(again, cfg)
+        var dict = try XCTUnwrap(JSONSerialization.jsonObject(with: IntakeJSON.encoder.encode(cfg)) as? [String: Any])
+        for key in ["reviewers", "integrators", "polishers"] { XCTAssertNotNil(dict.removeValue(forKey: key), key) }
+        let old = try IntakeJSON.decoder.decode(RoundConfig.self, from: JSONSerialization.data(withJSONObject: dict))
+        XCTAssertNil(old.reviewers); XCTAssertNil(old.integrators); XCTAssertNil(old.polishers)
+        for i in 0..<6 {
+            XCTAssertEqual(old.reviewer(rotation: i), cfg.reviewer)
+            XCTAssertEqual(old.integrator(rotation: i), cfg.integrator)
+            XCTAssertEqual(old.polisher(rotation: i), cfg.polisher)
+        }
+    }
+
+    /// An empty rotation reads as none.
+    func testAnEmptyRotationIsTheSingleAgent() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        cfg.reviewers = []; cfg.integrators = []; cfg.polishers = []
+        XCTAssertEqual(cfg.reviewer(rotation: 3), cfg.reviewer)
+        XCTAssertEqual(cfg.integrator(rotation: 3), cfg.integrator)
+        XCTAssertEqual(cfg.polisher(rotation: 3), cfg.polisher)
+        XCTAssertEqual(cfg.integratorRotation, [cfg.integrator])
+    }
+
+    /// Every agent a rotation can run has its account resolved up front.
+    func testAgentsIncludeEveryRotationEntry() {
+        var cfg = RoundConfig(drafters: [Slot(choice(.codex, "x"))], synthesizer: nil, reviewer: Slot(choice(.codex, "x")),
+                              integrator: choice(.codex, "x"), encoder: choice(.codex, "x"), polisher: choice(.codex, "x"),
+                              refinementCap: 1, polishCap: 1, freshEyesAndDedup: false, defaultPlay: .step, customized: false)
+        XCTAssertEqual(cfg.agents, [.codex])
+        cfg.reviewers = [Slot(choice(.codex, "x")), Slot(choice(.claude, "y"))]
+        cfg.integrators = [choice(.codex, "x"), choice(.grok, "g")]
+        cfg.polishers = [choice(.codex, "x"), choice(.gemini, "z")]
+        XCTAssertEqual(cfg.agents, [.codex, .claude, .grok, .gemini])
+    }
+
     // MARK: - Round-trip
 
     func testRoundConfigJSONRoundTrips() throws {
@@ -299,7 +428,14 @@ final class RoundConfigTests: XCTestCase {
     func testSameFamilyCrossReviewerDoesNotCrossCheck() throws {
         var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
         cfg.crossReviewer = cfg.reviewer
+        cfg.reviewers = nil
         XCTAssertFalse(cfg.crossChecks)
+        // With a rotation that has another family, the other round still cross-checks.
+        let rotating = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var same = rotating
+        same.crossReviewer = rotating.reviewer
+        XCTAssertTrue(same.crossChecks)
+        XCTAssertEqual(same.crossReviewer(rotation: 0)?.choice.agent, .claude, "the rotation's other family")
     }
 
     /// An intake.json written before cross-checks existed decodes to "off" (Review Focus 1).

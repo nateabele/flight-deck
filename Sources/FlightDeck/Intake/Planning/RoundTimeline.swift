@@ -75,7 +75,7 @@ enum RoundTimeline {
     static func chip(_ round: PlannedRound, config: RoundConfig?, progress: RoundChipModel.Progress = .planned) -> RoundChipModel {
         RoundChipModel(key: RoundKey(stage: round.stage, round: round.round),
                        name: BoardModel.name(stage: round.stage, round: round.round),
-                       agents: config.map { AgentStackModel.planned(stage: round.stage, crossCheck: round.crossCheck, config: $0) } ?? [],
+                       agents: config.map { AgentStackModel.planned(round, config: $0) } ?? [],
                        crossCheck: round.stage == .refine && round.crossCheck, progress: progress)
     }
 

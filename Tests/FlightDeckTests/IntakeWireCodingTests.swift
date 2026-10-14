@@ -123,6 +123,27 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
     }
 
+    /// The rotations are additive: they round-trip, and a config from a Mac that predates them (no
+    /// keys at all) decodes with none, which the phone reads as one agent per role.
+    func testRotationsRoundTripAndAnOldConfigDecodesWithoutThem() throws {
+        var rotating = Self.config
+        rotating.reviewers = [Self.seat, Self.seat]
+        rotating.integrators = [Self.seat, Self.seat]
+        rotating.polishers = [Self.seat, Self.seat, Self.seat]
+        let data = try JSONEncoder().encode(rotating)
+        XCTAssertEqual(try JSONDecoder().decode(WireRoundConfig.self, from: data), rotating)
+
+        let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.config)) as? [String: Any]
+        for key in ["reviewers", "integrators", "polishers"] { XCTAssertNil(plain?[key], key) }
+        let old = try JSONDecoder().decode(WireRoundConfig.self, from: JSONEncoder().encode(Self.config))
+        XCTAssertNil(old.reviewers); XCTAssertNil(old.integrators); XCTAssertNil(old.polishers)
+
+        // An older phone's decoder skips the keys it does not know.
+        struct OldConfig: Codable { var drafters: [WireSeat]; var integrator: WireSeat; var polisher: WireSeat? }
+        let older = try JSONDecoder().decode(OldConfig.self, from: data)
+        XCTAssertEqual(older.integrator, Self.seat)
+    }
+
     func testChooseIsAdditiveAnOlderPayloadDecodesWithoutIt() throws {
         // A detail from a Mac that predates the chooser and the inspector: none of the new keys.
         let detail = WireIntakeDetail(

@@ -176,7 +176,10 @@ enum IntakeDetailProjection {
             encoder: wireSeat(c.encoder), polisher: c.polisher.map { wireSeat($0) },
             refinementCap: c.refinementCap, polishCap: c.polishCap,
             freshEyesAndDedup: c.freshEyesAndDedup, defaultPlay: c.defaultPlay.rawValue,
-            customized: c.customized)
+            customized: c.customized,
+            reviewers: c.reviewers.flatMap { $0.isEmpty ? nil : $0.map(wireSeat) },
+            integrators: c.integrators.flatMap { $0.isEmpty ? nil : $0.map { wireSeat($0) } },
+            polishers: c.polishers.flatMap { $0.isEmpty ? nil : $0.map { wireSeat($0) } })
     }
 
     private static func pendingRound(_ p: PendingStart?) -> PlannedRound? {

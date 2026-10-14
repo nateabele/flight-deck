@@ -599,6 +599,48 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(reviewers[1].prompt.contains(store.checkpointDirectory(3).appendingPathComponent("plan.md").path))
     }
 
+    /// The engine starts the rotated agent: refine round k runs reviewers/integrators[(k-1) % n], and
+    /// it is the one `RoundParticipants` lists for that round.
+    func testRefineRunsTheRotatedReviewerAndIntegrator() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        var cfg = config()
+        cfg.reviewers = [Slot(codexA), Slot(claudeB)]
+        cfg.integrators = [claudeB, codexA]
+        cfg.reviewer = Slot(codexA); cfg.integrator = claudeB
+        var tape = try refineTape()
+        let ex = executor(runner)
+        for round in TapePlanner.plannedRounds(config: cfg, tape: tape).filter({ $0.stage == .refine }) {
+            let (cp, files) = try checkpoint(try await ex.run(round, inputs(cfg, tape: tape)))
+            try seed(&tape, .refine, round: round.round, files: ["plan.md": text(files["plan.md"])!])
+            let expected = RoundParticipants.of(round, config: cfg)
+            XCTAssertEqual(cp.record.slots.map(\.role), ["reviewer", "integrator"])
+            XCTAssertEqual(cp.record.slots.map(\.used), expected.map { $0.slot!.choice }, "refine \(round.round)")
+        }
+        XCTAssertEqual(runner.calls("reviewer").map(\.executable), ["codex", "claude"])
+        XCTAssertEqual(runner.calls("integrator").map(\.executable), ["claude", "codex"])
+    }
+
+    /// Polish rounds, fresh eyes and dedup walk the polishers rotation: 1...M, then M, M+1.
+    func testPolishStageRunsTheRotatedPolisher() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        var cfg = config()
+        cfg.polishers = [claudeB, codexA]
+        cfg.polisher = claudeB
+        cfg.freshEyesAndDedup = true
+        let tape = try polishTape()
+        let rounds = TapePlanner.plannedRounds(config: cfg, tape: tape).filter { [.polish, .freshEyes, .dedup].contains($0.stage) }
+        XCTAssertEqual(rounds.map(\.stage), [.polish, .freshEyes, .dedup])
+        for round in rounds {
+            let (cp, _) = try checkpoint(try await executor(runner).run(round, inputs(cfg, tape: tape)))
+            XCTAssertEqual(cp.record.slots.map(\.used), RoundParticipants.of(round, config: cfg).map { $0.slot!.choice })
+        }
+        XCTAssertEqual(runner.calls("polisher").map(\.executable), ["claude", "codex", "claude"])
+    }
+
     func testRefineConsumesAnnotations() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)

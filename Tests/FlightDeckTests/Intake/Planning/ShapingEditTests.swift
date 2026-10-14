@@ -135,6 +135,25 @@ final class ShapingEditTests: XCTestCase {
         XCTAssertEqual(edit.refusal(from: config, to: synthesizer), "The synthesizer already ran, so it can't change.")
     }
 
+    /// A rotation is part of the agents a stage ran: once the stage is done it can't change, and
+    /// before that it can.
+    func testARotationFollowsItsRolesLock() {
+        var rotating = config
+        rotating.reviewers = [rotating.reviewer!, Slot(grok)]
+        rotating.integrators = [rotating.integrator, codex]
+        var edited = rotating
+        edited.reviewers = [rotating.reviewer!]
+        edited.integrators = nil
+        XCTAssertNil(ShapingEdit(tape: tape([(.draft, 0), (.synthesis, 0)])).refusal(from: rotating, to: edited))
+        let done = ShapingEdit(tape: tape([(.draft, 0), (.refine, 1), (.encode, 0)]))
+        XCTAssertEqual(done.refusal(from: rotating, to: edited), "The reviewer already ran, so it can't change.")
+        var integrator = rotating
+        integrator.integrators = [rotating.integrator]
+        XCTAssertEqual(done.refusal(from: rotating, to: integrator), "The integrator already ran, so it can't change.")
+        XCTAssertEqual(ShapingEdit.stages(of: .polisherEntry(1)), ShapingEdit.stages(of: .polisher))
+        XCTAssertEqual(ShapingEdit.stages(of: .reviewerEntry(1)), [.refine])
+    }
+
     func testACapForAStageThatRanIsRefused() {
         let edit = ShapingEdit(tape: tape([(.draft, 0), (.refine, 1), (.encode, 0)]))
         var edited = config

@@ -24,6 +24,20 @@ struct RoundInspectorModel: Equatable {
         let fallback: String?
         /// The fallback's wire id, for its icon.
         let fallbackAgent: String?
+        /// The agents this role takes in turn, round after round, in order — empty for a role
+        /// with one agent. `agent` and `line` then describe the first.
+        var rotation: [Alternate] = []
+    }
+
+    /// One agent in a rotating role.
+    struct Alternate: Equatable, Identifiable {
+        let id: String
+        /// The wire id, for its icon.
+        let agent: String
+        /// The display name, "Claude".
+        let name: String
+        /// "Claude · opus · high".
+        let line: String
     }
 
     struct Stage: Equatable, Identifiable {
@@ -61,7 +75,7 @@ struct RoundInspectorModel: Equatable {
         var refine: [Agent] = []
         var refineFacts: [Fact] = []
         if let reviewer = c.reviewer {
-            refine.append(agent("reviewer", "Reviewer", reviewer))
+            refine.append(agent("reviewer", "Reviewer", reviewer, rotation: c.reviewers))
             // The Mac shows the cross-check agent only while the policy is on.
             if let policy = c.crossCheck, policy != "off", let cross = c.crossReviewer {
                 refine.append(agent("crossReviewer", "Cross-check agent", cross))
@@ -69,11 +83,11 @@ struct RoundInspectorModel: Equatable {
             refineFacts.append(Fact(label: "Rounds", value: "\(c.refinementCap)"))
             refineFacts.append(Fact(label: "Cross-check", value: crossCheckName(c.crossCheck)))
         }
-        refine.append(agent("integrator", "Integrator", c.integrator))
+        refine.append(agent("integrator", "Integrator", c.integrator, rotation: c.integrators))
         stages.append(Stage(id: "refine", title: "Refine", agents: refine, facts: refineFacts))
         stages.append(Stage(id: "encode", title: "Encode", agents: [agent("encoder", "Encoder", c.encoder)], facts: []))
         if let polisher = c.polisher {
-            stages.append(Stage(id: "polish", title: "Polish", agents: [agent("polisher", "Polisher", polisher)], facts: [
+            stages.append(Stage(id: "polish", title: "Polish", agents: [agent("polisher", "Polisher", polisher, rotation: c.polishers)], facts: [
                 Fact(label: "Rounds", value: "\(c.polishCap)"),
                 Fact(label: "Fresh eyes + dedup", value: c.freshEyesAndDedup ? "On" : "Off"),
             ]))
@@ -81,10 +95,23 @@ struct RoundInspectorModel: Equatable {
         return stages
     }
 
-    private static func agent(_ id: String, _ role: String, _ seat: WireSeat) -> Agent {
-        Agent(id: id, agent: seat.choice.agent, role: role, persona: seat.persona.flatMap { $0 == "general" ? nil : $0 },
-              line: describe(seat.choice), fallback: seat.fallback.map { "Falls back to \(describe($0))" },
-              fallbackAgent: seat.fallback?.agent)
+    /// `rotation` is the role's agents in turn when the Mac sent them; one entry (or none) is
+    /// the single agent, as an older Mac sends it. A rotation reads "Alternates: Claude → Gemini
+    /// → Codex" with each agent's icon, and its first agent's fallback is not shown: every entry
+    /// of a reviewer's rotation has its own.
+    private static func agent(_ id: String, _ role: String, _ seat: WireSeat, rotation: [WireSeat]? = nil) -> Agent {
+        let persona = seat.persona.flatMap { $0 == "general" ? nil : $0 }
+        guard let rotation, rotation.count > 1 else {
+            return Agent(id: id, agent: seat.choice.agent, role: role, persona: persona,
+                         line: describe(seat.choice), fallback: seat.fallback.map { "Falls back to \(describe($0))" },
+                         fallbackAgent: seat.fallback?.agent)
+        }
+        let names = rotation.map { $0.choice.agentName ?? $0.choice.agent }
+        return Agent(id: id, agent: rotation[0].choice.agent, role: role, persona: persona,
+                     line: "Alternates: " + names.joined(separator: " → "), fallback: nil, fallbackAgent: nil,
+                     rotation: rotation.enumerated().map { i, seat in
+                         Alternate(id: "\(id)\(i)", agent: seat.choice.agent, name: names[i], line: describe(seat.choice))
+                     })
     }
 
     static func describe(_ c: WireModelChoice) -> String {

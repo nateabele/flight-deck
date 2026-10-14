@@ -2070,13 +2070,20 @@ moves the intake to `.shaping`, and appends the config's default play to the tap
 | Feature plan | 2 (arbiter, realist) | yes | 3 | 2 | — | ⏭ next major |
 | Full plan | 4 (arbiter, realist, coverage, stress-test) | yes | 5 | 6 | yes | ⏭ next major |
 
-*Which agents a preset seats.* Codex and Claude take the seats that run every round:
+*Which agents a preset seats.* Codex and Claude take the seats:
 - the drafters (codex first);
-- the synthesizer and the reviewer (codex);
-- the integrator and the polisher (claude);
-- the encoder (codex).
+- the synthesizer (codex);
+- the encoder (codex);
+- the reviewer, the integrator and the polisher, which repeat round after round and so take turns (below).
 
 Each falls back to the other.
+
+*Rotations.* A role that repeats round after round can list its agents in `RoundConfig.reviewers`, `integrators` and `polishers`, so one family does not run a whole long stage. Refine round k runs entry (k-1) mod n of the reviewers and the integrators. The polish stage runs `polishers[i mod n]`, where polish 1 to M are i = 0 to M-1, fresh eyes is i = M and dedup is i = M+1; each planned round carries its index as `PlannedRound.rotation`, and `RoundParticipants.of` is the one derivation of who runs it, so the engine, the live card, the Rounds editor's timeline and the phone agree. Synthesis uses the first integrator. No list, or an empty one, is the single agent, and the single field (`reviewer`, `integrator`, `polisher`) always equals entry 0, so an older reader still sees a sensible agent. When codex and Claude are both present:
+- the reviewers are codex, then Claude, each falling back to the other;
+- the integrators are Claude, then codex, so every Refine round pairs two families;
+- the polishers are Claude, Gemini if detected, then codex. A Full plan's eight polish-stage rounds then run Claude, Gemini, codex, Claude, Gemini, codex, Claude (fresh eyes) and Gemini (dedup), and fresh eyes is never the family that ran the round before it.
+
+A machine with one family has no rotations. Grok (slow) and OpenCode are in no default rotation. A round whose reviewer is the cross-reviewer's own family (codex and Claude only, no Gemini) cross-checks with the first other family in the reviewer rotation instead (`RoundConfig.crossReviewer(rotation:)`), so a cross-check is always two families and the rounds the policy marks keep their mark.
 
 When Gemini and Grok are detected, they get seats that add a second family without slowing every round:
 - Gemini is the cross-reviewer.

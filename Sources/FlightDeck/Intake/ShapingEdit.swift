@@ -43,9 +43,9 @@ struct ShapingEdit: Equatable {
         switch role {
         case .drafter: [.draft]
         case .synthesizer: [.synthesis]
-        case .reviewer, .crossReviewer, .integrator: [.refine]
+        case .reviewer, .crossReviewer, .integrator, .reviewerEntry, .integratorEntry: [.refine]
         case .encoder: [.encode]
-        case .polisher: [.polish, .freshEyes, .dedup]
+        case .polisher, .polisherEntry: [.polish, .freshEyes, .dedup]
         }
     }
 
@@ -88,15 +88,15 @@ struct ShapingEdit: Equatable {
         if doneStages.contains(.draft), saved.drafters != edited.drafters { return Self.ran("drafter") }
         if doneStages.contains(.synthesis), saved.synthesizer != edited.synthesizer { return Self.ran("synthesizer") }
         if refineDone {
-            if saved.reviewer != edited.reviewer { return Self.ran("reviewer") }
+            if saved.reviewer != edited.reviewer || saved.reviewers != edited.reviewers { return Self.ran("reviewer") }
             if saved.crossReviewer != edited.crossReviewer || saved.crossCheck != edited.crossCheck {
                 return Self.ran("cross-check agent")
             }
-            if saved.integrator != edited.integrator { return Self.ran("integrator") }
+            if saved.integrator != edited.integrator || saved.integrators != edited.integrators { return Self.ran("integrator") }
             if saved.refinementCap != edited.refinementCap { return "Refinement already ran, so its rounds can't change." }
         }
         if doneStages.contains(.encode), saved.encoder != edited.encoder { return Self.ran("encoder") }
-        if isLocked(.polisher), saved.polisher != edited.polisher { return Self.ran("polisher") }
+        if isLocked(.polisher), saved.polisher != edited.polisher || saved.polishers != edited.polishers { return Self.ran("polisher") }
         if polishDone, saved.polishCap != edited.polishCap { return "Polish already ran, so its rounds can't change." }
         if freshEyesDone, saved.freshEyesAndDedup != edited.freshEyesAndDedup {
             return "Fresh eyes already ran, so it can't be turned on or off."

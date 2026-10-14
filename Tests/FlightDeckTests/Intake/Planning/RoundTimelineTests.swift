@@ -197,4 +197,38 @@ final class RoundTimelineTests: XCTestCase {
         let rows = RoundTimeline.rows(config: config(), tape: tape)
         XCTAssertEqual(RoundTimeline.mainTarget(for: RoundKey(stage: .synthesis, round: 0), rows: rows, tape: tape), .checkpoint(2))
     }
+
+    // MARK: - Rotations
+
+    /// Each chip shows ITS round's agents: the rotation entry, not the role's first agent.
+    func testChipsShowEachRoundsRotatedAgents() throws {
+        var cfg = config(.off, refine: 4, polish: 2, freshEyes: true)
+        cfg.reviewer = Slot(codex); cfg.polisher = claude
+        cfg.reviewers = [Slot(codex), Slot(claude)]
+        cfg.integrators = [claude, codex]
+        cfg.polishers = [claude, gemini, codex]
+        let rows = RoundTimeline.rows(config: cfg, tape: nil)
+        let refine = rows.first { $0.section == .refine }!.chips
+        XCTAssertEqual(refine.map { $0.agents.map(\.choice.agent) },
+                       [[.codex, .claude], [.claude, .codex], [.codex, .claude], [.claude, .codex]])
+        XCTAssertEqual(refine.map { $0.agents.map(\.role) }.first, ["reviewer", "integrator"])
+        let polish = rows.first { $0.section == .polish }!.chips
+        XCTAssertEqual(polish.map(\.name), ["Polish 1", "Polish 2", "Fresh eyes", "Dedup"])
+        XCTAssertEqual(polish.map { $0.agents.map(\.choice.agent) }, [[.claude], [.gemini], [.codex], [.claude]])
+        // The section heading's stack lists the whole rotation.
+        XCTAssertEqual(AgentStackModel.section(.polish, config: cfg).map(\.choice.agent), [.claude, .gemini, .codex])
+        XCTAssertEqual(AgentStackModel.section(.refine, config: cfg).map(\.role), ["reviewer", "reviewer", "integrator", "integrator"])
+    }
+
+    /// The live card's seat rows list the same agent the chip and the engine use.
+    func testSeatRowsFollowTheRotation() {
+        var cfg = config(.off)
+        cfg.reviewer = Slot(codex)
+        cfg.reviewers = [Slot(codex), Slot(claude)]
+        cfg.integrators = [claude, codex]
+        let round = TapePlanner.plannedRounds(config: cfg, tape: .empty).first { $0.stage == .refine && $0.round == 2 }!
+        let seats = LiveSeats.expected(round, config: cfg)
+        XCTAssertEqual(seats.map(\.base), ["refine-2-reviewer", "refine-2-integrator"])
+        XCTAssertEqual(seats.map { $0.requested?.choice.agent }, [.claude, .codex])
+    }
 }

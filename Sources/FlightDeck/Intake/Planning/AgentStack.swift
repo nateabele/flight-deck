@@ -49,11 +49,16 @@ enum AgentStackModel {
     /// a row of chips, not a group.
     static let limit = 3
 
-    /// The seats `stage` will start under `config`, in run order — read off `LiveSeats.expected`,
+    /// The seats `round` will start under `config`, in run order — read off `LiveSeats.expected`,
     /// the list the live card's seat rows come from, so the stack can't name a seat the rows
     /// don't. A seat with no slot (Sketch's polisher) is left out rather than drawn blank.
     static func planned(stage: Stage, crossCheck: Bool, config: RoundConfig) -> [RoundAgent] {
-        LiveSeats.expected(PlannedRound(stage: stage, round: 0, major: false, crossCheck: crossCheck), config: config)
+        planned(PlannedRound(stage: stage, round: 0, major: false, crossCheck: crossCheck), config: config)
+    }
+
+    /// The same for one round of the sequence, which knows its place in a rotating role's turns.
+    static func planned(_ round: PlannedRound, config: RoundConfig) -> [RoundAgent] {
+        LiveSeats.expected(round, config: config)
             .compactMap { seat in
                 // `<stage>-<round>-<role>[-<index>]`: no stage's raw value has a dash.
                 let parts = seat.base.split(separator: "-")
@@ -71,17 +76,19 @@ enum AgentStackModel {
     /// round's included whenever the policy can seat one — so any one round's stack in the main
     /// view is a subset of its section's in the inspector.
     static func section(_ section: RoundsSection, config: RoundConfig) -> [RoundAgent] {
+        func stage(_ stage: Stage) -> [RoundAgent] { planned(stage: stage, crossCheck: false, config: config) }
         switch section {
-        case .draft: planned(stage: .draft, crossCheck: false, config: config)
-        case .synthesis: config.synthesizer == nil ? [] : planned(stage: .synthesis, crossCheck: false, config: config)
+        case .draft: return stage(.draft)
+        case .synthesis: return config.synthesizer == nil ? [] : stage(.synthesis)
         case .refine:
             // The integrator is listed even with no reviewer seated: its row lives in this section.
-            (config.reviewer.map { [RoundAgent(role: "reviewer", choice: $0.choice)] } ?? [])
+            // A rotating role lists every agent in its rotation, in order.
+            return config.reviewerRotation.map { RoundAgent(role: "reviewer", choice: $0.choice) }
                 + (config.crossCheck.map { $0 != .off } == true
                     ? config.crossReviewer.map { [RoundAgent(role: "crossReviewer", choice: $0.choice)] } ?? [] : [])
-                + [RoundAgent(role: "integrator", choice: config.integrator)]
-        case .encode: planned(stage: .encode, crossCheck: false, config: config)
-        case .polish: planned(stage: .polish, crossCheck: false, config: config)
+                + config.integratorRotation.map { RoundAgent(role: "integrator", choice: $0) }
+        case .encode: return stage(.encode)
+        case .polish: return config.polisherRotation.map { RoundAgent(role: "polisher", choice: $0) }
         }
     }
 

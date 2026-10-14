@@ -186,22 +186,37 @@ public struct PlannedRound: Codable, Equatable, Sendable {
     /// Decided when the round starts and persisted in `Tape.roundInProgress`, so a later extend
     /// can't change what a running round is doing.
     public var crossCheck: Bool
-    public init(stage: Stage, round: Int, major: Bool, crossCheck: Bool = false) {
+    /// Where this round sits in its role's rotation (`RoundConfig.reviewers`): Refine round k and
+    /// polish round k are `k - 1`; fresh eyes and dedup follow the last polish round, which only the
+    /// planner knows. The default reads the round number, so every stage but those two is right
+    /// wherever it is built from; `TapePlanner` sets the rest.
+    public var rotation: Int
+    public init(stage: Stage, round: Int, major: Bool, crossCheck: Bool = false, rotation: Int? = nil) {
         self.stage = stage
         self.round = round
         self.major = major
         self.crossCheck = crossCheck
+        self.rotation = rotation ?? Self.defaultRotation(stage: stage, round: round)
     }
 
-    private enum CodingKeys: String, CodingKey { case stage, round, major, crossCheck }
+    private static func defaultRotation(stage: Stage, round: Int) -> Int {
+        switch stage {
+        case .refine, .polish: max(round - 1, 0)
+        default: 0
+        }
+    }
 
-    /// A `roundInProgress` written before cross-checks has no `crossCheck`: it wasn't one.
+    private enum CodingKeys: String, CodingKey { case stage, round, major, crossCheck, rotation }
+
+    /// A `roundInProgress` written before cross-checks has no `crossCheck`: it wasn't one. Before
+    /// rotations it has no `rotation` either: the round number says where it was.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         stage = try c.decode(Stage.self, forKey: .stage)
         round = try c.decode(Int.self, forKey: .round)
         major = try c.decode(Bool.self, forKey: .major)
         crossCheck = try c.decodeIfPresent(Bool.self, forKey: .crossCheck) ?? false
+        rotation = try c.decodeIfPresent(Int.self, forKey: .rotation) ?? Self.defaultRotation(stage: stage, round: round)
     }
 }
 
