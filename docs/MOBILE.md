@@ -767,8 +767,9 @@ page.
     its effort, "Account: ..." for a role that holds its own account or pool, a drafter's persona
     and any fallback, then
     rounds, cross-check, fresh eyes + dedup and default play. It matches what the Mac's own
-    Rounds inspector shows for the same fidelity. Wrong: a missing agent, an editable control, or
-    the word "seat".
+    Rounds inspector shows for the same fidelity. Wrong: a missing agent, or the word "seat". (On
+    a Mac that takes edits the list is the editor: see item 103; against an older Mac it stays
+    read-only.)
 101. **The round inspector while shaping.** Once started, a Rounds row appears on the intake
     screen. Open it, then edit an agent or a cap in the Mac's Rounds inspector: the phone shows the
     change within a poll, and the title reads "..., customized". Wrong: the phone showing the stock
@@ -777,6 +778,20 @@ page.
     section keeps "Choose fidelity and start on your Mac for now." with no buttons and no Rounds
     row, and the phone stays connected. An older phone against this Mac shows the old text and
     decodes the detail. Wrong: a chooser that does nothing, or a dropped connection.
+
+103. **Editing rounds from the phone.** Open a fidelity's info button. Each role has a model menu
+    (agent, then its models, the same names as the Mac's), an Effort picker only where the model
+    has levels, an Account picker only where the agent has more than one account or pool, and a
+    Fallback menu with None. Reviewer, integrator and polisher can alternate: add, move, remove
+    and "Use one agent". Rounds steppers, Cross-check, Fresh eyes + dedup and Default play are
+    there too. Edit something, go back: the fidelity reads "Edited" and Start sends the edit; the
+    Mac's inspector then shows it, "customized". Once shaping, the same screen edits the running
+    rounds with Revert and Save; a role whose stage already ran says "already ran" and is
+    disabled, and while a round runs everything is disabled under "Pause to change agents.". Wrong:
+    Start running the stock agents after an edit, a stage that ran taking an edit, a raw id or an
+    internal word anywhere, or a stale edit overwriting a change made on the Mac meanwhile (change
+    the Mac's config after opening the phone's screen, then Save: "The plan changed — reopen it and
+    try again.").
 
 ## A second checklist: the iOS plumbing
 

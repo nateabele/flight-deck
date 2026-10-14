@@ -139,6 +139,41 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The Rounds editor in the three states it is reached in: a fidelity being chosen (nothing
+    /// locked, an edit waiting for Start), a shaping intake with the stages that ran locked and an
+    /// unsaved edit (Revert / Save), and one with a round in flight (everything disabled, and why).
+    func testDrawRoundEditor() throws {
+        try begin()
+        let choosing = Fixture.editor(state: "awaitingChoice")
+        let shaping = Fixture.editor(state: "shaping", lock: WireRoundsLock(
+            editable: true, locked: ["drafter0", "drafter1", "synthesizer"], extraRefinement: 1, refinementFloor: 2))
+        let running = Fixture.editor(state: "shaping", lock: WireRoundsLock(
+            editable: false, reason: "Pause to change agents.", locked: ["drafter0", "drafter1", "synthesizer"],
+            extraRefinement: 1, refinementFloor: 2))
+        let cases: [(String, WireIntakeDetail, String?, Bool)] = [
+            ("choosing", choosing, "featurePlan", true), ("shaping", shaping, nil, true), ("running", running, nil, false)]
+        for (name, detail, preset, edited) in cases {
+            let flightControl = FlightControlModel(fetcher: stub(detail))
+            let model = flightControl.detailModel(for: detail.summary.id)
+            model.refresh()
+            if edited, let current = RoundEditing.make(detail: detail, preset: preset, drafts: [:]) {
+                var editor = current.editor
+                editor.setRefineRounds(editor.refineRounds + 1)
+                model.roundDrafts[current.key] = RoundDraft(base: current.base, config: editor.config)
+            }
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let view = NavigationStack {
+                    RoundInspectorScreen(intake: detail.summary.id, preset: preset, model: model, flightControl: flightControl)
+                }
+                // The editor is several screens long: drawn a screen at a time, from the top.
+                for (part, offset) in [("1", 0), ("2", 700), ("3", 1400), ("4", 2100)] as [(String, CGFloat)] {
+                    try write(screenImage(of: view, style: style, size: nil, scrolledBy: offset),
+                              to: "round-editor-\(name)-\(Self.styleName(style))-\(part).png")
+                }
+            }
+        }
+    }
+
     func testDrawClarifications() throws {
         try begin()
         let flightControl = FlightControlModel(fetcher: stub(Fixture.needsAnswers))
@@ -310,7 +345,7 @@ final class IntakeRenderHarness: XCTestCase {
     /// A phone-sized screen: fixed size, one window, and a short run-loop spin so `.task` loads
     /// and the `List`'s cells exist before `drawHierarchy`.
     private func screenImage(of view: some View, style: UIUserInterfaceStyle, size: DynamicTypeSize?,
-                             height: CGFloat = screenHeight) -> UIImage {
+                             height: CGFloat = screenHeight, scrolledBy offset: CGFloat = 0) -> UIImage {
         let frame = CGRect(x: 0, y: 0, width: Self.width, height: height)
         let controller = UIHostingController(rootView: AnyView(sized(view, size)))
         controller.overrideUserInterfaceStyle = style
@@ -324,9 +359,22 @@ final class IntakeRenderHarness: XCTestCase {
         window.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         window.layoutIfNeeded()
+        // A list longer than the screen, seen a screen at a time: the list's own scroll view,
+        // moved before the draw.
+        if offset > 0, let list = Self.scrollView(in: controller.view) {
+            list.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+            window.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        }
         return UIGraphicsImageRenderer(size: frame.size).image { _ in
             controller.view.drawHierarchy(in: controller.view.bounds, afterScreenUpdates: true)
         }
+    }
+
+    private static func scrollView(in view: UIView) -> UIScrollView? {
+        if let scroll = view as? UIScrollView { return scroll }
+        for sub in view.subviews { if let found = scrollView(in: sub) { return found } }
+        return nil
     }
 
     private func sized(_ view: some View, _ size: DynamicTypeSize?) -> some View {
@@ -529,6 +577,71 @@ private enum Fixture {
             answered: [WireExchange(questions: ["Which worker — the push or the pull side?", "Is backoff jittered today?"],
                                     answers: ["Pull.", "No, fixed 2 s."])]),
         servedAt: t)
+
+    /// A Feature plan with everything the editor draws: a rotating reviewer, integrator and polisher,
+    /// fallbacks, a cross-check agent on a model with no effort levels, and a role billing its own
+    /// pool beside an agent with an Account choice.
+    static func editorConfig() -> WireRoundConfig {
+        func choice(_ agent: String, _ name: String, _ model: String, _ modelName: String, _ effort: String = "high",
+                    pool: Bool = false) -> WireModelChoice {
+            WireModelChoice(agent: agent, agentName: name, model: model, effort: effort, modelName: modelName,
+                            account: pool ? "Work pool" : nil, accountKey: pool ? "pool:work" : nil)
+        }
+        let codex = choice("codex", "Codex", "gpt-6-sol", "GPT 6 Sol")
+        let claude = choice("claude", "Claude", "opus", "Opus 5.5")
+        let gemini = choice("gemini", "Gemini", "gemini-3.1-pro-high", "Gemini 3.1 Pro (High)", "")
+        let work = choice("claude", "Claude", "opus", "Opus 5.5", pool: true)
+        return WireRoundConfig(
+            drafters: [WireSeat(choice: codex, persona: "arbiter", fallback: claude),
+                       WireSeat(choice: claude, persona: "realist", fallback: codex)],
+            synthesizer: WireSeat(choice: codex, persona: "arbiter", fallback: claude),
+            reviewer: WireSeat(choice: codex, persona: "general", fallback: claude),
+            crossReviewer: WireSeat(choice: gemini, persona: "general"), crossCheck: "firstAndLast",
+            integrator: WireSeat(choice: work), encoder: WireSeat(choice: codex),
+            polisher: WireSeat(choice: claude), refinementCap: 3, polishCap: 2,
+            freshEyesAndDedup: true, defaultPlay: "nextMajor", customized: false,
+            reviewers: [WireSeat(choice: codex, persona: "general", fallback: claude),
+                        WireSeat(choice: claude, persona: "general", fallback: codex)],
+            integrators: [WireSeat(choice: work), WireSeat(choice: codex)],
+            polishers: [WireSeat(choice: claude), WireSeat(choice: gemini)])
+    }
+
+    static let editorMenu: WireRoundsMenu = {
+        let claudeModels = [WireModelOption(id: "opus", name: "Opus 5.5", efforts: ["low", "medium", "high"]),
+                            WireModelOption(id: "haiku", name: "Haiku 4.5")]
+        let codexModels = [WireModelOption(id: "gpt-6-sol", name: "GPT 6 Sol", efforts: ["medium", "high", "xhigh"])]
+        let geminiModels = [WireModelOption(id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)")]
+        return WireRoundsMenu(agents: [
+            WireAgentOption(agent: "claude", name: "Claude", models: claudeModels, efforts: ["low", "medium", "high"],
+                            planningEffort: "high",
+                            defaultChoice: WireModelChoice(agent: "claude", agentName: "Claude", model: "opus", effort: "high"),
+                            accounts: WireAccountMenu(defaultTitle: "Project default — Personal", offersChoice: true, options: [
+                                WireAccountOption(key: "account:work", title: "Work"),
+                                WireAccountOption(key: "pool:work", title: "Work pool", isPool: true)])),
+            WireAgentOption(agent: "codex", name: "Codex", models: codexModels, efforts: ["medium", "high", "xhigh"],
+                            planningEffort: "high",
+                            defaultChoice: WireModelChoice(agent: "codex", agentName: "Codex", model: "gpt-6-sol", effort: "high")),
+            WireAgentOption(agent: "gemini", name: "Gemini", models: geminiModels,
+                            defaultChoice: WireModelChoice(agent: "gemini", agentName: "Gemini", model: "gemini-3.1-pro-high", effort: "")),
+            WireAgentOption(agent: "grok", name: "Grok", reason: "Grok: run `grok login`"),
+        ])
+    }()
+
+    /// `state` "awaitingChoice" offers Feature plan with the editor's config; "shaping" runs it.
+    static func editor(state: String, lock: WireRoundsLock? = nil) -> WireIntakeDetail {
+        let config = editorConfig()
+        let shaping = state == "shaping"
+        return WireIntakeDetail(
+            etag: "editor-\(state)-\(lock?.editable == false)", project: project,
+            summary: WireIntakeSummary(id: UUID(), title: "Move settings to the new schema", state: state,
+                                       needsAttention: !shaping, preset: shaping ? "featurePlan" : nil,
+                                       runStatus: shaping ? "paused" : nil, createdAt: ago(600)),
+            intent: "Move settings to the new schema.",
+            choice: shaping ? nil : WireChoice(recommended: "featurePlan", presets: [
+                WirePresetOption(preset: "bead"), WirePresetOption(preset: "featurePlan", config: config)]),
+            servedAt: t, steer: true, choose: true, roundConfig: shaping ? config : nil,
+            editRounds: true, roundsMenu: editorMenu, roundsLock: lock)
+    }
 
     static let awaitingChoice = WireIntakeDetail(
         etag: "choice", project: project,

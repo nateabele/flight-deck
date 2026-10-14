@@ -17,6 +17,10 @@ final class IntakeDetailModel {
     private(set) var detail: WireIntakeDetail?
     private(set) var failure: String?
     private(set) var gone = false
+    /// Rounds edits not yet sent, by `RoundEditing.draftKey`: one per fidelity while it is being
+    /// chosen, one for the running config while shaping. Held here, with the detail, so an edit
+    /// survives leaving the inspector for the fidelity list and back.
+    var roundDrafts: [String: RoundDraft] = [:]
     /// Mac clock − phone clock, from the last detail's `servedAt` (Review Focus #1).
     private(set) var macClockOffset: TimeInterval = 0
     @ObservationIgnored private weak var fetcher: IntakeFetching?

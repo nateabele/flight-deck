@@ -82,7 +82,23 @@ final class IntakeSteerCommandServiceTests: XCTestCase {
         let gone = try await send(.intakeRemoveNote(id: i.id, token: UUID(), noteID: UUID()))
         guard case .err(_, let removeCode, _) = gone else { return XCTFail("expected err, got \(gone)") }
         XCTAssertEqual(removeCode, "note_consumed")
+
+        // The editor's two commands reach the same service: a round is in flight, so the Mac
+        // refuses a save with its own sentence, and a start for an intake already shaping.
+        let rounds = WireIntakeDetailFixture.config
+        var edited = rounds
+        edited.polishCap = 1
+        let tooBusy = try await send(.intakeRounds(id: i.id, token: UUID(), config: edited, base: rounds))
+        guard case .err(_, let busyCode, _) = tooBusy else { return XCTFail("expected err, got \(tooBusy)") }
+        XCTAssertEqual(busyCode, RoundsRefusal.prefix + "Pause to change agents.")
+        let started = try await send(.intakeStart(id: i.id, token: UUID(), preset: "sketch", config: rounds, base: rounds))
+        guard case .err(_, let startCode, _) = started else { return XCTFail("expected err, got \(started)") }
+        XCTAssertEqual(startCode, "intake_moved_on")
     }
+}
+
+private enum WireIntakeDetailFixture {
+    static let config = IntakeDetailProjection.wireConfig(PresetExpansion.config(for: .fullPlan, available: .defaults)!)
 }
 
 /// Every daemon answers and nothing is ever signalled (copied from `IntakeFleetEmissionTests`,

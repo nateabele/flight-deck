@@ -102,7 +102,19 @@ struct IntakeScreen: View {
         Binding(get: { confirmingFidelity != nil }, set: { if !$0 { confirmingFidelity = nil } })
     }
 
+    /// A fidelity whose rounds the phone edited starts with the edit (`intake.start`); any other
+    /// starts the stock config, as it always did.
     private func choose(_ preset: String) {
+        if let draft = model.roundDrafts[preset], RoundEditing.differs(draft) {
+            commands.send(.choose(preset),
+                          command: { .intakeStart(id: id, token: $0, preset: preset, config: draft.config, base: draft.base) },
+                          onAck: { model.roundDrafts[preset] = nil; model.refresh() },
+                          // The stock rounds moved under the edit: what it was made from is gone.
+                          onFailure: { error in
+                              if case .server(code: "rounds_changed")? = error { model.roundDrafts[preset] = nil; model.refresh() }
+                          })
+            return
+        }
         commands.send(.choose(preset), command: { .intakeChoose(id: id, token: $0, preset: preset) },
                       onAck: { model.refresh() })
     }
@@ -114,6 +126,7 @@ struct IntakeScreen: View {
                     HStack(spacing: 6) {
                         Text(option.name).font(.subheadline)
                         if option.recommended { Text("Recommended").font(.caption).foregroundStyle(Color.accentColor) }
+                        if option.edited { Text("Edited").font(.caption).foregroundStyle(.secondary) }
                     }
                     Text(option.summary).font(.caption).foregroundStyle(.secondary)
                 }
@@ -182,7 +195,7 @@ struct IntakeScreen: View {
                 }
                 if let reason = choice.reason { Text(reason).font(.subheadline).foregroundStyle(.secondary) }
                 if let rounds = choice.roundsSummary { Text(rounds).font(.caption).foregroundStyle(.secondary) }
-                if let options = FidelityChooser.options(detail: d) {
+                if let options = FidelityChooser.options(detail: d, drafts: model.roundDrafts) {
                     let busy = options.contains { commands.inFlight.contains(.choose($0.preset)) }
                     ForEach(options) { fidelityRow($0, live: frozenAt == nil, busy: busy) }
                 } else {

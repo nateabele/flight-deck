@@ -144,6 +144,60 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(older.integrator, Self.seat)
     }
 
+    static let menu = WireRoundsMenu(agents: [
+        WireAgentOption(
+            agent: "claude", name: "Claude",
+            models: [WireModelOption(id: "opus", name: "Opus 5.5", efforts: ["low", "high"]), WireModelOption(id: "haiku", name: "Haiku 4.5")],
+            accountModels: ["account:1": [WireModelOption(id: "opus", name: "Opus 5.5", efforts: ["high"])]],
+            efforts: ["low", "high"], planningEffort: "high",
+            defaultChoice: WireModelChoice(agent: "claude", agentName: "Claude", model: "opus", effort: "high"),
+            accounts: WireAccountMenu(defaultTitle: "Project default — Personal", offersChoice: true,
+                                      options: [WireAccountOption(key: "account:1", title: "Work"),
+                                                WireAccountOption(key: "pool:team", title: "Team pool", isPool: true)])),
+        WireAgentOption(agent: "grok", name: "Grok", reason: "Grok: run `grok login`"),
+    ])
+
+    /// The editor's wire is additive: it round-trips, and a detail from a Mac that predates it
+    /// (no key at all) decodes with none, which the phone reads as a read-only inspector.
+    func testTheEditorsMenuAndLockRoundTripAndAnOlderDetailDecodesWithoutThem() throws {
+        var detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "Build it.",
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200), steer: true, choose: true,
+            roundConfig: Self.config, editRounds: true, roundsMenu: Self.menu,
+            roundsLock: WireRoundsLock(editable: false, reason: "Pause to change agents.", locked: ["drafter0", "reviewer"],
+                                       refineDone: true, extraRefinement: 1, refinementFloor: 2))
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: JSONEncoder().encode(detail)), detail)
+
+        detail.editRounds = nil; detail.roundsMenu = nil; detail.roundsLock = nil
+        let data = try JSONEncoder().encode(detail)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for key in ["editRounds", "roundsMenu", "roundsLock"] { XCTAssertNil(json[key], key) }
+        let old = try JSONDecoder().decode(WireIntakeDetail.self, from: data)
+        XCTAssertNil(old.editRounds); XCTAssertNil(old.roundsMenu); XCTAssertNil(old.roundsLock)
+        XCTAssertEqual(old.roundConfig, Self.config)
+    }
+
+    /// An older phone skips every key it does not know, so a newer Mac's payload decodes there.
+    func testANewerDetailStillDecodesAsThePhoneBeforeTheEditor() throws {
+        struct OldDetail: Codable { var etag: String; var steer: Bool?; var choose: Bool?; var roundConfig: WireRoundConfig? }
+        let detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "i", servedAt: Date(), steer: true, choose: true,
+            roundConfig: Self.config, editRounds: true, roundsMenu: Self.menu, roundsLock: WireRoundsLock(editable: true))
+        let old = try JSONDecoder().decode(OldDetail.self, from: JSONEncoder().encode(detail))
+        XCTAssertEqual(old.roundConfig, Self.config)
+    }
+
+    func testAnAccountTravelsAsANameAndAKeyAndAnOldChoiceHasNoKey() throws {
+        let choice = WireModelChoice(agent: "claude", agentName: "Claude", model: "opus", effort: "high", modelName: "Opus 5.5",
+                                     account: "Team pool", accountKey: "pool:team")
+        XCTAssertEqual(try JSONDecoder().decode(WireModelChoice.self, from: JSONEncoder().encode(choice)), choice)
+        let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            WireModelChoice(agent: "claude", model: "opus", effort: "high"))) as? [String: Any]
+        XCTAssertNil(plain?["accountKey"])
+        let old = try JSONDecoder().decode(WireModelChoice.self, from: Data(#"{"agent":"claude","model":"opus","effort":"high"}"#.utf8))
+        XCTAssertNil(old.accountKey)
+    }
+
     func testChooseIsAdditiveAnOlderPayloadDecodesWithoutIt() throws {
         // A detail from a Mac that predates the chooser and the inspector: none of the new keys.
         let detail = WireIntakeDetail(

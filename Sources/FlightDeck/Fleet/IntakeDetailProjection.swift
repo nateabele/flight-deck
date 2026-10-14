@@ -146,7 +146,13 @@ enum IntakeDetailProjection {
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
             headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
             steer: true, choose: true, noteKind: true,
-            roundConfig: choosing ? nil : i.roundConfig.map { wireConfig($0, naming: naming) })
+            roundConfig: choosing ? nil : i.roundConfig.map { wireConfig($0, naming: naming) },
+            editRounds: true,
+            roundsMenu: choosing || i.state == .shaping
+                ? PhoneRoundsEdit.menu(available: available, accounts: menus, naming: naming) : nil,
+            roundsLock: i.state == .shaping ? i.roundConfig.map {
+                PhoneRoundsEdit.lock(service.shapingEdit(id), config: $0, editing: service.roundConfigEditing(id))
+            } : nil)
         detail.etag = etag(detail)
         return detail
     }
@@ -171,7 +177,7 @@ enum IntakeDetailProjection {
     static func wireChoice(_ c: ModelChoice, naming: Naming = Naming()) -> WireModelChoice {
         WireModelChoice(agent: c.agent.rawValue, agentName: c.agent.displayName, model: c.model, effort: c.effort,
                         modelName: naming.available.displayName(agent: c.agent, model: c.model, account: c.account),
-                        account: c.account.flatMap(naming.accountName))
+                        account: c.account.flatMap(naming.accountName), accountKey: c.account?.key)
     }
 
     static func wireSeat(_ slot: Slot, naming: Naming = Naming()) -> WireSeat {

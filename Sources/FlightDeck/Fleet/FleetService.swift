@@ -1371,6 +1371,14 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneChoose(id, token: token, preset: preset) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeStart(let id, let token, let preset, let config, let base):
+            if let code = store.intakeService.phoneStart(id, token: token, preset: preset, config: config, base: base) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeRounds(let id, let token, let config, let base):
+            if let code = store.intakeService.phoneRounds(id, token: token, config: config, base: base) {
+                return .err(cid: cid, code: code)
+            }
         case .swarmPause(let project):
             guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
             guard store.swarmServiceIfBuilt?.pause(project: path) == true else { return .err(cid: cid, code: "no_swarm") }
