@@ -249,7 +249,7 @@ final class PlanningAccountsTests: XCTestCase {
     func testTheEditorLineReadsBills() {
         let choice = ModelChoice(agent: .claude, model: "opus", effort: "high")
         XCTAssertEqual(RoundConfigEditor.accountRow(AccountMenu(projectDefault: "Team pool"), choice: choice),
-                       .line("Account: Team pool"))
+                       .line("Team pool"))
         XCTAssertEqual(AccountBilling.poolName("Night pool"), "Night pool", "never 'pool pool'")
     }
 

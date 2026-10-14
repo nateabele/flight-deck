@@ -111,7 +111,7 @@ final class RoundEditorModelsTests: XCTestCase {
     func testTheAccountRowIsAPickerOnlyWhenThereIsAChoice() {
         let plain = ModelChoice(agent: .claude, model: opus.id, effort: "high")
         let one = AccountMenu(projectDefault: "Personal")
-        XCTAssertEqual(RoundConfigEditor.accountRow(one, choice: plain), .line("Account: Personal"))
+        XCTAssertEqual(RoundConfigEditor.accountRow(one, choice: plain), .line("Personal"))
         let several = AccountMenu(projectDefault: "Personal", options: [], offersChoice: true)
         XCTAssertEqual(RoundConfigEditor.accountRow(several, choice: plain), .picker)
         var held = plain

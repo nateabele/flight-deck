@@ -67,7 +67,7 @@ final class RoundInspectorModelTests: XCTestCase {
         let polish = m.stages[4].agents[0]
         XCTAssertEqual(polish.line, "Alternates: Claude → Gemini → Codex")
         XCTAssertEqual(polish.rotation.map(\.agent), ["claude", "gemini", "codex"])
-        XCTAssertEqual(polish.rotation.map(\.line), ["Claude > Opus 5.5 (latest) · high", "Gemini > Gemini 3.1 Pro (High) · high", "Codex > GPT 6 Sol · high"])
+        XCTAssertEqual(polish.rotation.map(\.line), ["Claude > Opus 5.5 (latest) · high", "Gemini > 3.1 Pro (High) · high", "Codex > GPT 6 Sol · high"])
         XCTAssertEqual(polish.agent, "claude", "the first agent")
         XCTAssertNil(polish.fallback)
 
@@ -113,7 +113,7 @@ final class RoundInspectorModelTests: XCTestCase {
         let pinned = choice("claude", "Claude", "claude-opus-5-5", "high", modelName: "Opus 5.5", account: "Work pool")
         XCTAssertEqual(RoundInspectorModel.describe(pinned), "Claude > Opus 5.5 · high · Account: Work pool")
         XCTAssertEqual(RoundInspectorModel.describe(choice("gemini", "Gemini", "gemini-3.8-flash-high", "", modelName: "Gemini 3.8 Flash (High)")),
-                       "Gemini > Gemini 3.8 Flash (High)", "no effort: no trailing dot")
+                       "Gemini > 3.8 Flash (High)", "no effort: no trailing dot")
         XCTAssertEqual(RoundInspectorModel.describe(choice("claude", "Claude", "opus")), "Claude > opus · high",
                        "a Mac that predates names shows the model as it came")
     }
