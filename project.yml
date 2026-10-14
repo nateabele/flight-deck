@@ -519,7 +519,14 @@ targets:
     type: application
     platform: iOS
     productName: Flight Deck
-    sources: [Sources/FlightDeckMobile]
+    sources:
+      - Sources/FlightDeckMobile
+      # The Mac terminal's own theme files, so a highlighted code block on the phone resolves
+      # its ANSI colours against the palette the desktop draws them in (`TerminalPalette`).
+      - path: Sources/FlightDeck/GhosttyThemeDark.conf
+        buildPhase: resources
+      - path: Sources/FlightDeck/GhosttyThemeLight.conf
+        buildPhase: resources
     dependencies:
       - target: FleetKitiOS
         embed: true

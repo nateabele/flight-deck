@@ -253,20 +253,19 @@ struct TimelineBodyBlock: View {
     /// **Prose gets no panel, and that is what makes a fenced block inside it visible.**
     ///
     /// The grey surface is how machine text says it is machine text — it is the same fill the
-    /// row's tool card uses, and `TimelineMarkdown.theme` gives a fenced code block that very
-    /// same fill so a block of code in an answer reads as the same kind of object. Two of them
-    /// nested is one rectangle: `secondarySystemBackground` on `secondarySystemBackground` has
-    /// no edge in either theme. So the outer one goes, for prose only, and an answer sits on
-    /// the page the way an answer does — with its code blocks standing off it.
+    /// row's tool card uses. `TimelineMarkdown.theme` draws a fenced code block on its own
+    /// surface (the Mac terminal's background), and a panel inside a panel reads as clutter
+    /// rather than structure. So the outer one goes, for prose only, and an answer sits on the
+    /// page the way an answer does — with its code blocks standing off it.
     ///
     /// An empty prose body keeps its panel: what is drawn there is the "(empty)" placeholder,
     /// not prose, and a lone grey word on the page reads as a rendering failure.
     private var panelled: Bool {
         // **A task notification is drawn unpanelled**, for exactly the reason stated above: its
-        // result goes through `TimelineMarkdown.theme`, which fills a fenced block with
-        // `secondarySystemBackground` — the panel's own fill. An agent's report carrying a
-        // command or a block of test output would draw that block with no edge, which is the
-        // collision this property exists to avoid rather than an exception to it. It reaches
+        // result goes through `TimelineMarkdown.theme`, which gives a fenced block its own
+        // surface. An agent's report carrying a command or a block of test output would nest
+        // that surface in the panel, which is the collision this property exists to avoid
+        // rather than an exception to it. It reaches
         // here at all only because `rendersMarkdown` admits no `task-notification` — its one
         // `.systemNotice` exception is a peer session's message.
         guard TimelineStyle.taskNotification(for: item) == nil else { return false }

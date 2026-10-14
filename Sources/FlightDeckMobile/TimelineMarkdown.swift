@@ -116,9 +116,11 @@ enum TimelineMarkdown {
             .fixedSize(horizontal: false, vertical: true)
             .markdownMargin(top: .zero, bottom: .em(0.7))
         }
-        // The tool card's surface, exactly: same fill, same 10pt continuous corner, same
-        // monospaced footnote. A fenced block in an answer and a command panel below it are
-        // the same kind of object, and the render is what says so.
+        // The tool card's shape — same 10pt continuous corner, same monospaced footnote — but
+        // the Mac terminal's colours, because the text inside is highlighted in that
+        // terminal's palette (`ClaudeCodeHighlighter`) and those colours were picked against
+        // its background, not against `secondarySystemBackground`. The hairline is for light
+        // mode, where the terminal's background is the same white as the row's.
         //
         // **No horizontal `ScrollView`, which is what `.basic` wraps this in.** These land
         // inside `List` rows that are `NavigationLink`s, and a scroll view in a row competes
@@ -131,12 +133,17 @@ enum TimelineMarkdown {
                 .markdownTextStyle {
                     FontFamilyVariant(.monospaced)
                     FontSize(.em(0.86))
+                    ForegroundColor(TerminalPalette.foreground)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(.secondarySystemBackground))
+                        .fill(TerminalPalette.background)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color(.separator), lineWidth: 0.5)
                 )
                 .markdownMargin(top: .zero, bottom: .em(0.7))
         }
