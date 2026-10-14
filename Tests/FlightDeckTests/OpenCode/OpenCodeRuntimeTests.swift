@@ -56,14 +56,19 @@ final class OpenCodeRuntimeTests: XCTestCase {
         try db.part("prt_a", message: "msg_a", session: "ses_sig", data: ["type": "text", "text": "Tried it.\nBLOCKED: tests need a database"])
         let runtime = OpenCodeRuntime(server: FakeOpenCodeServer(running: false, databaseURL: db.url))
         var seen: [AgentEvent] = []
+        // Fulfilled by the event itself. This asserts that the report arrives, not how soon: the
+        // mirror sync runs on a detached task, and a wall-clock poll of a few seconds measured
+        // whether that task got scheduled on a busy machine.
+        let reportedSignals = expectation(description: "the blocked line is reported")
+        reportedSignals.assertForOverFulfill = false
         let binding = AgentBinding(conversationID: OpenCodeIdentity.conversationID(forSession: "ses_sig"),
                                    transcriptURL: OpenCodeFixtures.temporaryDirectory().appendingPathComponent("ses_sig.jsonl"))
-        let token = runtime.attach(binding, for: UUID()) { seen.append($0) }
-        defer { runtime.detach(token) }
-        let deadline = Date().addingTimeInterval(5)
-        while !seen.contains(where: { if case .outputSignals = $0 { true } else { false } }), Date() < deadline {
-            try await Task.sleep(nanoseconds: 20_000_000)
+        let token = runtime.attach(binding, for: UUID()) {
+            seen.append($0)
+            if case .outputSignals = $0 { reportedSignals.fulfill() }
         }
+        defer { runtime.detach(token) }
+        await fulfillment(of: [reportedSignals], timeout: 30)
         let reported: [[AgentOutputSignal]] = seen.compactMap { event in
             if case .outputSignals(let signals) = event { return signals }
             return nil
