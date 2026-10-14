@@ -60,7 +60,7 @@ final class TabModelOptionsTests: XCTestCase {
         XCTAssertEqual(adapter.resumeCommand(b, s, plan),
                        "agy --conversation=5e7b8b6d-c690-43b3-877e-0049c1db7ca8 --model gemini-3.8-flash-low --mode plan\n")
         XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions(mode: "yolo; rm -rf ~"))),
-                       "agy --model gemini-3.1-pro-high\n")
+                       "agy --model gemini-3.8-flash-high\n")
     }
 
     /// The Settings preview and the tab type the same tail, so the preview cannot drift.
@@ -76,7 +76,7 @@ final class TabModelOptionsTests: XCTestCase {
         XCTAssertEqual(TabModelOptionsForm.launchPreview(.grok(GrokOptions(model: "grok-4.6", effort: "high"))),
                        "grok -s ⟨generated⟩ -m 'grok-4.6' --effort 'high'")
         XCTAssertEqual(TabModelOptionsForm.launchPreview(.gemini(GeminiOptions(model: "claude-opus-5-5-high", mode: "accept-edits"))),
-                       "agy --model gemini-3.1-pro-high --mode accept-edits")
+                       "agy --model gemini-3.8-flash-high --mode accept-edits")
     }
 
     // MARK: Picker choices (from planning's detection, never a second probe)
@@ -125,13 +125,13 @@ final class TabModelOptionsTests: XCTestCase {
     /// agy also serves Claude and GPT-OSS models; a gemini tab silently launches its default
     /// instead (`GeminiAdapter.model(for:)`), so the pane has to say that out loud.
     func testANonGeminiModelSaysTheTabStartsOnTheDefault() {
-        let choices = TabModelChoices(agent: .gemini, available: detected(gemini: ["gemini-3.1-pro-high"]),
+        let choices = TabModelChoices(agent: .gemini, available: detected(gemini: ["gemini-3.8-flash-high"]),
                                       chosenModel: "claude-opus-5-5-high")
-        XCTAssertEqual(choices.defaultModelTitle, "Default (gemini-3.1-pro-high)")
+        XCTAssertEqual(choices.defaultModelTitle, "Default (gemini-3.8-flash-high)")
         XCTAssertEqual(choices.modes, GeminiOptions.modes)
         XCTAssertEqual(choices.efforts, [])
         XCTAssertEqual(choices.notes,
-                       ["A gemini tab runs Gemini models only; this one starts on gemini-3.1-pro-high instead."])
+                       ["A gemini tab runs Gemini models only; this one starts on gemini-3.8-flash-high instead."])
     }
 
     // MARK: Which pane

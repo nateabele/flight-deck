@@ -388,9 +388,10 @@ final class GeminiAvailabilityTests: XCTestCase {
     /// models mixed. Only Gemini ids are this harness's.
     func testModelListKeepsOnlyGeminiIDs() throws {
         let listed = GeminiProfile().parseModelList(String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self))
-        // agy lists Flash first; the planning default leads, since detection seeds seats with `first`.
+        // The planning default leads, since detection seeds seats with `first`; agy's own order
+        // follows it. (This capture still lists 3.1 Pro, which 3.8 Flash has since superseded.)
         XCTAssertEqual(listed.first, GeminiProfile.defaultPlanningModel)
-        XCTAssertEqual(listed.dropFirst().first, "gemini-3.8-flash-high")
+        XCTAssertEqual(listed.dropFirst().first, "gemini-3.8-flash-medium")
         XCTAssertTrue(listed.contains(GeminiProfile.defaultPlanningModel))
         XCTAssertTrue(listed.allSatisfy { $0.hasPrefix("gemini-") && !$0.contains("\t") })
         XCTAssertEqual(listed.count, 11)
@@ -403,7 +404,7 @@ final class GeminiAvailabilityTests: XCTestCase {
         let available = TriageSettings.available(path: bin.path, probe: probe(listed, exit: 0, calls: calls))
         XCTAssertEqual(available.agents, [.claude, .gemini])
         XCTAssertEqual(available.models[.gemini], GeminiProfile().parseModelList(listed))
-        XCTAssertEqual(available.choice(for: .gemini)?.model, "gemini-3.1-pro-high")
+        XCTAssertEqual(available.choice(for: .gemini)?.model, "gemini-3.8-flash-high")
         XCTAssertNil(available.unavailable[.gemini])
         // The ONLY agy command detection may run: `agy models`, which never starts a sign-in.
         XCTAssertEqual(calls.calls.map(\.0), ["agy"])

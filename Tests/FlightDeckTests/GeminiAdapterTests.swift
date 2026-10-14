@@ -193,15 +193,15 @@ final class GeminiAdapterTests: XCTestCase {
     func testLaunchAlwaysNamesAGeminiModel() {
         let adapter = GeminiAdapter(paths: paths)
         let s = session(), b = adapter.binding(for: s)
-        XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions())), "agy --model gemini-3.1-pro-high\n")
+        XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions())), "agy --model gemini-3.8-flash-high\n")
         XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions(model: "gemini-3.8-flash-low"))),
                        "agy --model gemini-3.8-flash-low\n")
         // agy also serves Claude models; a gemini tab never launches one, nor anything a shell
         // would read as more than a slug.
         XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions(model: "claude-opus-5-5-high"))),
-                       "agy --model gemini-3.1-pro-high\n")
+                       "agy --model gemini-3.8-flash-high\n")
         XCTAssertEqual(adapter.launchCommand(b, s, .gemini(GeminiOptions(model: "gemini-x; rm -rf ~"))),
-                       "agy --model gemini-3.1-pro-high\n")
+                       "agy --model gemini-3.8-flash-high\n")
     }
 
     /// agy answers `--conversation=<unknown>` by silently minting a fresh conversation, so a
@@ -211,9 +211,9 @@ final class GeminiAdapterTests: XCTestCase {
         let s = session(), b = adapter.binding(for: s)
         adapter.exists = { $0 == self.paths.stepStore(self.id).path }
         XCTAssertEqual(adapter.resumeCommand(b, s, .gemini(GeminiOptions())),
-                       "agy --conversation=5e7b8b6d-c690-43b3-877e-0049c1db7ca8 --model gemini-3.1-pro-high\n")
+                       "agy --conversation=5e7b8b6d-c690-43b3-877e-0049c1db7ca8 --model gemini-3.8-flash-high\n")
         adapter.exists = { _ in false }
-        XCTAssertEqual(adapter.resumeCommand(b, s, .gemini(GeminiOptions())), "agy --model gemini-3.1-pro-high\n")
+        XCTAssertEqual(adapter.resumeCommand(b, s, .gemini(GeminiOptions())), "agy --model gemini-3.8-flash-high\n")
     }
 
     func testBindingIsThePinAndItsTranscript() {
