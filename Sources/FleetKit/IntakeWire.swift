@@ -84,6 +84,16 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// The round configuration the intake is actually running (a customized one included), once
     /// a fidelity is chosen; nil before that, and from a Mac that predates the phone inspector.
     public var roundConfig: WireRoundConfig?
+    /// true from a Mac that accepts `intake.start` and `intake.rounds` — the phone's licence to
+    /// edit the Rounds inspector, separate from `choose` and `steer` for the same reason `choose`
+    /// is separate from `steer`: an older Mac drops the socket on an op it does not know. nil
+    /// from such a Mac, and the inspector stays read-only.
+    public var editRounds: Bool?
+    /// What the phone builds the inspector's menus from; sent with `editRounds`, while a
+    /// fidelity is being chosen or the intake is shaping.
+    public var roundsMenu: WireRoundsMenu?
+    /// What shaping has already run, so the inspector shows those roles locked; shaping only.
+    public var roundsLock: WireRoundsLock?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -91,7 +101,8 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         rounds: [WireRound] = [], questions: WireQuestions? = nil, choice: WireChoice? = nil,
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
         headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
-        roundConfig: WireRoundConfig? = nil
+        roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
+        roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -99,6 +110,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.pendingNotes = pendingNotes; self.halt = halt; self.headCheckpoint = headCheckpoint
         self.servedAt = servedAt; self.steer = steer; self.choose = choose; self.noteKind = noteKind
         self.roundConfig = roundConfig
+        self.editRounds = editRounds; self.roundsMenu = roundsMenu; self.roundsLock = roundsLock
     }
 }
 
@@ -384,11 +396,15 @@ public struct WireModelChoice: Codable, Equatable, Sendable {
     /// The name of the account or pool this role bills when it holds its own; nil bills the
     /// project's assignment, which the phone does not name.
     public var account: String?
+    /// The same account or pool as an opaque key (`AccountChoice.key`), which the phone echoes
+    /// back when it edits and never shows. nil bills the project's assignment, and from a Mac
+    /// that predates the editor.
+    public var accountKey: String?
 
     public init(agent: String, agentName: String? = nil, model: String, effort: String,
-                modelName: String? = nil, account: String? = nil) {
+                modelName: String? = nil, account: String? = nil, accountKey: String? = nil) {
         self.agent = agent; self.agentName = agentName; self.model = model; self.effort = effort
-        self.modelName = modelName; self.account = account
+        self.modelName = modelName; self.account = account; self.accountKey = accountKey
     }
 }
 
@@ -444,6 +460,111 @@ public struct WireRoundConfig: Codable, Equatable, Sendable {
         self.freshEyesAndDedup = freshEyesAndDedup; self.defaultPlay = defaultPlay
         self.customized = customized
         self.reviewers = reviewers; self.integrators = integrators; self.polishers = polishers
+    }
+}
+
+/// How `intake.rounds` and `intake.start` word a refusal that is the Mac's own sentence ("The
+/// reviewer already ran, so it can't change."): the `err` code is this prefix and then the
+/// sentence, so a phone shows it as it came and an unknown code from a newer Mac still reads.
+public enum RoundsRefusal {
+    public static let prefix = "refused: "
+}
+
+/// One model in an agent's menu, named as the Mac's menus name it. `efforts` are the levels this
+/// model takes — empty when it has none, so the phone hides the picker.
+public struct WireModelOption: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var efforts: [String]
+
+    public init(id: String, name: String, efforts: [String] = []) {
+        self.id = id; self.name = name; self.efforts = efforts
+    }
+}
+
+/// An account or pool a role could bill instead of the project's assignment. `key` is opaque.
+public struct WireAccountOption: Codable, Equatable, Sendable {
+    public var key: String
+    public var title: String
+    public var isPool: Bool
+
+    public init(key: String, title: String, isPool: Bool = false) {
+        self.key = key; self.title = title; self.isPool = isPool
+    }
+}
+
+/// An agent's account picker: the project default's title ("Project default — Work pool") and
+/// the choices beside it. The phone shows the picker only when `offersChoice`, or when a role
+/// already holds its own account (so it can be put back).
+public struct WireAccountMenu: Codable, Equatable, Sendable {
+    public var defaultTitle: String
+    public var offersChoice: Bool
+    public var options: [WireAccountOption]
+
+    public init(defaultTitle: String, offersChoice: Bool, options: [WireAccountOption] = []) {
+        self.defaultTitle = defaultTitle; self.offersChoice = offersChoice; self.options = options
+    }
+}
+
+/// One agent in the inspector's model menu. `reason` is why it cannot be picked ("Grok: run
+/// `grok login`"); nil means it can. `efforts` are the levels any model of this agent takes
+/// unless the model's own option says otherwise (a model typed in by hand has no option), and
+/// `planningEffort` the level a fresh role starts at. `accountModels` holds the lists of
+/// accounts and pools whose models differ from `models`, by `WireAccountOption.key`.
+/// `defaultChoice` is what a role newly given to this agent starts as.
+public struct WireAgentOption: Codable, Equatable, Sendable {
+    public var agent: String
+    public var name: String
+    public var reason: String?
+    public var models: [WireModelOption]
+    public var accountModels: [String: [WireModelOption]]?
+    public var efforts: [String]
+    public var planningEffort: String
+    public var defaultChoice: WireModelChoice?
+    public var accounts: WireAccountMenu?
+
+    public init(agent: String, name: String, reason: String? = nil, models: [WireModelOption] = [],
+                accountModels: [String: [WireModelOption]]? = nil, efforts: [String] = [],
+                planningEffort: String = "", defaultChoice: WireModelChoice? = nil,
+                accounts: WireAccountMenu? = nil) {
+        self.agent = agent; self.name = name; self.reason = reason; self.models = models
+        self.accountModels = accountModels; self.efforts = efforts; self.planningEffort = planningEffort
+        self.defaultChoice = defaultChoice; self.accounts = accounts
+    }
+}
+
+/// Everything the phone builds the Rounds editor's menus from, in the order the Mac lists agents.
+public struct WireRoundsMenu: Codable, Equatable, Sendable {
+    public var agents: [WireAgentOption]
+
+    public init(agents: [WireAgentOption]) { self.agents = agents }
+}
+
+/// What a shaping intake's tape has already run (the Mac's `ShapingEdit`), so the phone shows
+/// those roles locked and sets the caps the way the Mac does. `locked` names roles by the ids the
+/// phone's inspector uses ("drafter0", "synthesizer", "reviewer", "crossReviewer", "integrator",
+/// "encoder", "polisher"). The caps are shown as cap plus the tape's extend/trim counter, the
+/// rounds the stage will actually run. `editable` is false while a round runs, with `reason`
+/// saying so; the Mac refuses an edit then.
+public struct WireRoundsLock: Codable, Equatable, Sendable {
+    public var editable: Bool
+    public var reason: String?
+    public var locked: [String]
+    public var refineDone: Bool
+    public var polishDone: Bool
+    public var freshEyesDone: Bool
+    public var extraRefinement: Int
+    public var extraPolish: Int
+    public var refinementFloor: Int
+    public var polishFloor: Int
+
+    public init(editable: Bool, reason: String? = nil, locked: [String] = [], refineDone: Bool = false,
+                polishDone: Bool = false, freshEyesDone: Bool = false, extraRefinement: Int = 0,
+                extraPolish: Int = 0, refinementFloor: Int = 0, polishFloor: Int = 0) {
+        self.editable = editable; self.reason = reason; self.locked = locked
+        self.refineDone = refineDone; self.polishDone = polishDone; self.freshEyesDone = freshEyesDone
+        self.extraRefinement = extraRefinement; self.extraPolish = extraPolish
+        self.refinementFloor = refinementFloor; self.polishFloor = polishFloor
     }
 }
 

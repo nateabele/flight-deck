@@ -163,22 +163,26 @@ struct FidelityOption: Equatable, Identifiable {
     let summary: String
     /// Whether the Mac sent a configuration to inspect for this fidelity.
     let hasRounds: Bool
+    /// The phone edited this fidelity's rounds; Start sends the edit.
+    var edited = false
 }
 
 enum FidelityChooser {
     /// `nil` unless the Mac said it accepts the choice (`choose`) and sent the fidelities: an
     /// older Mac drops the socket on `intake.choose`, so the phone must not offer what it
     /// cannot send. The screen then says to choose on the Mac.
-    static func options(detail: WireIntakeDetail) -> [FidelityOption]? {
+    static func options(detail: WireIntakeDetail, drafts: [String: RoundDraft] = [:]) -> [FidelityOption]? {
         guard detail.choose == true, detail.steer == true,
               let choice = detail.choice, let presets = choice.presets, !presets.isEmpty,
               ["awaitingChoice", "parked"].contains(detail.summary.state) else { return nil }
         return presets.map { option in
-            FidelityOption(
+            // A fidelity the phone edited reads as edited: the summary is what Start will run.
+            let draft = drafts[option.preset].flatMap { RoundEditing.differs($0) ? $0 : nil }
+            return FidelityOption(
                 preset: option.preset, name: IntakeRowStyle.presetName(option.preset) ?? option.preset,
                 recommended: option.preset == choice.recommended,
-                summary: option.config.map(summary) ?? "Writes one task straight from triage, with no planning rounds.",
-                hasRounds: option.config != nil)
+                summary: (draft?.config ?? option.config).map(summary) ?? "Writes one task straight from triage, with no planning rounds.",
+                hasRounds: option.config != nil, edited: draft != nil)
         }
     }
 
@@ -195,5 +199,54 @@ enum FidelityChooser {
             ? "This starts paid agent rounds on your Mac, with the agents shown under Rounds."
             : "This runs an agent on your Mac to write the task."
         return ("Start with \(option.name)?", message, "Start")
+    }
+}
+
+/// Whether the inspector edits, and what it edits: the Mac's config for the fidelity or the running
+/// intake, with the phone's unsent edit over it.
+struct RoundEditing: Equatable {
+    var editor: RoundEditor
+    let key: String
+    /// What the Mac holds now.
+    let current: WireRoundConfig
+    /// What the edit was made from: `current`, until the phone edits.
+    let base: WireRoundConfig
+
+    /// The draft's key in `IntakeDetailModel.roundDrafts`: the fidelity, or the running config.
+    static func key(preset: String?) -> String { preset ?? "shaping" }
+
+    /// Differs from what it was edited from. `customized` is the Mac's to judge: an edit made and
+    /// taken back is no edit.
+    static func differs(_ draft: RoundDraft) -> Bool {
+        var config = draft.config
+        config.customized = draft.base.customized
+        return config != draft.base
+    }
+
+    var dirty: Bool { Self.differs(RoundDraft(base: base, config: editor.config)) }
+    /// The Mac changed these rounds since the edit began: sending it would be refused.
+    var stale: Bool { base != current }
+    var draft: RoundDraft { RoundDraft(base: base, config: editor.config) }
+
+    /// nil (read-only, as before the editor existed) unless the Mac said it takes edits
+    /// (`editRounds`) and sent what the menus are built from; while choosing, only for a fidelity
+    /// the chooser offers, and while shaping, only with what has run (`roundsLock`).
+    static func make(detail: WireIntakeDetail, preset: String?, drafts: [String: RoundDraft]) -> RoundEditing? {
+        guard detail.editRounds == true, detail.steer == true, let menu = detail.roundsMenu else { return nil }
+        let key = key(preset: preset)
+        let current: WireRoundConfig, lock: WireRoundsLock?
+        if let preset {
+            guard FidelityChooser.options(detail: detail) != nil,
+                  let stock = detail.choice?.presets?.first(where: { $0.preset == preset })?.config else { return nil }
+            current = stock
+            lock = nil
+        } else {
+            guard detail.summary.state == "shaping", let running = detail.roundConfig, let held = detail.roundsLock else { return nil }
+            current = running
+            lock = held
+        }
+        let draft = drafts[key]
+        return RoundEditing(editor: RoundEditor(config: draft?.config ?? current, menu: menu, lock: lock),
+                            key: key, current: current, base: draft?.base ?? current)
     }
 }

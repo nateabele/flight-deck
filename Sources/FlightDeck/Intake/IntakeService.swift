@@ -1296,6 +1296,59 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone starting a fidelity with its Rounds edited (`intakeStart`): `config` is what the
+    /// phone wants to run and `base` the stock `PresetExpansion` config it edited from. Refused as
+    /// `rounds_changed` once that stock config is no longer `base` (an agent signed in or out
+    /// since the phone loaded it), so an edit is never applied over a plan the phone did not see.
+    /// Otherwise the same `beginShaping` the Mac's own Start runs. The edited config must be one
+    /// the phone could have made (`PhoneRoundsEdit.accepts`).
+    func phoneStart(_ id: UUID, token: UUID, preset: String, config: WireRoundConfig, base: WireRoundConfig) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        guard i.state == .awaitingChoice || i.state == .parked else { return refuse("intake_moved_on", id) }
+        guard let chosen = Preset(rawValue: preset), chosen != .bead else { return refuse("unknown_preset", id) }
+        let available = availableModels()
+        guard let stock = PresetExpansion.config(for: chosen, available: available) else { return refuse("no_agents", id) }
+        guard let baseConfig = PhoneRoundsEdit.roundConfig(base), PhoneRoundsEdit.sameRounds(baseConfig, stock) else {
+            return refuse("rounds_changed", id)
+        }
+        guard var edited = PhoneRoundsEdit.roundConfig(config),
+              PhoneRoundsEdit.accepts(edited, reference: stock, available: available) else {
+            return refuse("invalid_config", id)
+        }
+        edited.customized = !PhoneRoundsEdit.sameRounds(edited, stock)
+        accept(token, for: id)
+        beginShaping(id, preset: chosen, config: edited)
+        return nil
+    }
+
+    /// The phone saving an edit to a shaping intake's Rounds (`intakeRounds`). `rounds_changed`
+    /// when `base` is no longer the saved config; otherwise the Mac editor's own save
+    /// (`saveRoundConfig`), so a stage that already ran stays as it was, nothing changes while a
+    /// round runs, and the refusal is the Mac's sentence (`RoundsRefusal`). An unsaved edit held
+    /// on the Mac also refuses: saving over it would be undone the next time the Mac saves.
+    func phoneRounds(_ id: UUID, token: UUID, config: WireRoundConfig, base: WireRoundConfig) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        guard i.state == .shaping, let saved = i.roundConfig else { return refuse("intake_moved_on", id) }
+        guard let baseConfig = PhoneRoundsEdit.roundConfig(base), PhoneRoundsEdit.sameRounds(baseConfig, saved) else {
+            return refuse("rounds_changed", id)
+        }
+        guard var edited = PhoneRoundsEdit.roundConfig(config),
+              PhoneRoundsEdit.accepts(edited, reference: saved, available: availableModels()) else {
+            return refuse("invalid_config", id)
+        }
+        if PhoneRoundsEdit.sameRounds(edited, saved) {
+            accept(token, for: id)
+            return nil
+        }
+        if roundConfigDrafts[id] != nil { return refuse(RoundsRefusal.prefix + "These rounds are being edited on your Mac.", id) }
+        edited.customized = true
+        if let refusal = saveRoundConfig(id, edited) { return refuse(RoundsRefusal.prefix + refusal, id) }
+        accept(token, for: id)
+        return nil
+    }
+
     /// A note from the phone (spec §6.5 `intakeNote`). The phone sends what it SHOWED — a block
     /// index and the rendered phrase — and the Mac builds the anchor from the markdown source,
     /// so the anchor is the same one the desktop's own highlight gesture would make. A phrase

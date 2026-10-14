@@ -14,7 +14,7 @@ protocol IntakeCommanding: AnyObject {
 
 /// One thing a person can ask of an intake; identifies a send for the in-flight set.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String)
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
 }
 
 enum CommandCopy {
@@ -35,7 +35,11 @@ enum CommandCopy {
             case "empty_note": return "Write something first."
             case "no_agents": return "No agent is available on your Mac to run planning rounds."
             case "unknown_intake": return "This intake is no longer on your Mac."
-            case "unknown_checkpoint", "unknown_block": return "The plan changed — reopen it and try again."
+            case "unknown_checkpoint", "unknown_block", "rounds_changed":
+                return "The plan changed — reopen it and try again."
+            case "invalid_config": return "Your Mac couldn't use those settings."
+            // The Mac's own sentence, as the Rounds editor words it ("The reviewer already ran…").
+            case _ where code.hasPrefix(RoundsRefusal.prefix): return String(code.dropFirst(RoundsRefusal.prefix.count))
             default: return "Your Mac wouldn't do that (\(code))."
             }
         }

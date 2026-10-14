@@ -51,6 +51,26 @@ final class IntakeCommandCodingTests: XCTestCase {
         try roundTrip(.intakeChoose(id: id, token: token, preset: "featurePlan"), op: "intake.choose")
     }
 
+    func testStartAndRoundsRoundTripWithTheirConfigs() throws {
+        let config = IntakeWireCodingTests.config
+        var edited = config
+        edited.refinementCap = 7
+        try roundTrip(.intakeStart(id: id, token: token, preset: "featurePlan", config: edited, base: config), op: "intake.start")
+        try roundTrip(.intakeRounds(id: id, token: token, config: edited, base: config), op: "intake.rounds")
+        let data = try JSONEncoder().encode(FleetCommand.intakeRounds(id: id, token: token, config: edited, base: config))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual((json["config"] as? [String: Any])?["refinementCap"] as? Int, 7)
+        XCTAssertEqual((json["base"] as? [String: Any])?["refinementCap"] as? Int, 3)
+    }
+
+    /// A start with no config is `intake.choose`, unchanged on the wire: an edit never rides on a
+    /// command an older Mac would read and drop the edit from.
+    func testChooseIsUnchangedOnTheWire() throws {
+        let data = try JSONEncoder().encode(FleetCommand.intakeChoose(id: id, token: token, preset: "sketch"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["op", "id", "token", "preset"])
+    }
+
     func testScopeIsFleetWideForAllFour() {
         let me = UUID()
         let all: [FleetCommand] = [
@@ -59,7 +79,9 @@ final class IntakeCommandCodingTests: XCTestCase {
             .intakeNote(id: id, token: token, noteID: noteID, kind: "comment", text: "x",
                         checkpoint: nil, block: nil, quote: nil),
             .intakeRemoveNote(id: id, token: token, noteID: noteID),
-            .intakeChoose(id: id, token: token, preset: "sketch")]
+            .intakeChoose(id: id, token: token, preset: "sketch"),
+            .intakeStart(id: id, token: token, preset: "sketch", config: IntakeWireCodingTests.config, base: IntakeWireCodingTests.config),
+            .intakeRounds(id: id, token: token, config: IntakeWireCodingTests.config, base: IntakeWireCodingTests.config)]
         for c in all {
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(me)), "\(c)")
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(id)), "\(c)")

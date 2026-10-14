@@ -1,9 +1,10 @@
 import FleetKit
 import SwiftUI
 
-/// The Rounds inspector (read-only): every agent a round configuration runs, with its model,
-/// effort and fallback, then the caps and the default play. Reached from the intake's "Rounds"
-/// row, or from the fidelity chooser for the configuration a fidelity WOULD run (`preset`).
+/// The Rounds inspector: every agent a round configuration runs, with its model, effort and
+/// fallback, then the caps and the default play. Reached from the intake's "Rounds" row, or from
+/// the fidelity chooser for the configuration a fidelity WOULD run (`preset`). Read-only, unless
+/// the Mac takes edits (`RoundEditing`), when it is the editor (`RoundEditorView`).
 struct RoundInspectorScreen: View {
     let intake: UUID
     let preset: String?
@@ -17,6 +18,17 @@ struct RoundInspectorScreen: View {
     }
 
     var body: some View {
+        if let detail = model.detail,
+           let editing = RoundEditing.make(detail: detail, preset: preset, drafts: model.roundDrafts) {
+            RoundEditorView(intake: intake, preset: preset, model: model, flightControl: flightControl, editing: editing,
+                            title: RoundInspectorModel.make(preset: preset ?? detail.summary.preset, config: editing.editor.config).title)
+                .intakePresence(id: intake, model: model, flightControl: flightControl)
+        } else {
+            readOnly
+        }
+    }
+
+    @ViewBuilder private var readOnly: some View {
         let inspector = config.map { RoundInspectorModel.make(preset: preset ?? model.detail?.summary.preset, config: $0) }
         List {
             if let inspector {

@@ -1438,7 +1438,28 @@ intake's own configuration once shaping, a customized one included (`WireRoundCo
 field is optional and additive. `WireIntakeDetail.choose == true` is the phone's only licence to send
 `intake.choose`, because an older Mac drops the socket on an unknown op; without it the phone keeps
 "choose on your Mac". A send nobody answers ends at `IntakeCommandModel`'s deadline with a message.
-Editing agents from the phone is out of scope.
+
+**The phone edits rounds.** The inspector is the editor (`RoundEditorView`, over `RoundEditor`) when the
+detail has `editRounds == true`, `steer`, and the menus: `roundsMenu` (`WireRoundsMenu`: every agent
+the Mac's model menu lists in its order, usable ones with models, per-model effort levels, the account
+and pool options and the project default's title, unusable ones with detection's reason; built by
+`PhoneRoundsEdit.menu` while choosing or shaping) and, while shaping, `roundsLock` (`WireRoundsLock`: the
+roles `ShapingEdit` has locked, `refineDone`/`polishDone`/`freshEyesDone`, the tape's extend/trim counters
+and floors, and `editable`, false with "Pause to change agents." while a round runs). A role's own account
+rides as `WireModelChoice.accountKey` (`AccountChoice.key`) beside the name. The phone edits a copy
+(`RoundDraft`: the edit and the config it was made from) and sends the whole thing:
+`intake.start` (`intakeStart`, sibling of `intake.choose` so an older Mac drops the socket rather than
+starting the stock config and ignoring the edit) from Start while choosing, and `intake.rounds`
+(`intakeRounds`) from Save while shaping. `IntakeService.phoneStart` and `phoneRounds` read the wire
+config as a `RoundConfig` (`PhoneRoundsEdit.roundConfig`, nil for anything this build cannot read), refuse
+a `base` that is no longer the Mac's config as `rounds_changed` ("The plan changed — reopen it and try
+again."), refuse a config the phone's editor could not have made (`invalid_config`: another drafter
+count, an unknown agent, a negative or absurd round count, an agent not usable now), then run
+`beginShaping` exactly as the Mac's Start does or `saveRoundConfig` exactly as its editor's save does.
+A shaping refusal is the Mac's own sentence in the `err` code after `RoundsRefusal.prefix`
+("refused: The reviewer already ran, so it can't change."), and so is an unsaved edit held on the Mac.
+Compatibility: all additive; `editRounds` is the licence to send either op, and a phone without the
+menu, or against a Mac without the flag, keeps the read-only inspector.
 
 **The phone runs.** It takes a code off the Mac's screen — scanned, or twelve characters typed —
 finds the Mac over Bonjour or by racing remembered addresses, and shows the running fleet in the

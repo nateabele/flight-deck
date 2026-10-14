@@ -310,6 +310,20 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// one; the Mac runs `IntakeService.choose`. **Sent only when the detail has `choose == true`**
     /// — an older Mac drops the socket on this unknown op, as for the four above.
     case intakeChoose(id: UUID, token: UUID, preset: String)
+    /// The phone starting a fidelity with its Rounds edited (`intake.start`): `config` is what the
+    /// phone wants to run, `base` the preset's stock config it edited from. The Mac refuses with
+    /// `rounds_changed` when the stock config is no longer `base`, and otherwise runs
+    /// `IntakeService.beginShaping` with `config` as its own Start does. **A sibling of
+    /// `intakeChoose` rather than a field on it**, so an older Mac drops the socket on the unknown
+    /// op instead of starting the stock config and ignoring the edit; sent only when the detail
+    /// has `editRounds == true`.
+    case intakeStart(id: UUID, token: UUID, preset: String, config: WireRoundConfig, base: WireRoundConfig)
+    /// The phone saving an edit to a shaping intake's Rounds (`intake.rounds`), with the config it
+    /// edited from. The Mac refuses a stale `base` (`rounds_changed`), applies the Mac's own
+    /// shaping rules (a stage that already ran stays as it was, nothing changes while a round
+    /// runs) and answers a refusal as `refused: <the Mac's sentence>`. Sent only when the detail
+    /// has `editRounds == true`.
+    case intakeRounds(id: UUID, token: UUID, config: WireRoundConfig, base: WireRoundConfig)
 
     /// Pause or resume project `project`'s swarm (L3-S §8). Idempotent by state, so no token.
     /// Sent only for a project whose snapshot carries `swarm`, which an older Mac never sends —
@@ -324,7 +338,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
         case block, approve, feedback
-        case command, stage, mode, noteID, kind, checkpoint, quote, preset
+        case command, stage, mode, noteID, kind, checkpoint, quote, preset, config, base
     }
 
     private enum Op: String, Codable {
@@ -347,6 +361,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeRemoveNote = "intake.removeNote"
         case intakeSetNoteKind = "intake.setNoteKind"
         case intakeChoose = "intake.choose"
+        case intakeStart = "intake.start"
+        case intakeRounds = "intake.rounds"
         case swarmPause = "swarm.pause"
         case swarmResume = "swarm.resume"
         case handoffConfirm = "handoff.confirm"
@@ -458,6 +474,19 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(preset, forKey: .preset)
+        case .intakeStart(let id, let token, let preset, let config, let base):
+            try c.encode(Op.intakeStart, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(preset, forKey: .preset)
+            try c.encode(config, forKey: .config)
+            try c.encode(base, forKey: .base)
+        case .intakeRounds(let id, let token, let config, let base):
+            try c.encode(Op.intakeRounds, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(config, forKey: .config)
+            try c.encode(base, forKey: .base)
         case .swarmPause(let project):
             try c.encode(Op.swarmPause, forKey: .op); try c.encode(project, forKey: .project)
         case .swarmResume(let project):
@@ -597,6 +626,21 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 preset: try c.decode(String.self, forKey: .preset)
+            )
+        case .intakeStart:
+            self = .intakeStart(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                preset: try c.decode(String.self, forKey: .preset),
+                config: try c.decode(WireRoundConfig.self, forKey: .config),
+                base: try c.decode(WireRoundConfig.self, forKey: .base)
+            )
+        case .intakeRounds:
+            self = .intakeRounds(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                config: try c.decode(WireRoundConfig.self, forKey: .config),
+                base: try c.decode(WireRoundConfig.self, forKey: .base)
             )
         case .swarmPause: self = .swarmPause(project: try c.decode(UUID.self, forKey: .project))
         case .swarmResume: self = .swarmResume(project: try c.decode(UUID.self, forKey: .project))
