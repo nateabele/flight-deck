@@ -58,7 +58,8 @@ final class PlanTableRenderHarness: XCTestCase {
     }
 
     func testDrawTables() throws {
-        let directory = try XCTUnwrap(directory, "set RENDER_PLAN_TABLE to draw the plan tables")
+        try XCTSkipUnless(self.directory != nil, "set RENDER_PLAN_TABLE to draw the plan tables")
+        let directory = self.directory!
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for (name, markdown) in Self.samples {
             for style in [UIUserInterfaceStyle.light, .dark] {
