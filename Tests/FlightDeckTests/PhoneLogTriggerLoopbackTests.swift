@@ -175,8 +175,15 @@ final class PhoneLogTriggerLoopbackTests: XCTestCase {
         try await attachPhone(
             caps: [], answering: WirePhoneLogs(entries: [], truncated: false)
         )
+        // Only a `phoneRequest` is the Mac speaking first, and so the only frame this phone
+        // must never see. The handshake's own `snapshot` is a reply to its `hello`, and it can
+        // land after `attachedClients` already lists the phone, which is the moment this
+        // handler replaces `attachPhone`'s: under load it arrives here, and a catch-all
+        // failed on it.
         client.onFrame = { frame in
-            XCTFail("a phone that claimed no capabilities must be sent nothing: \(frame)")
+            if case .phoneRequest = frame {
+                XCTFail("a phone that claimed no capabilities must not be asked: \(frame)")
+            }
         }
         let ended = expectation(description: "not disconnected")
         ended.isInverted = true

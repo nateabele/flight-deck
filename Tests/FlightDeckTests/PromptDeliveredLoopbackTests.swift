@@ -43,16 +43,18 @@ final class PromptDeliveredLoopbackTests: XCTestCase {
         harness = FleetTestHarness()
 
         // The tab injectable exactly as `PromptTypedEmitTests.makeStore` builds one: a stub
-        // injector standing in for the pty, idle status, an empty box, and a synchronous
-        // settle so `submitPrompt` -> `flushPromptQueue` -> `inject`'s `onSent` actually fires
-        // on this call stack rather than 120ms later on a run-loop turn this test does not
-        // drive.
+        // injector standing in for the pty, idle status and an empty box. The settle runs one
+        // main-queue turn later rather than inline, which is what production does (120ms
+        // later): an inline settle types the text, and broadcasts `promptTyped`, from inside
+        // the very handler that has not yet written the ack, so the event reached the phone
+        // first whenever the prompt got through. The ack is written before the handler
+        // returns, so any later turn is enough to order the two as they are ordered for real.
         harness.store.transcriptsRootOverride = projectsRoot
         harness.store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         harness.store.statusRootOverride = projectsRoot
         let spy = SpyInjector()
         harness.store.injectorOverride = spy
-        harness.store.injectionSettle = { $0() }
+        harness.store.injectionSettle = { DispatchQueue.main.async(execute: $0) }
         let session = harness.store.newSession(in: tmp)
         harness.store.applyRegistry(
             [1: entry(session.pinnedConversationID, .idle, cwd: tmp.path)]

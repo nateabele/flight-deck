@@ -317,6 +317,14 @@ public final class PairingListener: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         dispatchPrecondition(condition: .onQueue(queue))
+        // A connection the network stack had already queued when `stop()` cancelled the
+        // listener can still be handed to this handler afterwards. Filing it would leave a
+        // live socket on a closed window with nothing to answer it, held open until a
+        // deadline fires, which is the one thing `stop()` promises cannot happen.
+        guard listener != nil else {
+            connection.cancel()
+            return
+        }
         guard connections.count < Self.maxPending else {
             connection.cancel()
             return
