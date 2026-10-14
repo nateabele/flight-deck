@@ -11,10 +11,18 @@ import Foundation
 /// contents just changed. So every tab adopted from a previous app run is stale exactly when
 /// the bundled plugin's bytes differ from what that run shipped.
 ///
+/// **Only when the user comes back to the tab.** A stale tab is reloaded the first time it is
+/// activated (selected, with the app frontmost) after the plugin changed, not all at once at
+/// launch. Typing into every background tab at launch reached tabs that were asleep or not on
+/// screen, and there the Return was sometimes lost: the command stayed in the box, and the next
+/// launch's kill-and-yank put it back behind a second copy (`/reload-plugins/reload-plugins`).
+/// So `stale` is persisted across runs, a tab leaves it only once the box reads empty after the
+/// command, and a tab whose Return was lost waits for its next activation, not the next tick.
+///
 /// **What it deliberately is not.** It types nothing. The caller is `SessionStore`, through its
 /// existing gated `inject`, which refuses a dialog and an unreadable screen. That gate admits a
-/// busy composer, though, and whether claude runs a `/reload-plugins` queued mid-turn as a
-/// command is unprobed. So the caller asks only while the tab is idle.
+/// busy composer, though, and claude queues a slash command typed mid-turn as a message
+/// (probed against 2.1.300). So the caller asks only while the tab is idle.
 ///
 /// **It must not look like work.** Measured against Claude Code 2.1.293: the command flips the
 /// tab's registry row to `busy` for about 90 ms and back to `idle`. A poll that lands inside
@@ -38,32 +46,75 @@ struct PluginReload {
         debug ? "ClaudePluginFingerprint.Debug" : "ClaudePluginFingerprint"
     }
 
-    /// Tabs that still need the command. A `Set` because each tab needs it once, however many
-    /// registry ticks find it idle before the injection lands.
-    private(set) var pending: Set<UUID>
+    /// The `UserDefaults` key holding `stale`, so a tab not activated before the app quits is
+    /// still reloaded when it is activated in a later run. Per build for the fingerprint's reason.
+    static func staleTabsDefaultsKey(debug: Bool = SessionDaemon.isDebugBuild) -> String {
+        debug ? "ClaudePluginStaleTabs.Debug" : "ClaudePluginStaleTabs"
+    }
+
+    /// Tabs whose claude loaded the plugin before its last change and has not reloaded since.
+    private(set) var stale: Set<UUID>
+
+    /// Tabs already tried during the current activation. A lost Return is not retried until the
+    /// user activates the tab again, so a tab whose Return keeps failing is never typed into on
+    /// every tick.
+    private(set) var tried: Set<UUID> = []
+
+    /// Tabs whose command is typed but whose box has not been read back yet.
+    private(set) var checking: Set<UUID> = []
 
     /// Tabs whose reload blip may still be on its way, with when the quiet window closes.
     private(set) var quietUntil: [UUID: Date] = [:]
 
     /// `adopted` are the tabs whose claude was already running when this app run started.
     /// A tab this run launches loads the current plugin itself, and never belongs here.
-    init(adopted: some Sequence<UUID>, pluginChanged: Bool) {
-        pending = pluginChanged ? Set(adopted) : []
+    /// `stillStale` is the previous run's `stale`: an adopted tab in it has run the old plugin
+    /// since before that run, and still does.
+    init(adopted: some Sequence<UUID>, pluginChanged: Bool, stillStale: some Sequence<UUID> = []) {
+        let adopted = Set(adopted)
+        stale = pluginChanged ? adopted : adopted.intersection(stillStale)
     }
 
-    func needsReload(_ id: UUID) -> Bool { pending.contains(id) }
+    func needsReload(_ id: UUID) -> Bool {
+        stale.contains(id) && !tried.contains(id) && !checking.contains(id)
+    }
+
+    /// The user activated a tab: one that was tried and failed may be tried again.
+    mutating func activated() { tried.removeAll() }
 
     /// Called from `inject`'s `onSent`, never before: a drive that unwound typed nothing, and
-    /// the tab must stay pending so the next idle tick retries it.
+    /// the tab must stay due so the next idle tick retries it.
     mutating func sent(_ id: UUID, at now: Date) {
-        pending.remove(id)
+        tried.insert(id)
+        checking.insert(id)
         quietUntil[id] = now.addingTimeInterval(Self.quietWindow)
+    }
+
+    /// The box was read back after the command. `submitted` is false when the command was
+    /// still sitting in it.
+    mutating func checked(_ id: UUID, submitted: Bool) {
+        checking.remove(id)
+        if submitted { stale.remove(id) }
     }
 
     /// A relaunched or closed tab no longer has a stale claude to reload.
     mutating func forget(_ id: UUID) {
-        pending.remove(id)
+        stale.remove(id)
+        tried.remove(id)
+        checking.remove(id)
         quietUntil.removeValue(forKey: id)
+    }
+
+    /// What a composer holds after a lost Return, with every leading copy of the command
+    /// removed: the draft the kill-and-yank put back behind it, or "" if there was none. Nil
+    /// when the box does not start with the command, which means it was submitted.
+    static func leftover(in draft: String) -> String? {
+        var rest = Substring(draft)
+        guard rest.hasPrefix(command) else { return nil }
+        while rest.hasPrefix(command) {
+            rest = rest.dropFirst(command.count).drop { $0 == " " }
+        }
+        return String(rest)
     }
 
     /// Whether this edge is the reload's own blip: idle to busy or busy to idle, inside the
@@ -118,10 +169,8 @@ struct PluginReload {
     /// `current` for the next run. A missing record counts as changed: the first run that
     /// ships this check follows a build whose tabs never had the skill.
     ///
-    /// The record is written up front, not after every tab is reloaded, so a crash before
-    /// then costs those tabs their reload until the next plugin change. A tab can always be
-    /// relaunched, and a record that waited on every tab would re-reload on every launch
-    /// while any one of them stayed busy.
+    /// The record is written up front, not after every tab is reloaded: the tabs still owed a
+    /// reload carry over in `staleTabs` instead, which the store saves as soon as it arms.
     static func pluginChanged(current: String?, defaults: UserDefaults,
                               debug: Bool = SessionDaemon.isDebugBuild) -> Bool {
         guard let current else { return false }
@@ -129,5 +178,15 @@ struct PluginReload {
         let previous = defaults.string(forKey: key)
         defaults.set(current, forKey: key)
         return previous != current
+    }
+
+    /// The previous run's `stale`. Unparseable entries are dropped.
+    static func staleTabs(in defaults: UserDefaults, debug: Bool = SessionDaemon.isDebugBuild) -> Set<UUID> {
+        Set((defaults.stringArray(forKey: staleTabsDefaultsKey(debug: debug)) ?? []).compactMap(UUID.init(uuidString:)))
+    }
+
+    static func recordStale(_ tabs: Set<UUID>, in defaults: UserDefaults,
+                            debug: Bool = SessionDaemon.isDebugBuild) {
+        defaults.set(tabs.map(\.uuidString).sorted(), forKey: staleTabsDefaultsKey(debug: debug))
     }
 }

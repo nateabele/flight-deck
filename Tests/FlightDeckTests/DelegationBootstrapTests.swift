@@ -170,37 +170,148 @@ final class DelegationBootstrapTests: XCTestCase {
 
     // MARK: Plugin reload
 
-    func testPluginReloadIsDueOnlyForIdleAdoptedTabs() {
-        let store = store(hooks: nil)
-        let idle = store.newSession(in: temp).id
-        let busy = store.newSession(in: temp).id
-        let waiting = store.newSession(in: temp).id
-        let fresh = store.newSession(in: temp).id
-        store.armPluginReload(pluginChanged: true, adopted: [idle, busy, waiting])
+    /// A claude composer whose Return can be made to go missing, which is what left
+    /// `/reload-plugins` sitting in users' boxes. Kill, yank and paste act on `box` the way
+    /// claude's line editor does, so `submit`'s kill-and-yank round trip is exercised for real.
+    private final class Composer: TextInjecting {
+        var box = ""
+        var returnSubmits = true
+        private var ring = ""
+        private(set) var submitted: [String] = []
+        func sendText(_ text: String) { box += text }
+        func sendReturn() {
+            guard returnSubmits else { return }
+            submitted.append(box)
+            box = ""
+        }
+        func sendKillLine() {
+            guard !box.isEmpty else { return }
+            ring = box
+            box = ""
+        }
+        func sendYank() { box += ring }
+        func sendArrowDown() {}
+        func sendArrowUp() {}
+        func sendTab() {}
+        func sendEscape() {}
+        func sendCharacterKey(_ character: Character) {}
+        func sendControlKey(_ letter: Character) {}
+        func readViewport() -> String? {
+            let rule = String(repeating: "─", count: 92)
+            return [rule, box.isEmpty ? "❯" : "❯\u{a0}" + box, rule, "  Opus 5 (1M context)  ⎇ master"]
+                .joined(separator: "\n")
+        }
+    }
 
+    /// A store whose app is frontmost and whose injection settles synchronously.
+    private func reloadStore() -> SessionStore {
+        let store = store(hooks: nil)
+        store.appIsActive = { true }
+        store.injectionSettle = { $0() }
+        return store
+    }
+
+    func testPluginReloadIsDueOnlyForTheSelectedIdleAdoptedTab() {
+        let store = reloadStore()
+        let idle = store.newSession(in: temp).id
+        let other = store.newSession(in: temp).id
+        let busy = store.newSession(in: temp).id
+        let fresh = store.newSession(in: temp).id
+        store.armPluginReload(pluginChanged: true, adopted: [idle, other, busy])
         store.applyRegistryForTesting([
-            idle: SessionStatus(activity: .idle), busy: SessionStatus(activity: .busy),
-            waiting: SessionStatus(activity: .waiting), fresh: SessionStatus(activity: .idle),
+            idle: SessionStatus(activity: .idle), other: SessionStatus(activity: .idle),
+            busy: SessionStatus(activity: .busy), fresh: SessionStatus(activity: .idle),
         ])
 
-        XCTAssertEqual(store.pluginReloadsDue(), [idle])
+        store.selectedSessionID = fresh
+        XCTAssertEqual(store.pluginReloadsDue(), [], "a tab this run launched loads the current plugin")
+        store.selectedSessionID = busy
+        XCTAssertEqual(store.pluginReloadsDue(), [], "claude queues a command typed mid-turn")
+        store.selectedSessionID = idle
+        XCTAssertEqual(store.pluginReloadsDue(), [idle], "only the tab being looked at, not `other`")
+        store.appIsActive = { false }
+        XCTAssertEqual(store.pluginReloadsDue(), [], "a selected tab in a background app is not active")
     }
 
     func testNoPluginReloadWhenThePluginDidNotChange() {
-        let store = store(hooks: nil)
+        let store = reloadStore()
         let id = store.newSession(in: temp).id
         store.armPluginReload(pluginChanged: false, adopted: [id])
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
         XCTAssertEqual(store.pluginReloadsDue(), [])
     }
 
+    /// A tab not activated in the run that saw the change is still owed its reload in the next.
+    func testATabStillStaleFromThePreviousRunIsDueWithoutANewChange() {
+        let store = reloadStore()
+        let owed = store.newSession(in: temp).id
+        let done = store.newSession(in: temp).id
+        var saved: Set<UUID>?
+        store.armPluginReload(pluginChanged: false, adopted: [owed, done], stillStale: [owed],
+                              save: { saved = $0 })
+        XCTAssertEqual(saved, [owed], "armed state is saved at once, so a crash keeps it")
+        store.applyRegistryForTesting([owed: SessionStatus(activity: .idle), done: SessionStatus(activity: .idle)])
+        store.selectedSessionID = done
+        XCTAssertEqual(store.pluginReloadsDue(), [])
+        store.selectedSessionID = owed
+        XCTAssertEqual(store.pluginReloadsDue(), [owed])
+    }
+
     func testAClosedTabIsNoLongerDueAReload() {
-        let store = store(hooks: nil)
+        let store = reloadStore()
         let id = store.newSession(in: temp).id
-        store.armPluginReload(pluginChanged: true, adopted: [id])
+        var saved: Set<UUID>?
+        store.armPluginReload(pluginChanged: true, adopted: [id], save: { saved = $0 })
         store.closeSession(id)
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
         XCTAssertEqual(store.pluginReloadsDue(), [])
+        XCTAssertEqual(saved, [], "the record drops it too")
+    }
+
+    func testAReloadThatSubmitsRetiresTheTab() {
+        let store = reloadStore()
+        let composer = Composer()
+        store.injectorOverride = composer
+        let id = store.newSession(in: temp).id
+        var saved: Set<UUID>?
+        store.armPluginReload(pluginChanged: true, adopted: [id], save: { saved = $0 })
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.maintenanceTickForTesting()
+
+        XCTAssertEqual(composer.submitted, [PluginReload.command])
+        XCTAssertEqual(composer.box, "")
+        XCTAssertEqual(saved, [])
+        store.selectedSessionID = id
+        XCTAssertEqual(store.pluginReloadsDue(), [], "reactivating a reloaded tab types nothing")
+    }
+
+    /// The bug this guards: a Return that never landed left the command in the box, and the
+    /// next attempt's kill-and-yank put it back behind its own copy. The check clears every
+    /// copy, keeps the draft behind them, and waits for the user to come back to the tab.
+    func testALostReturnIsClearedKeepsTheDraftAndWaitsForTheNextActivation() {
+        let store = reloadStore()
+        let composer = Composer()
+        composer.box = "/reload-plugins/reload-pluginsfix the parser"
+        composer.returnSubmits = false
+        store.injectorOverride = composer
+        let id = store.newSession(in: temp).id
+        var saved: Set<UUID>?
+        store.armPluginReload(pluginChanged: true, adopted: [id], save: { saved = $0 })
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.maintenanceTickForTesting()
+        XCTAssertEqual(composer.box, "fix the parser", "residue cleared, draft kept")
+        XCTAssertEqual(saved, [id], "still owed a reload")
+        store.maintenanceTickForTesting()
+        XCTAssertEqual(composer.box, "fix the parser", "not retried on the next tick")
+
+        composer.returnSubmits = true
+        store.selectedSessionID = id
+        store.maintenanceTickForTesting()
+        XCTAssertEqual(composer.submitted, [PluginReload.command])
+        XCTAssertEqual(composer.box, "fix the parser")
+        XCTAssertEqual(saved, [])
     }
 
     /// The command flips the registry idle → busy → idle for about 90 ms. A poll that catches
@@ -276,11 +387,15 @@ final class DelegationBootstrapTests: XCTestCase {
                                  daemonControl: LiveDaemons([adopted]))
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
 
+        store.appIsActive = { true }
         store.armPluginReload(pluginChanged: true)
         store.applyRegistryForTesting([adopted: SessionStatus(activity: .idle),
                                        relaunched: SessionStatus(activity: .idle)])
 
-        XCTAssertEqual(store.pluginReloadsDue(), [adopted],
+        store.selectedSessionID = adopted
+        XCTAssertEqual(store.pluginReloadsDue(), [adopted])
+        store.selectedSessionID = relaunched
+        XCTAssertEqual(store.pluginReloadsDue(), [],
                        "a tab this run relaunched loads the current plugin itself")
     }
 }

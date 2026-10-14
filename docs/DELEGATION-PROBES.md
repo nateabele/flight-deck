@@ -49,7 +49,8 @@ moment in which to add the skill, so `-p` cannot answer this question.
 still names the bundle path whose contents just changed. `PluginReload`
 (`Sources/FlightDeck/Agents/PluginReload.swift`) fingerprints the bundled plugin, and finds
 the adopted tabs that need `/reload-plugins` when that fingerprint differs from the previous
-run's. `SessionStore` sends the command through the gated `inject`, while the tab is idle.
+run's. `SessionStore` sends the command through the gated `inject` when the user activates a
+stale tab and it is idle, then reads the box back to confirm the command was submitted.
 
 **Real skill check.** `p1_plugin_reload.py <trusted-dir> Resources/ClaudePlugin` reports that
 autocomplete offers `delegate`, as `/flight-deck:delegate` with the skill's description.

@@ -424,8 +424,11 @@ struct FlightDeckApp: App {
         if !resetState, let plugin = ClaudePluginLocation.directory(bundle: .main) {
             // Refresh the copy first, so the `/reload-plugins` this arms reads the new bytes.
             ClaudePluginLocation.refreshMaterialized(from: plugin)
-            store.armPluginReload(pluginChanged: PluginReload.pluginChanged(
-                current: PluginReload.fingerprint(of: plugin), defaults: .standard))
+            store.armPluginReload(
+                pluginChanged: PluginReload.pluginChanged(
+                    current: PluginReload.fingerprint(of: plugin), defaults: .standard),
+                stillStale: PluginReload.staleTabs(in: .standard),
+                save: { PluginReload.recordStale($0, in: .standard) })
         }
         // Set after the store exists: the service schedules itself on the store's `WatchClock`.
         store.capabilityIndexService = Self.makeCapabilityIndexService(store: store, resetState: resetState)

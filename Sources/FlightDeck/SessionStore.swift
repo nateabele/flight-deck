@@ -255,6 +255,8 @@ final class SessionStore: ObservableObject {
             // `appIsActive()`: selecting a row is an explicit act, so it counts as looking
             // at it even if the window is not frontmost at that instant.
             if let id = selectedSessionID { setUnread(id, false) }
+            // Activating a tab is also when a stale one is sent `/reload-plugins`.
+            pluginReload.activated()
             // Safety net against a stranded `renameRequest`: `SessionSidebar`'s Return
             // handler only sets it for a session with a rendered row, but the selection
             // it was issued for can still move out from under it afterward — collapsing
@@ -2068,6 +2070,8 @@ final class SessionStore: ObservableObject {
     /// Which adopted tabs still need `/reload-plugins` (C7 probe P1). Empty until
     /// `armPluginReload` runs, so a store nobody arms never types it.
     private var pluginReload = PluginReload(adopted: [], pluginChanged: false)
+    /// Where `pluginReload.stale` is kept between runs. Nil in a store nobody armed.
+    private var savePluginReloadStale: ((Set<UUID>) -> Void)?
 
     /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
     /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
@@ -2814,7 +2818,7 @@ final class SessionStore: ObservableObject {
             return .failed
         }
         // A fresh shell, so a fresh agent that loads the current plugin itself.
-        pluginReload.forget(id)
+        updatePluginReload { $0.forget(id) }
         // Same ordering and reason as `insertSession`: before anything is typed, so the child
         // is not left talking to libghostty's placeholder 800x600 grid.
         report(terminalSize, to: id)
@@ -5433,7 +5437,7 @@ final class SessionStore: ObservableObject {
         // re-takes it when the agent runs again.
         accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
-        pluginReload.forget(id)
+        updatePluginReload { $0.forget(id) }
         // A tab closed while frozen or mid-rollover leaves nothing to restore a draft into.
         frozenComposers[id] = nil
         pendingDrafts[id] = nil
@@ -8760,24 +8764,38 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Sends `/reload-plugins` to the claude tabs adopted at launch when the bundled plugin
-    /// changed since the previous run (C7's probe P1: a `--plugin-dir` skill added mid-session
-    /// never appears without it). `adopted` defaults to what `restore` recorded; a tab closed
-    /// since then is dropped.
-    func armPluginReload(pluginChanged: Bool, adopted: Set<UUID>? = nil) {
+    /// Arms `/reload-plugins` for the claude tabs adopted at launch that still run a plugin
+    /// older than this bundle's (C7's probe P1: a `--plugin-dir` skill added mid-session never
+    /// appears without it). `adopted` defaults to what `restore` recorded; a tab closed since
+    /// then is dropped. `stillStale` is the previous run's record and `save` keeps this run's,
+    /// so a tab not activated before the app quits is still owed its reload next run.
+    func armPluginReload(pluginChanged: Bool, adopted: Set<UUID>? = nil,
+                         stillStale: Set<UUID> = [], save: ((Set<UUID>) -> Void)? = nil) {
         let live = (adopted ?? adoptedClaudeTabs).filter { session(for: $0) != nil }
-        pluginReload = PluginReload(adopted: live, pluginChanged: pluginChanged)
+        pluginReload = PluginReload(adopted: live, pluginChanged: pluginChanged, stillStale: stillStale)
+        savePluginReloadStale = save
+        save?(pluginReload.stale)
     }
 
-    /// The tabs that may be sent `/reload-plugins` right now: pending, and idle by the status
-    /// registry. Idle, not just showing a composer, which is all `inject`'s own gate asks:
-    /// whether claude runs a `/reload-plugins` queued mid-turn as a command is unprobed, and a
-    /// tab with a user's rename or prompt still queued gets those first.
+    /// Applies `change` and saves the stale set if it moved.
+    private func updatePluginReload(_ change: (inout PluginReload) -> Void) {
+        let before = pluginReload.stale
+        change(&pluginReload)
+        if pluginReload.stale != before { savePluginReloadStale?(pluginReload.stale) }
+    }
+
+    /// The tab that may be sent `/reload-plugins` right now: the selected one, with the app
+    /// frontmost, still stale and not yet tried this activation, and idle by the status
+    /// registry. Only the tab the user is looking at: a background tab may be asleep or off
+    /// screen, and that is where a Return used to go missing. Idle, not just showing a
+    /// composer, which is all `inject`'s own gate asks: claude queues a slash command typed
+    /// mid-turn as a message. A tab with a user's rename or prompt still queued gets those first.
     func pluginReloadsDue() -> [UUID] {
-        pluginReload.pending.filter {
-            statuses[$0]?.activity == .idle && pendingRenames[$0] == nil && pendingPrompts[$0] == nil
-                && (promptQueue[$0]?.isEmpty ?? true)
-        }.sorted { $0.uuidString < $1.uuidString }
+        guard appIsActive(), let id = selectedSessionID, pluginReload.needsReload(id),
+              statuses[id]?.activity == .idle, pendingRenames[id] == nil, pendingPrompts[id] == nil,
+              promptQueue[id]?.isEmpty ?? true
+        else { return [] }
+        return [id]
     }
 
     private func flushPluginReloads() {
@@ -8785,14 +8803,50 @@ final class SessionStore: ObservableObject {
             inject(
                 PluginReload.command,
                 into: id,
-                // Re-asked after the settle: a turn that started meanwhile makes it wait.
+                // Re-asked after the settle: a turn that started meanwhile, or the user moving
+                // to another tab, makes it wait.
                 stillWanted: { [weak self] in self?.pluginReloadsDue().contains(id) ?? false },
                 onSent: { [weak self] in
                     guard let self else { return }
                     self.pluginReload.sent(id, at: self.now())
+                    self.injectionSettle { [weak self] in self?.checkPluginReload(id) }
                 }
             )
         }
+    }
+
+    /// Read with:
+    /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "plugin-reload"' --last 1d`
+    static let pluginReloadLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "plugin-reload"
+    )
+
+    /// Reads the box back after `/reload-plugins` went out. Empty, or anything else the user
+    /// put there, means it was submitted. The command still in it means the Return was lost:
+    /// every copy of it is cleared, any draft behind it is put back, and the tab stays stale
+    /// until it is next activated. Left alone the copy would be killed by the next injection's
+    /// probe and yanked back behind a second one, which is how `/reload-plugins/reload-plugins`
+    /// piled up. An unreadable box counts as submitted, as it did before this check existed.
+    private func checkPluginReload(_ id: UUID, attempt: Int = 0) {
+        guard pluginReload.checking.contains(id) else { return }
+        // Another drive mid-settle on this tab has the box; reading or clearing it now would
+        // land between its kill and its typing.
+        if injecting.contains(id), attempt < 10 {
+            injectionSettle { [weak self] in self?.checkPluginReload(id, attempt: attempt + 1) }
+            return
+        }
+        guard let injector = injector(for: id),
+              let draft = session(for: id)?.agent.textChannel?.draft(injector),
+              let leftover = PluginReload.leftover(in: draft)
+        else {
+            updatePluginReload { $0.checked(id, submitted: true) }
+            return
+        }
+        Self.pluginReloadLogger.notice("/reload-plugins stayed in \(id, privacy: .public)'s box; cleared it")
+        injector.sendKillLine()
+        if !leftover.isEmpty { injector.sendText(leftover) }
+        updatePluginReload { $0.checked(id, submitted: false) }
     }
 
     /// Drops a queued prompt for any session that has started working on its own.
@@ -10428,6 +10482,7 @@ final class SessionStore: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let id = self.selectedSessionID else { return }
                 self.setUnread(id, false)
+                self.pluginReload.activated()
             }
         }
     }

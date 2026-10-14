@@ -2676,8 +2676,10 @@ container; **nothing has run against a real second machine.**
   container's PID 1) rests on systemd's design, not a run: every Linux delegation test is in a
   `swift:6.3-noble` container with no systemd. Check both on a real host: `systemd-inhibit --list`
   during a run, and a run whose grandchild exits before it.
-- **`/reload-plugins` at a busy composer** is unprobed, which is why the app sends it only to an
-  idle tab. **A codex TUI already running** when its skill is installed or refreshed may not see
+- **`/reload-plugins` at a busy composer** is queued by claude 2.1.300 as a message ("Press up to
+  edit queued messages"), which is why the app sends it only to an idle tab. **A Return lost after
+  the command** was not reproduced in a raw pty (52 trials on 2.1.300, with and without gaps, kill
+  and yank); the app now sends it only to the tab on screen and reads the box back. **A codex TUI already running** when its skill is installed or refreshed may not see
   it; new tabs do.
 
 ### Not built, or out of v1 by decision
