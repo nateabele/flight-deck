@@ -491,6 +491,20 @@ final class EditLayerFragment: NSTextLayoutFragment {
         return text.attribute(.planQuote, at: 0, effectiveRange: nil) != nil
     }
 
+    /// This line's place in its table's grid, while the table is drawn as one (`MarkdownStyler.styleTable`).
+    private var tableRow: PlanTableRowRef? {
+        guard let text = paragraphText, text.length > 0 else { return nil }
+        return text.attribute(.planTableRow, at: 0, effectiveRange: nil) as? PlanTableRowRef
+    }
+
+    /// Where a grid row's top-left corner is, in this fragment's coordinates: the text
+    /// container's leading edge, inside its line padding, and the row's line — below the space
+    /// the first row keeps above the grid.
+    private var tableOrigin: CGPoint {
+        CGPoint(x: -layoutFragmentFrame.minX + (textLayoutManager?.textContainer?.lineFragmentPadding ?? 0),
+                y: textLineFragments.first?.typographicBounds.minY ?? 0)
+    }
+
     /// The box behind a fenced block's line, in this fragment's coordinates: the text
     /// container's full width, and the fragment's full height — its spacing included, which is
     /// where the fences' padding is — so consecutive lines' bands meet with no seam.
@@ -515,6 +529,10 @@ final class EditLayerFragment: NSTextLayoutFragment {
     override var renderingSurfaceBounds: CGRect {
         var bounds = super.renderingSurfaceBounds
         if let band = codeBand { bounds = bounds.union(band) }
+        // The row's cells are drawn across the table's width, where its (hidden) text has none.
+        if let ref = tableRow {
+            bounds = bounds.union(CGRect(x: tableOrigin.x - 1, y: tableOrigin.y, width: ref.layout.width + 2, height: ref.layout.rows[ref.row].height))
+        }
         let gutterX = PlanGutter.offset(.edit) - layoutFragmentFrame.minX - 1
         bounds = bounds.union(CGRect(x: gutterX, y: bounds.minY, width: 1, height: bounds.height))
         for (_, ghost) in ghosts where ghost.placement == .above || ghost.placement == .below {
@@ -527,7 +545,11 @@ final class EditLayerFragment: NSTextLayoutFragment {
 
     override func draw(at point: CGPoint, in context: CGContext) {
         drawBlockDecoration(at: point, in: context)
-        super.draw(at: point, in: context)
+        if let ref = tableRow {
+            drawTableRow(ref, at: point, in: context)
+        } else {
+            super.draw(at: point, in: context)
+        }
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
         let ghosts = ghosts
         var inserted = Set<Int>()
@@ -597,6 +619,28 @@ final class EditLayerFragment: NSTextLayoutFragment {
             case (true, false): bar(b.minY, b.maxY, EditLayer.barColor)
             default: bar(b.minY, b.maxY, EditLayer.deletedColor)
             }
+        }
+    }
+
+    /// A grid row's cells, with the fill the decoration layers (the edit tint, a note's highlight)
+    /// and the selection give its hidden text: those paint behind glyphs, and a row's glyphs are
+    /// nothing, so the row takes the colour as a whole.
+    private func drawTableRow(_ ref: PlanTableRowRef, at point: CGPoint, in context: CGContext) {
+        guard let layout = textLayoutManager else { return }
+        var tint: NSColor?
+        layout.enumerateRenderingAttributes(from: rangeInElement.location, reverse: false) { _, attributes, range in
+            guard range.location.compare(rangeInElement.endLocation) == .orderedAscending else { return false }
+            if let color = attributes[.backgroundColor] as? NSColor { tint = color }
+            return true
+        }
+        let selected = layout.textSelections.contains { selection in
+            selection.textRanges.contains { !$0.isEmpty && $0.intersection(rangeInElement).map { !$0.isEmpty } ?? false }
+        }
+        let origin = CGPoint(x: point.x + tableOrigin.x, y: point.y + tableOrigin.y)
+        // Colours resolve in the text view's appearance, not whatever a layer's draw happens to run in.
+        let appearance = layout.textContainer?.textView?.effectiveAppearance ?? NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            ref.layout.draw(row: ref.row, at: origin, in: context, theme: .standard, tint: tint, selected: selected)
         }
     }
 

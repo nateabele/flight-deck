@@ -217,6 +217,7 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.textView = container.textView
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
         if let folds { coordinator.foldStore = folds }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
@@ -442,19 +443,69 @@ struct PlanTextView: NSViewRepresentable {
             revealed = next
         }
 
+        /// The theme with the width the plan's tables are laid out in: the text container less the
+        /// padding of its lines. Zero while the view has none yet (`fitContainer` supplies it).
+        private var styleTheme: PlanTheme {
+            var theme = parent.theme
+            if let container = textView?.textContainer, container.size.width < 10_000 {
+                theme.contentWidth = max(0, container.size.width - 2 * container.lineFragmentPadding)
+            }
+            return theme
+        }
+
+        /// Tables the edit layer has words to draw inside — a deleted cell's text, struck through
+        /// where it was. A grid has no place for them, so such a table shows its source, as under
+        /// the caret.
+        private func sourceTables() -> Set<Int> {
+            Set(marks.compactMap { mark -> Int? in
+                guard mark.kind == .deleted, mark.inline,
+                      let index = MarkdownStyler.blockIndex(at: min(mark.range.location, max((textView?.string as NSString?)?.length ?? 1, 1) - 1), in: blocks),
+                      blocks[index].kind == .table else { return nil }
+                return index
+            })
+        }
+
+        /// The width the tables were last laid out in.
+        private var tableWidth: CGFloat = 0
+
+        /// The container took a new width: the tables are laid out again in it, once, however many
+        /// ticks of a resize arrive this turn. Only tables are restyled; the plan's own
+        /// re-wrap is `fitContainer`'s.
+        func containerWidthChanged() {
+            guard !tablesRestylePending, blocks.contains(where: { $0.kind == .table }) else { return }
+            tablesRestylePending = true
+            RunLoop.main.perform(inModes: [.common]) { [weak self] in
+                MainActor.assumeIsolated { self?.restyleTables() }
+            }
+        }
+        private var tablesRestylePending = false
+
+        private func restyleTables() {
+            tablesRestylePending = false
+            guard let textView, let storage = textView.textStorage, styleTheme.contentWidth != tableWidth else { return }
+            let tables = blocks.indices.filter { blocks[$0].kind == .table }
+            guard !tables.isEmpty else { return }
+            style(storage, indices: tables, reveal: revealed)
+            // The rows' heights changed: the plan's height is an estimate again.
+            textView.layOutWholePlan()
+        }
+
         /// Every styler pass goes through here, so the edit layer is laid back over exactly
         /// the blocks the styler just reset (`EditLayer.apply`'s contract).
         private func style(_ storage: NSTextStorage, indices: [Int]?, reveal: Int?) {
+            let theme = styleTheme
+            tableWidth = theme.contentWidth
+            let source = sourceTables()
             if let indices {
-                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, theme: parent.theme)
+                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, alsoRevealed: source, theme: theme)
                 let ranges = Set(indices).filter(blocks.indices.contains).map { i -> NSRange in
                     let r = blocks[i].range
                     return NSRange(location: r.location, length: min(r.length + 1, storage.length - r.location))
                 }
-                EditLayer.apply(marks, to: storage, within: ranges, theme: parent.theme)
+                EditLayer.apply(marks, to: storage, within: ranges, theme: theme)
             } else {
-                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, theme: parent.theme)
-                EditLayer.apply(marks, to: storage, within: nil, theme: parent.theme)
+                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, alsoRevealed: source, theme: theme)
+                EditLayer.apply(marks, to: storage, within: nil, theme: theme)
             }
         }
 
@@ -878,6 +929,7 @@ struct PlanTextView: NSViewRepresentable {
             // text typed at a folded heading's end read as inside its old body.
             if editCount == 0, let textView { unfold(containing: textView.selectedRange()) }
             MainActor.assumeIsolated { notesBridge.selectionChanged() }
+            redrawSelectedTables()
             // Mid-edit selection changes arrive before `textDidChange` re-parses; that pass
             // restyles the caret block itself.
             guard editCount == 0, let storage = textView?.textStorage else { return }
@@ -885,6 +937,24 @@ struct PlanTextView: NSViewRepresentable {
             guard next != revealed else { return }
             style(storage, indices: [revealed, next].compactMap { $0 }, reveal: next)
             revealed = next
+        }
+
+        /// The tables the selection touches, now and a moment ago: a grid row paints the selection
+        /// itself (`EditLayerFragment`), and the text view redraws only the hidden text's sliver.
+        private var selectedTables: [Int] = []
+
+        private func redrawSelectedTables() {
+            guard let textView else { return }
+            let selection = textView.selectedRange()
+            let now = blocks.indices.filter {
+                blocks[$0].kind == .table && selection.length > 0 && NSIntersectionRange(blocks[$0].range, selection).length > 0
+            }
+            for index in Set(now + selectedTables) where blocks.indices.contains(index) {
+                for rect in textView.segmentRects(blocks[index].range) {
+                    textView.setNeedsDisplay(NSRect(x: 0, y: rect.minY, width: textView.bounds.width, height: rect.height))
+                }
+            }
+            selectedTables = now
         }
 
         private func scheduleIdleCommit() {
@@ -1119,6 +1189,8 @@ final class PlanEditorContainer: NSView {
 class PlanNSTextView: NSTextView {
     var isFocused = false
     var onFocusChange: (() -> Void)?
+    /// The text container took a new width: what the tables are laid out in.
+    var onContainerWidth: (() -> Void)?
     /// How much of the page's top edge something is drawn over — the pinned control bar and
     /// board. A caret there is "visible" to AppKit and hidden from the human, so a reveal keeps
     /// this much room above it (`scrollRangeToVisible`).
@@ -1190,6 +1262,7 @@ class PlanNSTextView: NSTextView {
         let width = compact ? max(0, frame.width) : PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
         guard container.size.width != width else { return }
         container.size = NSSize(width: width, height: container.size.height)
+        onContainerWidth?()
         // Every line re-wraps: the height is an estimate again until it is all laid out.
         layOutWholePlan()
     }
@@ -1332,7 +1405,30 @@ class PlanNSTextView: NSTextView {
             openLink(link)
             return
         }
+        // A click on a table drawn as a grid puts the caret in the cell's text, which turns the
+        // table into its source. AppKit would put it at the end of the row's hidden line.
+        if !event.modifierFlags.contains(.shift), let caret = tableCaret(at: point) {
+            setSelectedRange(NSRange(location: caret, length: 0))
+            window?.makeFirstResponder(self)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    /// Where a click at `point` (view coordinates) lands in a table drawn as a grid: the source
+    /// offset of the character under it in the cell, nil when it isn't on a grid's cells.
+    func tableCaret(at point: NSPoint) -> Int? {
+        guard let layout = textLayoutManager, let content = layout.textContentManager else { return nil }
+        let origin = textContainerOrigin
+        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+        guard let fragment = layout.textLayoutFragment(for: local), let paragraph = (fragment.textElement as? NSTextParagraph)?.attributedString,
+              paragraph.length > 0, let ref = paragraph.attribute(.planTableRow, at: 0, effectiveRange: nil) as? PlanTableRowRef
+        else { return nil }
+        let frame = fragment.layoutFragmentFrame
+        let padding = layout.textContainer?.lineFragmentPadding ?? 0
+        guard let offset = ref.layout.sourceOffset(row: ref.row, at: CGPoint(x: local.x - frame.minX - padding, y: local.y - frame.minY - (fragment.textLineFragments.first?.typographicBounds.minY ?? 0)))
+        else { return nil }
+        return content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location) + offset
     }
 
     // MARK: Links
