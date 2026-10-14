@@ -1,0 +1,16 @@
+{
+  "files": [
+    "rate-limit-options.captured.txt"
+  ],
+  "isVerbatimCapturedOutput": true,
+  "claudeVersion": "2.1.296 (Claude Code)",
+  "capturedOn": "2026-10-13",
+  "method": "pyte 140x45 screen over a real `claude` TUI in a pty, signed in to a Max subscription, with `open`/BROWSER shimmed. `/rate-limit-options` typed and Return pressed: the hidden command claude opens by itself when a usage limit is hit, opened by hand so no real limit was needed. Nothing was sent to the API and no option was chosen; Escape closed it.",
+  "sanitized": "Verbatim. The first screen line ('uuu ▐▛███▛█Claude Code') is pyte's rendering of the banner, kept as captured.",
+  "screens": {
+    "rate-limit-options.captured.txt": "`What do you want to do?` - two numbered rows, cursor on row 0, `Esc to cancel` footer. The echoed `❯ /rate-limit-options` above it carries the marker with no number. While it was open, claude's sessions/<pid>.json read status `waiting`, waitingFor `dialog open`."
+  },
+  "sha256": {
+    "rate-limit-options.captured.txt": "18f4ec238e5bd588e5d1a4a36e2722694bb49a0d24e1971b17c45ecfb5064482"
+  }
+}
