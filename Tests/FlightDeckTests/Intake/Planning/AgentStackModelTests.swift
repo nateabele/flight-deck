@@ -80,7 +80,7 @@ final class AgentStackModelTests: XCTestCase {
     func testHelpListsEveryRoleWithItsModel() {
         let crossed = AgentStackModel.planned(stage: .refine, crossCheck: true, config: config)
         XCTAssertEqual(AgentStackModel.help(crossed),
-                       "Reviewer: Grok > Grok 4.7\nCross-check agent: Gemini > Gemini 3.1 Pro (High)\nIntegrator: Claude > Opus")
+                       "Reviewer: Grok > 4.7\nCross-check agent: Gemini > 3.1 Pro (High)\nIntegrator: Claude > Opus")
         XCTAssertEqual(AgentStackModel.accessibilityLabel(crossed), "Agents: Grok, Gemini, Claude")
     }
 

@@ -75,6 +75,14 @@ public enum AccountChoice: Hashable, Codable, Sendable {
 // MARK: - Names
 
 public enum ModelNaming {
+    /// "Claude > Opus 5.5": the agent, then the model's name. A name that already starts with its
+    /// agent's says it once ("Gemini > 3.8 Flash (High)", not "Gemini > Gemini 3.8 Flash (High)").
+    public static func label(agent: AgentID, name: String) -> String {
+        let prefix = agent.displayName + " "
+        let model = name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
+        return "\(agent.displayName) > \(model)"
+    }
+
     /// Words an id spells in lowercase that are written in capitals.
     private static let acronyms: Set<String> = ["gpt", "oss", "glm", "llm", "ai"]
     /// A trailing word that is an effort level, shown in parentheses as agy does.
@@ -393,6 +401,6 @@ public extension ModelChoice {
     /// "Claude > Opus 5.5": the agent, then the model, as a person reads them. Raw ids stay in
     /// storage, on the wire and on command lines.
     var displayLabel: String {
-        model.isEmpty ? agent.displayName : "\(agent.displayName) > \(ModelNaming.name(agent: agent, model: model))"
+        model.isEmpty ? agent.displayName : ModelNaming.label(agent: agent, name: ModelNaming.name(agent: agent, model: model))
     }
 }

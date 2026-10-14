@@ -124,7 +124,10 @@ struct RoundInspectorModel: Equatable {
     /// the agent capitalized, never as the raw id.
     static func describe(_ c: WireModelChoice) -> String {
         let agent = agentName(c)
-        let model = c.modelName ?? c.model
+        var model = c.modelName ?? c.model
+        // "Gemini > 3.8 Flash (High)": a name that already starts with its agent's says it once,
+        // as the Mac's `AvailableModels.modelLabel` does.
+        if model.hasPrefix(agent + " ") { model.removeFirst(agent.count + 1) }
         let head = model.isEmpty ? agent : "\(agent) > \(model)"
         return [head, c.effort, c.account.map { "Account: \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
     }

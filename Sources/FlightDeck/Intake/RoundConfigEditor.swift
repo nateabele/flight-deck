@@ -298,10 +298,14 @@ struct RoundConfigEditor: View {
                         Text(Self.alreadyRan).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
-                    agentRow(entry, rotation: row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) },
-                             fallbackShown: Self.supportsFallback(entry))
+                // One grid for every entry of the role, so a rotation's turns share one label column.
+                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+                    ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                        agentRows(entry, rotation: row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) },
+                                  fallbackShown: Self.supportsFallback(entry))
+                    }
                 }
+                .font(.callout)
                 if let role = row.keyPath.rotation?.role, Self.canAddToRotation(config, role, available: available) {
                     HStack(spacing: 10) {
                         Button { config = Self.addingToRotation(config, role, available: available) } label: {
@@ -335,38 +339,65 @@ struct RoundConfigEditor: View {
         }
     }
 
-    /// One agent's controls: its glyph, then the one "Claude > Opus 5.5" menu, effort where the
-    /// model takes it, the account, and the fallback. A rotating role's entries also get a position
-    /// and move/remove buttons once there are two.
-    private func agentRow(_ keyPath: SlotKeyPath, rotation: (role: RotatingRole, index: Int, count: Int)?,
-                          fallbackShown: Bool) -> some View {
+    /// One agent's rows in its role's grid, so every line of a role lines up: labels in a trailing
+    /// column (Model, Account, Fallback, Account), then the "Claude > Opus 5.5" menu with its glyph,
+    /// then effort where the model takes it. A rotating role's entries read "Turn 1", "Turn 2", with
+    /// move/remove buttons once there are two.
+    @ViewBuilder
+    private func agentRows(_ keyPath: SlotKeyPath, rotation: (role: RotatingRole, index: Int, count: Int)?,
+                           fallbackShown: Bool) -> some View {
         let site = ChoiceSite(keyPath: keyPath)
-        let choice = Self.choice(at: site, in: config)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                if let rotation, rotation.count > 1 {
-                    Text("\(rotation.index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                // The glyph the main view's stacks draw for this agent, beside its picker.
-                AgentBadge(agent: choice?.agent ?? .codex, size: 18)
-                modelMenu(site, noneTitle: nil)
-                effortPicker(site)
-                if let rotation, rotation.count > 1 {
-                    rotationButtons(rotation)
-                }
+        let fallbackSite = ChoiceSite(keyPath: keyPath, isFallback: true)
+        let turn = rotation.flatMap { $0.count > 1 ? $0 : nil }
+        modelGridRow(site, label: turn.map { "Turn \($0.index + 1)" } ?? "Model", noneTitle: nil, rotation: turn)
+        customModelGridRow(site)
+        accountGridRow(site)
+        if fallbackShown {
+            modelGridRow(fallbackSite, label: "Fallback", noneTitle: "None", rotation: nil)
+            customModelGridRow(fallbackSite)
+            accountGridRow(fallbackSite)
+        }
+    }
+
+    private func gridLabel(_ text: String) -> some View {
+        Text(text).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+    }
+
+    private func modelGridRow(_ site: ChoiceSite, label: String, noneTitle: String?,
+                              rotation: (role: RotatingRole, index: Int, count: Int)?) -> some View {
+        GridRow(alignment: .center) {
+            gridLabel(label)
+            // The glyph the main view's stacks draw for this agent, in a column of its own so the
+            // menus and the Account pickers under them start on one edge.
+            if let agent = Self.choice(at: site, in: config)?.agent {
+                AgentBadge(agent: agent, size: 16)
+            } else {
+                Color.clear.frame(width: 16, height: 16)
             }
-            customModelField(site)
-            accountRow(site)
-            if fallbackShown {
-                let fallbackSite = ChoiceSite(keyPath: keyPath, isFallback: true)
-                HStack(spacing: 8) {
-                    Text("Fallback").foregroundStyle(.secondary)
-                    modelMenu(fallbackSite, noneTitle: "None")
-                    effortPicker(fallbackSite)
-                }
-                .font(.callout)
-                customModelField(fallbackSite)
-                accountRow(fallbackSite)
+            modelMenu(site, noneTitle: noneTitle)
+            effortPicker(site)
+            if let rotation { rotationButtons(rotation) }
+        }
+    }
+
+    @ViewBuilder
+    private func customModelGridRow(_ site: ChoiceSite) -> some View {
+        if let entry = custom, entry.site == site {
+            GridRow {
+                Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                customModelField(site).gridCellColumns(3)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func accountGridRow(_ site: ChoiceSite) -> some View {
+        if let choice = Self.choice(at: site, in: config), let menu = accounts[choice.agent] {
+            GridRow(alignment: .center) {
+                gridLabel(Self.accountLabel)
+                Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                accountControl(site, menu: menu, choice: choice).gridCellColumns(3)
             }
         }
     }
@@ -452,7 +483,7 @@ struct RoundConfigEditor: View {
         } label: {
             Text(choice.map { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) } ?? (noneTitle ?? ""))
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
         .fixedSize()
         .accessibilityIdentifier("rounds-model-menu")
     }
@@ -515,42 +546,36 @@ struct RoundConfigEditor: View {
 
     /// "Account": a picker when the agent has more than one account or pool to choose from (the
     /// project's assignment first), else the account it resolves to as text. A role that holds its
-    /// own account keeps the picker, so it can be put back.
+    /// own account keeps the picker, so it can be put back. The label is the grid's.
     @ViewBuilder
-    private func accountRow(_ site: ChoiceSite) -> some View {
-        if let choice = Self.choice(at: site, in: config), let menu = accounts[choice.agent] {
-            switch Self.accountRow(menu, choice: choice) {
-            case .picker:
-                HStack(spacing: 8) {
-                    Text(Self.accountLabel).foregroundStyle(.secondary)
-                    Picker(Self.accountLabel, selection: accountBinding(site)) {
-                        Text(menu.defaultTitle).tag(AccountChoice?.none)
-                        ForEach(menu.options.filter { !$0.isPool }, id: \.choice) { Text($0.title).tag(AccountChoice?.some($0.choice)) }
-                        let pools = menu.options.filter(\.isPool)
-                        if !pools.isEmpty {
-                            Divider()
-                            ForEach(pools, id: \.choice) { Label($0.title, systemImage: "square.stack.3d.up").tag(AccountChoice?.some($0.choice)) }
-                        }
-                        if let own = choice.account, menu.title(for: own) == nil {
-                            Divider()
-                            Text(own.key.hasPrefix("pool:") ? "Missing pool" : "Missing account").tag(AccountChoice?.some(own))
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityIdentifier("rounds-account-picker")
+    private func accountControl(_ site: ChoiceSite, menu: AccountMenu, choice: ModelChoice) -> some View {
+        switch Self.accountRow(menu, choice: choice) {
+        case .picker:
+            Picker(Self.accountLabel, selection: accountBinding(site)) {
+                Text(menu.defaultTitle).tag(AccountChoice?.none)
+                ForEach(menu.options.filter { !$0.isPool }, id: \.choice) { Text($0.title).tag(AccountChoice?.some($0.choice)) }
+                let pools = menu.options.filter(\.isPool)
+                if !pools.isEmpty {
+                    Divider()
+                    ForEach(pools, id: \.choice) { Label($0.title, systemImage: "square.stack.3d.up").tag(AccountChoice?.some($0.choice)) }
                 }
-                .font(.callout)
-            case .line(let text):
-                HStack(spacing: 4) {
-                    if menu.problem { Image(systemName: "exclamationmark.triangle.fill").imageScale(.small) }
-                    Text(text).lineLimit(1).truncationMode(.middle)
+                if let own = choice.account, menu.title(for: own) == nil {
+                    Divider()
+                    Text(own.key.hasPrefix("pool:") ? "Missing pool" : "Missing account").tag(AccountChoice?.some(own))
                 }
-                .font(.caption)
-                .foregroundStyle(menu.problem ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
-                .help(menu.problem ? "Choose another in Settings → Projects." : "Set per project in Settings → Projects.")
-                .accessibilityIdentifier("rounds-account")
             }
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityIdentifier("rounds-account-picker")
+        case .line(let name):
+            HStack(spacing: 4) {
+                if menu.problem { Image(systemName: "exclamationmark.triangle.fill").imageScale(.small) }
+                Text(name).lineLimit(1).truncationMode(.middle)
+            }
+            .foregroundStyle(menu.problem ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
+            .help(menu.problem ? "Choose another in Settings → Projects." : "Set per project in Settings → Projects.")
+            .accessibilityLabel("\(Self.accountLabel): \(name)")
+            .accessibilityIdentifier("rounds-account")
         }
     }
 
@@ -752,7 +777,7 @@ struct RoundConfigEditor: View {
     }
 
     /// What the Account row shows for a role: a picker (the agent has more than one account or pool,
-    /// or the role already holds its own), else the resolved account as text.
+    /// or the role already holds its own), else the resolved account's name, beside the row's label.
     enum AccountRowKind: Equatable {
         case picker
         case line(String)
@@ -762,7 +787,7 @@ struct RoundConfigEditor: View {
     static let otherModel = "Other…"
 
     static func accountRow(_ menu: AccountMenu, choice: ModelChoice) -> AccountRowKind {
-        menu.offersChoice || choice.account != nil ? .picker : .line("\(accountLabel): \(menu.projectDefault)")
+        menu.offersChoice || choice.account != nil ? .picker : .line(menu.projectDefault)
     }
 
     /// The effort levels shown for `choice`: its model's, with a stored level the model no longer

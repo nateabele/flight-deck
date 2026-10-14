@@ -260,7 +260,7 @@ public struct AvailableModels: Sendable, Equatable {
     /// "Claude > Opus 5.5": the agent, then the model. A model the list does not hold reads as custom.
     public func modelLabel(agent: AgentID, model: String, account: AccountChoice? = nil) -> String {
         let custom = !model.isEmpty && option(agent: agent, model: model, account: account) == nil
-        return "\(agent.displayName) > \(displayName(agent: agent, model: model, account: account))" + (custom ? " (custom)" : "")
+        return ModelNaming.label(agent: agent, name: displayName(agent: agent, model: model, account: account)) + (custom ? " (custom)" : "")
     }
 
     /// The effort levels `model` takes: its own when the source says (an empty list: none), else
