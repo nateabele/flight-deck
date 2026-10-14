@@ -49,6 +49,35 @@ final class RoundInspectorModelTests: XCTestCase {
         XCTAssertFalse(AgentIcon.known("newagent"))
     }
 
+    /// A rotating role reads as its agents in order, each with its icon; a role with one agent, or
+    /// from a Mac that predates rotations, is unchanged.
+    func testARotatingRoleListsItsAgentsInOrder() {
+        let gemini = choice("gemini", "Gemini", "gemini-3.1-pro-high")
+        var c = full()
+        c.reviewers = [WireSeat(choice: codex, persona: "general", fallback: claude), WireSeat(choice: claude, persona: "general", fallback: codex)]
+        c.integrators = [WireSeat(choice: claude), WireSeat(choice: codex)]
+        c.polishers = [WireSeat(choice: claude), WireSeat(choice: gemini), WireSeat(choice: codex)]
+        let m = RoundInspectorModel.make(preset: "fullPlan", config: c)
+        let refine = m.stages[2].agents
+        XCTAssertEqual(refine.map(\.role), ["Reviewer", "Cross-check agent", "Integrator"])
+        XCTAssertEqual(refine[0].line, "Alternates: Codex → Claude")
+        XCTAssertEqual(refine[0].rotation.map(\.agent), ["codex", "claude"])
+        XCTAssertEqual(refine[2].line, "Alternates: Claude → Codex")
+        let polish = m.stages[4].agents[0]
+        XCTAssertEqual(polish.line, "Alternates: Claude → Gemini → Codex")
+        XCTAssertEqual(polish.rotation.map(\.agent), ["claude", "gemini", "codex"])
+        XCTAssertEqual(polish.rotation.map(\.line), ["Claude · opus · high", "Gemini · gemini-3.1-pro-high · high", "Codex · gpt-6-sol · high"])
+        XCTAssertEqual(polish.agent, "claude", "the first agent")
+        XCTAssertNil(polish.fallback)
+
+        var one = full()
+        one.integrators = [WireSeat(choice: claude)]
+        let plain = RoundInspectorModel.make(preset: "fullPlan", config: one).stages[2].agents[2]
+        XCTAssertEqual(plain.line, "Claude · opus · high")
+        XCTAssertEqual(plain.rotation, [])
+        XCTAssertEqual(RoundInspectorModel.make(preset: "fullPlan", config: full()).stages[2].agents[0].rotation, [])
+    }
+
     func testCapsPolicyAndDefaultPlay() {
         let m = RoundInspectorModel.make(preset: "featurePlan", config: full())
         XCTAssertEqual(m.stages[2].facts, [.init(label: "Rounds", value: "3"), .init(label: "Cross-check", value: "First and last")])

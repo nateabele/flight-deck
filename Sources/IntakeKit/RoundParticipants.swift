@@ -27,6 +27,7 @@ public enum RoundParticipants {
     /// the last round as the stage stands now, so an extend moves it (coverage spec §3, §7).
     public static func crossChecks(round: Int, of total: Int, config: RoundConfig) -> Bool {
         guard config.crossChecks, let policy = config.crossCheck, round >= 1, round <= total else { return false }
+        guard config.crossReviewer(rotation: round - 1) != nil else { return false }
         switch policy {
         case .off: return false
         case .firstAndLast: return round == 1 || round == total
@@ -42,25 +43,27 @@ public enum RoundParticipants {
 
     /// The agents `round` starts, in the order `RoundExecutor` starts them. Synthesis lists the
     /// integrator because the engine runs it there (`RoundExecutor.synthesis` → `integrate`);
-    /// fresh eyes and dedup run on the polisher, as polish does.
+    /// fresh eyes and dedup run on the polisher, as polish does. A rotating role (`RoundConfig.reviewers`)
+    /// is read at the round's `rotation`, and the engine picks its agents with the same
+    /// `RoundConfig` accessors, so what this lists is what runs.
     public static func of(_ round: PlannedRound, config: RoundConfig) -> [RoundParticipant] {
         switch round.stage {
         case .draft:
             return config.drafters.enumerated().map { RoundParticipant(role: "drafter", index: $0.offset, slot: $0.element) }
         case .synthesis:
             return [RoundParticipant(role: "synthesizer", slot: config.synthesizer),
-                    RoundParticipant(role: "integrator", slot: Slot(config.integrator))]
+                    RoundParticipant(role: "integrator", slot: Slot(config.integrator(rotation: 0)))]
         case .refine:
             // The cross-reviewer sits between the two because that is the order the engine
             // starts them (`RoundExecutor.crossCheckRefine`), and the seat rows list in it.
-            var out = [RoundParticipant(role: "reviewer", slot: config.reviewer)]
-            if round.crossCheck { out.append(RoundParticipant(role: "crossReviewer", slot: config.crossReviewer)) }
-            out.append(RoundParticipant(role: "integrator", slot: Slot(config.integrator)))
+            var out = [RoundParticipant(role: "reviewer", slot: config.reviewer(rotation: round.rotation))]
+            if round.crossCheck { out.append(RoundParticipant(role: "crossReviewer", slot: config.crossReviewer(rotation: round.rotation))) }
+            out.append(RoundParticipant(role: "integrator", slot: Slot(config.integrator(rotation: round.rotation))))
             return out
         case .encode:
             return [RoundParticipant(role: "encoder", slot: Slot(config.encoder))]
         case .polish, .freshEyes, .dedup:
-            return [RoundParticipant(role: "polisher", slot: config.polisher.map { Slot($0) })]
+            return [RoundParticipant(role: "polisher", slot: config.polisher(rotation: round.rotation).map { Slot($0) })]
         }
     }
 }

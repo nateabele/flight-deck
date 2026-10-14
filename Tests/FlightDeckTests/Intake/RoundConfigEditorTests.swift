@@ -25,6 +25,108 @@ final class RoundConfigEditorTests: XCTestCase {
         XCTAssertEqual(RoundConfigEditor.label(preset: .fullPlan, config: config), "Full plan, customized")
     }
 
+    // MARK: - Rotations
+
+    private let threeAgents = AvailableModels(choices: [
+        .codex: ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high"),
+        .claude: ModelChoice(agent: .claude, model: "opus", effort: "high"),
+        .gemini: ModelChoice(agent: .gemini, model: "gemini-3.1-pro-high", effort: "high")])
+
+    private func fullWithEveryAgent() throws -> RoundConfig {
+        try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: threeAgents))
+    }
+
+    private func polishers(_ c: RoundConfig) -> [AgentID] { c.polisherRotation.map(\.agent) }
+
+    /// A rotating role is one row that lists its agents in order; the rows stay one per role.
+    func testARotatingRoleShowsItsEntriesInOrder() throws {
+        let config = try fullWithEveryAgent()
+        XCTAssertEqual(RoundConfigEditor.slots(of: config).map(\.role).filter { $0 == "polisher" }.count, 1)
+        let polisher = RoundConfigEditor.entries(of: .polisher, in: config)
+        XCTAssertEqual(polisher, [.polisher, .polisherEntry(1), .polisherEntry(2)])
+        XCTAssertEqual(polisher.compactMap { RoundConfigEditor.choice(for: $0, in: config)?.agent }, [.claude, .gemini, .codex])
+        XCTAssertEqual(RoundConfigEditor.entries(of: .reviewer, in: config).compactMap { RoundConfigEditor.choice(for: $0, in: config)?.agent },
+                       [.codex, .claude])
+        XCTAssertEqual(RoundConfigEditor.entries(of: .encoder, in: config), [.encoder])
+        XCTAssertEqual(RoundConfigEditor.fallback(for: .reviewerEntry(1), in: config)?.agent, .codex)
+        XCTAssertTrue(RoundConfigEditor.supportsFallback(.reviewerEntry(1)))
+        XCTAssertFalse(RoundConfigEditor.supportsFallback(.polisherEntry(1)))
+    }
+
+    /// Every rotation edit flags the config customized and keeps the single field equal to entry 0.
+    func testEditingARotationMarksItCustomizedAndKeepsEntryZeroInStep() throws {
+        let config = try fullWithEveryAgent()
+        XCTAssertFalse(config.customized)
+
+        let moved = RoundConfigEditor.movingInRotation(config, .polisher, from: 2, to: 0)
+        XCTAssertTrue(moved.customized)
+        XCTAssertEqual(polishers(moved), [.codex, .claude, .gemini])
+        XCTAssertEqual(moved.polisher, moved.polishers?.first)
+
+        let removed = RoundConfigEditor.removingFromRotation(config, .polisher, at: 0)
+        XCTAssertTrue(removed.customized)
+        XCTAssertEqual(polishers(removed), [.gemini, .codex])
+        XCTAssertEqual(removed.polisher?.agent, .gemini)
+
+        let collapsed = RoundConfigEditor.collapsingRotation(config, .polisher)
+        XCTAssertNil(collapsed.polishers, "one agent is no rotation")
+        XCTAssertEqual(collapsed.polisher?.agent, .claude)
+        XCTAssertEqual(collapsed.polisher(rotation: 5)?.agent, .claude)
+
+        // Removing down to one agent collapses to it, whichever was left.
+        let one = RoundConfigEditor.removingFromRotation(RoundConfigEditor.removingFromRotation(config, .polisher, at: 0), .polisher, at: 0)
+        XCTAssertNil(one.polishers)
+        XCTAssertEqual(one.polisher?.agent, .codex)
+        // The last agent can't be taken out.
+        XCTAssertEqual(RoundConfigEditor.removingFromRotation(one, .polisher, at: 0).polisher?.agent, .codex)
+    }
+
+    func testAddingAnAgentMakesAPairFromASingleAgent() throws {
+        let codexOnly = AvailableModels(codex: threeAgents.codex, claude: nil)
+        let single = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: codexOnly))
+        XCTAssertNil(single.integrators)
+        XCTAssertFalse(RoundConfigEditor.canAddToRotation(single, .integrator, available: codexOnly))
+        XCTAssertTrue(RoundConfigEditor.canAddToRotation(single, .integrator, available: threeAgents))
+        let added = RoundConfigEditor.addingToRotation(single, .integrator, available: threeAgents)
+        XCTAssertTrue(added.customized)
+        XCTAssertEqual(added.integrators?.map(\.agent), [.codex, .claude])
+        XCTAssertEqual(added.integrator.agent, .codex)
+        let more = RoundConfigEditor.addingToRotation(added, .integrator, available: threeAgents)
+        XCTAssertEqual(more.integrators?.map(\.agent), [.codex, .claude, .gemini])
+        let reviewer = RoundConfigEditor.addingToRotation(single, .reviewer, available: threeAgents)
+        XCTAssertEqual(reviewer.reviewers?.map(\.choice.agent), [.codex, .claude])
+    }
+
+    /// Editing an entry reaches the rotation the engine reads; editing entry 0 reaches the single field too.
+    func testEditingAnEntryReachesTheRound() throws {
+        let config = try fullWithEveryAgent()
+        let second = RoundConfigEditor.switchingAgent(config, at: .polisherEntry(1), to: .codex, available: threeAgents)
+        XCTAssertEqual(second.polisher(rotation: 1)?.agent, .codex)
+        XCTAssertEqual(second.polisher?.agent, .claude)
+        XCTAssertTrue(second.customized)
+        let first = RoundConfigEditor.switchingAgent(config, at: .polisher, to: .gemini, available: threeAgents)
+        XCTAssertEqual(first.polisher?.agent, .gemini)
+        XCTAssertEqual(first.polisher(rotation: 0)?.agent, .gemini)
+        XCTAssertEqual(first.polisher(rotation: 3)?.agent, .gemini, "wraps to entry 0")
+        let reviewer = RoundConfigEditor.updatingFallback(config, at: .reviewerEntry(1), to: nil)
+        XCTAssertNil(reviewer.reviewer(rotation: 1)?.fallback)
+        XCTAssertNotNil(reviewer.reviewer(rotation: 0)?.fallback)
+        let model = RoundConfigEditor.updatingChoice(config, at: .reviewer) { $0.model = "other" }
+        XCTAssertEqual(model.reviewers?.first?.choice.model, "other")
+        XCTAssertEqual(model.reviewer(rotation: 2)?.choice.model, "other")
+    }
+
+    /// A rotation that holds only the cross-reviewer's family has no round to cross-check; one that
+    /// holds another family does.
+    func testSameFamilyCaptionFollowsTheWholeRotation() throws {
+        var config = try fullWithEveryAgent()
+        config.crossReviewer = Slot(config.reviewers![1].choice)
+        XCTAssertFalse(RoundConfigEditor.crossCheckSameFamily(config), "codex reviews round 1")
+        config.reviewers = nil
+        config.reviewer = config.crossReviewer
+        XCTAssertTrue(RoundConfigEditor.crossCheckSameFamily(config))
+    }
+
     // MARK: - effortChoices
 
     /// `ultra` enables delegation and isn't Pro — it must never appear as a choice here even
@@ -182,7 +284,7 @@ final class RoundConfigEditorTests: XCTestCase {
         XCTAssertTrue(RoundConfigEditor.summary(preset: .featurePlan, config: cfg).contains("cross-check R1, R3"))
         var off = cfg; off.crossCheck = .off
         XCTAssertFalse(RoundConfigEditor.summary(preset: .featurePlan, config: off).contains("cross-check"))
-        var same = cfg; same.crossReviewer = cfg.reviewer
+        var same = cfg; same.crossReviewer = cfg.reviewer; same.reviewers = nil
         XCTAssertEqual(RoundConfigEditor.crossCheckRounds(same), [])
         var every = cfg; every.crossCheck = .every
         XCTAssertEqual(RoundConfigEditor.crossCheckRounds(every), [1, 2, 3])

@@ -180,8 +180,8 @@ public struct RoundExecutor: Sendable {
     /// A fresh reviewer every round — never a resume — so round N isn't anchored on what the
     /// same session already said in round N-1; that independence is the point of refining.
     private func refine(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
-        guard let reviewer = inputs.config.reviewer else { throw Pause.config("no reviewer") }
-        if planned.crossCheck, let cross = inputs.config.crossReviewer {
+        guard let reviewer = inputs.config.reviewer(rotation: planned.rotation) else { throw Pause.config("no reviewer") }
+        if planned.crossCheck, let cross = inputs.config.crossReviewer(rotation: planned.rotation) {
             return try await crossCheckRefine(planned, reviewer, cross, inputs, &record)
         }
         let plan = try currentPlan(inputs)
@@ -306,7 +306,7 @@ public struct RoundExecutor: Sendable {
 
         // cwd IS the work dir — never the project: codex's workspace-write sandbox is rooted at
         // cwd, so a project cwd would let the integrator edit the user's repo.
-        let integrated = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator,
+        let integrated = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator(rotation: planned.rotation),
                                    prompt: RoundPrompts.integrate(planFile: planFile.path, changesFile: changesFile.path,
                                                                   humanEdits: ctx.humanEdits, clustered: clustered),
                                    schema: clustered ? RoundSchemas.integrateClustered : RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
@@ -382,7 +382,7 @@ public struct RoundExecutor: Sendable {
     /// to keep exactly as it was. `graphObservedAt` stays that snapshot's time for the same
     /// reason: release measures drift from when the graph was read, not from the last polish.
     private func polish(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
-        guard let polisher = inputs.config.polisher else { throw Pause.config("no polisher") }
+        guard let polisher = inputs.config.polisher(rotation: planned.rotation) else { throw Pause.config("no polisher") }
         let plan = try currentPlan(inputs)
         guard let current = latestFile("changeset.json", inputs) else {
             throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "no change set to \(planned.stage.rawValue)",

@@ -39,8 +39,9 @@ public enum TapePlanner {
         // Both rounds are seated by the polisher; planning them without one would run the tape
         // to encode and then pause on a seat a `.shaping` intake can no longer fill.
         if config.freshEyesAndDedup && config.polisher != nil {
-            seq.append(PlannedRound(stage: .freshEyes, round: 0, major: false))
-            seq.append(PlannedRound(stage: .dedup, round: 0, major: true))
+            // They follow the last polish round in the polisher's rotation (`RoundConfig.polishers`).
+            seq.append(PlannedRound(stage: .freshEyes, round: 0, major: false, rotation: polishTotal))
+            seq.append(PlannedRound(stage: .dedup, round: 0, major: true, rotation: polishTotal + 1))
         }
 
         return seq

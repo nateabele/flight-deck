@@ -410,12 +410,20 @@ public struct WireRoundConfig: Codable, Equatable, Sendable {
     public var freshEyesAndDedup: Bool
     public var defaultPlay: String
     public var customized: Bool
+    /// The agents a role takes in turn, round after round (the Mac's `RoundConfig.reviewers`,
+    /// `integrators`, `polishers`), in order. nil or empty: the role has the one agent above,
+    /// which is also the first entry here, so a phone that predates rotations still shows a
+    /// sensible agent and ignores these.
+    public var reviewers: [WireSeat]?
+    public var integrators: [WireSeat]?
+    public var polishers: [WireSeat]?
 
     public init(
         drafters: [WireSeat], synthesizer: WireSeat? = nil, reviewer: WireSeat? = nil,
         crossReviewer: WireSeat? = nil, crossCheck: String? = nil, integrator: WireSeat,
         encoder: WireSeat, polisher: WireSeat? = nil, refinementCap: Int, polishCap: Int,
-        freshEyesAndDedup: Bool, defaultPlay: String, customized: Bool
+        freshEyesAndDedup: Bool, defaultPlay: String, customized: Bool,
+        reviewers: [WireSeat]? = nil, integrators: [WireSeat]? = nil, polishers: [WireSeat]? = nil
     ) {
         self.drafters = drafters; self.synthesizer = synthesizer; self.reviewer = reviewer
         self.crossReviewer = crossReviewer; self.crossCheck = crossCheck
@@ -423,6 +431,7 @@ public struct WireRoundConfig: Codable, Equatable, Sendable {
         self.refinementCap = refinementCap; self.polishCap = polishCap
         self.freshEyesAndDedup = freshEyesAndDedup; self.defaultPlay = defaultPlay
         self.customized = customized
+        self.reviewers = reviewers; self.integrators = integrators; self.polishers = polishers
     }
 }
 

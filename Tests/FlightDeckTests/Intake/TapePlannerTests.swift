@@ -69,10 +69,28 @@ final class TapePlannerTests: XCTestCase {
             PlannedRound(stage: .polish, round: 4, major: false),
             PlannedRound(stage: .polish, round: 5, major: false),
             PlannedRound(stage: .polish, round: 6, major: true),
-            PlannedRound(stage: .freshEyes, round: 0, major: false),
-            PlannedRound(stage: .dedup, round: 0, major: true),
+            // Fresh eyes and dedup follow the six polish rounds in the polisher's rotation.
+            PlannedRound(stage: .freshEyes, round: 0, major: false, rotation: 6),
+            PlannedRound(stage: .dedup, round: 0, major: true, rotation: 7),
         ])
         XCTAssertNil(TapePlanner.next(after: tape, config: cfg))
+    }
+
+    /// Each round carries its place in its role's rotation; an extend pushes fresh eyes and dedup
+    /// along, and a `roundInProgress` from before rotations reads its place off the round number.
+    func testRotationIndexPerRound() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        let rounds = TapePlanner.plannedRounds(config: cfg, tape: .empty)
+        XCTAssertEqual(rounds.filter { $0.stage == .refine }.map(\.rotation), [0, 1, 2, 3, 4])
+        XCTAssertEqual(rounds.filter { [.polish, .freshEyes, .dedup].contains($0.stage) }.map(\.rotation), [0, 1, 2, 3, 4, 5, 6, 7])
+        var tape = Tape.empty
+        tape.extraPolish = 2
+        let extended = TapePlanner.plannedRounds(config: cfg, tape: tape)
+        XCTAssertEqual(extended.filter { $0.stage == .freshEyes || $0.stage == .dedup }.map(\.rotation), [8, 9])
+        let old = try JSONDecoder().decode(PlannedRound.self, from: Data(#"{"stage":"polish","round":3,"major":false}"#.utf8))
+        XCTAssertEqual(old.rotation, 2)
+        let kept = try JSONDecoder().decode(PlannedRound.self, from: JSONEncoder().encode(rounds.last))
+        XCTAssertEqual(kept, rounds.last)
     }
 
     // MARK: - extraRefinement / extraPolish

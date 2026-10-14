@@ -88,17 +88,29 @@ public struct RoundConfig: Codable, Equatable, Sendable {
     public var crossReviewer: Slot?
     /// nil reads as `.off` — every intake from before this existed, larkOS included.
     public var crossCheck: CrossCheckPolicy?
+    /// Optional rotations for the three roles that repeat round after round, so a long stage is
+    /// not one family's. nil or empty is today's single agent (`reviewer`, `integrator`,
+    /// `polisher`). With a rotation, Refine round k runs `reviewers[(k-1) % n]` and
+    /// `integrators[(k-1) % n]`; the polish stage runs `polishers[i % n]` for polish 1...M as
+    /// i = 0...M-1, then fresh eyes (i = M) and dedup (i = M+1). Synthesis keeps the first
+    /// integrator. The single fields stay equal to entry 0, so a reader from before rotations
+    /// still sees a sensible single agent; `RoundConfigEditor` keeps the two in step.
+    /// Optional so an `intake.json` written before rotations decodes unchanged.
+    public var reviewers: [Slot]?
+    public var integrators: [ModelChoice]?
+    public var polishers: [ModelChoice]?
 
     /// Whether any round can cross-check: a policy, both reviewers, and two different families.
     public var crossChecks: Bool {
-        guard let policy = crossCheck, policy != .off, let reviewer, let crossReviewer else { return false }
-        return reviewer.choice.agent != crossReviewer.choice.agent
+        guard let policy = crossCheck, policy != .off, let crossReviewer else { return false }
+        return reviewerRotation.contains { $0.choice.agent != crossReviewer.choice.agent }
     }
 
     public init(drafters: [Slot], synthesizer: Slot?, reviewer: Slot?, integrator: ModelChoice,
                 encoder: ModelChoice, polisher: ModelChoice?, refinementCap: Int, polishCap: Int,
                 freshEyesAndDedup: Bool, defaultPlay: PlayMode, customized: Bool,
-                crossReviewer: Slot? = nil, crossCheck: CrossCheckPolicy? = nil) {
+                crossReviewer: Slot? = nil, crossCheck: CrossCheckPolicy? = nil,
+                reviewers: [Slot]? = nil, integrators: [ModelChoice]? = nil, polishers: [ModelChoice]? = nil) {
         self.drafters = drafters
         self.synthesizer = synthesizer
         self.reviewer = reviewer
@@ -112,6 +124,50 @@ public struct RoundConfig: Codable, Equatable, Sendable {
         self.customized = customized
         self.crossReviewer = crossReviewer
         self.crossCheck = crossCheck
+        self.reviewers = reviewers
+        self.integrators = integrators
+        self.polishers = polishers
+    }
+
+    /// The reviewer for rotation index `i` (Refine round k is `k - 1`): the rotation's entry, else
+    /// the single `reviewer`. nil when the config seats no reviewer (no Refine stage).
+    public func reviewer(rotation i: Int) -> Slot? {
+        guard reviewer != nil else { return nil }
+        return Self.entry(reviewers, i) ?? reviewer
+    }
+
+    /// The cross-reviewer for rotation index `i`: `crossReviewer`, unless it is the family of that
+    /// round's reviewer, in which case the first other family in the reviewer rotation (no fallback,
+    /// like any cross-reviewer). nil when no other family is available, which makes the round no
+    /// cross-check. So a rotating reviewer never cross-checks against itself, and a round the policy
+    /// marks still cross-checks.
+    public func crossReviewer(rotation i: Int) -> Slot? {
+        guard let cross = crossReviewer, let reviewer = reviewer(rotation: i) else { return crossReviewer }
+        if cross.choice.agent != reviewer.choice.agent { return cross }
+        return reviewerRotation.first { $0.choice.agent != reviewer.choice.agent }.map { Slot($0.choice) }
+    }
+
+    /// The integrator for rotation index `i`. Synthesis is index 0 — the first integrator.
+    public func integrator(rotation i: Int) -> ModelChoice { Self.entry(integrators, i) ?? integrator }
+
+    /// The polisher for rotation index `i` (polish round k is `k - 1`; fresh eyes and dedup follow
+    /// the last polish round). nil when the config seats no polisher.
+    public func polisher(rotation i: Int) -> ModelChoice? {
+        guard polisher != nil else { return nil }
+        return Self.entry(polishers, i) ?? polisher
+    }
+
+    /// Each role's agents in rotation order — one entry when it does not rotate, none when unseated.
+    /// An unseated reviewer or polisher (Sketch's polisher) has none, whatever a stale list says.
+    public var reviewerRotation: [Slot] { reviewer == nil ? [] : Self.nonEmpty(reviewers) ?? reviewer.map { [$0] } ?? [] }
+    public var integratorRotation: [ModelChoice] { Self.nonEmpty(integrators) ?? [integrator] }
+    public var polisherRotation: [ModelChoice] { polisher == nil ? [] : Self.nonEmpty(polishers) ?? polisher.map { [$0] } ?? [] }
+
+    private static func nonEmpty<T>(_ list: [T]?) -> [T]? { list?.isEmpty == false ? list : nil }
+
+    private static func entry<T>(_ list: [T]?, _ i: Int) -> T? {
+        guard let list = nonEmpty(list) else { return nil }
+        return list[((i % list.count) + list.count) % list.count]
     }
 }
 
@@ -185,6 +241,15 @@ public enum PresetExpansion {
     /// round against 42-73 s for the drafters. Each of their seats falls back to A or B.
     /// OpenCode is never seated here: the Rounds editor offers it, but no live planning round
     /// has measured it.
+    ///
+    /// When A and B are different families the three roles that repeat round after round rotate
+    /// (`RoundConfig.reviewers`), so no one family runs a whole long stage: the reviewer
+    /// alternates A, B (each falling back to the other) and the integrator B, A, so every Refine
+    /// round pairs two families and neither runs both agents of one round. The polisher goes B,
+    /// then Gemini when detected, then A — so a Full plan's eight polish-stage rounds run
+    /// claude, gemini, codex, claude, gemini, codex, claude (fresh eyes), gemini (dedup), and
+    /// fresh eyes is never the family that ran the round before it. Grok is slow and OpenCode
+    /// unmeasured, so neither is in a rotation. One family on the machine: no rotations.
     public static func config(for preset: Preset, available: AvailableModels) -> RoundConfig? {
         guard preset != .bead else { return nil }
         let a: ModelChoice
@@ -208,6 +273,10 @@ public enum PresetExpansion {
         // Another family to check the reviewer's work: Gemini, else Grok, else B when B is a
         // second family. Never a fallback — a same-family fallback is not a cross-check.
         let crossReviewer = (gemini ?? grok).map { Slot($0) } ?? (hasFallback ? Slot(b) : nil)
+        let rotates = a.agent != b.agent
+        let reviewers: [Slot]? = rotates ? [Slot(a, fallback: b), Slot(b, fallback: a)] : nil
+        let integrators: [ModelChoice]? = rotates ? [b, a] : nil
+        let polishers: [ModelChoice]? = rotates ? [b] + (gemini.map { [$0] } ?? []) + [a] : nil
 
         switch preset {
         case .bead:
@@ -220,7 +289,8 @@ public enum PresetExpansion {
                 integrator: integrator, encoder: encoder, polisher: nil,
                 refinementCap: 2, polishCap: 0, freshEyesAndDedup: false,
                 defaultPlay: .toReview, customized: false,
-                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .off)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .off,
+                reviewers: reviewers, integrators: integrators)
         case .featurePlan:
             return RoundConfig(
                 drafters: [
@@ -232,7 +302,8 @@ public enum PresetExpansion {
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 3, polishCap: 2, freshEyesAndDedup: false,
                 defaultPlay: .nextMajor, customized: false,
-                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast,
+                reviewers: reviewers, integrators: integrators, polishers: polishers)
         case .fullPlan:
             return RoundConfig(
                 drafters: [
@@ -248,7 +319,8 @@ public enum PresetExpansion {
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 5, polishCap: 6, freshEyesAndDedup: true,
                 defaultPlay: .nextMajor, customized: false,
-                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast)
+                crossReviewer: crossReviewer, crossCheck: crossReviewer == nil ? nil : .firstAndLast,
+                reviewers: reviewers, integrators: integrators, polishers: polishers)
         }
     }
 }

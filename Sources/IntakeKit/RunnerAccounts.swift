@@ -64,13 +64,13 @@ public struct RunnerAccounts: Codable, Equatable, Sendable {
 }
 
 public extension RoundConfig {
-    /// Every agent any seat of this config can run — fallbacks and the cross-check reviewer
+    /// Every agent any seat of this config can run — rotations, fallbacks and the cross-check reviewer
     /// included, since a fallback that fires mid-round needs its account resolved already: the
     /// runner cannot ask the app for one then.
     var agents: Set<AgentID> {
-        var choices: [ModelChoice] = [integrator, encoder]
+        var choices: [ModelChoice] = [integrator, encoder] + integratorRotation + polisherRotation
         if let polisher { choices.append(polisher) }
-        for slot in drafters + [synthesizer, reviewer, crossReviewer].compactMap({ $0 }) {
+        for slot in drafters + [synthesizer, reviewer, crossReviewer].compactMap({ $0 }) + reviewerRotation {
             choices.append(slot.choice)
             if let fallback = slot.fallback { choices.append(fallback) }
         }

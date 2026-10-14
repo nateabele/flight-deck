@@ -15,6 +15,40 @@ public enum SlotKeyPath: Hashable {
     case integrator
     case encoder
     case polisher
+    /// The later entries (1...) of a rotating role (`RoundConfig.reviewers`, `integrators`,
+    /// `polishers`); entry 0 is always the role's own case above, the single field an older reader
+    /// sees. `RotatingRole.keyPath(at:)` makes the right one for an index.
+    case reviewerEntry(Int)
+    case integratorEntry(Int)
+    case polisherEntry(Int)
+}
+
+/// The three roles that repeat round after round and can take their agents in turn.
+enum RotatingRole: CaseIterable {
+    case reviewer, integrator, polisher
+
+    func keyPath(at index: Int) -> SlotKeyPath {
+        switch self {
+        case .reviewer: index == 0 ? .reviewer : .reviewerEntry(index)
+        case .integrator: index == 0 ? .integrator : .integratorEntry(index)
+        case .polisher: index == 0 ? .polisher : .polisherEntry(index)
+        }
+    }
+}
+
+extension SlotKeyPath {
+    /// The rotating role this seat belongs to, with its place in the rotation.
+    var rotation: (role: RotatingRole, index: Int)? {
+        switch self {
+        case .reviewer: (.reviewer, 0)
+        case .integrator: (.integrator, 0)
+        case .polisher: (.polisher, 0)
+        case .reviewerEntry(let i): (.reviewer, i)
+        case .integratorEntry(let i): (.integrator, i)
+        case .polisherEntry(let i): (.polisher, i)
+        case .drafter, .synthesizer, .crossReviewer, .encoder: nil
+        }
+    }
 }
 
 /// Lets the human tune a chosen preset's expanded `RoundConfig` before shaping starts. Its home
@@ -240,6 +274,7 @@ struct RoundConfigEditor: View {
     private func slotBlock(_ row: (role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)) -> some View {
         if let choice = Self.choice(for: row.keyPath, in: config) {
             let ran = shaping?.isLocked(row.keyPath) == true
+            let entries = Self.entries(of: row.keyPath, in: config)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     // `.capitalized` title-cases every word, which turns "cross-check
@@ -249,28 +284,30 @@ struct RoundConfigEditor: View {
                     if let persona = row.persona, persona != .general {
                         Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
                     }
+                    if entries.count > 1 {
+                        Text(Self.alternates).font(.caption).foregroundStyle(.secondary)
+                    }
                     if ran {
                         Text(Self.alreadyRan).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                HStack(spacing: 8) {
-                    // The glyph the main view's stacks draw for this agent, beside its picker.
-                    AgentBadge(agent: choice.agent, size: 18)
-                    harnessPicker(for: row.keyPath).fixedSize()
-                    modelField(for: row.keyPath, agent: choice.agent)
-                    if !Self.effortChoices(for: choice.agent).isEmpty {
-                        effortPicker(for: row.keyPath, agent: choice.agent).fixedSize()
-                    }
+                ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                    agentRow(entry, rotation: row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) },
+                             fallbackShown: Self.supportsFallback(entry))
                 }
-                if let line = Self.billingLine(billing[choice.agent]) {
-                    billingLabel(line, problem: billing[choice.agent]?.problem == true)
-                }
-                if Self.supportsFallback(row.keyPath) {
-                    HStack(spacing: 8) {
-                        Text("Fallback").foregroundStyle(.secondary)
-                        fallbackPicker(for: row.keyPath, choice: choice).fixedSize()
+                if let role = row.keyPath.rotation?.role, Self.canAddToRotation(config, role, available: available) {
+                    HStack(spacing: 10) {
+                        Button { config = Self.addingToRotation(config, role, available: available) } label: {
+                            Label("Add an agent to alternate", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Take turns with another agent, round after round")
+                        if entries.count > 1 {
+                            Button("Use one agent") { config = Self.collapsingRotation(config, role) }
+                                .buttonStyle(.borderless)
+                        }
                     }
-                    .font(.callout)
+                    .font(.caption)
                 }
                 // Only reached once the crossReviewer row itself is showing (policy
                 // not off), so the caption never appears while the picker reads "Off".
@@ -289,6 +326,61 @@ struct RoundConfigEditor: View {
         if row.keyPath == .reviewer, config.reviewer != nil {
             crossCheckPicker.disabled(shaping?.isLocked(.reviewer) == true)
         }
+    }
+
+    /// One agent's controls: its glyph, agent, model and effort, then billing and fallback. A
+    /// rotating role's entries also get a position and move/remove buttons once there are two.
+    private func agentRow(_ keyPath: SlotKeyPath, rotation: (role: RotatingRole, index: Int, count: Int)?,
+                          fallbackShown: Bool) -> some View {
+        let choice = Self.choice(for: keyPath, in: config)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if let rotation, rotation.count > 1 {
+                    Text("\(rotation.index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                // The glyph the main view's stacks draw for this agent, beside its picker.
+                AgentBadge(agent: choice?.agent ?? .codex, size: 18)
+                harnessPicker(for: keyPath).fixedSize()
+                modelField(for: keyPath, agent: choice?.agent ?? .codex)
+                if !Self.effortChoices(for: choice?.agent ?? .codex).isEmpty {
+                    effortPicker(for: keyPath, agent: choice?.agent ?? .codex).fixedSize()
+                }
+                if let rotation, rotation.count > 1 {
+                    rotationButtons(rotation)
+                }
+            }
+            if let agent = choice?.agent, let line = Self.billingLine(billing[agent]) {
+                billingLabel(line, problem: billing[agent]?.problem == true)
+            }
+            if fallbackShown, let choice {
+                HStack(spacing: 8) {
+                    Text("Fallback").foregroundStyle(.secondary)
+                    fallbackPicker(for: keyPath, choice: choice).fixedSize()
+                }
+                .font(.callout)
+            }
+        }
+    }
+
+    private func rotationButtons(_ rotation: (role: RotatingRole, index: Int, count: Int)) -> some View {
+        HStack(spacing: 2) {
+            Button { config = Self.movingInRotation(config, rotation.role, from: rotation.index, to: rotation.index - 1) } label: {
+                Image(systemName: "chevron.up")
+            }
+            .disabled(rotation.index == 0)
+            .help("Run earlier")
+            Button { config = Self.movingInRotation(config, rotation.role, from: rotation.index, to: rotation.index + 1) } label: {
+                Image(systemName: "chevron.down")
+            }
+            .disabled(rotation.index == rotation.count - 1)
+            .help("Run later")
+            Button { config = Self.removingFromRotation(config, rotation.role, at: rotation.index) } label: {
+                Image(systemName: "minus.circle")
+            }
+            .help("Take this agent out of the rotation")
+        }
+        .buttonStyle(.borderless)
+        .fixedSize()
     }
 
     /// "Cross-check" policy picker: Off / First and last / Every round. Turning it on from
@@ -547,8 +639,8 @@ struct RoundConfigEditor: View {
     /// Whether the crossReviewer picked the same family as the reviewer — the caption under its
     /// row explains why a live policy still won't cross-check anything.
     static func crossCheckSameFamily(_ config: RoundConfig) -> Bool {
-        guard let reviewer = config.reviewer, let crossReviewer = config.crossReviewer else { return false }
-        return reviewer.choice.agent == crossReviewer.choice.agent
+        guard config.reviewer != nil, let crossReviewer = config.crossReviewer else { return false }
+        return config.reviewerRotation.allSatisfy { $0.choice.agent == crossReviewer.choice.agent }
     }
 
     /// The caption under the Cross-check picker when the policy is on but no cross-check agent
@@ -668,9 +760,9 @@ struct RoundConfigEditor: View {
         switch keyPath {
         case .drafter: .draft
         case .synthesizer: .synthesis
-        case .reviewer, .crossReviewer, .integrator: .refine
+        case .reviewer, .crossReviewer, .integrator, .reviewerEntry, .integratorEntry: .refine
         case .encoder: .encode
-        case .polisher: .polish
+        case .polisher, .polisherEntry: .polish
         }
     }
 
@@ -684,6 +776,103 @@ struct RoundConfigEditor: View {
         return next
     }
 
+    /// "Alternates each round" beside a role that takes more than one agent in turn.
+    static let alternates = "alternates each round"
+
+    /// The seats a row shows, in rotation order: a rotating role's entries, else the one seat.
+    static func entries(of keyPath: SlotKeyPath, in config: RoundConfig) -> [SlotKeyPath] {
+        guard let role = keyPath.rotation?.role else { return [keyPath] }
+        return (0..<max(rotationCount(config, role), 1)).map(role.keyPath(at:))
+    }
+
+    static func rotationCount(_ config: RoundConfig, _ role: RotatingRole) -> Int {
+        switch role {
+        case .reviewer: config.reviewerRotation.count
+        case .integrator: config.integratorRotation.count
+        case .polisher: config.polisherRotation.count
+        }
+    }
+
+    /// Whether the role offers "Add an agent": it is seated, and a second agent is installed.
+    static func canAddToRotation(_ config: RoundConfig, _ role: RotatingRole, available: AvailableModels) -> Bool {
+        let seated = switch role {
+        case .reviewer: config.reviewer != nil
+        case .integrator: true
+        case .polisher: config.polisher != nil
+        }
+        return seated && available.agents.count > 1
+    }
+
+    /// Appends an agent to the role's rotation: the next installed agent after the last entry's,
+    /// so a first press makes the pair and later ones walk the installed families. A role with one
+    /// agent becomes a rotation of that agent and the new one.
+    static func addingToRotation(_ config: RoundConfig, _ role: RotatingRole, available: AvailableModels) -> RoundConfig {
+        setting(config) { cfg in
+            let last = switch role {
+            case .reviewer: cfg.reviewerRotation.last?.choice
+            case .integrator: cfg.integratorRotation.last
+            case .polisher: cfg.polisherRotation.last
+            }
+            guard let last else { return }
+            let agents = available.agents
+            let next = (agents.firstIndex(of: last.agent).map { agents[($0 + 1) % agents.count] } ?? agents.first)
+                .flatMap(available.choice(for:))
+            guard let next, next.agent != last.agent else { return }
+            switch role {
+            case .reviewer: cfg.reviewers = cfg.reviewerRotation + [Slot(next)]
+            case .integrator: cfg.integrators = cfg.integratorRotation + [next]
+            case .polisher: cfg.polishers = cfg.polisherRotation + [next]
+            }
+        }
+    }
+
+    /// Takes entry `index` out; the rotation collapses to the one agent left, and the role's single
+    /// field follows entry 0 (`RoundConfig.reviewers`).
+    static func removingFromRotation(_ config: RoundConfig, _ role: RotatingRole, at index: Int) -> RoundConfig {
+        reordering(config, role) { list in
+            guard list.indices.contains(index), list.count > 1 else { return }
+            list.remove(at: index)
+        }
+    }
+
+    static func movingInRotation(_ config: RoundConfig, _ role: RotatingRole, from: Int, to: Int) -> RoundConfig {
+        reordering(config, role) { list in
+            guard list.indices.contains(from), list.indices.contains(to), from != to else { return }
+            list.insert(list.remove(at: from), at: to)
+        }
+    }
+
+    /// Back to the role's first agent alone.
+    static func collapsingRotation(_ config: RoundConfig, _ role: RotatingRole) -> RoundConfig {
+        reordering(config, role) { list in list = Array(list.prefix(1)) }
+    }
+
+    /// Edits the role's rotation as indices into its current list, then writes it back: a list of
+    /// one or none is no rotation (nil), and the single field takes entry 0.
+    private static func reordering(_ config: RoundConfig, _ role: RotatingRole, _ edit: (inout [Int]) -> Void) -> RoundConfig {
+        setting(config) { cfg in
+            var order = Array(0..<rotationCount(cfg, role))
+            edit(&order)
+            switch role {
+            case .reviewer:
+                let list = cfg.reviewerRotation
+                let next = order.map { list[$0] }
+                cfg.reviewers = next.count > 1 ? next : nil
+                if let first = next.first { cfg.reviewer = first }
+            case .integrator:
+                let list = cfg.integratorRotation
+                let next = order.map { list[$0] }
+                cfg.integrators = next.count > 1 ? next : nil
+                if let first = next.first { cfg.integrator = first }
+            case .polisher:
+                let list = cfg.polisherRotation
+                let next = order.map { list[$0] }
+                cfg.polishers = next.count > 1 ? next : nil
+                if let first = next.first { cfg.polisher = first }
+            }
+        }
+    }
+
     static func choice(for keyPath: SlotKeyPath, in config: RoundConfig) -> ModelChoice? {
         switch keyPath {
         case .drafter(let i): config.drafters.indices.contains(i) ? config.drafters[i].choice : nil
@@ -693,6 +882,9 @@ struct RoundConfigEditor: View {
         case .integrator: config.integrator
         case .encoder: config.encoder
         case .polisher: config.polisher
+        case .reviewerEntry(let i): config.reviewerRotation.indices.contains(i) ? config.reviewerRotation[i].choice : nil
+        case .integratorEntry(let i): config.integratorRotation.indices.contains(i) ? config.integratorRotation[i] : nil
+        case .polisherEntry(let i): config.polisherRotation.indices.contains(i) ? config.polisherRotation[i] : nil
         }
     }
 
@@ -701,7 +893,8 @@ struct RoundConfigEditor: View {
         case .drafter(let i): config.drafters.indices.contains(i) ? config.drafters[i].fallback : nil
         case .synthesizer: config.synthesizer?.fallback
         case .reviewer: config.reviewer?.fallback
-        case .crossReviewer, .integrator, .encoder, .polisher: nil
+        case .reviewerEntry(let i): config.reviewerRotation.indices.contains(i) ? config.reviewerRotation[i].fallback : nil
+        case .crossReviewer, .integrator, .encoder, .polisher, .integratorEntry, .polisherEntry: nil
         }
     }
 
@@ -712,8 +905,8 @@ struct RoundConfigEditor: View {
     /// own doc comment on `crossReviewer`).
     static func supportsFallback(_ keyPath: SlotKeyPath) -> Bool {
         switch keyPath {
-        case .drafter, .synthesizer, .reviewer: true
-        case .crossReviewer, .integrator, .encoder, .polisher: false
+        case .drafter, .synthesizer, .reviewer, .reviewerEntry: true
+        case .crossReviewer, .integrator, .encoder, .polisher, .integratorEntry, .polisherEntry: false
         }
     }
 
@@ -729,16 +922,28 @@ struct RoundConfigEditor: View {
             case .reviewer:
                 guard cfg.reviewer != nil else { return }
                 mutate(&cfg.reviewer!.choice)
+                if cfg.reviewers?.isEmpty == false { cfg.reviewers![0] = cfg.reviewer! }
             case .crossReviewer:
                 guard cfg.crossReviewer != nil else { return }
                 mutate(&cfg.crossReviewer!.choice)
             case .integrator:
                 mutate(&cfg.integrator)
+                if cfg.integrators?.isEmpty == false { cfg.integrators![0] = cfg.integrator }
             case .encoder:
                 mutate(&cfg.encoder)
             case .polisher:
                 guard cfg.polisher != nil else { return }
                 mutate(&cfg.polisher!)
+                if cfg.polishers?.isEmpty == false { cfg.polishers![0] = cfg.polisher! }
+            case .reviewerEntry(let i):
+                guard cfg.reviewers?.indices.contains(i) == true else { return }
+                mutate(&cfg.reviewers![i].choice)
+            case .integratorEntry(let i):
+                guard cfg.integrators?.indices.contains(i) == true else { return }
+                mutate(&cfg.integrators![i])
+            case .polisherEntry(let i):
+                guard cfg.polishers?.indices.contains(i) == true else { return }
+                mutate(&cfg.polishers![i])
             }
         }
     }
@@ -753,7 +958,11 @@ struct RoundConfigEditor: View {
                 cfg.synthesizer?.fallback = fallback
             case .reviewer:
                 cfg.reviewer?.fallback = fallback
-            case .crossReviewer, .integrator, .encoder, .polisher:
+                if cfg.reviewers?.isEmpty == false, let reviewer = cfg.reviewer { cfg.reviewers![0] = reviewer }
+            case .reviewerEntry(let i):
+                guard cfg.reviewers?.indices.contains(i) == true else { return }
+                cfg.reviewers![i].fallback = fallback
+            case .crossReviewer, .integrator, .encoder, .polisher, .integratorEntry, .polisherEntry:
                 break // crossReviewer never offers a fallback control; integrator/encoder/polisher have no field to set.
             }
         }

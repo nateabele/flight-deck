@@ -221,6 +221,23 @@ final class IntakeDetailProjectionTests: XCTestCase {
         XCTAssertTrue(full.freshEyesAndDedup)
     }
 
+    /// The Mac's projection fills the rotations in, entry 0 being the single field; a config that
+    /// does not rotate sends none.
+    func testTheProjectionCarriesRotations() throws {
+        let rotating = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        let wire = IntakeDetailProjection.wireConfig(rotating)
+        XCTAssertEqual(wire.reviewers?.map(\.choice.agent), ["codex", "claude"])
+        XCTAssertEqual(wire.reviewers?.map(\.fallback?.agent), ["claude", "codex"])
+        XCTAssertEqual(wire.integrators?.map(\.choice.agent), ["claude", "codex"])
+        XCTAssertEqual(wire.polishers?.map(\.choice.agent), ["claude", "codex"])
+        XCTAssertEqual(wire.reviewers?.first, wire.reviewer)
+        XCTAssertEqual(wire.integrators?.first, wire.integrator)
+        XCTAssertEqual(wire.polishers?.first, wire.polisher)
+        let single = AvailableModels(codex: AvailableModels.defaults.codex, claude: nil)
+        let plain = IntakeDetailProjection.wireConfig(try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: single)))
+        XCTAssertNil(plain.reviewers); XCTAssertNil(plain.integrators); XCTAssertNil(plain.polishers)
+    }
+
     func testAParkedDetailOffersTheSameChoice() async throws {
         let i = try seed(.parked)
         let svc = await makeService()

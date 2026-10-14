@@ -86,4 +86,80 @@ final class RoundParticipantsTests: XCTestCase {
         let cross = RoundParticipants.of(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true), config: cfg)
         XCTAssertEqual(cross.map { $0.slot?.choice.agent }, [.grok, .gemini, .claude])
     }
+
+    // MARK: - Rotations
+
+    private func rotating(cross: ModelChoice? = nil, policy: CrossCheckPolicy? = nil) -> RoundConfig {
+        var cfg = config(policy, cap: 5, crossReviewer: cross)
+        cfg.reviewer = Slot(codex); cfg.integrator = claude; cfg.polisher = claude
+        cfg.reviewers = [Slot(codex, fallback: claude), Slot(claude, fallback: codex)]
+        cfg.integrators = [claude, codex]
+        cfg.polishers = [claude, gemini, codex]
+        return cfg
+    }
+
+    private func agents(_ stage: Stage, rotation: Int, role: String, _ cfg: RoundConfig) -> AgentID? {
+        let round = PlannedRound(stage: stage, round: 0, major: false, rotation: rotation)
+        return RoundParticipants.of(round, config: cfg).first { $0.role == role }?.slot?.choice.agent
+    }
+
+    /// Refine round k runs entry (k-1) mod n of the reviewer and integrator rotations.
+    func testRefineRoundsTakeTheirRotationEntry() {
+        let cfg = rotating()
+        let rounds = TapePlanner.plannedRounds(config: cfg, tape: .empty).filter { $0.stage == .refine }
+        XCTAssertEqual(rounds.map { RoundParticipants.of($0, config: cfg).first { $0.role == "reviewer" }?.slot?.choice.agent },
+                       [.codex, .claude, .codex, .claude, .codex])
+        XCTAssertEqual(rounds.map { RoundParticipants.of($0, config: cfg).first { $0.role == "integrator" }?.slot?.choice.agent },
+                       [.claude, .codex, .claude, .codex, .claude])
+        XCTAssertEqual(RoundParticipants.of(rounds[1], config: cfg).first { $0.role == "reviewer" }?.slot?.fallback?.agent, .codex)
+    }
+
+    /// Polish 1...M are entries 0...M-1; fresh eyes is M and dedup M+1; synthesis keeps the first integrator.
+    func testPolishStageWalksThePolishersRotation() {
+        let cfg = rotating()
+        let polish = TapePlanner.plannedRounds(config: cfg, tape: .empty).filter { [.polish, .freshEyes, .dedup].contains($0.stage) }
+        XCTAssertEqual(polish.count, 4)
+        XCTAssertEqual(polish.map { RoundParticipants.of($0, config: cfg).first!.slot?.choice.agent }, [.claude, .gemini, .codex, .claude])
+        XCTAssertEqual(agents(.synthesis, rotation: 0, role: "integrator", cfg), .claude)
+        XCTAssertEqual(agents(.polish, rotation: 4, role: "polisher", cfg), .gemini)
+    }
+
+    /// A role with no rotation is the same agent every round.
+    func testNoRotationIsTheSingleAgentEveryRound() {
+        var cfg = rotating()
+        cfg.reviewers = nil; cfg.integrators = nil; cfg.polishers = nil
+        for k in 0..<7 {
+            XCTAssertEqual(agents(.refine, rotation: k, role: "reviewer", cfg), .codex)
+            XCTAssertEqual(agents(.refine, rotation: k, role: "integrator", cfg), .claude)
+            XCTAssertEqual(agents(.polish, rotation: k, role: "polisher", cfg), .claude)
+        }
+    }
+
+    /// A round whose reviewer is the cross-reviewer's own family cross-checks against the first other
+    /// family in the reviewer rotation instead, so the rounds the policy marks still cross-check with
+    /// two families; the planner, the participants and the engine's accessor agree.
+    func testARotatingReviewerNeverCrossChecksAgainstItsOwnFamily() {
+        let cfg = rotating(cross: claude, policy: .every)
+        XCTAssertEqual(RoundParticipants.crossCheckRounds(of: 5, config: cfg), [1, 2, 3, 4, 5])
+        let planned = TapePlanner.plannedRounds(config: cfg, tape: .empty).filter { $0.stage == .refine }
+        XCTAssertEqual(planned.filter(\.crossCheck).map(\.round), [1, 2, 3, 4, 5])
+        for round in planned {
+            let seats = RoundParticipants.of(round, config: cfg)
+            XCTAssertEqual(seats.map(\.role), ["reviewer", "crossReviewer", "integrator"])
+            XCTAssertNotEqual(seats[0].slot?.choice.agent, seats[1].slot?.choice.agent, "refine \(round.round)")
+            XCTAssertEqual(seats[1].slot, cfg.crossReviewer(rotation: round.rotation))
+        }
+        XCTAssertEqual(cfg.crossReviewer(rotation: 0)?.choice.agent, .claude)
+        XCTAssertEqual(cfg.crossReviewer(rotation: 1)?.choice.agent, .codex)
+        XCTAssertNil(cfg.crossReviewer(rotation: 1)?.fallback)
+        // Another family cross-checks every round as configured.
+        let gem = rotating(cross: gemini, policy: .every)
+        XCTAssertEqual(RoundParticipants.crossCheckRounds(of: 5, config: gem), [1, 2, 3, 4, 5])
+        XCTAssertEqual(gem.crossReviewer(rotation: 1)?.choice.agent, .gemini)
+        // Only one family in the whole rotation: nothing to cross-check with.
+        var same = cfg
+        same.reviewers = nil; same.reviewer = Slot(claude)
+        XCTAssertEqual(RoundParticipants.crossCheckRounds(of: 5, config: same), [])
+        XCTAssertFalse(same.crossChecks)
+    }
 }
