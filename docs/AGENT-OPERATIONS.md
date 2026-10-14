@@ -342,9 +342,43 @@ account. They cost money by the hour, and every guard below exists because the f
 ## 5. Tests
 
 ```bash
-./scripts/test-unit.sh     # headless, fast, NOT throttled — your normal TDD loop
+./scripts/test-unit.sh     # on the UI-test Mac, NOT throttled — your normal TDD loop
 ./scripts/smoke.sh         # GUI UITest, on the UI-test Mac; ends with "SMOKE PASS"
 ```
+
+### The unit suite runs on that Mac too
+
+The unit suite is not headless: `*LiveTests` classes open real windows (a `ParkedWindow` at
+-10000 plus `orderFrontRegardless`), `NSHostingView` renders run, and the menu-bar lane puts up a
+SwiftUI app. So `test-unit.sh` hands off to `scripts/test-unit-remote.sh` by default, with the same
+knobs (`FD_TEST_FILTER=ClassA,ClassB/testX`, `FD_SKIP_BUILD=1`, `FD_TEST_SHARDS`,
+`FD_SKIP_MENUBAR`), the same `** SHARDED UNIT RUN PASSED/FAILED **` summary and the remote run's
+exit status. `FD_TEST_LOCAL=1` is the local path (it opens windows on this screen; the remote copy
+runs with it set, which is what stops the hand-off recursing). An unreachable host fails; it never
+falls back to this Mac.
+
+| What it does | Why |
+|---|---|
+| `build-for-testing` HERE | This Mac has the toolchain, the vendor artifacts and the signing team. |
+| rsync the checkout and `Build/Products/Debug` to the SAME absolute path on the UI-test Mac (minus `.git`, `DerivedData` intermediates, `scripts/local.env`; `vendor/fd-abduco-artifacts` as a real directory) | "Needs this Mac's state" means the bundle bakes in the checkout's path: tests find fixtures, scripts, docs and Sources through `#filePath`, and `fd-abduco` and the scripts through the working directory; the bundle's rpath names its own `PackageFrameworks`. Same path = nothing to rewrite, and each worktree's copy stays separate. |
+| Ship this Xcode's `xctest` and test frameworks as `~/flightdeck-uitests/xctest26/`; `FD_XCTEST_SHIM` points `test-unit.sh` at them | The remote Xcode is older. Proven with `DYLD_PRINT_LIBRARIES`: the `xctest` that runs is the shipped one, XCTest is the copy embedded in the app's `Contents/Frameworks`, the rest from the shim. |
+| Compile the menu-bar harness here (`FD_MENUBAR_BUILD_ONLY`), run it there (`FD_MENUBAR_PREBUILT`) | The older `swiftc` cannot read this Xcode's modules. The lane runs on the UI-test Mac and passes. |
+| Hold the same remote `.lock` as `smoke-remote.sh`, without its throttle | A unit run never overlaps an XCUITest run or another worktree's unit run. |
+| Reap on exit: test-unit/xctest/harness processes of this checkout, `fd-abduco` daemons under the Debug root `/tmp/flight-deck-debug-<uid>`, then the lock | Same as `smoke-remote.sh`; the release root holds the UI-test Mac's own sessions and is never touched. |
+
+`test-opencode-live.sh` and `test-hostd-linux-interop.sh` pin `FD_TEST_LOCAL=1`: they need this
+Mac's credentials and docker, and open no window.
+
+**Differs on the UI-test Mac (macOS 15.7; this Mac is on 26).** These fail there, deterministically,
+and are OS behavior, not the remote setup:
+`FleetSlotAttributionTests` (2) and `FleetDeviceNamingTests.testRenamingThePhoneItselfShowsUpOnTheNextAttach`
+(`FleetPSKIdentities.take` keyed by the TLS metadata's `ObjectIdentifier` finds no record for the
+second connection, so its slot is `nil`), `HostTransportLoopbackTests.testRevokingOneControllerLeavesTheOtherConnected`
+(rebuilding the listener resets the surviving connection) and
+`ProjectViewIntakeListLiveTests.testCollapseSlidesOverTheDetailAndIsRememberedPerProject` (toolbar
+geometry and per-frame width changes). The app's deployment target is macOS 14, so the first two
+groups may be real bugs on 14/15. `HostLinkTests.testServerStopMarksOfflineAndRestartRecovers` also
+failed once in a full run and passed alone.
 
 ### The UI suite runs on another Mac
 

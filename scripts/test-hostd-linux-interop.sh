@@ -101,7 +101,7 @@ done
 FD_LINUX_HOSTD_ENDPOINT="127.0.0.1:$PORT" FD_LINUX_HOSTD_MODE="$MODE" FD_LINUX_HOSTD_CODE="$CODE" \
   FD_LINUX_HOSTD_CONTAINER="$NAME" FD_LINUX_HOSTD_PAIRING_ENDPOINT="127.0.0.1:47411" \
   FD_TEST_FILTER="${FD_INTEROP_FILTER:-$CLASS}" \
-  ./scripts/test-unit.sh 2>&1 | tee "$LOG"
+  FD_TEST_LOCAL=1 ./scripts/test-unit.sh 2>&1 | tee "$LOG"
 # `if`, not a bare `! rg`: set -e does not apply to a negated command, so `! rg` stops the
 # script only when it is the last line — which it no longer is.
 if rg -n "error:|failed \(" "$LOG"; then exit 1; fi

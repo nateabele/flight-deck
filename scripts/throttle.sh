@@ -6,9 +6,9 @@
 # machine unusable. This caps UI runs at one per $FLIGHTDECK_TEST_THROTTLE
 # seconds (default 120).
 #
-# test-unit.sh is deliberately NOT throttled: it runs headless via `xcrun
-# xctest` and never takes the foreground, so implementers keep a normal
-# red/green TDD cycle.
+# test-unit.sh is deliberately NOT throttled: it runs in-process via `xcrun
+# xctest` (on the UI-test Mac, so no window lands on this screen), so
+# implementers keep a normal red/green TDD cycle.
 #
 # The stamp is written BEFORE the run, not after, so a long or crashed run
 # still counts against the window.

@@ -40,4 +40,6 @@ EOF
 export XDG_CONFIG_HOME="$WORK/config"
 export XDG_STATE_HOME="$WORK/state"
 export FLIGHTDECK_OPENCODE_LIVE=1
-FD_TEST_FILTER=OpenCodeLiveTests ./scripts/test-unit.sh
+# FD_TEST_LOCAL=1: this needs THIS Mac's opencode, credentials and XDG dirs, and the class opens no
+# window, so it stays off the UI-test Mac that test-unit.sh otherwise runs on.
+FD_TEST_LOCAL=1 FD_TEST_FILTER=OpenCodeLiveTests ./scripts/test-unit.sh
