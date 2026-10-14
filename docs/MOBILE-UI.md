@@ -94,6 +94,13 @@ nohup dns-sd -P <uuid> _remotepairing._tcp local <srv-port> <phone>-proxy.local 
 
 Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` works.
 
+- **First check that the phone is on the LAN at all.** If `tailscale status` shows the iPhone's
+  `direct` address as a public IP rather than a `192.168.x.x` one, the phone is on cellular, and
+  neither this recipe nor a stale proxy can help. Tailscale does not carry CoreDevice. On
+  2026-10-14 the phone answered ping over its tailnet address, but its mDNS responder (5353)
+  did not answer, and the remote-pairing (49152) and lockdownd (62078) ports were closed. Join
+  the Mac's Wi-Fi, or plug in a cable.
+
 - **The proxy's host name must not be the phone's own.** `Mobile3.local` is already claimed,
   and `dns-sd` reports `Name in use, please choose another`. That error is also a clue: the
   phone's *host* record does get through, and only the service advert is lost.
