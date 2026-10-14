@@ -1,3 +1,4 @@
+import MarkdownUI
 import Network
 import SwiftUI
 
@@ -50,10 +51,13 @@ struct FlightDeckMobileApp: App {
                 }
             }
             .animation(.default, value: model.flightControl.banners.first?.id)
+            // Every fenced block in every screen below, coloured as the Mac's terminal colours it.
+            .markdownCodeSyntaxHighlighter(.claudeCode)
             // Started here, once, alongside the view it backs — `start()` is idempotent so a
             // second `onAppear` (the window regaining an already-appeared root, which SwiftUI
             // does not promise never to deliver) costs nothing beyond the guard check.
             .onAppear {
+                ClaudeCodeHighlightEngine.shared.prewarm()
                 pathWatcher.onRedial = {
                     guard model.mac != nil else { return }
                     model.reconnect()
