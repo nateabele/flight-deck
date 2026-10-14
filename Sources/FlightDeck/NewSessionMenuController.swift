@@ -24,7 +24,8 @@ enum NewSessionMenuModel {
         }
         let entries: [NewSessionAffordance.MenuEntry] = project.map { project in
             NewSessionAffordance.menu(agents: agents, preferences: preferences.preferences,
-                                      resolved: preferences.resolvedAccounts(for: agents, project: project))
+                                      resolved: preferences.resolvedAccounts(for: agents, project: project),
+                                      pools: preferences.assignedPoolLabels(for: agents, project: project))
         } ?? []
         let entryByAgent = entries.reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) { $0[$1.agent] = $1 }
         // Which account row wears which chord — shared with the sidebar's dropdown.
@@ -33,9 +34,16 @@ enum NewSessionMenuModel {
         return agents.map { settings in
             if let entry = entryByAgent[settings.id], case .submenu(let agent, let rows) = entry {
                 return .submenu(title: "New \(agent.displayName) Session", rows: rows.compactMap { row in
-                    guard case .agent(let rowAgent, let account, let isResolved) = row else { return nil }
-                    let name = preferences.account(id: account)?.displayName ?? rowAgent.displayName
-                    return .item(title: name, agent: rowAgent, account: account, checked: isResolved, chord: chords[account])
+                    switch row {
+                    case .pool(let rowAgent, let label):
+                        // No account: `createFromMenu` resolves the project's pool and leases.
+                        return .item(title: label, agent: rowAgent, account: nil, checked: true, chord: chords[.pool(rowAgent)])
+                    case .agent(let rowAgent, let account, let isResolved):
+                        let name = preferences.account(id: account)?.displayName ?? rowAgent.displayName
+                        return .item(title: name, agent: rowAgent, account: account, checked: isResolved, chord: chords[.account(account)])
+                    case .submenu:
+                        return nil
+                    }
                 })
             }
             if let slot = slotByAgent[settings.id] {

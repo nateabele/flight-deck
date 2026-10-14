@@ -82,6 +82,30 @@ final class NewSessionAffordanceTests: XCTestCase {
         ])
     }
 
+    /// A pooled agent leads with its pool row, which is the resolved row and wears the chord;
+    /// no account row is ticked, whatever `resolved` names (the pool's first member).
+    func testAPooledAgentLeadsWithItsPoolRow() {
+        let one = AgentAccount(agent: .claude, displayName: "Radify", home: URL(fileURLWithPath: "/a"))
+        let two = AgentAccount(agent: .claude, displayName: "Summer", home: URL(fileURLWithPath: "/b"))
+        let agents = [AgentSettings(id: .claude, options: .claude(FlagSet()))]
+        let entries = NewSessionAffordance.menu(
+            agents: agents, accounts: [one, two], resolved: [.claude: one.id], pools: [.claude: "Personal"]
+        )
+        XCTAssertEqual(entries, [
+            .submenu(.claude, [
+                .pool(.claude, label: "Personal"),
+                .agent(.claude, account: one.id, isResolved: false),
+                .agent(.claude, account: two.id, isResolved: false),
+            ])
+        ])
+        XCTAssertEqual(NewSessionAffordance.chords(for: entries, agents: agents), [.pool(.claude): [.command]])
+
+        let flat = NewSessionAffordance.menu(
+            agents: agents, accounts: [one], resolved: [.claude: one.id], pools: [.claude: "Personal"]
+        )
+        XCTAssertEqual(flat, [.pool(.claude, label: "Personal")], "a one-member pool still launches through the pool")
+    }
+
     /// The resolved leaf gets the chord that a submenu's parent item cannot itself carry —
     /// the same row the checkmark already marks, so the shortcut and the visible default
     /// never disagree.
@@ -91,7 +115,7 @@ final class NewSessionAffordanceTests: XCTestCase {
             .agent(.claude, account: UUID(), isResolved: true),
         ]
         guard case .agent(_, let resolved, true) = rows[1] else { return XCTFail("expected the resolved row") }
-        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), resolved)
+        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), .account(resolved))
     }
 
     /// A chord bound by list position must never simply go dead: if nothing in the submenu
@@ -102,7 +126,7 @@ final class NewSessionAffordanceTests: XCTestCase {
             .agent(.claude, account: first, isResolved: false),
             .agent(.claude, account: UUID(), isResolved: false),
         ]
-        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), first)
+        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), .account(first))
     }
 
     func testShortcutLeafOfEmptyRowsIsNil() {
@@ -121,8 +145,8 @@ final class NewSessionAffordanceTests: XCTestCase {
             resolved: [.claude: claude.id, .codex: codex.id]
         )
         let chords = NewSessionAffordance.chords(for: entries, agents: two)
-        XCTAssertEqual(chords[claude.id], [.command])
-        XCTAssertEqual(chords[codex.id], [.command, .shift])
+        XCTAssertEqual(chords[.account(claude.id)], [.command])
+        XCTAssertEqual(chords[.account(codex.id)], [.command, .shift])
     }
 
     /// Inside a submenu only the resolved leaf carries the chord — the sibling accounts stay
@@ -135,8 +159,8 @@ final class NewSessionAffordanceTests: XCTestCase {
             agents: agents, accounts: [personal, work], resolved: [.claude: work.id]
         )
         let chords = NewSessionAffordance.chords(for: entries, agents: agents)
-        XCTAssertEqual(chords[work.id], [.command], "the resolved leaf answers the agent's chord")
-        XCTAssertNil(chords[personal.id], "a sibling account is a mouse-only pick, not a rebind")
+        XCTAssertEqual(chords[.account(work.id)], [.command], "the resolved leaf answers the agent's chord")
+        XCTAssertNil(chords[.account(personal.id)], "a sibling account is a mouse-only pick, not a rebind")
         XCTAssertEqual(chords.count, 1)
     }
 
@@ -151,8 +175,8 @@ final class NewSessionAffordanceTests: XCTestCase {
             resolved: [.claude: claude.id, .codex: codex.id]
         )
         let chords = NewSessionAffordance.chords(for: entries, agents: reversed)
-        XCTAssertEqual(chords[codex.id], [.command])
-        XCTAssertEqual(chords[claude.id], [.command, .shift])
+        XCTAssertEqual(chords[.account(codex.id)], [.command])
+        XCTAssertEqual(chords[.account(claude.id)], [.command, .shift])
     }
 
     /// `slots(for:)` binds only three agents, so a fourth row shows no chord rather than

@@ -232,7 +232,8 @@ final class FleetService: ObservableObject {
         let agents = preferences.agentOrder(forProject: path)
         return NewSessionAffordance.menu(
             agents: agents, preferences: preferences.preferences,
-            resolved: preferences.resolvedAccounts(for: agents, project: path)
+            resolved: preferences.resolvedAccounts(for: agents, project: path),
+            pools: preferences.assignedPoolLabels(for: agents, project: path)
         )
     }
 
@@ -1181,8 +1182,11 @@ final class FleetService: ObservableObject {
         guard store.ensureTerminalCreatable() else { return .err(cid: cid, code: "terminal_unavailable") }
 
         if let agent, let accountIndex, let picked = AgentID(rawValue: agent),
-           let account = NewSessionOptionsProjection.account(forAgent: agent, index: accountIndex,
-                                                             in: menuEntries(forProjectAt: path)) {
+           let choice = NewSessionOptionsProjection.account(forAgent: agent, index: accountIndex,
+                                                            in: menuEntries(forProjectAt: path)) {
+            // A pool row names no account: the project's pool leases one, as ⌘N does.
+            var account: UUID?
+            if case .account(let id) = choice { account = id }
             // `selecting: false`: a client's `+` must not move the desk's selection.
             switch await store.createSession(agent: picked, in: path, account: account, selecting: false) {
             case .success(let id) where store.sessionExists(id):

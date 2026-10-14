@@ -342,6 +342,19 @@ final class PreferencesStore: ObservableObject {
         })
     }
 
+    /// The label of the pool each of `agents` bills to in `project`, for the agents whose
+    /// effective assignment is a live pool. `NewSessionAffordance.menu` puts a pool row on
+    /// these: their ⌘N must launch through the pool's lease, not as `resolvedAccounts`' answer
+    /// (the pool's first member, whatever its usage).
+    func assignedPoolLabels(for agents: [AgentSettings], project: String) -> [AgentID: String] {
+        agents.reduce(into: [AgentID: String]()) { result, settings in
+            guard case .pool(let id)? = effectiveAssignment(for: settings.id, project: project),
+                  let pool = effectivePools.first(where: { $0.id == id && $0.agent == settings.id })
+            else { return }
+            result[settings.id] = pool.label
+        }
+    }
+
     /// Whether any account — tombstoned included — already occupies this home.
     ///
     /// Tombstones were filtered here for a while, so that "recover from an accidental removal"

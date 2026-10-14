@@ -35,14 +35,29 @@ enum NewSessionOptionsProjection {
                     agent: agent.rawValue, agentName: agent.displayName,
                     index: 0, accountName: nil, isDefault: isResolved
                 )]
+            case .pool(let agent, _):
+                // A flat pool row: the agent's one account, launched through the pool.
+                return [WireNewSessionOption(
+                    agent: agent.rawValue, agentName: agent.displayName,
+                    index: 0, accountName: nil, isDefault: true
+                )]
             case .submenu(let agent, let rows):
                 return rows.enumerated().compactMap { index, row in
-                    guard case .agent(_, let account, let isResolved) = row else { return nil }
-                    return WireNewSessionOption(
-                        agent: agent.rawValue, agentName: agent.displayName,
-                        index: index, accountName: name(account) ?? agent.displayName,
-                        isDefault: isResolved
-                    )
+                    switch row {
+                    case .agent(_, let account, let isResolved):
+                        return WireNewSessionOption(
+                            agent: agent.rawValue, agentName: agent.displayName,
+                            index: index, accountName: name(account) ?? agent.displayName,
+                            isDefault: isResolved
+                        )
+                    case .pool(_, let label):
+                        return WireNewSessionOption(
+                            agent: agent.rawValue, agentName: agent.displayName,
+                            index: index, accountName: label, isDefault: true
+                        )
+                    case .submenu:
+                        return nil
+                    }
                 }
             }
         }
@@ -59,20 +74,33 @@ enum NewSessionOptionsProjection {
     /// visible, recoverable answer.
     static func account(
         forAgent agent: String, index: Int, in entries: [NewSessionAffordance.MenuEntry]
-    ) -> UUID? {
+    ) -> Choice? {
+        func choice(_ row: NewSessionAffordance.MenuEntry) -> Choice? {
+            switch row {
+            case .agent(_, let account, _): .account(account)
+            case .pool: .pool
+            case .submenu: nil
+            }
+        }
         for entry in entries where entry.agent.rawValue == agent {
             switch entry {
-            case .agent(_, let account, _):
+            case .agent, .pool:
                 // A flat row is an agent's only account, so the only index that can mean
                 // anything is 0. Anything else is a menu that has changed shape underneath the
                 // phone — an account added since the fetch — and is refused rather than guessed.
-                return index == 0 ? account : nil
+                return index == 0 ? choice(entry) : nil
             case .submenu(_, let rows):
-                guard rows.indices.contains(index),
-                      case .agent(_, let account, _) = rows[index] else { return nil }
-                return account
+                guard rows.indices.contains(index) else { return nil }
+                return choice(rows[index])
             }
         }
         return nil
+    }
+
+    /// What a tapped row launches: one account by name, or the agent's project pool (no
+    /// account named, so `AccountResolver` leases the member with headroom).
+    enum Choice: Equatable {
+        case account(UUID)
+        case pool
     }
 }
