@@ -290,6 +290,40 @@ it would diverge from the replayed mirror on the very next connect and trip `Fle
 drift assertion. `FleetService.onRequest`'s `.macEndpoints` case says exactly this at the call
 site, in case this section ever drifts from it.
 
+### Resuming across launches: the epoch, `caughtUp`, and the phone's disk cache
+
+A cold launch used to ask for the whole fleet (`lastSeq` 0) and re-read the end of every session
+it opened. Now the phone keeps both on disk (`PhoneCache`, under `Caches`) and resumes from them.
+Three mechanisms make that safe. Each one closes a failure the cache would otherwise turn
+from rare into routine:
+
+- **The Mac's epoch.** `FleetEventLog.seq` restarts at zero on every launch, so a `seq` alone
+  cannot say which run counted it. A phone holding seq 300 from yesterday, resuming against a run
+  that has reached 900, was replayed 301...900 onto yesterday's fleet. Every snapshot now carries
+  `epoch` (one UUID per log), the phone echoes it in `hello`, and `FleetEventLog.resume(from:epoch:)`
+  answers a mismatch with a `.seqTooOld` snapshot. A client that claims no epoch (older phones,
+  `flightdeck tail --since`) is judged on the number alone, as before.
+- **`ServerFrame.caughtUp`.** A resume that was already current used to get no frame at all.
+  `FleetConnector` installs its race winner on the first frame, so that phone never connected and
+  redialled every `raceTimeout`. The Mac now ends every replay with `caughtUp`, including an empty
+  replay, but only for clients that advertise `FleetCapability.caughtUp`, because older phones
+  cannot decode it.
+- **`TimelinePage.source`.** This is the transcript's identity (device, inode and birth time).
+  `reset` only notices a file that shrank past the cursor, so a feed cached overnight could land
+  its `.after` cursor in a replacement file that is at least as long. The phone compares `source`
+  with the token its cached cursors came with and treats any difference as a `reset`. A Mac that
+  sends no `source` gets nothing cached.
+
+The cached fleet is one atomic record of fleet, `seq` and epoch, keyed to the Mac's service
+name. A cursor is only meaningful against the fleet it was folded to, so the three are never
+persisted apart. `FleetModel` also keeps that resume point in memory and hands it to every
+connector it builds, so a foreground redial resumes too. Before this, the redial dialled with the
+launch-time `lastSeq` of 0 and took a full snapshot. A cached feed keeps only its newest end:
+records cut whole, no spilled placeholders, 300 items or about 1 MB
+(`TimelineFeed.cacheable`). A cached feed whose first `.after` page still reports `hasMore` is
+more than a page behind, and it is replaced with one `.latest` rather than chased forward page by
+page. Unpairing and re-pairing purge the whole cache, the same as the spill store.
+
 ### Two endpoints, not more
 
 The pairing code (see "Pairing" above) now packs up to two of `LocalEndpoints`' ranked addresses

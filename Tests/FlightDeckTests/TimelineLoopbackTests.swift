@@ -171,7 +171,7 @@ final class TimelineLoopbackTests: XCTestCase {
         // The snapshot the attach produced, then the page. Nothing else: a read is not a
         // mutation, so there is no northbound event for it to have emitted.
         XCTAssertEqual(frames.count, 2, "answering a page must emit no fleet event")
-        guard case .snapshot(_, _, .initial) = frames[0] else {
+        guard case .snapshot(_, _, .initial, _) = frames[0] else {
             return XCTFail("the first frame must be the attach snapshot, got \(frames[0])")
         }
     }

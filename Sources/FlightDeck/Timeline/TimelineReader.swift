@@ -50,7 +50,7 @@ enum TimelineReader: Sendable {
             // different record now, so the page carries the signal and no content.
             return .success(TimelinePage(
                 session: session, items: [], start: source.start, end: source.end,
-                hasMore: false, reset: true
+                hasMore: false, reset: true, source: identity(of: url)
             ))
         }
 
@@ -123,8 +123,26 @@ enum TimelineReader: Sendable {
             // is everything" is a conversation with a hole in it, and the whole file fitting
             // in one pager window is exactly when that happens.
             hasMore: source.hasMore || dropped,
-            reset: false
+            reset: false,
+            source: identity(of: url)
         ))
+    }
+
+    /// `TimelinePage.source`: which file this is, as device, inode and birth time.
+    ///
+    /// Not the path. A `/clear` or a fork moves a tab to a new path, which this catches too
+    /// (a new file is a new inode), but a transcript rewritten in place — truncated and
+    /// re-filled, or replaced by an atomic rename — keeps its path and is exactly the case
+    /// `reset` cannot see. Birth time guards inode reuse after a delete. Read separately from
+    /// the pager's own open, so a replacement landing between the two pairs one file's token
+    /// with the other's records — the next fetch sees the newer token and resets, which is
+    /// one wasted page rather than a wrong conversation. `nil` when `stat` fails; the phone
+    /// then just does not cache.
+    static func identity(of url: URL) -> String? {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return nil }
+        let birth = info.st_birthtimespec
+        return "\(info.st_dev)-\(info.st_ino)-\(birth.tv_sec).\(birth.tv_nsec)"
     }
 
     /// Cuts an oversized body and records what was dropped, so a client can say "showing the

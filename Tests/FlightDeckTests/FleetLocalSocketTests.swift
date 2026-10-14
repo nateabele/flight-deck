@@ -36,7 +36,7 @@ final class FleetLocalSocketTests: XCTestCase {
         }
         try await server.startLocal(path: path)
         let arrived = expectation(description: "snapshot")
-        let connection = dial { if case .snapshot(7, _, _) = $0 { arrived.fulfill() } }
+        let connection = dial { if case .snapshot(7, _, _, _) = $0 { arrived.fulfill() } }
         FleetSocket.send(ClientFrame.hello(lastSeq: 0, device: nil, caps: [], caller: "tok"), over: connection)
         await fulfillment(of: [arrived], timeout: 5)
         XCTAssertEqual(seen?.isLocal, true)

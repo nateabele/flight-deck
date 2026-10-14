@@ -164,7 +164,7 @@ final class CLIRunner {
         guard !finished else { return }
         reachedMac = true
         switch frame {
-        case .snapshot(let seq, let snapshot, _):
+        case .snapshot(let seq, let snapshot, _, _):
             lastSeq = seq
             fleet = snapshot
         case .event(let seq, let event):
@@ -380,7 +380,7 @@ final class CLIRunner {
 
     private func tail(_ frame: ServerFrame, token: String?, noSnapshot: Bool) {
         switch frame {
-        case .snapshot(_, _, let reason):
+        case .snapshot(_, _, let reason, _):
             let first = !tailSawSnapshot
             tailSawSnapshot = true
             if first, tailTarget == nil, let token {
@@ -643,7 +643,7 @@ final class CLIRunner {
                 // A refusal is the Mac saying no, like any `err`: message on stderr, exit 1.
                 if !result.ok { return self.fail("refused", result.message) }
                 self.out(self.askedForJSON ? CLIOutput.json(result) : result.message)
-            case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
+            case .ack, .snapshot, .event, .caughtUp, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
                  .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,
                  .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone:

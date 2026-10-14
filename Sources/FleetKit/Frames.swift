@@ -606,7 +606,15 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// `caller` is optional and omitted when nil, for the same reason `device` is: a client
     /// with nothing to claim must put the same bytes on the wire it always did. Only a
     /// local-mode server honours it — see Task 3 — a socket-paired phone has no caller to name.
-    case hello(lastSeq: Int, device: String?, caps: [String] = [], caller: String? = nil)
+    ///
+    /// `epoch` is the `ServerFrame.snapshot` epoch that `lastSeq` was counted in, echoed back.
+    /// A `seq` alone cannot say which run of the Mac issued it — `FleetEventLog` starts again
+    /// at zero on every launch — so a phone resuming across a Mac restart used to be replayed
+    /// the new run's events on top of the old run's fleet. With the epoch the Mac can tell, and
+    /// answers a mismatch with a snapshot. `nil` is every client built before it, and every
+    /// client holding nothing to resume: both get exactly the answer they always did.
+    case hello(lastSeq: Int, device: String?, caps: [String] = [], caller: String? = nil,
+               epoch: String? = nil)
     case cmd(cid: Int, FleetCommand)
     /// Ask, rather than tell. See `FleetRequest` for why this is not a `cmd`.
     case req(cid: Int, FleetRequest)
@@ -625,14 +633,14 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// rule `FleetRequestError.server` states for the other direction.
     case refused(cid: Int, code: String)
 
-    enum CodingKeys: String, CodingKey { case t, lastSeq, device, caps, cid, logs, code, caller }
+    enum CodingKeys: String, CodingKey { case t, lastSeq, device, caps, cid, logs, code, caller, epoch }
 
     private enum Tag: String, Codable { case hello, cmd, req, logs, refused }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let lastSeq, let device, let caps, let caller):
+        case .hello(let lastSeq, let device, let caps, let caller, let epoch):
             try c.encode(Tag.hello, forKey: .t)
             try c.encode(lastSeq, forKey: .lastSeq)
             // `encodeIfPresent`, so a client with no name to claim emits the same two-key
@@ -645,6 +653,8 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // `encodeIfPresent`, same reason as `device`: the phone never sets this, and must
             // keep putting the same bytes on the wire it always did.
             try c.encodeIfPresent(caller, forKey: .caller)
+            // `encodeIfPresent`, same reason again: a client resuming nothing claims no epoch.
+            try c.encodeIfPresent(epoch, forKey: .epoch)
         case .cmd(let cid, let command):
             try c.encode(Tag.cmd, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -682,11 +692,13 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // Mac would otherwise stop talking to every already-paired device on upgrade.
             // `caps` is read the same way and for the same reason, one feature later: every
             // phone in the field today sends a `hello` without it, and "claims nothing" is
-            // exactly what an empty list means. `caller` follows suit, one feature later still.
+            // exactly what an empty list means. `caller` follows suit, one feature later still,
+            // and `epoch` one after that.
             self = .hello(lastSeq: try c.decode(Int.self, forKey: .lastSeq),
                           device: try c.decodeIfPresent(String.self, forKey: .device),
                           caps: try c.decodeIfPresent([String].self, forKey: .caps) ?? [],
-                          caller: try c.decodeIfPresent(String.self, forKey: .caller))
+                          caller: try c.decodeIfPresent(String.self, forKey: .caller),
+                          epoch: try c.decodeIfPresent(String.self, forKey: .epoch))
         case .cmd:
             self = .cmd(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetCommand(from: decoder))
@@ -709,8 +721,27 @@ public enum ClientFrame: Codable, Equatable, Sendable {
 
 /// Mac → client. Northbound frames are sequenced; replies to commands are correlated.
 public enum ServerFrame: Codable, Equatable, Sendable {
-    case snapshot(seq: Int, fleet: FleetSnapshot, reason: SnapshotReason)
+    /// `epoch` names the run of the Mac that counted `seq` — see `ClientFrame.hello`'s
+    /// `epoch`, which is this value coming back. Optional and omitted when nil, so a Mac built
+    /// before it and every test fixture keep their bytes; an older phone's keyed decode never
+    /// reads the key, so sending it to one costs nothing.
+    case snapshot(seq: Int, fleet: FleetSnapshot, reason: SnapshotReason, epoch: String? = nil)
     case event(seq: Int, FleetEvent)
+    /// "That was the whole replay: you are current." Sent after a resume's replayed events,
+    /// including after none at all, and only to a client that advertised
+    /// `FleetCapability.caughtUp` — an older phone cannot decode it and would lose its socket.
+    ///
+    /// **It exists because a resume that is already current used to be answered with
+    /// silence**, and silence is indistinguishable from a `hello` that was never heard.
+    /// `FleetConnector` picks its race winner, and reports `.connected`, on the first frame a
+    /// candidate delivers — so a phone that resumed onto a fleet nothing had changed in got no
+    /// frame, never won its race, and redialled every `raceTimeout` while the list said
+    /// "Connecting…". Rare while a phone only resumed mid-run; the ordinary case once it
+    /// resumes from a fleet cached on disk overnight.
+    ///
+    /// Carries no `seq`, deliberately: it describes the stream rather than standing in it, and
+    /// a client's resume point is whatever the events before it left it at.
+    case caughtUp
     case ack(cid: Int)
     /// `message` is for a human and optional: `code` stays the machine-readable contract every
     /// caller matches on. Added for `host.info`, whose refusals carry facts the code cannot —
@@ -818,7 +849,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case infraDone(cid: Int)
 
     enum CodingKeys: String, CodingKey {
-        case t, seq, fleet, reason, cid, code, message, page, options, endpoints
+        case t, seq, fleet, reason, epoch, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
         case line, machine, machines, orphans, unreadable, checks, choices, switched
@@ -826,7 +857,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
-        case snapshot, ack, err, page, options, endpoints, conversations, hits, session
+        case snapshot, caughtUp, ack, err, page, options, endpoints, conversations, hits, session
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
@@ -837,11 +868,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .snapshot(let seq, let fleet, let reason):
+        case .snapshot(let seq, let fleet, let reason, let epoch):
             try c.encode(Tag.snapshot, forKey: .t)
             try c.encode(seq, forKey: .seq)
             try c.encode(fleet, forKey: .fleet)
             try c.encode(reason, forKey: .reason)
+            try c.encodeIfPresent(epoch, forKey: .epoch)
+        case .caughtUp:
+            try c.encode(Tag.caughtUp, forKey: .t)
         case .event(let seq, let event):
             try c.encode(seq, forKey: .seq)
             // The event supplies its own `t`; the frame adds only the sequence. One flat
@@ -990,7 +1024,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .snapshot:
                 self = .snapshot(seq: try c.decode(Int.self, forKey: .seq),
                                  fleet: try c.decode(FleetSnapshot.self, forKey: .fleet),
-                                 reason: try c.decode(SnapshotReason.self, forKey: .reason))
+                                 reason: try c.decode(SnapshotReason.self, forKey: .reason),
+                                 epoch: try c.decodeIfPresent(String.self, forKey: .epoch))
+            case .caughtUp:
+                self = .caughtUp
             case .ack:
                 self = .ack(cid: try c.decode(Int.self, forKey: .cid))
             case .err:
@@ -1118,7 +1155,7 @@ public extension ServerFrame {
     /// reply case cannot compile until someone decides whether it is correlated.
     var correlationID: Int? {
         switch self {
-        case .snapshot, .event: return nil
+        case .snapshot, .event, .caughtUp: return nil
         case .ack(let cid), .err(let cid, _, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
