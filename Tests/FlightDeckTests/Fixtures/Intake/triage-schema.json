@@ -3,13 +3,13 @@
  "properties":{
   "kind":{"type":"string","enum":["questions","recommendation"]},
   "questions":{"type":["array","null"],"items":{"type":"string"}},
-  "preset":{"type":["string","null"],"enum":["bead","sketch","featurePlan","fullPlan",null]},
+  "preset":{"type":["string","null"],"enum":["singleTask","sketch","featurePlan","fullPlan",null]},
   "reason":{"type":["string","null"]},
   "changeSet":{"type":["object","null"],"additionalProperties":false,"required":["graphObservedAt","ops"],
                "properties":{"graphObservedAt":{"type":"string"},"ops":{"type":"array","items":{"type":"object","additionalProperties":false,
  "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
  "properties":{
-  "op":{"type":"string","enum":["createBead","addEdge","editBead","reopen","followUp"]},
+  "op":{"type":"string","enum":["createTask","addEdge","editTask","reopen","followUp"]},
   "tempId":{"type":["string","null"]},"title":{"type":["string","null"]},"type":{"type":["string","null"]},
   "priority":{"type":["integer","null"]},"description":{"type":["string","null"]},"acceptance":{"type":["string","null"]},
   "labels":{"type":["array","null"],"items":{"type":"string"}},

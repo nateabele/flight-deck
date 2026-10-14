@@ -40,16 +40,6 @@ enum TerminologyScan {
         ".beads",
         "beads.db",
         "beads.db-wal",
-
-        // IntakeDelivery.deliver: the Agent-Mail `--thread-id` value groups a bead's mail
-        // thread by its internal id — a wire key, never rendered as prose. It's a standalone
-        // array element, so the same-line `argv` skip (the array's `var argv = [...]` is a
-        // different physical line) never reaches it.
-        "bead:$",
-        // IntakeDelivery.reclaimFailedInjectText: text injected into an AGENT's own session
-        // (`inject(...)`), never shown to the human user — spec §2 exempts agent prompts.
-        "or reply on the Agent Mail thread bead:$.",
-
     ]
 
     /// Literals exempt in ONE file only. A bare `"beads"` anywhere else is exactly the kind of
@@ -64,13 +54,11 @@ enum TerminologyScan {
         "IntakeStyle.swift": ["bead"],
     ]
 
-    /// IntakeKit files whose literals are all agent- or `br`-facing: prompts and schemas an agent
-    /// reads, mail and injected text sent to an agent, and `br` argv/paths (spec §2 keeps the
-    /// word there). Every other IntakeKit file is scanned — its strings reach the human as a
-    /// failure, a diagnosis or a summary, and the app-side sweep can't see them.
-    static let agentFacingIntakeKitFiles: Set<String> = [
-        "Triage.swift", "RoundPrompts.swift", "DeliveryPlanner.swift", "ShadowGraph.swift",
-    ]
+    /// IntakeKit files whose literals are `br` argv/paths (spec §2 keeps the word there). Prompts,
+    /// schemas and mail to agents are scanned like everything else: no agent reads the word either
+    /// (`AgentVocabularyGuardTests` builds them). Every other IntakeKit file is scanned — its
+    /// strings reach the human as a failure, a diagnosis or a summary.
+    static let agentFacingIntakeKitFiles: Set<String> = ["ShadowGraph.swift"]
 
     static func offenders(under root: URL, allow: Set<String>, skipping skipped: Set<String> = []) throws -> [String] {
         var offenses: [String] = []

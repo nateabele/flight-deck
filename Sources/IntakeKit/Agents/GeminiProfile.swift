@@ -131,9 +131,9 @@ public struct GeminiProfile: AgentProfile {
 
 /// The intake's strict schemas, made acceptable to Gemini's API without changing which
 /// instances validate. Probed on agy 1.3.1, 2026-10-07: the triage schema's nullable enums
-/// (`{"type":["string","null"],"enum":["bead",…,null]}`) are refused with `400 INVALID_ARGUMENT
+/// (`{"type":["string","null"],"enum":["singleTask",…,null]}`) are refused with `400 INVALID_ARGUMENT
 /// … enum[4]: cannot be empty` — Gemini allows no `null` inside `enum`. Each such node becomes
-/// `{"anyOf":[{"type":"string","enum":["bead",…]},{"type":"null"}]}`, which accepts exactly the
+/// `{"anyOf":[{"type":"string","enum":["singleTask",…]},{"type":"null"}]}`, which accepts exactly the
 /// same values, and which agy accepted and enforced in the same probe. Nothing else changes.
 public enum GeminiSchema {
     public static func compatible(_ schemaJSON: String) -> String {

@@ -127,7 +127,9 @@ extension ChangeOp: Codable {
         let c = try decoder.container(keyedBy: Key.self)
         let op = try c.decode(String.self, forKey: .op)
         switch op {
-        case "createBead":
+        // `createBead`/`editBead` are the names that tapes written before the rename carry, and that
+        // an agent still remembering them emits; both spellings decode to the same op.
+        case "createTask", "createBead":
             self = .createBead(NewBead(
                 tempId: try c.decode(String.self, forKey: .tempId),
                 title: try c.decode(String.self, forKey: .title),
@@ -144,7 +146,7 @@ extension ChangeOp: Codable {
             self = .addEdge(from: try c.decode(BeadRef.self, forKey: .from),
                             to: try c.decode(BeadRef.self, forKey: .to),
                             kind: try c.decodeIfPresent(EdgeKind.self, forKey: .kind) ?? .blocks)
-        case "editBead":
+        case "editTask", "editBead":
             self = .editBead(id: try c.decode(String.self, forKey: .id),
                              set: try c.decode(FieldSet.self, forKey: .set),
                              pre: try c.decode(Precondition.self, forKey: .pre),
@@ -168,7 +170,7 @@ extension ChangeOp: Codable {
         var c = encoder.container(keyedBy: Key.self)
         switch self {
         case .createBead(let b):
-            try c.encode("createBead", forKey: .op)
+            try c.encode("createTask", forKey: .op)
             try c.encode(b.tempId, forKey: .tempId); try c.encode(b.title, forKey: .title)
             try c.encode(b.type, forKey: .type); try c.encode(b.priority, forKey: .priority)
             try c.encode(b.description, forKey: .description)
@@ -179,7 +181,7 @@ extension ChangeOp: Codable {
             try c.encode("addEdge", forKey: .op)
             try c.encode(from, forKey: .from); try c.encode(to, forKey: .to); try c.encode(kind, forKey: .kind)
         case .editBead(let id, let set, let pre, let delivery):
-            try c.encode("editBead", forKey: .op)
+            try c.encode("editTask", forKey: .op)
             try c.encode(id, forKey: .id); try c.encode(set, forKey: .set); try c.encode(pre, forKey: .pre)
             try c.encodeIfPresent(delivery, forKey: .delivery)
         case .reopen(let id, let reason, let pre):

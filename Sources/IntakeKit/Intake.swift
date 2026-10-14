@@ -1,6 +1,18 @@
 import Foundation
 
-public enum Preset: String, Codable, Sendable { case bead, sketch, featurePlan, fullPlan }
+public enum Preset: String, Codable, Sendable {
+    case bead, sketch, featurePlan, fullPlan
+
+    /// Agents are offered `singleTask` (triage's schema); storage keeps writing `bead`, so intakes
+    /// on disk and the phone's wire are untouched. Both spellings decode to `.bead`.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let preset = raw == "singleTask" ? Preset.bead : Preset(rawValue: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unknown preset \(raw)"))
+        }
+        self = preset
+    }
+}
 
 public enum IntakeState: String, Codable, Sendable {
     case triaging, needsAnswers, awaitingChoice, parked, review, releasing, released

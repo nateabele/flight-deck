@@ -102,7 +102,7 @@ public enum DeliveryPlanner {
     /// what Flight Deck actually *did*, so a holder is never told a prompt was sent or a
     /// reclaim happened when it was not attempted or did not work.
     public static func mailBody(for rating: DeliveryRating, bead: String, reason: String, outcome: DeliveryOutcome) -> String {
-        let trailer = "Run `br show \(bead)` to see the full change, or reply on the Agent Mail thread bead:\(bead)."
+        let trailer = "Run `br show \(bead)` to see the full change, or reply on the Agent Mail thread task:\(bead)."
         switch rating {
         case .clarifying:
             return "Flight Deck intake changed \(bead) (clarifying): \(reason). No action needed unless it changes your plan. \(trailer)"
@@ -124,7 +124,7 @@ public enum DeliveryPlanner {
     private static func scopeChangeInjectText(bead: String, reason: String) -> String {
         "Flight Deck intake changed \(bead) while you are working on it (scope change): \(reason). " +
         "Run `br show \(bead)`, compare it with what you have done, and adjust — " +
-        "or reply on the Agent Mail thread bead:\(bead) explaining why not."
+        "or reply on the Agent Mail thread task:\(bead) explaining why not."
     }
 
     private static func invalidatingInjectText(bead: String, reason: String) -> String {

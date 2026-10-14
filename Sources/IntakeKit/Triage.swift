@@ -6,9 +6,9 @@ public enum TriageResult: Equatable, Sendable {
 }
 
 /// The triage prompt, its strict JSON output schema, and the decoder for that schema
-/// (pipeline step 2, spec §4). Triage reads the live bead graph read-only and returns
-/// either clarifying questions or a fidelity recommendation — at Bead fidelity, with the
-/// full change set already encoded, since Bead has no later encode step.
+/// (pipeline step 2, spec §4). Triage reads the live task graph read-only and returns
+/// either clarifying questions or a fidelity recommendation — at Single-task fidelity, with the
+/// full change set already encoded, since Single task has no later encode step.
 public enum Triage {
     public struct Malformed: Error, Equatable { public let why: String }
 
@@ -22,7 +22,7 @@ public enum Triage {
     {"type":"object","additionalProperties":false,
      "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
      "properties":{
-      "op":{"type":"string","enum":["createBead","addEdge","editBead","reopen","followUp"]},
+      "op":{"type":"string","enum":["createTask","addEdge","editTask","reopen","followUp"]},
       "tempId":\(nullableString),"title":\(nullableString),"type":\(nullableString),
       "priority":{"type":["integer","null"]},"description":\(nullableString),"acceptance":\(nullableString),
       "labels":{"type":["array","null"],"items":{"type":"string"}},
@@ -56,7 +56,7 @@ public enum Triage {
      "properties":{
       "kind":{"type":"string","enum":["questions","recommendation"]},
       "questions":{"type":["array","null"],"items":{"type":"string"}},
-      "preset":{"type":["string","null"],"enum":["bead","sketch","featurePlan","fullPlan",null]},
+      "preset":{"type":["string","null"],"enum":["singleTask","sketch","featurePlan","fullPlan",null]},
       "reason":\(nullableString),
       "changeSet":\(changeSetSchemaFragment)}}
     """
@@ -91,50 +91,50 @@ public enum Triage {
     public static func graphShapeText(graphFile: String) -> String {
         """
         \(graphFile) is a JSON snapshot shaped:
-        `{"beads": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
+        `{"tasks": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
         "edges": [{"dependent": "<id>", "dependency": "<id>"}]}`. An edge's `dependent` \
         depends on its `dependency` — that is, `dependent` is `from` and `dependency` is \
-        `to`. A bead with no `assignee` key has no assignee; when you copy its `pre` \
+        `to`. A task with no `assignee` key has no assignee; when you copy its `pre` \
         precondition, use `"assignee": null` for it — never an empty string, and never
         omit the key.
         """
     }
 
     /// The change-set rules (spec §4). `RoundPrompts.encode`/`polish`/`freshEyes`/`dedup`
-    /// reuse this verbatim — they all produce the same change-set shape triage does at Bead
+    /// reuse this verbatim — they all produce the same change-set shape triage does at Single-task
     /// fidelity, so a second wording of the same rules is a second place for them to drift.
     public static func changeSetRulesText(observedAt: Date, kinds: [TaskKind] = []) -> String {
         """
         Change-set rules, whenever you return a change set:
         - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
           — the moment FD read the graph, not your own clock.
-        - Reference a bead you are creating in this same change set as `new:<tempId>` (never
+        - Reference a task you are creating in this same change set as `new:<tempId>` (never
           a bare tempId), everywhere another op needs to point at it.
         - Edge direction is `from` depends on `to`: `{"from": A, "to": B}` means A cannot
           proceed until B is done.
-        - For every existing bead an op touches, copy its `pre` precondition (status and
+        - For every existing task an op touches, copy its `pre` precondition (status and
           assignee) exactly as read from the graph — FD uses it to detect drift before
           release.
-        - Rate every edit to a bead that is `in_progress`: `clarifying` if it only affects
+        - Rate every edit to a task that is `in_progress`: `clarifying` if it only affects
           understanding, `scopeChange` if it changes what is being delivered, or
-          `invalidating` if it makes the bead's current work moot — and give a reason for
+          `invalidating` if it makes the task's current work moot — and give a reason for
           the rating.
-        - For new work on a bead that is already closed, use `op=followUp` — it creates a
-          new bead with a `related` edge to the closed one; never emit `createBead` plus a
+        - For new work on a task that is already closed, use `op=followUp` — it creates a
+          new task with a `related` edge to the closed one; never emit `createTask` plus a
           separate `addEdge` instead. Use `op=reopen` only when the closed work was itself
           wrong, and say why in its reason.
-        - Before creating a bead, check for duplicates against both open and closed beads,
+        - Before creating a task, check for duplicates against both open and closed tasks,
           not just open ones.
 
         Each op must fill in exactly the fields its kind needs, and set every other field
         to null:
-        - `createBead`: `tempId`, `title`, `description` are required; `type`, `priority`,
+        - `createTask`: `tempId`, `title`, `description` are required; `type`, `priority`,
           `acceptance`, and `labels` are optional (null falls back to `task` priority 2
           with no acceptance or labels).
         - `addEdge`: `from`, `to`, and `kind` — `kind` is required, one of `blocks`,
           `related`, or `parent-child`.
-        - `editBead`: `id`, `set` (a non-null object of the fields you are changing), and
-          `pre`; also `delivery` when the bead you are editing is `in_progress`.
+        - `editTask`: `id`, `set` (a non-null object of the fields you are changing), and
+          `pre`; also `delivery` when the task you are editing is `in_progress`.
         - `reopen`: `id`, `reason`, and `pre`.
         - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
         """ + kindsRulesText(kinds)
@@ -152,7 +152,7 @@ public enum Triage {
         return """
 
 
-        Task kinds. Classify every task a `createBead` op creates:
+        Task kinds. Classify every task a `createTask` op creates:
         - Set `taskKind` to the id of the kind below that fits it best.
         - When none fits, set `taskKind` to null and fill `kindProposal`: a short `name`, a \
         one-line `description`, and `dimensions` as `[{"dimension": <id>, "weight": 0 to 1}]` over \
@@ -176,7 +176,7 @@ public enum Triage {
         observedAt: Date, kinds: [TaskKind] = []
     ) -> String {
         var files = """
-        - Live bead graph: \(graphFile)
+        - Live task graph: \(graphFile)
         - Current triage view: \(triageFile)
         """
         if let agentsFile {
@@ -185,8 +185,8 @@ public enum Triage {
         if let readmeFile {
             files += "\n- Project README: \(readmeFile)"
         }
-        return """
-        You are triaging one intent against this project's live bead graph. Decide whether \
+        return AgentVocabulary.closing("""
+        You are triaging one intent against this project's live task graph. Decide whether \
         you need more information, and if not, recommend a fidelity preset.
 
         Intent:
@@ -209,7 +209,7 @@ public enum Triage {
           already answer.
 
         Choose one of four fidelity presets:
-        - Bead: no drafting or refinement — you encode the change set yourself in one pass.
+        - Single task: no drafting or refinement — you encode the change set yourself in one pass.
         - Sketch: one drafter, then up to two reviewer refinement rounds.
         - Feature plan: two drafters synthesize, then up to three refinement rounds and up to
           two polish rounds.
@@ -217,13 +217,13 @@ public enum Triage {
           up to five refinement rounds, then up to six polish rounds plus a fresh-eyes round
           and a dedup round.
 
-        If you recommend Bead fidelity, also return the full change set now — Bead has no
+        If you recommend Single-task fidelity, also return the full change set now — Single task has no
         later encode step, so this is the only chance to produce it.
 
         \(changeSetRulesText(observedAt: observedAt, kinds: kinds))
 
         Return only JSON matching the provided schema. Do not write prose.
-        """
+        """)
     }
 
     /// The follow-up turn once the human has answered triage's clarifying questions:
@@ -234,16 +234,16 @@ public enum Triage {
         let qa = zip(questions, answers)
             .map { "Q: \($0)\nA: \($1)" }
             .joined(separator: "\n\n")
-        return """
+        return AgentVocabulary.closing("""
         Here are your questions and the answers you asked for:
 
         \(qa)
 
         If these answers leave the scope unsettled, or raise something new, ask your
         follow-up questions now (kind=questions). Otherwise return your recommendation: a
-        preset, a one-sentence reason, and — if you recommend Bead fidelity — the full
+        preset, a one-sentence reason, and — if you recommend Single-task fidelity — the full
         change set. Follow the same change-set rules as before.
-        """
+        """)
     }
 
     /// The single automatic retry after a change set fails validation (spec §11): resumes
@@ -252,25 +252,25 @@ public enum Triage {
     /// `graphObservedAt` because the graph file may have been re-read since the first turn.
     public static func correctionPrompt(errors: [ValidationError], observedAt: Date) -> String {
         let list = errors.map { "- \($0.message)" }.joined(separator: "\n")
-        return """
+        return AgentVocabulary.closing("""
         Your change set failed validation:
         \(list)
 
         Return your recommendation again as JSON matching the schema, with a corrected, \
         complete change set that fixes every error above. Follow the same change-set rules \
         as before. Set changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
-        """
+        """)
     }
 
-    /// Forces a Bead-fidelity encode regardless of what triage would otherwise recommend —
-    /// used when the human picks Bead over triage's own recommendation. Carries its own
+    /// Forces a Single-task-fidelity encode regardless of what triage would otherwise recommend —
+    /// used when the human picks Single task over triage's own recommendation. Carries its own
     /// `graphObservedAt` instruction because it can start a fresh session (unlike
     /// `answersPrompt`, which resumes the session `initialPrompt` already gave it to).
     public static func encodeNowPrompt(observedAt: Date) -> String {
-        """
-        Encode this intent now at Bead fidelity as a single pass, regardless of your \
-        recommended preset; return kind=recommendation, preset=bead with the full changeSet. \
+        AgentVocabulary.closing("""
+        Encode this intent now at Single-task fidelity as a single pass, regardless of your \
+        recommended preset; return kind=recommendation, preset=singleTask with the full changeSet. \
         Set changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
-        """
+        """)
     }
 }

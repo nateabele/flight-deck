@@ -49,7 +49,7 @@ final class IntakeDeliveryTests: XCTestCase {
             ["am", "mail", "send", "--project", "/tmp/proj", "--from", "FDName", "--to", "BlueFalcon",
              "--subject", DeliveryPlanner.subject(for: .clarifying, bead: "b1"),
              "--body", DeliveryPlanner.mailBody(for: .clarifying, bead: "b1", reason: "why", outcome: .notAttempted),
-             "--thread-id", "bead:b1", "--topic", "fd-intake"],
+             "--thread-id", "task:b1", "--topic", "fd-intake"],
         ])
     }
 

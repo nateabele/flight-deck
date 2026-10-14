@@ -52,7 +52,7 @@ final class DeliveryPlannerTests: XCTestCase {
                 XCTAssertTrue(body.contains("b1"), "\(rating)/\(outcome): \(body)")
                 XCTAssertTrue(body.contains("why"), "\(rating)/\(outcome): \(body)")
                 XCTAssertTrue(body.contains("br show b1"), "\(rating)/\(outcome): \(body)")
-                XCTAssertTrue(body.contains("bead:b1"), "\(rating)/\(outcome): \(body)")
+                XCTAssertTrue(body.contains("task:b1"), "\(rating)/\(outcome): \(body)")
             }
         }
     }

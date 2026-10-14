@@ -160,7 +160,7 @@ public enum RoundSchemas {
 
     /// Embeds `Triage.changeSetSchemaFragment` exactly, rather than a hand-copied twin that
     /// could drift from it — encode, polish, fresh-eyes, and dedup all hand back the same
-    /// `{graphObservedAt, ops}` shape triage does at Bead fidelity.
+    /// `{graphObservedAt, ops}` shape triage does at Single-task fidelity.
     public static let changeSet = """
     {"type":"object","additionalProperties":false,"required":["changeSet","summary"],
      "properties":{"changeSet":\(Triage.changeSetSchemaFragment),"summary":{"type":"string"}}}
@@ -225,7 +225,7 @@ public enum RoundPrompts {
     // MARK: - Shared fragments
 
     private static func inputFiles(_ c: RoundContext) -> String {
-        var files = "- Live bead graph: \(c.graphFile)"
+        var files = "- Live task graph: \(c.graphFile)"
         if let agentsFile = c.agentsFile { files += "\n- Project agent instructions: \(agentsFile)" }
         if let readmeFile = c.readmeFile { files += "\n- Project README: \(readmeFile)" }
         return files
@@ -330,7 +330,7 @@ public enum RoundPrompts {
     /// The extra clause every polish-family round gets once FD has run `bv`'s robot reports
     /// against this round's shadow graph (Task 7b wires this in, `RoundExecutor.polish`): the
     /// model reads what `bv` found AS IF the current change set had already landed, so it sees
-    /// the shape its own beads would actually produce before committing to it — nil when the
+    /// the shape its own tasks would actually produce before committing to it — nil when the
     /// shadow or the `bv` runs themselves failed, e.g. the first polish round of a fresh
     /// intake, or a `bv` version too old for one of these flags. The agent reads these files;
     /// it never runs `bv` itself — see `ShadowAnalytics`'s doc comment for why.
@@ -351,7 +351,7 @@ public enum RoundPrompts {
     }
 
     /// The read-only inputs every change-set round (encode, polish, fresh-eyes, dedup) is
-    /// pointed at. The graph is the one that matters: every existing-bead op must copy its
+    /// pointed at. The graph is the one that matters: every existing-task op must copy its
     /// `pre` out of it, and a prompt that never names the file leaves the model guessing at
     /// statuses and assignees — which then fail validation and burn the one correction turn.
     private static func changeSetInputs(_ c: RoundContext) -> String {
@@ -415,12 +415,12 @@ public enum RoundPrompts {
         You are read-only: never run a `br` command that writes, and never edit any file.
         Return only JSON matching the provided schema: `{"plan": "<the plan, as markdown>"}`.
         """
-        return s
+        return AgentVocabulary.closing(s)
     }
 
     public static func synthesis(_ c: RoundContext, ownDraft: String, otherDrafts: [String]) -> String {
         let others = otherDrafts.map { "- Competing draft: \($0)" }.joined(separator: "\n")
-        return """
+        return AgentVocabulary.closing("""
         You are synthesizing a plan for this project intake. I asked competing models to \
         independently draft the same plan; be intellectually honest about what the \
         competing drafts did better than the draft at \(ownDraft) (yours to revise), and \
@@ -441,7 +441,7 @@ public enum RoundPrompts {
         any plan text in an `edit`: \(planTextRule)
 
         Return only JSON matching the provided schema: `{"changes": [...], "summary": "..."}`.
-        """
+        """)
     }
 
     public static func review(_ c: RoundContext, planFile: String, round: Int) -> String {
@@ -466,7 +466,7 @@ public enum RoundPrompts {
 
         Return only JSON matching the provided schema.
         """
-        return s
+        return AgentVocabulary.closing(s)
     }
 
     /// `humanEdits` is the head's capped edit diff, the same one the proposing seat saw: the
@@ -489,7 +489,7 @@ public enum RoundPrompts {
         let example = clustered
             ? #"`{"agree": N, "somewhat": N, "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...], "clusters": [[0, 3], ...]}`"#
             : #"`{"agree": N, "somewhat": N, "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...]}`"#
-        return """
+        return AgentVocabulary.closing("""
         Integrate these revisions into `\(planFile)` in place; be meticulous; edit only \
         that file. The proposed changes are in \(changesFile). For any text you add or \
         rewrite: \(planTextRule)\(humanEditsBlock(humanEdits))
@@ -502,35 +502,35 @@ public enum RoundPrompts {
         one-line `notes` on what you did and why anything was left out.\(clusterBlock)
 
         Return only JSON matching the provided schema: \(example).
-        """
+        """)
     }
 
     public static func encode(_ c: RoundContext, planFile: String) -> String {
-        """
-        Turn ALL of the plan at \(planFile) into a comprehensive and granular set of beads: \
-        each bead self-contained and self-documenting, so someone who has never read the \
+        AgentVocabulary.closing("""
+        Turn ALL of the plan at \(planFile) into a comprehensive and granular set of tasks: \
+        each task self-contained and self-documenting, so someone who has never read the \
         plan can pick it up and work it. Include unit and end-to-end test obligations in \
-        every bead's acceptance criteria. Never lose a feature the plan describes.
+        every task's acceptance criteria. Never lose a feature the plan describes.
 
         \(changeSetInputs(c))
 
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
-        """
+        """)
     }
 
     public static func polish(_ c: RoundContext, planFile: String, changeSetFile: String, round: Int,
                                analytics: ShadowAnalytics? = nil) -> String {
-        """
-        This is polish round \(round). \(rereadAgents(c))Check over each proposed bead in \
+        AgentVocabulary.closing("""
+        This is polish round \(round). \(rereadAgents(c))Check over each proposed task in \
         \(changeSetFile) super carefully against the plan at \(planFile): does it make \
         sense, is it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT \
         LOSE FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
-        cross-check every bead against the plan.\(shadowAnalyticsClause(analytics))
+        cross-check every task against the plan.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
+        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
         \(changeSetInputs(c))
@@ -538,21 +538,21 @@ public enum RoundPrompts {
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
-        """
+        """)
     }
 
     public static func freshEyes(_ c: RoundContext, planFile: String, changeSetFile: String,
                                   analytics: ShadowAnalytics? = nil) -> String {
-        """
-        You are seeing this plan and its beads for the first time — a fresh-eyes reviewer, \
+        AgentVocabulary.closing("""
+        You are seeing this plan and its tasks for the first time — a fresh-eyes reviewer, \
         not someone who has been polishing them for rounds. \(rereadAgents(c))Read the plan at \(planFile) \
-        and the proposed beads at \(changeSetFile) fresh: does the change set make sense, is \
+        and the proposed tasks at \(changeSetFile) fresh: does the change set make sense, is \
         it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT LOSE \
         FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
-        cross-check every bead against the plan.\(shadowAnalyticsClause(analytics))
+        cross-check every task against the plan.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
+        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
         \(changeSetInputs(c))
@@ -560,17 +560,17 @@ public enum RoundPrompts {
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
-        """
+        """)
     }
 
     public static func dedup(_ c: RoundContext, changeSetFile: String, analytics: ShadowAnalytics? = nil) -> String {
-        """
-        \(rereadAgents(c))Check over ALL proposed beads at \(changeSetFile); none may be duplicative or \
-        excessively overlapping. Merge into canonical beads, keeping the richer tests and \
+        AgentVocabulary.closing("""
+        \(rereadAgents(c))Check over ALL proposed tasks at \(changeSetFile); none may be duplicative or \
+        excessively overlapping. Merge into canonical tasks, keeping the richer tests and \
         dependencies of whichever duplicate had them.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
+        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
         \(changeSetInputs(c))
@@ -578,7 +578,7 @@ public enum RoundPrompts {
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
-        """
+        """)
     }
 
     /// The single automatic retry after an encode/polish/fresh-eyes/dedup change set fails
@@ -587,7 +587,7 @@ public enum RoundPrompts {
     /// something it doesn't recognise is one more way to spend the only retry on confusion.
     public static func changeSetCorrection(errors: [ValidationError], observedAt: Date) -> String {
         let list = errors.map { "- \($0.message)" }.joined(separator: "\n")
-        return """
+        return AgentVocabulary.closing("""
         Your change set failed validation:
         \(list)
 
@@ -596,7 +596,7 @@ public enum RoundPrompts {
         changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
-        """
+        """)
     }
 
     /// Decodes one round's structured output. `IntakeJSON.decoder` handles both ISO8601

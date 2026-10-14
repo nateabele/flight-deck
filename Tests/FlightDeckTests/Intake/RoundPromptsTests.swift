@@ -286,7 +286,7 @@ final class RoundPromptsTests: XCTestCase {
         ]
         for (name, p) in prompts {
             XCTAssertTrue(p.contains("Read-only files:"), name)
-            XCTAssertTrue(p.contains("- Live bead graph: /i/graph.json"), name)
+            XCTAssertTrue(p.contains("- Live task graph: /i/graph.json"), name)
             XCTAssertTrue(p.contains("/i/graph.json is a JSON snapshot shaped"), name)
         }
     }
