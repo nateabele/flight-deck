@@ -25,11 +25,35 @@ final class FleetService: ObservableObject {
     /// Which session each live connection is looking at.
     private var viewingByClient: [UUID: UUID] = [:]
 
+    /// How many phone connections are attached, as of the last `onAttachedSlotsChanged` to
+    /// reach main. The prompt log's client count: `server.attachedCount` is confined to
+    /// `socketQueue`, and the log is written on main, in step with the events it describes.
+    private var attachedPhoneCount = 0
+
     /// Sessions some phone currently has open. Drives the sidebar's presence badge.
     @Published private(set) var phoneActiveSessions: Set<UUID> = []
 
     private static let logger = Logger(
         subsystem: "dev.flightdeck.FlightDeck", category: "fleet"
+    )
+
+    /// Where both socket servers run: every handshake, frame, `hello` and broadcast.
+    ///
+    /// **Not the main queue, because the main queue is not always there.** It also runs every
+    /// per-session poll for every open tab, and once macOS lowers the app's priority — the
+    /// display asleep, or another app in front — those polls stop fitting. Measured 2026-10-14
+    /// with 65 sessions open: `flightdeck ls` stalls of 9–44s, a median of 816ms against 50ms
+    /// that morning, and a phone that reconnects has 8s (`FleetConnector.raceTimeout`) to
+    /// finish its handshake and get its `hello` answered before it gives up and backs off. So
+    /// the socket work runs here, a `hello` is answered here from `socketLog` without touching
+    /// the main thread, and only commands and requests — which read and change the store —
+    /// hop to main, replying back here when they are done.
+    ///
+    /// Serial, so the confinement `FleetSocketServer` asserts holds, and so a `hello` and a
+    /// broadcast cannot interleave: a phone is handed the log up to some sequence, and every
+    /// broadcast queued after that point reaches it after its `hello` answer.
+    nonisolated static let socketQueue = DispatchQueue(
+        label: "dev.flightdeck.fleet-socket", qos: .userInitiated
     )
 
     private let store: SessionStore
@@ -40,7 +64,7 @@ final class FleetService: ObservableObject {
     /// every arm, expiry and revocation reloads the phone's keys with `server.stop()` and a
     /// fresh `start`, which cancels every connection that server holds — a CLI tailing a tab
     /// would be dropped each time a phone was paired.
-    private let localServer = FleetSocketServer()
+    private let localServer = FleetSocketServer(queue: FleetService.socketQueue)
     /// The key each tab's `FLIGHT_DECK_CALLER` token is minted and verified under. Injected so
     /// a test can mint a token without reading or writing the real defaults; `FlightDeckApp`
     /// copies it onto `SessionStore.controlSecret` so tabs carry tokens this service accepts.
@@ -50,6 +74,10 @@ final class FleetService: ObservableObject {
     /// pin a level without touching `UserDefaults`.
     var scopeLevel: () -> ControlScopeLevel = { ControlScope.level() }
     private let replicator: FleetReplicator
+    /// The socket queue's copy of `replicator.log`, kept in step batch by batch from
+    /// `onEvents` and replaced whole on `onResync`. What a `hello` is answered from — see
+    /// `socketQueue`.
+    private let socketLog: SocketLog
     /// Answers history requests. Held here rather than built per request because it holds the
     /// store, and because there is exactly one of it — a request carries its own session id,
     /// so nothing about it is per-connection.
@@ -130,7 +158,7 @@ final class FleetService: ObservableObject {
         self.controlSecret = controlSecret
         self.preferences = preferences
         self.armer = armer
-        self.server = FleetSocketServer()
+        self.server = FleetSocketServer(queue: Self.socketQueue)
         // The three closures are the production wiring for the test seams `PlanGateService`
         // declares. `callID` re-derives the open `ExitPlanMode` call from a transcript tail —
         // `PromptService`'s own read, sized the same — through `ClaudeOpenPlanGate`, which
@@ -158,6 +186,7 @@ final class FleetService: ObservableObject {
             guard let store else { return .empty }
             return FleetProjection.snapshot(of: store, planGates: planGates)
         }
+        self.socketLog = SocketLog(replicator.log)
         self.timeline = TimelineService(store: store)
         let prompts = PromptService(store: store)
         self.prompts = prompts
@@ -394,98 +423,157 @@ final class FleetService: ObservableObject {
         // QR path — a phone that scanned the code never touches the pairing listener, so
         // `armer.claim` is the sole witness that pairing finished.
         armer.onWindowClosed = { [weak self] in self?.closePairingListener() }
+        let server = self.server, localServer = self.localServer, socketLog = self.socketLog
+        let queue = Self.socketQueue
         replicator.onEvents = { [weak self] batch in
             guard let self else { return }
+            // A closed tab takes its services down with it (§6.2): nothing should keep a port
+            // forwarded for a session that no longer exists.
             for entry in batch {
-                // A closed tab takes its services down with it (§6.2): nothing should keep a
-                // port forwarded for a session that no longer exists.
                 if case .sessionRemoved(let id) = entry.event { self.delegation?.sessionClosed(id) }
-                let needed = Self.requiredCapability(for: entry.event)
-                self.server.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
-                self.localServer.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
             }
-            // After the sends, never before: a record that says a closure was pushed to one
-            // client is only true once it has been. The client count is read here for the
-            // whole batch — `attached` moves only on this queue, so it cannot have changed
-            // across the loop above.
-            self.promptLifecycle.observe(batch, clients: self.server.attachedCount)
+            // Logged and sent in one block on the socket queue, so a `hello` answered there
+            // sees either the whole batch in the log it hands out or none of it and the
+            // broadcast after — never both, and never neither. See `socketQueue`.
+            queue.async {
+                socketLog.log.apply(batch)
+                for entry in batch {
+                    let needed = Self.requiredCapability(for: entry.event)
+                    server.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
+                    localServer.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
+                }
+            }
+            // Recorded here, in step with the store, once the sends are queued: the sends are
+            // ordered behind every earlier batch on the socket queue, so a record that says a
+            // closure was pushed describes a frame that is on its way, in order. The count is
+            // the last one main heard — see `attachedPhoneCount`.
+            self.promptLifecycle.observe(batch, clients: self.attachedPhoneCount)
         }
+        replicator.onResync = { log in queue.async { socketLog.log = log } }
         // Both servers share one set of handlers: the local control socket speaks the phone's
         // protocol verbatim, and a second copy of these bodies would be a second opinion about
         // what a command does. What differs for a local caller — no presence, no resume
         // observation, a scope check — is decided inside the handlers off `isLocal`.
+        //
+        // Every handler is called on `socketQueue`. A `hello` is answered there outright;
+        // commands and requests hop to main, where the store lives, and their `reply` is
+        // carried back to `socketQueue`, where `FleetSocketServer` requires it.
         //
         // `localServer.onAttachedSlotsChanged` is deliberately NOT wired: attached slots, the
         // sleep assertion and presence pruning are all about paired phones, and a CLI
         // connection has no slot to report.
         for server in [server, localServer] {
             server.onHello = { [weak self] attachment, lastSeq in
-                guard let self else { return [] }
-                return Self.deliverable(self.handleHello(attachment, lastSeq), caps: attachment.caps)
+                let answer = socketLog.resumeFrames(
+                    from: lastSeq, epoch: attachment.epoch, caps: attachment.caps
+                )
+                // A local caller is not a phone that was away, so there is no attachment to
+                // file and no stale card for the resume record to explain — filing one would
+                // log a resume no phone ever made.
+                if !attachment.isLocal {
+                    let clients = server.attachedCount
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard let self else { return }
+                            self.noteAttached(attachment)
+                            // A phone that was away across a dialog closing learns about it
+                            // from this answer and from nothing later, so what it was handed
+                            // is the other half of any stale-card question — see
+                            // `PromptLifecycleObserver.observeResume`.
+                            self.promptLifecycle.observeResume(
+                                lastSeq: lastSeq, frames: answer, clients: clients
+                            )
+                        }
+                    }
+                }
+                return Self.deliverable(answer, caps: attachment.caps)
             }
             server.onCommand = { [weak self] client, cid, command, reply in
-                guard let self else { return reply(.err(cid: cid, code: "stopped")) }
-                self.handleCommand(client, cid, command, reply)
+                let reply = Self.onSocketQueue(reply)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+                        self.handleCommand(client, cid, command, reply)
+                    }
+                }
             }
             server.onRequest = { [weak self] client, cid, request, reply in
-                guard let self else { return reply(.err(cid: cid, code: "stopped")) }
-                self.handleRequest(client, cid, request, reply)
+                let reply = Self.onSocketQueue(reply)
+                // Taken here, synchronously inside `onRequest`, the only place it is valid.
+                let cancellation = Self.onMainQueue(server.replyCancellation(for: client, cid: cid))
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+                        self.handleRequest(client, cid, request, cancellation: cancellation, reply)
+                    }
+                }
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
-            // Safe only because `FleetSocketServer`'s `queue` defaults to `.main` and nothing
-            // here overrides it: `assumeIsolated` traps rather than hopping if the caller
-            // turns out not to be on the main actor, and `init(queue:)` does not enforce
-            // serial-ness, let alone `.main` specifically — a caller passing a concurrent
-            // queue would compile cleanly and turn this into a runtime crash with no
-            // compiler signal. `FleetSocketServer` now also asserts this with a
-            // `dispatchPrecondition` before invoking any handler, so a violation traps at
-            // the source instead of here.
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                // Assigned directly, not merged: `slots` is already the server's full,
-                // authoritative attached set at this instant, so keeping our own copy in
-                // sync by patching it per-event is exactly the stale-count bug this signal
-                // shape replaces.
-                self.attachedSlots = slots
-                self.refreshSleepAssertion()
-                // A phone that vanished mid-session never sends `viewing(nil)`, so presence is
-                // pruned from the authoritative attached set rather than trusted to clean up
-                // after itself — otherwise a badge glows for a phone that is gone.
-                //
-                // **Per client, not all-or-nothing, and `attachments` rather than `slots` is
-                // what makes that possible.** This was `if slots.isEmpty { removeAll() }`,
-                // which only ever fired when the LAST phone detached — so a client that went
-                // away while any other was still attached left its entry behind forever. An
-                // ordinary single-phone wake with a clean teardown does not hit this:
-                // `FleetModel.connect()` stops the old connector before dialling the new one,
-                // so `slots` genuinely does pass through empty and the old prune fired. The
-                // bug is with a second phone attached, or simply with the new connection
-                // landing before the old one is reaped — either way `slots` never passes
-                // through empty, so the Mac kept a viewer that no longer existed and drew the
-                // badge for it.
-                //
-                // `slots` is the wrong key to prune on even now: a slot is the paired DEVICE,
-                // and two connections from one device — precisely what a reconnect produces
-                // for the moment they overlap — share one. `viewingByClient` is keyed by
-                // connection id, and `attachments` is the server's live set of those
-                // (`FleetSocketServer.attachments`), so the two line up exactly.
-                //
-                // Reading `attachments` here is safe for the same reason the `assumeIsolated`
-                // above is: it asserts `.onQueue(queue)`, and this handler already runs on the
-                // server's queue, which is `.main`.
-                let live = Set(self.server.attachments.map(\.id))
-                let kept = self.viewingByClient.filter { live.contains($0.key) }
-                if kept.count != self.viewingByClient.count {
-                    self.viewingByClient = kept
-                    self.publishPhonePresence()
+            // Read here, on the socket queue, where `attachments` is confined, and carried to
+            // main with `slots`, so the two still describe the same instant when they land.
+            let live = Set(server.attachments.map(\.id))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // Assigned directly, not merged: `slots` is already the server's full,
+                    // authoritative attached set at this instant, so keeping our own copy in
+                    // sync by patching it per-event is exactly the stale-count bug this signal
+                    // shape replaces.
+                    self.attachedSlots = slots
+                    self.attachedPhoneCount = live.count
+                    self.refreshSleepAssertion()
+                    // A phone that vanished mid-session never sends `viewing(nil)`, so presence
+                    // is pruned from the authoritative attached set rather than trusted to clean
+                    // up after itself — otherwise a badge glows for a phone that is gone.
+                    //
+                    // **Per client, not all-or-nothing, and `attachments` rather than `slots`
+                    // is what makes that possible.** This was `if slots.isEmpty { removeAll() }`,
+                    // which only ever fired when the LAST phone detached — so a client that
+                    // went away while any other was still attached left its entry behind
+                    // forever. An ordinary single-phone wake with a clean teardown does not hit
+                    // this: `FleetModel.connect()` stops the old connector before dialling the
+                    // new one, so `slots` genuinely does pass through empty and the old prune
+                    // fired. The bug is with a second phone attached, or simply with the new
+                    // connection landing before the old one is reaped — either way `slots`
+                    // never passes through empty, so the Mac kept a viewer that no longer
+                    // existed and drew the badge for it.
+                    //
+                    // `slots` is the wrong key to prune on even now: a slot is the paired
+                    // DEVICE, and two connections from one device — precisely what a reconnect
+                    // produces for the moment they overlap — share one. `viewingByClient` is
+                    // keyed by connection id, and `attachments` is the server's live set of
+                    // those (`FleetSocketServer.attachments`), so the two line up exactly.
+                    let kept = self.viewingByClient.filter { live.contains($0.key) }
+                    if kept.count != self.viewingByClient.count {
+                        self.viewingByClient = kept
+                        self.publishPhonePresence()
+                    }
                 }
             }
         }
     }
 
+    /// `reply`, made callable from main: `FleetSocketServer` asserts every reply lands on
+    /// `socketQueue`. Order is kept — a stream's frames are queued in the order they were sent.
+    nonisolated private static func onSocketQueue(
+        _ reply: @escaping (ServerFrame) -> Void
+    ) -> (ServerFrame) -> Void {
+        { frame in socketQueue.async { reply(frame) } }
+    }
+
+    /// A main-queue twin of a socket-side cancellation. `ReplyCancellation` is not locked, and
+    /// its handlers belong to whoever registered them — a delegation run, on main — so the
+    /// socket side's firing is carried over rather than shared.
+    nonisolated private static func onMainQueue(_ source: ReplyCancellation?) -> ReplyCancellation? {
+        guard let source else { return nil }
+        let twin = ReplyCancellation()
+        source.onCancel { DispatchQueue.main.async { twin.cancel() } }
+        return twin
+    }
+
     /// Which capability a peer must have claimed to be sent this event (spec §6).
-    static func requiredCapability(for event: FleetEvent) -> String? {
+    nonisolated static func requiredCapability(for event: FleetEvent) -> String? {
         if case .projectIntakes = event { return FleetCapability.flightControl }
         if case .projectSwarm = event { return FleetCapability.swarm }
         return nil
@@ -493,19 +581,11 @@ final class FleetService: ObservableObject {
 
     /// `hello` replies with the capability filter applied — a resume replay must not hand an
     /// older phone the event `broadcast(_:requiring:)` withholds live.
-    static func deliverable(_ frames: [ServerFrame], caps: Set<String>) -> [ServerFrame] {
+    nonisolated static func deliverable(_ frames: [ServerFrame], caps: Set<String>) -> [ServerFrame] {
         frames.filter { frame in
             guard case .event(_, let event) = frame, let needed = requiredCapability(for: event) else { return true }
             return caps.contains(needed)
         }
-    }
-
-    /// A phone's hello files it as attached and observes what it was handed on resume; a local
-    /// caller's does neither — see `framesForLocal(resumingFrom:)`.
-    private func handleHello(_ attachment: FleetAttachment, _ lastSeq: Int) -> [ServerFrame] {
-        if attachment.isLocal { return framesForLocal(resumingFrom: lastSeq) }
-        noteAttached(attachment)
-        return frames(resumingFrom: lastSeq)
     }
 
     private func handleCommand(
@@ -534,7 +614,7 @@ final class FleetService: ObservableObject {
 
     private func handleRequest(
         _ client: FleetAttachment, _ cid: Int, _ request: FleetRequest,
-        _ reply: @escaping (ServerFrame) -> Void
+        cancellation: ReplyCancellation?, _ reply: @escaping (ServerFrame) -> Void
     ) {
         // The same guard `handleCommand` opens with, for the same reason.
         if client.isLocal {
@@ -740,10 +820,10 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "not_implemented",
                                   message: "delegated execution is not implemented in this Flight Deck yet"))
             }
-            // Taken here, synchronously inside `onRequest` where it is valid: it stops the
-            // request's producers once its reader is gone.
+            // Taken on the socket queue, inside `onRequest` where it is valid (see
+            // `wireHandlers()`): it stops the request's producers once its reader is gone.
             delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
-                              cid: cid, cancellation: localServer.replyCancellation(for: client, cid: cid),
+                              cid: cid, cancellation: cancellation,
                               reply: reply)
         case .infra(let request):
             // Local callers only, like `delegate`: creating or destroying a cloud machine
@@ -787,6 +867,19 @@ final class FleetService: ObservableObject {
     /// Gated on there being a pairing at all, so a Mac nobody has paired with sleeps normally.
     /// The cost is real and deliberate: a paired laptop will not idle-sleep while Flight Deck
     /// runs. That IS the feature — "keep it reachable" and "let it sleep" cannot both hold.
+    ///
+    /// **`.userInitiated`, not `.idleSystemSleepDisabled` alone, because awake is not enough.**
+    /// The narrower option kept the Mac out of system sleep and left App Nap free to take the
+    /// app the moment the display slept and every window went dark. A napped app is darwinbg:
+    /// its disk I/O is throttled behind every other process, and its sockets are reclassified
+    /// to background service with LEDBAT. The fleet server answers on the main queue, and the
+    /// main queue does file I/O — `SubagentWatcher.rescan()` lists a `subagents/` folder per
+    /// session on a timer. Measured 2026-10-14, display asleep: the main thread spent a full
+    /// 5s sample inside one `getattrlistbulk`, a `flightdeck ls` took 54.9s and returned the
+    /// second the display woke, and the phone's log fetch timed out over a socket that was
+    /// still ESTABLISHED. The same 120-folder listing ran in 1.9s normally and 228s under
+    /// `taskpolicy -b`. The phone saw a Mac that had stopped answering and called it a drop.
+    /// The host daemon has held `.userInitiated` for the same reason (`HostDaemon/main.swift`).
     private func refreshSleepAssertion() {
         holdSleepAwake(!preferences.pairedDevices.isEmpty)
     }
@@ -794,44 +887,12 @@ final class FleetService: ObservableObject {
     private func holdSleepAwake(_ shouldHold: Bool) {
         if shouldHold, sleepAssertion == nil {
             sleepAssertion = ProcessInfo.processInfo.beginActivity(
-                options: [.idleSystemSleepDisabled],
+                options: .userInitiated,  // includes .idleSystemSleepDisabled; also stops App Nap
                 reason: "A paired phone can reach this Mac"
             )
         } else if !shouldHold, let held = sleepAssertion {
             ProcessInfo.processInfo.endActivity(held)
             sleepAssertion = nil
-        }
-    }
-
-    /// A replay when the ring can serve it, a snapshot when it cannot. The explicit
-    /// re-snapshot is the point: silently resuming from wherever the server happens to be is
-    /// how a phone ends up confidently displaying a fleet that no longer exists.
-    private func frames(resumingFrom lastSeq: Int) -> [ServerFrame] {
-        let answer = resumeFrames(from: lastSeq)
-        // A phone that was away across a dialog closing learns about it from this answer and
-        // from nothing later, so what it was handed is the other half of any stale-card
-        // question — see `PromptLifecycleObserver.observeResume`.
-        promptLifecycle.observeResume(
-            lastSeq: lastSeq, frames: answer, clients: server.attachedCount
-        )
-        return answer
-    }
-
-    /// What `frames(resumingFrom:)` answers a local caller with, minus the resume observation:
-    /// a CLI is not a phone that was away, so there is no stale card for that record to
-    /// explain, and filing one would log a resume no phone ever made.
-    private func framesForLocal(resumingFrom lastSeq: Int) -> [ServerFrame] {
-        resumeFrames(from: lastSeq)
-    }
-
-    /// The replicator half both hellos share.
-    private func resumeFrames(from lastSeq: Int) -> [ServerFrame] {
-        switch replicator.resume(from: lastSeq) {
-        case .replay(let events):
-            return events.map { .event(seq: $0.seq, $0.event) }
-        case .resnapshot(let reason):
-            let current = replicator.snapshot()
-            return [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
         }
     }
 
@@ -928,13 +989,18 @@ final class FleetService: ObservableObject {
         // attached set, and an assertion keyed on that would survive a stop that unpaired
         // everything.
         holdSleepAwake(false)
-        // `server.stop()` drops every attachment synchronously through `cancelConnections()`,
-        // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
-        // `attachedSlots` is already empty by the time this returns; nothing to clear here.
-        server.stop()
-        // Unlinks the socket file too, so the next launch binds cleanly instead of finding a
-        // stale path.
-        localServer.stop()
+        // `server.stop()` drops every attachment through `cancelConnections()`, which fires
+        // `onAttachedSlotsChanged` itself — see `wireHandlers()` — so `attachedSlots` empties
+        // on the main queue's next turn; nothing to clear here.
+        //
+        // The local server unlinks the socket file too, so the next launch binds cleanly
+        // instead of finding a stale path. `sync`, because a stop is a teardown its caller
+        // goes on to depend on, and nothing on `socketQueue` ever waits for main.
+        let server = self.server, localServer = self.localServer
+        Self.socketQueue.sync {
+            server.stop()
+            localServer.stop()
+        }
     }
 
     /// Restarts the listener so a changed key set takes effect. Every arm, expiry and
@@ -1108,7 +1174,10 @@ final class FleetService: ObservableObject {
     /// `attachedSlots` set already published above, because a log fetch needs what that set
     /// throws away: the connection to address, the name to print beside the answer, and the
     /// capabilities that decide whether this phone can be asked at all.
-    var attachedClients: [FleetAttachment] { server.attachments }
+    var attachedClients: [FleetAttachment] {
+        let server = self.server
+        return Self.socketQueue.sync { server.attachments }
+    }
 
     /// Ask one attached phone for its own log. See `PhoneRequest` for why the Mac may ask this
     /// at all, and `FleetSocketServer.request` for what the completion promises: exactly one
@@ -1123,7 +1192,12 @@ final class FleetService: ObservableObject {
         from client: UUID, seconds: Int, limit: Int,
         then completion: @escaping (Result<WirePhoneLogs, FleetRequestError>) -> Void
     ) {
-        server.request(.logs(seconds: seconds, limit: limit), of: client, then: completion)
+        let server = self.server
+        Self.socketQueue.async {
+            server.request(.logs(seconds: seconds, limit: limit), of: client) { result in
+                DispatchQueue.main.async { completion(result) }
+            }
+        }
     }
 
     /// Convenience for the tests and for nothing else — production dials a discovered or
@@ -1401,5 +1475,36 @@ final class FleetService: ObservableObject {
         // arrives too late to be a reply. It is recoverable by the person at the keyboard;
         // a wrong Return would not have been.
         return .ack(cid: cid)
+    }
+}
+
+/// `FleetService.socketLog`: the socket queue's copy of the replicator's log. Touched only on
+/// `FleetService.socketQueue`, which is the whole of its thread safety.
+private final class SocketLog: @unchecked Sendable {
+    var log: FleetEventLog
+
+    init(_ log: FleetEventLog) { self.log = log }
+
+    /// A replay when the ring can serve it, a snapshot when it cannot. The explicit
+    /// re-snapshot is the point: silently resuming from wherever the server happens to be is
+    /// how a phone ends up confidently displaying a fleet that no longer exists.
+    ///
+    /// A replay ends with `caughtUp` for a client that decodes it — empty replays included,
+    /// which are the reason it exists (see `ServerFrame.caughtUp`). `epoch` is the client's
+    /// claim from its `hello`; see `FleetEventLog.resume(from:epoch:)`.
+    func resumeFrames(
+        from lastSeq: Int, epoch: String? = nil, caps: Set<String> = []
+    ) -> [ServerFrame] {
+        dispatchPrecondition(condition: .onQueue(FleetService.socketQueue))
+        switch log.resume(from: lastSeq, epoch: epoch) {
+        case .replay(let events):
+            let replay: [ServerFrame] = events.map { .event(seq: $0.seq, $0.event) }
+            return caps.contains(FleetCapability.caughtUp) ? replay + [.caughtUp] : replay
+        case .resnapshot(let reason):
+            let current = log.snapshot()
+            return [.snapshot(
+                seq: current.seq, fleet: current.fleet, reason: reason, epoch: log.epoch
+            )]
+        }
     }
 }

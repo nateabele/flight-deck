@@ -1124,16 +1124,27 @@ final class SessionStore: ObservableObject {
     // MARK: - Tab leases follow the agent process
 
     /// Whether `session`'s agent process is running: a process started as the agent's binary
-    /// under the tab's fd-abduco daemon or its surface (`AgentProcessProbe`). Settable so tests
-    /// script it. A SIGSTOP'd (asleep) agent is still a process, so it still reads running —
-    /// which is why `reconcileTabLeases` asks the sleep controller first.
-    lazy var agentProcessRunning: (Session) -> Bool = { [weak self] session in
-        guard let self else { return false }
-        let roots = [self.daemonControl.daemonPID(session.id),
-                     self.processRegistry.process(for: session.id)?.identity.pid].compactMap { $0 }
+    /// under the tab's fd-abduco daemon or its surface's shell, `surfacePID`
+    /// (`AgentProcessProbe`). Settable so tests script it. A SIGSTOP'd (asleep) agent is still a
+    /// process, so it still reads running — which is why `reconcileTabLeases` asks the sleep
+    /// controller first.
+    ///
+    /// **Runs on `processProbeQueue`, so it touches nothing on the store.** The surface's pid is
+    /// read on main and handed in; the daemon's comes from its pidfile, and the walk reads each
+    /// descendant's argv with `KERN_PROCARGS2`. With 65 tabs open that sweep was up to 38% of
+    /// a 5s main-thread sample (2026-10-14), while the fleet server waited behind it.
+    lazy var agentProcessRunning: (Session, _ surfacePID: pid_t?) -> Bool = {
+        [daemonControl, processInspector] session, surfacePID in
+        let roots = [daemonControl.daemonPID(session.id), surfacePID].compactMap { $0 }
         guard !roots.isEmpty else { return false }
-        return AgentProcessProbe(inspector: self.processInspector).isRunning(session.agent, under: roots)
+        return AgentProcessProbe(inspector: processInspector).isRunning(session.agent, under: roots)
     }
+
+    /// Where the lease sweep's process probes run. Serial and `.utility`: one sweep at a time,
+    /// and nothing waits on its answer.
+    nonisolated static let processProbeQueue = DispatchQueue(
+        label: "dev.flightdeck.process-probe", qos: .utility
+    )
 
     /// How often `maintenanceTick` reconciles tab leases. Each pass walks the process tree of
     /// every tab that holds a lease or sits in a pool-assigned project, so it is spaced well
@@ -1145,12 +1156,66 @@ final class SessionStore: ObservableObject {
     static let tabLeaseReleaseGrace: TimeInterval = 30
     private var tabLeaseAgentGoneSince: [UUID: Date] = [:]
     private var lastTabLeaseSweep: Date?
+    /// A sweep's probes are running on `processProbeQueue`. The next due sweep waits for them
+    /// rather than queueing a second walk behind the first.
+    private var tabLeaseSweepInFlight = false
 
+    /// The scheduled sweep: probes on `processProbeQueue`, results applied back on main.
     private func reconcileTabLeasesIfDue() {
         let t = now()
         if let last = lastTabLeaseSweep, t.timeIntervalSince(last) < Self.tabLeaseSweepInterval { return }
+        guard !tabLeaseSweepInFlight, let targets = tabLeaseProbeTargets() else { return }
         lastTabLeaseSweep = t
-        reconcileTabLeases()
+        guard !targets.isEmpty else { return reconcileTabLeases(running: [:]) }
+        tabLeaseSweepInFlight = true
+        let probe = agentProcessRunning
+        Self.processProbeQueue.async { [weak self] in
+            let running = Self.probe(targets, with: probe)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.tabLeaseSweepInFlight = false
+                    self.reconcileTabLeases(running: running)
+                }
+            }
+        }
+    }
+
+    /// One sweep, synchronously, probes and all. The form tests drive; production goes through
+    /// `reconcileTabLeasesIfDue`.
+    func reconcileTabLeases() {
+        guard let targets = tabLeaseProbeTargets() else { return }
+        reconcileTabLeases(running: Self.probe(targets, with: agentProcessRunning))
+    }
+
+    private nonisolated static func probe(
+        _ targets: [(session: Session, surfacePID: pid_t?)],
+        with probe: (Session, pid_t?) -> Bool
+    ) -> [UUID: Bool] {
+        Dictionary(targets.map { ($0.session.id, probe($0.session, $0.surfacePID)) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The tabs whose agent the sweep must look for, each with its surface's shell pid — read
+    /// here because `processRegistry` lives on main. Nil when leases are not wired at all.
+    private func tabLeaseProbeTargets() -> [(session: Session, surfacePID: pid_t?)]? {
+        guard let preferences, let resolver = accountResolver else { return nil }
+        return repos.lazy.flatMap(\.sessions).compactMap { session in
+            guard self.needsTabLeaseProbe(session, preferences: preferences, resolver: resolver)
+            else { return nil }
+            return (session, self.processRegistry.process(for: session.id)?.identity.pid)
+        }
+    }
+
+    /// The probe half of `reconcileTabLeases(running:)`'s rules, asked twice: once to pick what
+    /// to probe, and again when the answers land.
+    private func needsTabLeaseProbe(
+        _ session: Session, preferences: PreferencesStore, resolver: AccountResolver
+    ) -> Bool {
+        if sleepController.asleep.contains(session.id) || rollingOver.contains(session.id) { return false }
+        if !resolver.leases(heldBy: session.id).isEmpty { return true }
+        if case .pool? = preferences.effectiveAssignment(for: session.agent, project: session.workingDirectory) { return true }
+        return false
     }
 
     /// Makes each tab's pool lease follow its AGENT process, not the tab (unify round 2, item 9):
@@ -1171,7 +1236,12 @@ final class SessionStore: ObservableObject {
     /// this sweep never re-takes one for a tab the sleep controller holds — the process probe
     /// would otherwise see the stopped process and re-lease it on the next pass. The thaw
     /// re-leases (`thawInPlace`) or moves the conversation (`rollOver`).
-    func reconcileTabLeases() {
+    ///
+    /// `running` holds the probe answers, taken off main. They are applied against the store as
+    /// it is NOW, not as it was when the probes started: a tab frozen, closed or re-leased in
+    /// between is judged on its current state, and a tab with no answer (opened since, or newly
+    /// pooled) is left alone until the next sweep.
+    private func reconcileTabLeases(running: [UUID: Bool]) {
         guard let preferences, let resolver = accountResolver else { return }
         let t = now()
         var present: Set<UUID> = []
@@ -1188,7 +1258,8 @@ final class SessionStore: ObservableObject {
             // A tab in an unpooled project that holds nothing has nothing to reconcile, and
             // costs no process walk.
             guard holds || pooled else { tabLeaseAgentGoneSince[session.id] = nil; continue }
-            if agentProcessRunning(session) {
+            guard let isRunning = running[session.id] else { continue }
+            if isRunning {
                 tabLeaseAgentGoneSince[session.id] = nil
                 if !holds, !accountIsMissing(for: session), let account = account(for: session) {
                     resolver.reacquire(agent: session.agent, project: session.workingDirectory,
@@ -1683,13 +1754,15 @@ final class SessionStore: ObservableObject {
             // Both resolve conversation -> tab live, for the same reason as the two above. The
             // process start bounds which `subagents/` files are this run's agents: a resumed
             // conversation's folder still holds every agent of its earlier runs.
+            // `lazy`, unlike the lookups above: every `SubagentWatcher` asks this on every
+            // clock beat, so an eager `flatMap` copied every session once per open session
+            // per beat — 9% of the main thread in a 2026-10-14 sample with 65 sessions open.
             agentStartedAt: { [weak self] conversationID in
                 guard let self,
-                      let tab = self.repos.flatMap(\.sessions)
-                          .first(where: { $0.pinnedConversationID == conversationID })?.id,
-                      let pid = self.claudePID(of: tab),
-                      let micros = ProcessTree().startTime(of: pid) else { return nil }
-                return Date(timeIntervalSince1970: TimeInterval(micros) / 1_000_000)
+                      let tab = self.repos.lazy.flatMap(\.sessions)
+                          .first(where: { $0.pinnedConversationID == conversationID })?.id
+                else { return nil }
+                return self.agentStartDate(of: tab)
             },
             lastPromptSubmit: { [weak self] conversationID in
                 self?.lastPromptSubmits[conversationID]
@@ -2279,7 +2352,8 @@ final class SessionStore: ObservableObject {
             activity: { [weak self] in self?.statuses[$0]?.activity },
             selectedID: { [weak self] in self?.selectedSessionID },
             reportsBackgroundWork: { [weak self] in self?.backgroundWorkSessions.contains($0) ?? false },
-            daemonPID: { [weak self] in self?.daemonControl.daemonPID($0) }
+            // Not through `self`: this runs on `probeQueue`, off main.
+            daemonPID: { [daemonControl = self.daemonControl] in daemonControl.daemonPID($0) }
         ),
         tearDownSurface: { [weak self] in self?.tearDownSurface(for: $0) },
         // Mirrors `respawnSurface`'s post-attach size report: `makeAttachSurface` forks a
@@ -2302,8 +2376,14 @@ final class SessionStore: ObservableObject {
         // The pidfile read and process-tree walk at most every 5s rather than every 500ms
         // tick — see `SessionSleepController.evaluationInterval`.
         evaluationInterval: 5,
+        probeQueue: sleepProbeQueue,
         now: { Date() }
     )
+
+    /// Where `sleepController` runs its pidfile reads and process walks — see
+    /// `SessionSleepController.probeQueue`. Settable so a test can freeze a tab within one
+    /// `tick()`; read once, when the controller is built.
+    var sleepProbeQueue: DispatchQueue? = SessionStore.processProbeQueue
 
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
@@ -6560,6 +6640,29 @@ final class SessionStore: ObservableObject {
     func claudePID(of id: UUID) -> pid_t? {
         anchors[id]?.pid
     }
+
+    /// When the claude process a tab follows started, to the microsecond (`KERN_PROC_PID`).
+    ///
+    /// **Memoized per anchor.** Every `SubagentWatcher` asks this on every clock beat, and the
+    /// `sysctl` behind it was 658 samples of a 5s main-thread sample with 65 tabs open
+    /// (2026-10-14). An anchor is a pid AND the registry's `procStart`, so it names one process
+    /// and its start never changes; a recycled pid arrives with a different `procStart` and
+    /// misses.
+    func agentStartDate(of tab: UUID) -> Date? {
+        guard let anchor = anchors[tab] else { return nil }
+        if let known = agentStartDates[anchor] { return known }
+        guard let micros = ProcessTree().startTime(of: anchor.pid) else { return nil }
+        // Pruned to the live anchors when it outgrows them, so restarts cannot grow it forever.
+        if agentStartDates.count >= 2 * max(anchors.count, 8) {
+            let live = Set(anchors.values)
+            agentStartDates = agentStartDates.filter { live.contains($0.key) }
+        }
+        let started = Date(timeIntervalSince1970: TimeInterval(micros) / 1_000_000)
+        agentStartDates[anchor] = started
+        return started
+    }
+
+    private var agentStartDates: [ConversationPin.Anchor: Date] = [:]
 
     /// Every session this Mac knows, for `PlanGateService`'s `sessions` closure. Order is
     /// whatever `repos` is in; `PlanGateService` only ever uses this to scan, never to display.

@@ -126,6 +126,7 @@ final class AccountSwitchTests: XCTestCase {
         let daemons = Daemons(), notices = Notices(), provider = Provider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences, daemonControl: daemons)
+        store.sleepProbeQueue = nil   // probe inline, so one `tick()` freezes
         store.launchFailureReporter = Reporter()
         store.statusRootOverride = dir("status")
         store.hookEventDirectoryOverride = dir("hooks")
