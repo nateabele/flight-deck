@@ -58,13 +58,11 @@ struct RoundConfigEditor: View {
     let preset: Preset
     @Binding var config: RoundConfig
     let available: AvailableModels
-    /// What each agent bills for this intake's project (`IntakeService.planningBilling`) — shown,
-    /// never picked: a seat bills the project's assignment for its agent (unify brief R9), set in
-    /// Settings → Projects. Empty (no resolver) hides the line.
-    var billing: [AgentID: AccountBilling] = [:]
-    /// codex's own `model/list`, when routing has already fetched it this launch — never
-    /// fetched from here, since that spawns an app-server.
-    var codexListedModels: [String] = []
+    /// Each agent's accounts for this intake's project (`IntakeService.planningAccountMenus`): what
+    /// the project's assignment bills (the default a role uses unless it picks its own) and the
+    /// accounts and pools a role could pick instead (unify brief R9). Empty (no resolver) hides the
+    /// Account row.
+    var accounts: [AgentID: AccountMenu] = [:]
     /// Set once shaping has started: which agents already ran (shown disabled, "already ran")
     /// and the tape's extend/trim counters, which the caps are shown and saved against. nil
     /// before shaping, where every field is open and a cap is just the cap.
@@ -90,6 +88,15 @@ struct RoundConfigEditor: View {
     /// The selection when no pane shares one — a render, the awaiting-choice editor before a
     /// pane wires it. Scoped to this view so a pick never invalidates anything above it.
     @State private var ownSelection: RoundTimeline.Selection?
+
+    /// The model being typed in by hand ("Other…"), and the text so far.
+    @State private var custom: CustomModelEntry?
+    @State private var customText = ""
+
+    struct CustomModelEntry: Hashable {
+        var site: ChoiceSite
+        var agent: AgentID
+    }
 
     /// What the "Check again" button needs from the service: whether a detection is running
     /// (spinner, button disabled) and how to start one.
@@ -328,11 +335,13 @@ struct RoundConfigEditor: View {
         }
     }
 
-    /// One agent's controls: its glyph, agent, model and effort, then billing and fallback. A
-    /// rotating role's entries also get a position and move/remove buttons once there are two.
+    /// One agent's controls: its glyph, then the one "Claude > Opus 5.5" menu, effort where the
+    /// model takes it, the account, and the fallback. A rotating role's entries also get a position
+    /// and move/remove buttons once there are two.
     private func agentRow(_ keyPath: SlotKeyPath, rotation: (role: RotatingRole, index: Int, count: Int)?,
                           fallbackShown: Bool) -> some View {
-        let choice = Self.choice(for: keyPath, in: config)
+        let site = ChoiceSite(keyPath: keyPath)
+        let choice = Self.choice(at: site, in: config)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 if let rotation, rotation.count > 1 {
@@ -340,24 +349,24 @@ struct RoundConfigEditor: View {
                 }
                 // The glyph the main view's stacks draw for this agent, beside its picker.
                 AgentBadge(agent: choice?.agent ?? .codex, size: 18)
-                harnessPicker(for: keyPath).fixedSize()
-                modelField(for: keyPath, agent: choice?.agent ?? .codex)
-                if !Self.effortChoices(for: choice?.agent ?? .codex).isEmpty {
-                    effortPicker(for: keyPath, agent: choice?.agent ?? .codex).fixedSize()
-                }
+                modelMenu(site, noneTitle: nil)
+                effortPicker(site)
                 if let rotation, rotation.count > 1 {
                     rotationButtons(rotation)
                 }
             }
-            if let agent = choice?.agent, let line = Self.billingLine(billing[agent]) {
-                billingLabel(line, problem: billing[agent]?.problem == true)
-            }
-            if fallbackShown, let choice {
+            customModelField(site)
+            accountRow(site)
+            if fallbackShown {
+                let fallbackSite = ChoiceSite(keyPath: keyPath, isFallback: true)
                 HStack(spacing: 8) {
                     Text("Fallback").foregroundStyle(.secondary)
-                    fallbackPicker(for: keyPath, choice: choice).fixedSize()
+                    modelMenu(fallbackSite, noneTitle: "None")
+                    effortPicker(fallbackSite)
                 }
                 .font(.callout)
+                customModelField(fallbackSite)
+                accountRow(fallbackSite)
             }
         }
     }
@@ -408,78 +417,141 @@ struct RoundConfigEditor: View {
         }
     }
 
-    private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
-        Picker("AgentID", selection: harnessBinding(for: keyPath)) {
-            ForEach(Self.pickerAgents(in: available, chosen: Self.choice(for: keyPath, in: config)?.agent), id: \.self) { agent in
-                Text(Self.agentLabel(agent, available: available)).tag(agent)
+    /// The agent and model as one menu: a submenu per agent ("Claude" ▸ "Opus 5.5", …), closed it
+    /// reads "Claude > Opus 5.5". An agent that is not usable stays in the list, disabled, with the
+    /// reason detection gave. With `noneTitle`, the menu also offers no choice at all (a fallback).
+    private func modelMenu(_ site: ChoiceSite, noneTitle: String?) -> some View {
+        let choice = Self.choice(at: site, in: config)
+        return Menu {
+            if let noneTitle {
+                Button { setFallback(site, nil) } label: { Self.checked(noneTitle, choice == nil) }
+                Divider()
             }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-    }
-
-    /// Free text, because every CLI also takes a full model name — with the profile's known
-    /// models one click away, so `fable` is offered here as it is in Settings and routing.
-    private func modelField(for keyPath: SlotKeyPath, agent: AgentID) -> some View {
-        let suggestions = Self.modelSuggestions(for: agent, codexListed: codexListedModels,
-                                                detected: available.models[agent] ?? [])
-        return HStack(spacing: 2) {
-            TextField("Model", text: modelBinding(for: keyPath))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: .infinity)
-            if !suggestions.isEmpty {
-                Menu {
-                    ForEach(suggestions, id: \.self) { model in
-                        Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
+            ForEach(Self.menuAgents(in: available, chosen: choice?.agent), id: \.self) { agent in
+                if let reason = Self.unavailableReason(agent, available: available) {
+                    Text(reason).disabled(true)
+                } else {
+                    Menu(agent.displayName) {
+                        let current = choice?.agent == agent ? choice : nil
+                        let options = available.menuOptions(for: agent, account: current?.account)
+                        if let current, !current.model.isEmpty, !options.contains(where: { $0.id == current.model }) {
+                            Button { } label: { Self.checked(available.modelLabel(agent: agent, model: current.model, account: current.account)
+                                .replacingOccurrences(of: "\(agent.displayName) > ", with: ""), true) }
+                        }
+                        ForEach(options, id: \.id) { option in
+                            Button { select(site, agent: agent, model: option.id) } label: { Self.checked(option.name, current?.model == option.id) }
+                        }
+                        Divider()
+                        Button(Self.otherModel) {
+                            customText = current?.model ?? ""
+                            custom = CustomModelEntry(site: site, agent: agent)
+                        }
                     }
-                } label: {
-                    Image(systemName: "chevron.down")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+            }
+        } label: {
+            Text(choice.map { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) } ?? (noneTitle ?? ""))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityIdentifier("rounds-model-menu")
+    }
+
+    /// The "Other…" row in an agent's submenu: a model id typed in, for a model no list names.
+    @ViewBuilder
+    private func customModelField(_ site: ChoiceSite) -> some View {
+        if let entry = custom, entry.site == site {
+            HStack(spacing: 6) {
+                Text("\(entry.agent.displayName) model").font(.caption).foregroundStyle(.secondary)
+                TextField("Model id", text: $customText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { applyCustomModel(entry) }
+                Button("Use") { applyCustomModel(entry) }
+                    .disabled(customText.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Cancel") { custom = nil }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private func applyCustomModel(_ entry: CustomModelEntry) {
+        let model = customText.trimmingCharacters(in: .whitespaces)
+        guard !model.isEmpty else { return }
+        select(entry.site, agent: entry.agent, model: model)
+        custom = nil
+    }
+
+    private func select(_ site: ChoiceSite, agent: AgentID, model: String) {
+        config = Self.selecting(config, at: site, agent: agent, model: model, available: available)
+    }
+
+    private func setFallback(_ site: ChoiceSite, _ choice: ModelChoice?) {
+        config = Self.updatingFallback(config, at: site.keyPath, to: choice)
+    }
+
+    /// A menu row with a check mark beside the current one.
+    @ViewBuilder
+    private static func checked(_ title: String, _ isCurrent: Bool) -> some View {
+        if isCurrent { Label(title, systemImage: "checkmark") } else { Text(title) }
+    }
+
+    /// Effort, only for a model that has levels (`AvailableModels.effortValues`): gemini's ids carry
+    /// theirs, opencode has no setting, and claude's Haiku 4.5 takes none.
+    @ViewBuilder
+    private func effortPicker(_ site: ChoiceSite) -> some View {
+        if let choice = Self.choice(at: site, in: config) {
+            let levels = Self.effortLevels(for: choice, available: available)
+            if !levels.isEmpty {
+                Picker("Effort", selection: effortBinding(site)) {
+                    ForEach(levels, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
                 .fixedSize()
-                .help("Known models")
+                .accessibilityIdentifier("rounds-effort")
             }
         }
     }
 
-    private func effortPicker(for keyPath: SlotKeyPath, agent: AgentID) -> some View {
-        Picker("Effort", selection: effortBinding(for: keyPath)) {
-            ForEach(Self.effortChoices(for: agent), id: \.self) { effort in
-                Text(effort).tag(effort)
+    /// "Account": a picker when the agent has more than one account or pool to choose from (the
+    /// project's assignment first), else the account it resolves to as text. A role that holds its
+    /// own account keeps the picker, so it can be put back.
+    @ViewBuilder
+    private func accountRow(_ site: ChoiceSite) -> some View {
+        if let choice = Self.choice(at: site, in: config), let menu = accounts[choice.agent] {
+            switch Self.accountRow(menu, choice: choice) {
+            case .picker:
+                HStack(spacing: 8) {
+                    Text(Self.accountLabel).foregroundStyle(.secondary)
+                    Picker(Self.accountLabel, selection: accountBinding(site)) {
+                        Text(menu.defaultTitle).tag(AccountChoice?.none)
+                        ForEach(menu.options.filter { !$0.isPool }, id: \.choice) { Text($0.title).tag(AccountChoice?.some($0.choice)) }
+                        let pools = menu.options.filter(\.isPool)
+                        if !pools.isEmpty {
+                            Divider()
+                            ForEach(pools, id: \.choice) { Label($0.title, systemImage: "square.stack.3d.up").tag(AccountChoice?.some($0.choice)) }
+                        }
+                        if let own = choice.account, menu.title(for: own) == nil {
+                            Divider()
+                            Text(own.key.hasPrefix("pool:") ? "Missing pool" : "Missing account").tag(AccountChoice?.some(own))
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityIdentifier("rounds-account-picker")
+                }
+                .font(.callout)
+            case .line(let text):
+                HStack(spacing: 4) {
+                    if menu.problem { Image(systemName: "exclamationmark.triangle.fill").imageScale(.small) }
+                    Text(text).lineLimit(1).truncationMode(.middle)
+                }
+                .font(.caption)
+                .foregroundStyle(menu.problem ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+                .help(menu.problem ? "Choose another in Settings → Projects." : "Set per project in Settings → Projects.")
+                .accessibilityIdentifier("rounds-account")
             }
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
-    }
-
-    /// The read-only "Bills: Work pool" line under a seat. A broken assignment reads in orange
-    /// with a warning glyph — planning will refuse to start on it — rather than as a login.
-    private func billingLabel(_ line: String, problem: Bool) -> some View {
-        HStack(spacing: 4) {
-            if problem { Image(systemName: "exclamationmark.triangle.fill").imageScale(.small) }
-            Text(line).lineLimit(1).truncationMode(.middle)
-        }
-        .font(.caption)
-        .foregroundStyle(problem ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
-        .help(problem ? "Choose another in Settings → Projects." : "Set per project in Settings → Projects.")
-        .accessibilityIdentifier("rounds-billing")
-    }
-
-    /// "none" or the other available model. `ModelChoice` isn't `Hashable` (its `.effort` is a
-    /// free-text `String` that never needs set/dictionary membership elsewhere), so the Picker's
-    /// selection is the two-way "has a fallback at all" toggle ("none" or the other model), not
-    /// the choice itself.
-    private func fallbackPicker(for keyPath: SlotKeyPath, choice: ModelChoice) -> some View {
-        let other = Self.otherModel(for: choice, available: available)
-        return Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
-            Text("none").tag(false)
-            if let other {
-                Text("\(other.agent.rawValue) \(other.model)").tag(true)
-            }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
     }
 
     /// Refine's round count, under its agents: changing it adds or takes chips off the strip
@@ -532,31 +604,17 @@ struct RoundConfigEditor: View {
 
     // MARK: - Bindings (route every edit through `setting`, which flags `customized`)
 
-    private func harnessBinding(for keyPath: SlotKeyPath) -> Binding<AgentID> {
+    private func effortBinding(_ site: ChoiceSite) -> Binding<String> {
         Binding(
-            get: { Self.choice(for: keyPath, in: config)?.agent ?? .codex },
-            set: { config = Self.switchingAgent(config, at: keyPath, to: $0, available: available) }
+            get: { Self.choice(at: site, in: config)?.effort ?? "high" },
+            set: { newValue in config = Self.updatingChoice(config, at: site) { $0.effort = newValue } }
         )
     }
 
-    private func modelBinding(for keyPath: SlotKeyPath) -> Binding<String> {
+    private func accountBinding(_ site: ChoiceSite) -> Binding<AccountChoice?> {
         Binding(
-            get: { Self.choice(for: keyPath, in: config)?.model ?? "" },
-            set: { newValue in config = Self.updatingChoice(config, at: keyPath) { $0.model = newValue } }
-        )
-    }
-
-    private func effortBinding(for keyPath: SlotKeyPath) -> Binding<String> {
-        Binding(
-            get: { Self.choice(for: keyPath, in: config)?.effort ?? "high" },
-            set: { newValue in config = Self.updatingChoice(config, at: keyPath) { $0.effort = newValue } }
-        )
-    }
-
-    private func fallbackBinding(for keyPath: SlotKeyPath, other: ModelChoice?) -> Binding<Bool> {
-        Binding(
-            get: { Self.fallback(for: keyPath, in: config) != nil },
-            set: { hasFallback in config = Self.updatingFallback(config, at: keyPath, to: hasFallback ? other : nil) }
+            get: { Self.choice(at: site, in: config)?.account },
+            set: { newValue in config = Self.updatingChoice(config, at: site) { $0.account = newValue } }
         )
     }
 
@@ -693,9 +751,47 @@ struct RoundConfigEditor: View {
         return out
     }
 
-    /// "Bills: Work pool", or nil when there is nothing to show.
-    static func billingLine(_ billing: AccountBilling?) -> String? {
-        billing.map { "Bills: \($0.text)" }
+    /// What the Account row shows for a role: a picker (the agent has more than one account or pool,
+    /// or the role already holds its own), else the resolved account as text.
+    enum AccountRowKind: Equatable {
+        case picker
+        case line(String)
+    }
+
+    static let accountLabel = "Account"
+    static let otherModel = "Other…"
+
+    static func accountRow(_ menu: AccountMenu, choice: ModelChoice) -> AccountRowKind {
+        menu.offersChoice || choice.account != nil ? .picker : .line("\(accountLabel): \(menu.projectDefault)")
+    }
+
+    /// The effort levels shown for `choice`: its model's, with a stored level the model no longer
+    /// lists kept in so the picker never reads blank. Empty hides the control.
+    static func effortLevels(for choice: ModelChoice, available: AvailableModels) -> [String] {
+        let levels = available.effortValues(agent: choice.agent, model: choice.model, account: choice.account)
+        guard !levels.isEmpty else { return [] }
+        return levels.contains(choice.effort) || choice.effort.isEmpty ? levels : levels + [choice.effort]
+    }
+
+    /// The agents detection offers — installed and signed in.
+    static func agents(in available: AvailableModels) -> [AgentID] {
+        available.agents
+    }
+
+    /// Every agent a model menu lists, in `AgentID.planningOrder` order: the usable ones, those
+    /// installed but not usable (shown disabled with their reason), and the row's own agent when
+    /// detection no longer offers it, so a re-check never blanks a role.
+    static func menuAgents(in available: AvailableModels, chosen: AgentID?) -> [AgentID] {
+        AgentID.planningOrder.filter {
+            available.choice(for: $0) != nil || available.unavailable[$0] != nil || $0 == chosen
+        }
+    }
+
+    /// Why `agent` cannot be picked: detection's own reason (sign-in hint, "not installed"), or
+    /// "<Agent> (unavailable)" for a chosen agent detection no longer lists. nil: usable.
+    static func unavailableReason(_ agent: AgentID, available: AvailableModels) -> String? {
+        guard available.choice(for: agent) == nil else { return nil }
+        return available.unavailable[agent] ?? "\(agent.displayName) (unavailable)"
     }
 
     /// The editor's one block of notes: why an installed-but-unusable harness is missing from
@@ -888,6 +984,23 @@ struct RoundConfigEditor: View {
         }
     }
 
+    /// A model choice in a config: a role's own, or the fallback it retries with.
+    struct ChoiceSite: Hashable {
+        var keyPath: SlotKeyPath
+        var isFallback = false
+    }
+
+    static func choice(at site: ChoiceSite, in config: RoundConfig) -> ModelChoice? {
+        site.isFallback ? fallback(for: site.keyPath, in: config) : choice(for: site.keyPath, in: config)
+    }
+
+    static func updatingChoice(_ config: RoundConfig, at site: ChoiceSite, _ mutate: (inout ModelChoice) -> Void) -> RoundConfig {
+        guard site.isFallback else { return updatingChoice(config, at: site.keyPath, mutate) }
+        guard var fallback = fallback(for: site.keyPath, in: config) else { return config }
+        mutate(&fallback)
+        return updatingFallback(config, at: site.keyPath, to: fallback)
+    }
+
     static func fallback(for keyPath: SlotKeyPath, in config: RoundConfig) -> ModelChoice? {
         switch keyPath {
         case .drafter(let i): config.drafters.indices.contains(i) ? config.drafters[i].fallback : nil
@@ -968,33 +1081,14 @@ struct RoundConfigEditor: View {
         }
     }
 
-    /// Switching a seat's harness resets model AND effort to that harness's default from
-    /// `available` — leaving the old model string in place would pair e.g. codex's harness
-    /// with a claude model name that codex has never heard of. The account is not the seat's to
-    /// carry: it follows the new agent's project assignment (unify brief R9).
-    static func switchingAgent(_ config: RoundConfig, at keyPath: SlotKeyPath, to agent: AgentID, available: AvailableModels) -> RoundConfig {
-        let replacement = available.choice(for: agent) ?? ModelChoice(agent: agent, model: "", effort: "high")
-        return updatingChoice(config, at: keyPath) { $0 = replacement }
-    }
-
-    /// AgentID Pickers only ever offer harnesses actually installed — an unavailable harness
-    /// in the list would let the human pick a model no adapter can run.
-    static func agents(in available: AvailableModels) -> [AgentID] {
-        available.agents
-    }
-
-    /// `agents(in:)`, plus the row's own agent when detection no longer offers it — a re-check
-    /// that finds an agent signed out must not blank a role the human already gave it (a menu
-    /// Picker whose selection has no tag draws empty). Never rewrites the config.
-    static func pickerAgents(in available: AvailableModels, chosen: AgentID?) -> [AgentID] {
-        let offered = agents(in: available)
-        guard let chosen, !offered.contains(chosen) else { return offered }
-        return offered + [chosen]
-    }
-
-    /// The picker's label for an agent: its name, marked when detection does not offer it.
-    static func agentLabel(_ agent: AgentID, available: AvailableModels) -> String {
-        available.choice(for: agent) == nil ? "\(agent.rawValue) (unavailable)" : agent.rawValue
+    /// Moves a role (or its fallback) to `model` on `agent`: the effort follows the model, and the
+    /// role's own account is kept only while the agent stays the same — an account belongs to one
+    /// agent (`AvailableModels.selecting`).
+    static func selecting(_ config: RoundConfig, at site: ChoiceSite, agent: AgentID, model: String,
+                          available: AvailableModels) -> RoundConfig {
+        let next = available.selecting(agent: agent, model: model, from: choice(at: site, in: config))
+        if site.isFallback { return updatingFallback(config, at: site.keyPath, to: next) }
+        return updatingChoice(config, at: site.keyPath) { $0 = next }
     }
 
     /// The fallback Picker's one non-"None" option: the first available model of ANOTHER family

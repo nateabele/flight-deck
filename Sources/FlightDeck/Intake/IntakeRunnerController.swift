@@ -389,7 +389,9 @@ final class IntakeRunnerController {
         let intake = try? intakes.load(id: id)
         let project = intake?.projectPath ?? ""
         var notices: [AccountNotice] = []
-        switch accounts.acquire(intake?.roundConfig?.agents ?? [], project: project, notice: { notices.append($0) }) {
+        let acquired = intake?.roundConfig.map { accounts.acquire($0, project: project, notice: { notices.append($0) }) }
+            ?? accounts.acquire([], project: project, notice: { notices.append($0) })
+        switch acquired {
         case .failure(let error):
             return .failure(.accountUnavailable(error.message))
         case .success(let resolved):

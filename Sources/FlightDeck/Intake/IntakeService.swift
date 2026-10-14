@@ -47,6 +47,7 @@ struct TriageSettings: Equatable, Sendable {
         choices[.codex] = codex ? AvailableModels.defaults.codex : nil
         choices[.claude] = claude || !codex ? AvailableModels.defaults.claude : nil
         var models: [AgentID: [String]] = [:], unavailable: [AgentID: String] = [:]
+        var options: [AgentID: [ModelOption]] = [:]
         for agent in AgentID.planningOrder where agent != .codex && agent != .claude
             && AgentProfiles.headlessReady.contains(agent) {
             let profile = AgentProfiles.profile(for: agent)
@@ -64,6 +65,10 @@ struct TriageSettings: Equatable, Sendable {
                     // grok's list command IS its sign-in check — one spawn, not two.
                     let listOutput = list == check.arguments ? output : probe.run(executable, list, path ?? "")
                     listed = listOutput.map { profile.parseModelList($0.stdout) } ?? []
+                    // The same output names the models (agy's display names, opencode's `name`).
+                    if let stdout = listOutput?.stdout, !listed.isEmpty {
+                        options[agent] = ModelListSources.options(agent: agent, listStdout: stdout, profile: profile)
+                    }
                 }
                 let offered = listed.isEmpty ? catalog.aliases : listed
                 // A listed model wins over the profile's hard-coded default: `parseModelList`
@@ -80,6 +85,7 @@ struct TriageSettings: Equatable, Sendable {
         }
         var available = AvailableModels(choices: choices)
         available.models = models
+        available.options = options
         available.unavailable = unavailable
         return available
     }
@@ -92,7 +98,7 @@ struct TriageSettings: Equatable, Sendable {
 
     private static func installed(_ tool: String, path: String?) -> Bool { executable(tool, path: path) != nil }
 
-    private static func executable(_ tool: String, path: String?) -> String? {
+    static func executable(_ tool: String, path: String?) -> String? {
         (path ?? "").split(separator: ":").lazy.map { "\($0)/\(tool)" }
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
@@ -386,6 +392,14 @@ final class IntakeService: ObservableObject {
     /// (`DetectedModelsReader`): a pane opened before the probe lands must refresh when it does,
     /// or it would keep offering the built-in fallback list as if it were the account's.
     @Published private(set) var availableModelsCache: AvailableModels?
+    /// Every model list read from a CLI, by `ModelListTargets.key` — one per claude and codex
+    /// account, per pool (the union of its members') and per agent's built-in home. Filled from the
+    /// store at launch and refreshed with every detection and every new intake.
+    @Published private(set) var modelLists: [String: [ModelOption]] = [:]
+    /// Reads and stores the model lists. nil (a test host) reads nothing, so no test spawns a CLI.
+    var modelRefresher: ModelListRefresher?
+    /// The accounts to read lists for, set by `SessionStore` (which owns preferences).
+    var modelListTargets: (@MainActor () -> ModelListTargets)?
     /// True while a detection runs (launch warm-up, "Check again", or an app-active re-check),
     /// for the Rounds editor's spinner.
     @Published private(set) var isDetectingAgents = false
@@ -614,10 +628,19 @@ final class IntakeService: ObservableObject {
         isDetectingAgents = true
         lastDetectionStart = now()
         let detect = detectAgents
+        let refresher = modelRefresher
+        let targets = modelListTargets?()
         let task = Task { @MainActor [weak self] in
-            let detected = await Task.detached { detect() }.value
+            // Detection and the list refresh share one off-main pass: the lists claude and codex
+            // keep, then grok, gemini and opencode's from the detection itself.
+            let (detected, lists) = await Task.detached { () -> (AvailableModels, [String: [ModelOption]]?) in
+                var detected = detect()
+                refresher?.record(&detected)
+                return (detected, targets.flatMap { refresher?.refresh($0) })
+            }.value
             guard let self else { return }
             self.availableModelsCache = detected
+            if let lists { self.modelLists = lists }
             self.isDetectingAgents = false
             self.detection = nil
         }
@@ -931,6 +954,9 @@ final class IntakeService: ObservableObject {
         guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now())
         save(intake)
+        // The start of an intake is when the model menus are refreshed (and what they list is
+        // re-read from each CLI); off the main actor, so triage never waits on it.
+        if modelRefresher != nil { recheckAgents() }
         start(intake.id) { await $0.runTriage(intake.id, turn: .initial) }
     }
 
@@ -1365,6 +1391,28 @@ final class IntakeService: ObservableObject {
         availableModelsCache ?? .defaults
     }
 
+    /// `availableModels()` with the model lists the Rounds editor menus show: every account's and
+    /// pool's list, and for each agent the one of the account `project` bills (nil: the agent's
+    /// built-in home), so the menu a role shows is the one its account can run.
+    func availableModels(project: String?) -> AvailableModels {
+        var available = availableModels()
+        available.optionsByAccount.merge(modelLists) { _, listed in listed }
+        let billing = project.map(planningBilling(project:)) ?? [:]
+        for agent in AgentID.allCases {
+            let key = ModelListTargets.key(agent, billing[agent]?.choice)
+            if let list = modelLists[key] ?? modelLists[ModelListTargets.key(agent, nil)], !list.isEmpty {
+                available.options[agent] = list
+            }
+        }
+        return available
+    }
+
+    /// Fills `modelLists` from the store, so the editor has lists before the first refresh lands.
+    func loadCachedModelLists() {
+        guard let refresher = modelRefresher, let targets = modelListTargets?() else { return }
+        modelLists = refresher.cached(targets)
+    }
+
     /// The detection itself, or nil until it lands — unlike `availableModels()`, which stands the
     /// stock defaults in for it. Settings' tab model pickers need the difference: "no list yet"
     /// and "the CLI listed these" are different notes (`TabModelChoices`).
@@ -1384,6 +1432,12 @@ final class IntakeService: ObservableObject {
     func planningBilling(project: String) -> [AgentID: AccountBilling] {
         guard let accountResolver else { return [:] }
         return Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, accountResolver.billing($0, project: project)) })
+    }
+
+    /// The Rounds editor's account picker for every agent in `project`.
+    func planningAccountMenus(project: String) -> [AgentID: AccountMenu] {
+        guard let accountResolver else { return [:] }
+        return Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, accountResolver.accountMenu($0, project: project)) })
     }
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
@@ -2242,9 +2296,9 @@ final class IntakeService: ObservableObject {
             out = try await headless.run(HeadlessCommand.build(request), cwd: project, account: request.account,
                                          onStdout: { activity.feed($0) })
         } catch {
-            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.agent.rawValue)")
+            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.agent.displayName)")
             triageActivities[id] = activity.activity
-            return .failure(TurnFailure(message: "Could not run \(settings.agent.rawValue): \(error)", raw: nil))
+            return .failure(TurnFailure(message: "Could not run \(settings.agent.displayName): \(error)", raw: nil))
         }
         activity.finish(exitCode: out.exitCode)
         triageActivities[id] = activity.activity
@@ -2252,7 +2306,7 @@ final class IntakeService: ObservableObject {
         let raw = stdout.isEmpty ? out.stderr : stdout
         guard out.exitCode == 0 else {
             let why = out.stderr.firstLine.isEmpty ? stdout.firstLine : out.stderr.firstLine
-            return .failure(TurnFailure(message: "\(settings.agent.rawValue) exited \(out.exitCode): \(why)", raw: raw))
+            return .failure(TurnFailure(message: "\(settings.agent.displayName) exited \(out.exitCode): \(why)", raw: raw))
         }
         do {
             let (session, structured) = try HeadlessOutput.parse(settings.agent, stdout: out.stdout)

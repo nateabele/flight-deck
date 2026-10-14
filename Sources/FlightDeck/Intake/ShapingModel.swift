@@ -423,5 +423,5 @@ struct ShapingModel {
         }
     }
 
-    private static func modelName(_ m: ModelChoice) -> String { "\(m.agent.rawValue) \(m.model)" }
+    private static func modelName(_ m: ModelChoice) -> String { m.displayLabel }
 }

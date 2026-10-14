@@ -16,20 +16,37 @@ public struct ModelChoice: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var model: String
     public var effort: String
-    public init(agent: AgentID, model: String, effort: String) {
+    /// The account or pool this role bills instead of the project's assignment; nil (the usual
+    /// case) bills the assignment. The Rounds editor offers it only where the agent has a real
+    /// choice, and the app resolves it at each runner start (`RunnerAccounts.overrides`).
+    public var account: AccountChoice?
+    public init(agent: AgentID, model: String, effort: String, account: AccountChoice? = nil) {
         self.agent = agent
         self.model = model
         self.effort = effort
+        self.account = account
     }
 
     private enum CodingKeys: String, CodingKey {
         case agent = "harness"
-        // No `account`: a seat no longer picks its own account — every seat bills the project's
-        // assignment for its agent, resolved by the app at each runner start (unify brief R9,
-        // `RunnerAccounts`). Configs written while the Rounds editor had a per-seat picker still
-        // carry the key; a keyed decoder skips a key it is not asked for, so they decode, and
-        // the next save drops it.
+        // The override is `accountOverride`, a NEW key. The `account` key an older Rounds editor
+        // wrote per seat (before unify brief R9) is deliberately still not read: those configs
+        // name whatever account the seat was given months ago, and honouring it would quietly bill
+        // a login the project's assignment has since moved off — the failure R9 exists to stop.
+        // A keyed decoder skips a key it is not asked for, so they decode, and the next save
+        // drops it.
         case model, effort
+        case account = "accountOverride"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        agent = try c.decode(AgentID.self, forKey: .agent)
+        model = try c.decode(String.self, forKey: .model)
+        effort = try c.decode(String.self, forKey: .effort)
+        // A value this build cannot read (a newer kind of account) is no override, not a config
+        // that fails to load.
+        account = try? c.decodeIfPresent(AccountChoice.self, forKey: .account)
     }
 }
 
@@ -204,6 +221,74 @@ public struct AvailableModels: Sendable, Equatable {
     /// signed out (its profile's hint, e.g. "Grok: run `grok login`"). The editor shows these,
     /// so a harness is never silently missing from a picker (spec §3.2).
     public var unavailable: [AgentID: String] = [:]
+
+    /// Each agent's models as the editor's menus list them, for the project's default account
+    /// (`ModelListStore`, or detection's list command). Empty for an agent no source has read yet;
+    /// `menuOptions` then falls back to the profile's aliases.
+    public var options: [AgentID: [ModelOption]] = [:]
+    /// The same lists for a role's own account or pool, keyed by `AccountChoice.key` — a pool's is
+    /// the union of its members'. Different accounts can see different models.
+    public var optionsByAccount: [String: [ModelOption]] = [:]
+
+    /// What the model menu for `agent` offers a role billing `account` (nil: the project's
+    /// assignment): that account's list when one was read, else the project default's, else — on
+    /// a machine nothing has listed yet — the detected ids, else the profile's aliases and
+    /// default, named by `ModelNaming`. Never empty for an agent with a catalog.
+    public func menuOptions(for agent: AgentID, account: AccountChoice? = nil) -> [ModelOption] {
+        if let listed = account.flatMap({ optionsByAccount[$0.key] }), !listed.isEmpty { return listed }
+        if let listed = options[agent], !listed.isEmpty { return listed }
+        let catalog = AgentProfiles.profile(for: agent).modelCatalog
+        let ids = models[agent] ?? (catalog.aliases + [catalog.defaultPlanningModel])
+        var seen = Set<String>()
+        return ids.filter { !$0.isEmpty && seen.insert($0).inserted }.map { id in
+            ModelOption(id: id, name: agent == .claude && catalog.aliases.contains(id)
+                        ? ModelNaming.aliasName(id) : ModelNaming.derive(id, agent: agent))
+        }
+    }
+
+    public func option(agent: AgentID, model: String, account: AccountChoice? = nil) -> ModelOption? {
+        menuOptions(for: agent, account: account).first { $0.id == model }
+    }
+
+    /// The name a person reads for `model`: the source's own, else derived. Empty is the CLI's own
+    /// default (opencode's).
+    public func displayName(agent: AgentID, model: String, account: AccountChoice? = nil) -> String {
+        if model.isEmpty { return "Default" }
+        return option(agent: agent, model: model, account: account)?.name ?? ModelNaming.derive(model, agent: agent)
+    }
+
+    /// "Claude > Opus 5.5": the agent, then the model. A model the list does not hold reads as custom.
+    public func modelLabel(agent: AgentID, model: String, account: AccountChoice? = nil) -> String {
+        let custom = !model.isEmpty && option(agent: agent, model: model, account: account) == nil
+        return "\(agent.displayName) > \(displayName(agent: agent, model: model, account: account))" + (custom ? " (custom)" : "")
+    }
+
+    /// The effort levels `model` takes: its own when the source says (an empty list: none), else
+    /// the agent profile's. Empty for an agent with no effort setting at all (gemini's ids carry
+    /// theirs; opencode has none).
+    public func effortValues(agent: AgentID, model: String, account: AccountChoice? = nil) -> [String] {
+        let profile = AgentProfiles.profile(for: agent).modelCatalog.effortValues
+        guard !profile.isEmpty else { return [] }
+        return option(agent: agent, model: model, account: account)?.efforts ?? profile
+    }
+
+    /// `choice` moved to `model` (and `agent`): the effort follows the new model — empty when it
+    /// takes none, kept when it still fits, else the profile's planning effort (or the nearest the
+    /// model has).
+    public func selecting(agent: AgentID, model: String, from choice: ModelChoice?) -> ModelChoice {
+        let account = agent == choice?.agent ? choice?.account : nil
+        let levels = effortValues(agent: agent, model: model, account: account)
+        let planning = AgentProfiles.profile(for: agent).modelCatalog.defaultPlanningEffort
+        let effort: String
+        if levels.isEmpty {
+            effort = ""
+        } else if let current = choice?.effort, agent == choice?.agent, levels.contains(current) {
+            effort = current
+        } else {
+            effort = levels.contains(planning) ? planning : (levels.contains("high") ? "high" : levels[levels.count / 2])
+        }
+        return ModelChoice(agent: agent, model: model, effort: effort, account: account)
+    }
 
     public func choice(for agent: AgentID) -> ModelChoice? { choices[agent] }
 

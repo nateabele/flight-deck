@@ -592,16 +592,19 @@ public struct RoundExecutor: Sendable {
         let schemaFile = dir.appendingPathComponent("schema.json")
         try Data(schema.utf8).write(to: schemaFile, options: .atomic)
 
-        // The project's account for this agent, as the app resolved it at this runner's start.
+        // The seat's account — its own override's, else the project's for this agent — as the app
+        // resolved it at this runner's start.
         // An agent the file leaves out was added to the config after the runner started (only
         // a hand edit can do that): running it on the built-in home would bill an account the
         // project never chose, so the seat pauses and the next ▶ re-resolves.
         let billing: RunnerAccounts.Entry?
         if let accounts = inputs.accounts {
-            guard let entry = accounts.agents[choice.agent] else {
+            guard let entry = accounts.entry(for: choice) else {
                 return .failed(Diagnosis(category: .harnessError,
                                          detail: "No account was resolved for \(choice.agent.displayName) when planning started",
-                                         action: "Press play again so Flight Deck picks this project's \(choice.agent.displayName) account."),
+                                         action: choice.account == nil
+                                             ? "Press play again so Flight Deck picks this project's \(choice.agent.displayName) account."
+                                             : "Press play again so Flight Deck picks the account chosen for this \(choice.agent.displayName) role."),
                                sessionID: nil)
             }
             billing = entry

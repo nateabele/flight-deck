@@ -106,10 +106,10 @@ enum AgentStackModel {
 
     static func overflowText(_ n: Int) -> String { "+\(n)" }
 
-    /// "Reviewer: Grok grok-4.7", a line per role — the stack's tooltip, the one place it says
+    /// "Reviewer: Grok > Grok 4.7", a line per role — the stack's tooltip, the one place it says
     /// which model each bubble stands for.
     static func help(_ entries: [RoundAgent]) -> String {
-        entries.map { "\(UIText.sentenceCase(UIText.roleName($0.role))): \($0.choice.agent.displayName) \($0.choice.model)" }
+        entries.map { "\(UIText.sentenceCase(UIText.roleName($0.role))): \($0.choice.displayLabel)" }
             .joined(separator: "\n")
     }
 

@@ -106,7 +106,7 @@ struct RoundInspectorModel: Equatable {
                          line: describe(seat.choice), fallback: seat.fallback.map { "Falls back to \(describe($0))" },
                          fallbackAgent: seat.fallback?.agent)
         }
-        let names = rotation.map { $0.choice.agentName ?? $0.choice.agent }
+        let names = rotation.map { agentName($0.choice) }
         return Agent(id: id, agent: rotation[0].choice.agent, role: role, persona: persona,
                      line: "Alternates: " + names.joined(separator: " → "), fallback: nil, fallbackAgent: nil,
                      rotation: rotation.enumerated().map { i, seat in
@@ -114,8 +114,19 @@ struct RoundInspectorModel: Equatable {
                      })
     }
 
+    /// The agent as a person reads it; a Mac that sends no name gets the id capitalized.
+    private static func agentName(_ c: WireModelChoice) -> String {
+        c.agentName ?? c.agent.prefix(1).uppercased() + c.agent.dropFirst()
+    }
+
+    /// "Claude > Opus 5.5 · high", then "· Work pool" when the role holds its own account. A Mac
+    /// that sends no `modelName` shows the model as it came; one that sends no `agentName` shows
+    /// the agent capitalized, never as the raw id.
     static func describe(_ c: WireModelChoice) -> String {
-        [c.agentName ?? c.agent, c.model, c.effort].filter { !$0.isEmpty }.joined(separator: " · ")
+        let agent = agentName(c)
+        let model = c.modelName ?? c.model
+        let head = model.isEmpty ? agent : "\(agent) > \(model)"
+        return [head, c.effort, c.account.map { "Account: \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     /// An unknown word from a newer Mac shows as it came.

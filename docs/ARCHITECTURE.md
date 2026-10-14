@@ -2100,17 +2100,28 @@ a stage still running lengthens it and moves its major checkpoint to the new las
 last round of each stage is a **major** checkpoint (⏭'s stop). Release is never a tape target:
 the tape stops at release review and the existing release flow takes over unchanged.
 
-*Which accounts planning bills (unify brief R9).* Every planning seat bills the project's
+*Which accounts planning bills (unify brief R9).* A planning seat bills the project's
 assignment for its agent (Settings → Projects, own or inherited from a parent folder) — an account, or a pool leased through the
 `CapacityLedger` (first under soft) — and with no assignment the agent's first live account, as
-a new tab would; an agent with no account record runs in its CLI's built-in home. There is no
-per-seat account: `ModelChoice` no longer carries one (an old `account` key decodes and is
-dropped on save), and the Rounds editor shows each seat's "Bills: …" line read-only. The runner
-has no preferences, so the APP resolves: at every runner start `IntakeRunnerController` resolves
-each agent the round config can run (fallbacks included) through `AccountResolving` — the tabs'
-own `AccountResolver` — and writes `<intake>/accounts.json` (`RunnerAccounts`) before
-spawning; `RoundExecutor` binds each seat to its agent's entry and records the account id on the
-seat's `activity.json`, which is what `UsageService` credits. A broken assignment (a removed
+a new tab would; an agent with no account record runs in its CLI's built-in home. A role may
+instead hold its own: `ModelChoice.account` (stored as `accountOverride`, `account:<uuid>` or
+`pool:<id>`, nil = the project's assignment) is offered by the Rounds editor's "Account" picker
+only for an agent with more than one account or pool to choose from (otherwise the editor shows
+"Account: <resolved name>" as text), and a fallback or a rotation entry carries its own. The
+old per-seat `account` key from before R9 is still NOT read — it decodes and is dropped on save.
+Those configs name whatever login a seat was given months ago, and honouring them would bill an
+account the project's assignment has since moved off, which is the failure R9 exists to stop; the
+override is a new key so no old file can set it by accident (an unreadable value decodes as no
+override rather than failing the config). The runner has no preferences, so the APP resolves: at
+every runner start `IntakeRunnerController` resolves, through `AccountResolving` — the tabs'
+own `AccountResolver` — each agent some seat runs on the project's assignment (fallbacks
+included; an agent whose every seat holds its own account is not resolved) and each distinct
+per-role account or pool (a pool override leases through the `CapacityLedger` exactly as a
+project pool does), and writes `<intake>/accounts.json` (`RunnerAccounts`: `agents` for the
+assignments, the optional `overrides` keyed by `AccountChoice.key`) before spawning;
+`RoundExecutor` binds each seat to its own override's entry, else its agent's
+(`RunnerAccounts.entry(for:)`), and records the account id on the seat's `activity.json`, which
+is what `UsageService` credits. A broken assignment (a removed
 account, a pool that is gone or has no live member) refuses the start
 (`RunnerStartError.accountUnavailable`); a pool with nothing leasable runs on a member unleased by
 the tab rules (first over-soft member; every member over hard → most headroom), never on a login
@@ -2132,6 +2143,27 @@ ends — success, failed sources or `cancelRefresh()` (which SIGTERMs the runnin
 no snapshot). Each source's folded stream is published as `CapabilityIndexService.seatActivities`,
 stamped with the billed account id, and `UsageEnvironment.live` adds them to the seats
 `UsageService` credits. Removing the assigned account or pool resets the index to Default.
+*Model menus and names.* The Rounds editor picks agent and model in one hierarchical menu
+(`Claude ▸ Opus 5.5`, closed it reads "Claude > Opus 5.5"); every name a person sees is a display
+name, never an id (ids stay in storage, on the wire and in commands). Nothing is a hand-kept
+model list. Each agent's list is read from its CLI (`ModelListSources`, `ModelListRefresher`):
+claude from the model catalog the CLI keeps per account in `<config dir>/cache/model-catalog/
+*-cc.json` (names and each model's effort levels) plus `claude -p "/model"`, a command the CLI
+answers locally for free (it names the aliases and what each resolves to; a run not marked
+`"local_command":"model"` with cost 0 is discarded, and only exactly `/model` is ever sent);
+codex from `<CODEX_HOME>/models_cache.json` (codex's own `model/list`, `visibility: list` only,
+names read with hyphens as spaces); gemini from `agy models` (`id<TAB>name`, Gemini ids only);
+opencode from `opencode models --verbose` (each model's `name`); grok from `grok models`, named
+by derivation. An id no source names is derived (`ModelNaming.derive`: `gpt-6-sol` is "GPT 6 Sol",
+`claude-opus-5-5` "Opus 5.5"). Lists are cached per agent and account in the state directory's
+`model-lists` (`ModelListStore`), refreshed off the main actor with every agent detection and at
+the start of every intake (`IntakeService.capture`); a refresh that finds nothing keeps the last
+good list and logs why, so a menu is never emptied. An account's menu is its own list and a
+pool's the union of its members'. Effort shows only for a model with levels (its source's own, else
+the profile's); gemini's ids carry theirs and opencode has no setting, so those roles store an
+empty effort. The phone's `WireModelChoice` carries `modelName` and, for a role holding its own,
+`account`, both optional.
+
 Every seat's usage is credited to the account it billed (`UsageService.ingestHeadlessSeats`): claude
 from its `rate_limit_event`s, codex from the rollout its run wrote (`SeatActivity.conversationID` →
 `CodexRolloutFile`; `codex exec --json` has no rate limits on stdout), grok from its home's billing

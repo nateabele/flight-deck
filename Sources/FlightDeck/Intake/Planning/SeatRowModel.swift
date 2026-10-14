@@ -187,18 +187,18 @@ struct SeatRowModel: Equatable, Identifiable {
         return activityAgent != requested.choice.agent
     }
 
-    /// "codex · gpt-6-sol · high", or after a fallback "claude → codex · gpt-6-sol" (spec §6) —
+    /// "Codex > GPT 6 Sol · high", or after a fallback "Claude → Codex > GPT 6 Sol" (spec §6) —
     /// the model, not the effort, on the far side of the arrow: the fallback line is about which
     /// harness took over, and the effort the harness that failed asked for says nothing about it.
     private static func identity(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> String {
         guard let choice = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent) else {
-            return activityAgent?.rawValue ?? "…"
+            return activityAgent?.displayName ?? "…"
         }
         guard isFallback(slot: slot, requested: requested, activityAgent: activityAgent),
               let from = slot?.requested.agent ?? requested?.choice.agent else {
-            return "\(choice.agent.rawValue) · \(choice.model) · \(choice.effort)"
+            return ([choice.displayLabel] + (choice.effort.isEmpty ? [] : [choice.effort])).joined(separator: " · ")
         }
-        return "\(from.rawValue) → \(choice.agent.rawValue) · \(choice.model)"
+        return "\(from.displayName) → \(choice.displayLabel)"
     }
 
     /// "fell back to codex" — and, only when the engine actually recorded why (today that's
@@ -208,8 +208,8 @@ struct SeatRowModel: Equatable, Identifiable {
     /// a reason the current engine doesn't record for a live or successful fallback.
     private static func fallbackReason(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> String? {
         guard isFallback(slot: slot, requested: requested, activityAgent: activityAgent) else { return nil }
-        let to = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent)?.agent.rawValue
-            ?? activityAgent?.rawValue ?? "the fallback model"
+        let to = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent)?.agent.displayName
+            ?? activityAgent?.displayName ?? "the fallback model"
         var text = "fell back to \(to)"
         if let detail = slot?.diagnosis?.detail, !detail.isEmpty { text += " · \(detail)" }
         return text

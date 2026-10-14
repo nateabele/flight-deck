@@ -84,12 +84,12 @@ final class RoundConfigEditorRenderTests: XCTestCase {
         let grok = ModelChoice(agent: .grok, model: "grok-4.7", effort: "high")
         config.crossReviewer = Slot(grok)
         let available = AvailableModels(choices: [.claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!, .grok: grok])
-        let billing: [AgentID: AccountBilling] = [
-            .codex: AccountBilling(text: "Work pool"), .claude: AccountBilling(text: "Personal"),
-            .grok: AccountBilling(text: "a removed account", problem: true),
+        let billing: [AgentID: AccountMenu] = [
+            .codex: AccountMenu(projectDefault: "Work pool"), .claude: AccountMenu(projectDefault: "Personal"),
+            .grok: AccountMenu(projectDefault: "a removed account", problem: true),
         ]
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available, billing: billing),
+            try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available, accounts: billing),
                        size: NSSize(width: 420, height: 700),
                        to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-billing-\(name).png"),
                        appearance: appearance)

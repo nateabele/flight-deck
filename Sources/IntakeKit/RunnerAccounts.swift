@@ -38,7 +38,21 @@ public struct RunnerAccounts: Codable, Equatable, Sendable {
     }
 
     public var agents: [AgentID: Entry]
-    public init(agents: [AgentID: Entry] = [:]) { self.agents = agents }
+    /// The accounts and pools roles bill instead of the project's assignment, by
+    /// `AccountChoice.key`. Additive: nil in a file written before per-role accounts, and for a
+    /// config with no override. A pool override holds its lease here exactly as a project pool
+    /// does under `agents`.
+    public var overrides: [String: Entry]?
+    public init(agents: [AgentID: Entry] = [:], overrides: [String: Entry]? = nil) {
+        self.agents = agents; self.overrides = overrides
+    }
+
+    /// The entry a seat bills: its own override's, else its agent's (the project's assignment).
+    /// nil when the file has none — the runner pauses the seat rather than guess a login.
+    public func entry(for choice: ModelChoice) -> Entry? {
+        guard let account = choice.account else { return agents[choice.agent] }
+        return overrides?[account.key]
+    }
 
     public static let fileName = "accounts.json"
 
@@ -60,20 +74,35 @@ public struct RunnerAccounts: Codable, Equatable, Sendable {
     }
 
     /// Every lease the file holds, for release or re-adoption.
-    public var leases: [AccountLease] { agents.values.compactMap { $0.lease?.lease } }
+    public var leases: [AccountLease] { (Array(agents.values) + Array((overrides ?? [:]).values)).compactMap { $0.lease?.lease } }
 }
 
 public extension RoundConfig {
     /// Every agent any seat of this config can run — rotations, fallbacks and the cross-check reviewer
     /// included, since a fallback that fires mid-round needs its account resolved already: the
     /// runner cannot ask the app for one then.
-    var agents: Set<AgentID> {
+    var agents: Set<AgentID> { Set(allChoices.map(\.agent)) }
+
+    /// Every seat's choice, fallbacks included.
+    private var allChoices: [ModelChoice] {
         var choices: [ModelChoice] = [integrator, encoder] + integratorRotation + polisherRotation
         if let polisher { choices.append(polisher) }
         for slot in drafters + [synthesizer, reviewer, crossReviewer].compactMap({ $0 }) + reviewerRotation {
             choices.append(slot.choice)
             if let fallback = slot.fallback { choices.append(fallback) }
         }
-        return Set(choices.map(\.agent))
+        return choices
+    }
+
+    /// The agents some seat runs on the project's assignment: a seat with its own account does not
+    /// need its agent's project account resolved (or leased) at all.
+    var projectAssignedAgents: Set<AgentID> { Set(allChoices.filter { $0.account == nil }.map(\.agent)) }
+
+    /// The distinct per-role accounts, with the agent each belongs to, in a stable order.
+    var accountOverrides: [(agent: AgentID, choice: AccountChoice)] {
+        var seen = Set<String>()
+        return allChoices.compactMap { c in c.account.map { (c.agent, $0) } }
+            .filter { seen.insert($0.1.key).inserted }
+            .sorted { $0.1.key < $1.1.key }
     }
 }

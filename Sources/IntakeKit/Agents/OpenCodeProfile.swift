@@ -40,7 +40,7 @@ public struct OpenCodeProfile: AgentProfile {
     /// a value one provider accepts another rejects, so offering a fixed list would let a seat
     /// pick a level its model refuses.
     public var modelCatalog: ProfileModelCatalog {
-        ProfileModelCatalog(aliases: [], listArguments: ["models"], defaultPlanningModel: "",
+        ProfileModelCatalog(aliases: [], listArguments: ["models", "--verbose"], defaultPlanningModel: "",
                             defaultPlanningEffort: "", effortValues: [])
     }
 
@@ -50,7 +50,10 @@ public struct OpenCodeProfile: AgentProfile {
         var models: [String] = []
         for raw in stdout.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.contains(" "), let slash = line.firstIndex(of: "/"),
+            // `--verbose` follows each id with that model's JSON object: its lines are quoted or
+            // bracketed, never an id.
+            guard let first = line.first, first.isLetter || first.isNumber,
+                  !line.contains(" "), !line.contains("\""), !line.contains(","), let slash = line.firstIndex(of: "/"),
                   slash != line.startIndex, line.index(after: slash) != line.endIndex,
                   !models.contains(line) else { continue }
             models.append(line)

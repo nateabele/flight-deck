@@ -21,6 +21,46 @@ struct AccountBilling: Equatable, Sendable {
     /// Set when the assignment cannot be honoured (an account or pool that no longer exists):
     /// planning will refuse to start, and the editor says so instead of naming a login.
     var problem: Bool = false
+    /// The account or pool behind `text`, when there is one (nil: the agent's built-in home, or a
+    /// broken assignment) — what the editor reads the project default's model list under.
+    var choice: AccountChoice? = nil
+}
+
+/// What the Rounds editor offers for one agent's account: the project's assignment (the default),
+/// then each account and pool the agent has. `offersChoice` is false with one account and no pool
+/// of the user's own, where the editor shows the resolved account as text instead of a picker.
+struct AccountMenu: Equatable {
+    struct Option: Equatable {
+        var choice: AccountChoice
+        var title: String
+        var isPool: Bool
+    }
+    /// What the project's assignment bills ("Work pool", "Personal"): the default's name.
+    var projectDefault: String
+    /// The project's assignment cannot be honoured (planning will refuse to start).
+    var problem: Bool = false
+    var options: [Option] = []
+    var offersChoice = false
+
+    /// The default row's title, "Project default — Work pool".
+    var defaultTitle: String { "Project default — \(projectDefault)" }
+
+    func title(for choice: AccountChoice) -> String? { options.first { $0.choice == choice }?.title }
+}
+
+extension AccountChoice {
+    init(_ assignment: AccountAssignment) {
+        switch assignment {
+        case .account(let id): self = .account(id)
+        case .pool(let id): self = .pool(id)
+        }
+    }
+    var assignment: AccountAssignment {
+        switch self {
+        case .account(let id): .account(id)
+        case .pool(let id): .pool(id)
+        }
+    }
 }
 
 /// One agent's resolved billing: the account it runs as, and the pool lease that put it there.
@@ -54,9 +94,9 @@ extension AccountResolutionError {
     var message: String {
         switch self {
         case .accountMissing(let agent):
-            "the \(agent.displayName) account assigned to this project no longer exists — choose another in Settings → Projects"
+            "the \(agent.displayName) account chosen for this project no longer exists — choose another in Settings → Projects, or on the role in the Rounds editor"
         case .poolUnavailable(let pool, let agent):
-            "the \(agent.displayName) pool assigned to this project (\(pool)) has no account to use — choose another in Settings → Projects"
+            "the \(agent.displayName) pool chosen for this project (\(pool)) has no account to use — choose another in Settings → Projects, or on the role in the Rounds editor"
         }
     }
 }
@@ -66,32 +106,60 @@ extension AccountResolutionError {
 protocol AccountResolving: AnyObject {
     /// What `agent` would bill in `project`, without leasing — the Rounds editor's line.
     func billing(_ agent: AgentID, project: String) -> AccountBilling
+    /// The Rounds editor's account picker for `agent` in `project`.
+    func accountMenu(_ agent: AgentID, project: String) -> AccountMenu
     /// Resolves `agent` in `project`, taking a lease when the project assigns a pool. The caller
     /// owns the lease and must `release` it when its run ends.
     func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError>
+    /// Resolves a role's own account or pool for `agent`, leasing when it is a pool — the same rules
+    /// as the project's assignment, with the role's choice in its place.
+    func acquire(_ choice: AccountChoice, agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError>
     func release(_ lease: AccountLease)
     /// Re-registers a lease a previous launch took for a holder that is still running.
     func adopt(_ lease: AccountLease)
 }
 
 extension AccountResolving {
-    /// Every agent in `agents`, all-or-nothing: on any failure the leases already taken are
-    /// released, so a refused start never strands one. `notice` hears each over-limit notice
-    /// only once every agent resolved — a refused start must not also say it started.
-    func acquire(_ agents: Set<AgentID>, project: String,
+    /// A resolver that knows no list of accounts offers no choice: the editor shows the line only.
+    func accountMenu(_ agent: AgentID, project: String) -> AccountMenu {
+        let billing = billing(agent, project: project)
+        return AccountMenu(projectDefault: billing.text, problem: billing.problem)
+    }
+
+    /// Every account `config` bills, all-or-nothing: the project's assignment for each agent some
+    /// seat runs on it, and each role's own account or pool. On any failure the leases already taken
+    /// are released, so a refused start never strands one. `notice` hears each over-limit notice
+    /// only once everything resolved — a refused start must not also say it started.
+    func acquire(_ config: RoundConfig, project: String,
+                 notice: (AccountNotice) -> Void = { _ in }) -> Result<RunnerAccounts, AccountResolutionError> {
+        acquire(config.projectAssignedAgents, overrides: config.accountOverrides, project: project, notice: notice)
+    }
+
+    func acquire(_ agents: Set<AgentID>, overrides: [(agent: AgentID, choice: AccountChoice)] = [], project: String,
                  notice: (AccountNotice) -> Void = { _ in }) -> Result<RunnerAccounts, AccountResolutionError> {
         var resolved = RunnerAccounts()
         var notices: [AccountNotice] = []
-        // A fixed order, so which pool is leased first never depends on Set iteration.
-        for agent in AgentID.allCases where agents.contains(agent) {
-            switch acquire(agent, project: project) {
+        var failure: AccountResolutionError?
+        func run(_ result: Result<ResolvedAccount, AccountResolutionError>, _ store: (RunnerAccounts.Entry) -> Void) {
+            guard failure == nil else { return }
+            switch result {
             case .success(let account):
-                resolved.agents[agent] = account.entry
+                store(account.entry)
                 if let n = account.notice { notices.append(n) }
             case .failure(let error):
-                release(resolved)
-                return .failure(error)
+                failure = error
             }
+        }
+        // A fixed order, so which pool is leased first never depends on Set iteration.
+        for agent in AgentID.allCases where agents.contains(agent) {
+            run(acquire(agent, project: project)) { resolved.agents[agent] = $0 }
+        }
+        for (agent, choice) in overrides {
+            run(acquire(choice, agent: agent)) { resolved.overrides = (resolved.overrides ?? [:]).merging([choice.key: $0]) { $1 } }
+        }
+        if let failure {
+            release(resolved)
+            return .failure(failure)
         }
         notices.forEach(notice)
         return .success(resolved)
@@ -117,9 +185,9 @@ extension AccountResolver: AccountResolving {
         switch resolve(agent: agent, project: project, leasing: false) {
         case .success(let resolution):
             if case .pool(let id) = resolution.source {
-                return AccountBilling(text: AccountBilling.poolName(poolLabel(id)))
+                return AccountBilling(text: AccountBilling.poolName(poolLabel(id)), choice: .pool(id))
             }
-            return AccountBilling(text: Self.name(resolution.account, agent: agent))
+            return AccountBilling(text: Self.name(resolution.account, agent: agent), choice: resolution.account.map { .account($0.id) })
         case .failure(.accountMissing): return AccountBilling(text: "a removed account", problem: true)
         case .failure(.poolUnavailable): return AccountBilling(text: "an unusable pool", problem: true)
         }
@@ -127,6 +195,22 @@ extension AccountResolver: AccountResolving {
 
     func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError> {
         resolve(agent: agent, project: project).map(resolved)
+    }
+
+    func accountMenu(_ agent: AgentID, project: String) -> AccountMenu {
+        let billing = billing(agent, project: project)
+        let list = preferences.preferences.accountList
+        // Projects' own choices and order; its first row is the unset one, which is the default here.
+        let options = ProjectsSettingsTab.accountOptions(for: agent, in: list, agentDefault: preferences.accountDefault(for: agent))
+            .dropFirst().compactMap { option in
+                option.value.map { AccountMenu.Option(choice: AccountChoice($0), title: option.title, isPool: option.isPool) }
+            }
+        return AccountMenu(projectDefault: billing.text, problem: billing.problem, options: Array(options),
+                           offersChoice: ProjectsSettingsTab.showsAccountPicker(for: agent, in: list, assigned: nil))
+    }
+
+    func acquire(_ choice: AccountChoice, agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError> {
+        resolve(agent: agent, assignment: choice.assignment).map(resolved)
     }
 
     fileprivate func resolved(_ resolution: AccountResolution) -> ResolvedAccount {

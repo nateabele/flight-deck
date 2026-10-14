@@ -51,7 +51,7 @@ final class OpenCodeProfileTests: XCTestCase {
         XCTAssertNil(profile.unimplemented)
         XCTAssertEqual(profile.binaryName, "opencode")
         XCTAssertFalse(profile.hasNativeSchema, "run has no schema flag: the schema rides in the prompt")
-        XCTAssertEqual(profile.modelCatalog.listArguments, ["models"])
+        XCTAssertEqual(profile.modelCatalog.listArguments, ["models", "--verbose"])
         XCTAssertEqual(profile.modelCatalog.defaultPlanningModel, "", "empty = OpenCode's configured default")
         XCTAssertEqual(profile.modelCatalog.effortValues, [], "--variant is provider-specific")
         XCTAssertFalse(profile.modelCatalog.isEmpty)

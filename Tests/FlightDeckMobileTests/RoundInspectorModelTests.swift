@@ -4,12 +4,13 @@ import XCTest
 @testable import FlightDeckMobile
 
 final class RoundInspectorModelTests: XCTestCase {
-    private func choice(_ agent: String, _ name: String, _ model: String, _ effort: String = "high") -> WireModelChoice {
-        WireModelChoice(agent: agent, agentName: name, model: model, effort: effort)
+    private func choice(_ agent: String, _ name: String, _ model: String, _ effort: String = "high",
+                        modelName: String? = nil, account: String? = nil) -> WireModelChoice {
+        WireModelChoice(agent: agent, agentName: name, model: model, effort: effort, modelName: modelName, account: account)
     }
 
-    private var codex: WireModelChoice { choice("codex", "Codex", "gpt-6-sol") }
-    private var claude: WireModelChoice { choice("claude", "Claude", "opus") }
+    private var codex: WireModelChoice { choice("codex", "Codex", "gpt-6-sol", modelName: "GPT 6 Sol") }
+    private var claude: WireModelChoice { choice("claude", "Claude", "opus", modelName: "Opus 5.5 (latest)") }
 
     private func full(customized: Bool = false) -> WireRoundConfig {
         WireRoundConfig(
@@ -29,8 +30,8 @@ final class RoundInspectorModelTests: XCTestCase {
         XCTAssertEqual(m.stages.map(\.title), ["Draft", "Synthesis", "Refine", "Encode", "Polish"])
         XCTAssertEqual(m.stages[0].agents.map(\.role), ["Drafter", "Drafter"])
         XCTAssertEqual(m.stages[0].agents.map(\.persona), ["arbiter", "realist"])
-        XCTAssertEqual(m.stages[0].agents[0].line, "Codex · gpt-6-sol · high")
-        XCTAssertEqual(m.stages[0].agents[0].fallback, "Falls back to Claude · opus · high")
+        XCTAssertEqual(m.stages[0].agents[0].line, "Codex > GPT 6 Sol · high")
+        XCTAssertEqual(m.stages[0].agents[0].fallback, "Falls back to Claude > Opus 5.5 (latest) · high")
         XCTAssertEqual(m.stages[2].agents.map(\.role), ["Reviewer", "Cross-check agent", "Integrator"])
         XCTAssertNil(m.stages[2].agents[0].persona, "general says nothing")
     }
@@ -104,8 +105,32 @@ final class RoundInspectorModelTests: XCTestCase {
         XCTAssertEqual(RoundInspectorModel.crossCheckName("someNewPolicy"), "someNewPolicy")
     }
 
-    func testAnAgentWithoutADisplayNameFallsBackToItsId() {
-        XCTAssertEqual(RoundInspectorModel.describe(WireModelChoice(agent: "grok", model: "m", effort: "low")), "grok · m · low")
+    func testAnAgentWithoutADisplayNameIsCapitalizedNeverTheRawId() {
+        XCTAssertEqual(RoundInspectorModel.describe(WireModelChoice(agent: "grok", model: "m", effort: "low")), "Grok > m · low")
+    }
+
+    func testARoleWithItsOwnAccountNamesIt() {
+        let pinned = choice("claude", "Claude", "claude-opus-5-5", "high", modelName: "Opus 5.5", account: "Work pool")
+        XCTAssertEqual(RoundInspectorModel.describe(pinned), "Claude > Opus 5.5 · high · Account: Work pool")
+        XCTAssertEqual(RoundInspectorModel.describe(choice("gemini", "Gemini", "gemini-3.8-flash-high", "", modelName: "Gemini 3.8 Flash (High)")),
+                       "Gemini > Gemini 3.8 Flash (High)", "no effort: no trailing dot")
+        XCTAssertEqual(RoundInspectorModel.describe(choice("claude", "Claude", "opus")), "Claude > opus · high",
+                       "a Mac that predates names shows the model as it came")
+    }
+
+    func testNoInspectorTextShowsARawAgentId() {
+        let config = WireRoundConfig(
+            drafters: [WireSeat(choice: codex, persona: "arbiter", fallback: claude)], reviewer: WireSeat(choice: claude),
+            integrator: WireSeat(choice: codex), encoder: WireSeat(choice: codex), polisher: WireSeat(choice: claude),
+            refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: "nextMajor", customized: false,
+            reviewers: [WireSeat(choice: claude), WireSeat(choice: codex)])
+        let model = RoundInspectorModel.make(preset: "featurePlan", config: config)
+        let lines = model.stages.flatMap(\.agents).flatMap { agent in
+            [agent.line, agent.fallback ?? ""] + agent.rotation.map(\.line) + agent.rotation.map(\.name)
+        }
+        for line in lines {
+            for raw in ["claude", "codex", "grok", "gemini", "opencode"] { XCTAssertFalse(line.contains(raw), "\(line) shows \(raw)") }
+        }
     }
 }
 

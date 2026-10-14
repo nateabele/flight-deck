@@ -100,11 +100,11 @@ final class RoundConfigEditorTests: XCTestCase {
     /// Editing an entry reaches the rotation the engine reads; editing entry 0 reaches the single field too.
     func testEditingAnEntryReachesTheRound() throws {
         let config = try fullWithEveryAgent()
-        let second = RoundConfigEditor.switchingAgent(config, at: .polisherEntry(1), to: .codex, available: threeAgents)
+        let second = RoundConfigEditor.selecting(config, at: .init(keyPath: .polisherEntry(1)), agent: .codex, model: "gpt-6-sol", available: threeAgents)
         XCTAssertEqual(second.polisher(rotation: 1)?.agent, .codex)
         XCTAssertEqual(second.polisher?.agent, .claude)
         XCTAssertTrue(second.customized)
-        let first = RoundConfigEditor.switchingAgent(config, at: .polisher, to: .gemini, available: threeAgents)
+        let first = RoundConfigEditor.selecting(config, at: .init(keyPath: .polisher), agent: .gemini, model: GeminiProfile.defaultPlanningModel, available: threeAgents)
         XCTAssertEqual(first.polisher?.agent, .gemini)
         XCTAssertEqual(first.polisher(rotation: 0)?.agent, .gemini)
         XCTAssertEqual(first.polisher(rotation: 3)?.agent, .gemini, "wraps to entry 0")
@@ -254,7 +254,7 @@ final class RoundConfigEditorTests: XCTestCase {
         let config = try fullPlan()
         XCTAssertEqual(config.drafters[0].choice.agent, .codex)
 
-        let updated = RoundConfigEditor.switchingAgent(config, at: .drafter(0), to: .claude, available: available)
+        let updated = RoundConfigEditor.selecting(config, at: .init(keyPath: .drafter(0)), agent: .claude, model: "opus", available: available)
 
         XCTAssertEqual(updated.drafters[0].choice, available.claude)
         XCTAssertTrue(updated.customized)
@@ -265,7 +265,7 @@ final class RoundConfigEditorTests: XCTestCase {
 
     func testSwitchingHarnessOnIntegratorSeat() throws {
         let config = try fullPlan()
-        let updated = RoundConfigEditor.switchingAgent(config, at: .integrator, to: .codex, available: available)
+        let updated = RoundConfigEditor.selecting(config, at: .init(keyPath: .integrator), agent: .codex, model: "gpt-6-sol", available: available)
         XCTAssertEqual(updated.integrator, available.codex)
     }
 
