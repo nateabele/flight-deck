@@ -80,15 +80,15 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         settle()
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
         store.selectProject(b.id)
-        settle()
+        settleUntilToggle("Show Inspector", in: window)
         XCTAssertEqual(toggleLabel(in: window), "Show Inspector", "project B has its own inspector state")
 
         // A terminal tab in between tears `ProjectView` down entirely; A comes back open.
         store.selectSession(session)
-        settle()
+        settleUntilToggle(nil, in: window)
         XCTAssertNil(toggleLabel(in: window), "no toggle while a terminal fills the detail column")
         store.selectProject(a.id)
-        settle()
+        settleUntilToggle("Hide Inspector", in: window)
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector", "project A's open inspector survived the switch")
     }
 
@@ -155,8 +155,12 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     /// Opening the inspector settles: the window stops re-evaluating, and every column still has
     /// content. The maintainer's 2026-10-09 screenshot after ⌥⌘I showed the sidebar, the Intakes list and
     /// the inspector as blank panes with only the plan drawn — the main thread busy redrawing.
-    func testOpeningTheInspectorSettlesWithEveryColumnDrawn() throws {
-        let (_, _, _, _, window) = try openTwoShapingProjects()
+    func testOpeningTheInspectorSettlesWithEveryColumnDrawn() async throws {
+        let (store, _, _, _, window) = try openTwoShapingProjects()
+        // The first poll folds each plan's convergence and coverage series off the main actor
+        // and publishes them when done: a legitimate redraw, but under load it landed inside the
+        // idle window below. Wait for the folds so "nothing changing" is true of the window.
+        for intake in store.intakeService.intakes { await store.intakeService.convergenceFold(for: intake.id)?.value }
         XCTAssertTrue(pressInspectorChord(in: window))
         settleRenders()
         RenderProbe.reset()
@@ -284,6 +288,16 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
 
     private func settle(_ seconds: TimeInterval = 0.6) {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// Runs the loop until the toolbar's toggle reads `label` (nil: there is none), up to
+    /// `limit`. The toolbar is rebuilt a few turns after a selection change, and how many
+    /// turns a fixed pause covers depends on the machine's load; the caller asserts the label,
+    /// so a state that never arrives still fails.
+    private func settleUntilToggle(_ label: String?, in window: NSWindow, limit: TimeInterval = 20) {
+        let deadline = Date().addingTimeInterval(limit)
+        while toggleLabel(in: window) != label, Date() < deadline { settle(0.05) }
+        settle(0.1)
     }
 
     /// ⌥⌘I as the window receives it: `performKeyEquivalent` is the path a key-equivalent chord

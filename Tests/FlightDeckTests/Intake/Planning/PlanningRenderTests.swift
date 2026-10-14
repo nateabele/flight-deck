@@ -313,7 +313,7 @@ final class PlanningRenderTests: XCTestCase {
     /// live card, and not the pane, its header, its Clarifications or its plan. And a publish
     /// the pane does observe re-evaluates the pane, but not those three, whose inputs didn't
     /// change. Before the seat maps moved to `SeatFeed`, every beat re-evaluated all of it.
-    func testASeatBeatRedrawsTheLiveCardAlone() throws {
+    func testASeatBeatRedrawsTheLiveCardAlone() async throws {
         let store = IntakeStore(root: root)
         let config = RoundConfig(
             drafters: [Slot(codex, persona: .arbiter)], synthesizer: Slot(claude), reviewer: Slot(codex), integrator: codex,
@@ -329,6 +329,10 @@ final class PlanningRenderTests: XCTestCase {
         let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
+        // The first poll folds the convergence and coverage series off the main actor and
+        // publishes them when done, which under load lands in the middle of the measurement
+        // below as a legitimate redraw of the pane. Wait for it so the beat is the only publish.
+        await service.convergenceFold(for: intake.id)?.value
 
         let size = NSSize(width: 1100, height: 900)
         let host = NSHostingView(rootView: IntakeDetailView(service: service, intake: intake, onOpenReview: {})

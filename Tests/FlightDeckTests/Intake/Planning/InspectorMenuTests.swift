@@ -78,6 +78,14 @@ final class InspectorMenuTests: XCTestCase {
 
     private func turn() { settleMainRunLoop() }
 
+    /// Runs the loop until `condition` holds, up to `limit`. The menu heals a few main-queue
+    /// hops after the change (a notification hop, then an async one), and how many a fixed
+    /// turn covers depends on load; the caller asserts, so a state that never arrives fails.
+    private func turn(until condition: () -> Bool, limit: TimeInterval = 20) {
+        let deadline = Date().addingTimeInterval(limit)
+        while !condition(), Date() < deadline { turn() }
+    }
+
     func testTheItemsFillTheShellWithTheirChords() {
         XCTAssertEqual(shell.items.filter { !$0.isHidden }.map(\.title), ["Notes", "Rounds"])
         XCTAssertEqual(shell.items.filter(\.isHidden).map(\.title), ["—"], "SwiftUI's placeholder, hidden, not removed")
@@ -132,7 +140,7 @@ final class InspectorMenuTests: XCTestCase {
         let viewIndex = mainMenu.items.firstIndex { $0.submenu?.title == "View" }!
         mainMenu.removeItem(at: viewIndex)
         mainMenu.insertItem(Self.host(Self.viewMenu()), at: viewIndex)
-        turn()
+        turn(until: { shell.items.contains { !$0.isHidden && $0.title == "Notes" } })
         XCTAssertEqual(shell.items.filter { !$0.isHidden }.map(\.title), ["Notes", "Rounds"], "moved into the new shell")
         XCTAssertTrue(controller.menu === shell)
     }
