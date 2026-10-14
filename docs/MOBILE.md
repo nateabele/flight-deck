@@ -164,6 +164,11 @@ run by anything on this machine.
 8. Quit Flight Deck — the phone shows "Not connected", dimmed, not a frozen live-looking fleet.
 9. Leave the phone off the network for ten minutes, then return — it resumes rather than
    re-downloading (check the Mac's log for a replay rather than a snapshot).
+   Force-quit and relaunch the app as well. The list should appear at once with "Connecting…
+   showing what it said …", and the Mac's log should show `resume … mode=replay`. Open a
+   session you read before: its conversation should be on screen before any spinner. Quit and
+   relaunch Flight Deck on the Mac, then relaunch the phone: the log should now show
+   `snapshot-seqTooOld` (the epoch changed), not a replay.
 10. Revoke the device on the Mac — the phone disconnects and cannot reconnect.
 11. Let a pairing code expire unscanned, then scan it — it is refused.
 12. Arm a code, quit Flight Deck before it is scanned, relaunch, then wait out the window and

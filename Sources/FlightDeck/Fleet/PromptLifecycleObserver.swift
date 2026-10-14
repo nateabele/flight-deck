@@ -82,7 +82,7 @@ final class PromptLifecycleObserver {
         var waiting = 0
         for frame in frames {
             switch frame {
-            case .snapshot(_, let fleet, let reason):
+            case .snapshot(_, let fleet, let reason, _):
                 mode = "snapshot-\(reason.rawValue)"
                 waiting += fleet.projects
                     .flatMap(\.sessions)

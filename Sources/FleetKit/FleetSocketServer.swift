@@ -35,18 +35,23 @@ public struct FleetAttachment: Equatable, Sendable {
     /// socket, and for any client that claimed nothing. Same kind of fact as `name` — merely
     /// *claimed*, never authenticated — verified by the app, never trusted.
     public let caller: String?
+    /// The epoch this client's `hello` claimed its `lastSeq` was counted in — see
+    /// `ClientFrame.hello`. Set only on the attachment handed to `onHello`, because that is
+    /// the one moment it means anything; every later frame's attachment carries `nil`.
+    public let epoch: String?
 
     /// `caps` defaults to empty — "claims nothing" — because that is a real wire state the
     /// server has to handle anyway, not a convenience for callers. `isLocal` defaults to false
     /// and `caller` to nil so every existing construction site compiles unchanged.
     public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = [],
-                isLocal: Bool = false, caller: String? = nil) {
+                isLocal: Bool = false, caller: String? = nil, epoch: String? = nil) {
         self.id = id
         self.slot = slot
         self.name = name
         self.caps = caps
         self.isLocal = isLocal
         self.caller = caller
+        self.epoch = epoch
     }
 }
 
@@ -868,7 +873,9 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             // Recorded before the attachment is built, so the `hello` that carries the claim
             // is itself attributed with it rather than only the frames after it.
-            if case .hello(_, let device, let caps, let caller) = frame {
+            var epoch: String?
+            if case .hello(_, let device, let caps, let caller, let claimed) = frame {
+                epoch = claimed
                 if let device { self.names[id] = device }
                 // Recorded even when empty, so a re-`hello` on the same socket cannot leave a
                 // stale claim from an earlier one standing.
@@ -883,10 +890,11 @@ public final class FleetSocketServer: @unchecked Sendable {
             let attachment = FleetAttachment(
                 id: id, slot: self.isLocal ? nil : self.slot(of: connection, id: id),
                 name: self.names[id], caps: self.caps[id] ?? [],
-                isLocal: self.isLocal, caller: self.isLocal ? self.callers[id] : nil
+                isLocal: self.isLocal, caller: self.isLocal ? self.callers[id] : nil,
+                epoch: epoch
             )
             switch frame {
-            case .hello(let lastSeq, _, _, _):
+            case .hello(let lastSeq, _, _, _, _):
                 if self.attached[id] == nil {
                     self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
@@ -1091,7 +1099,7 @@ public extension ServerFrame {
         switch self {
         case .delegateStarted, .delegateNotice, .delegateOutput, .infraProgress:
             return true
-        case .snapshot, .event, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
+        case .snapshot, .event, .caughtUp, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
              .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
              .recipeCheck, .hostDisk, .infraMachine, .infraList, .infraDoctor, .infraDone,

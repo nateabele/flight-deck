@@ -347,9 +347,11 @@ struct FleetListScreen: View {
         project.isCollapsed ? [] : IntakeRowStyle.ordered(project.intakes ?? [])
     }
 
-    /// Clocks freeze at the last moment the Mac was live, so a stale list never keeps counting.
+    /// Clocks freeze at the last moment the Mac was live, so a stale list never keeps counting
+    /// — including a list restored from disk that is still waiting for its first connection.
     private var frozenAt: Date? {
-        if case .lost = model.state { model.lastLive } else { nil }
+        if case .lost = model.state { return model.lastLive }
+        return model.isShowingCache ? model.lastLive : nil
     }
 
     /// Tighter than the platform default, and the only lever pulled for density that touches
@@ -801,9 +803,21 @@ struct FleetListScreen: View {
         case .connected:
             EmptyView()
         case .idle, .searching:
-            Label("Connecting to \(model.macName)…", systemImage: "antenna.radiowaves.left.and.right")
+            // A fleet restored from disk is on screen before the Mac has said anything, so it
+            // is labelled for what it is, exactly as the stale banner labels a dropped link.
+            if model.isShowingCache, let lastLive = model.lastLive {
+                Label(
+                    "Connecting to \(model.macName)… showing what it said "
+                        + "\(lastLive.formatted(.relative(presentation: .named))).",
+                    systemImage: "antenna.radiowaves.left.and.right"
+                )
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            } else {
+                Label("Connecting to \(model.macName)…", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         case .lost(let retryingIn):
             staleBanner(retryingIn: retryingIn)
         }

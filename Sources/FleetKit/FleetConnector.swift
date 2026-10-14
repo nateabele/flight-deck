@@ -160,6 +160,10 @@ public final class FleetConnector: @unchecked Sendable {
     private var pendingClosed: [Int: (Result<[WireClosedSession], FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
+    /// The epoch of the snapshot `fleet` descends from, handed back in every `hello` beside
+    /// `mac.lastSeq` — the two are one resume point and only mean something together. `nil`
+    /// until a snapshot carries one, which a Mac built before epochs never does.
+    private var epoch: String?
     private var attempt = 0
     private var running = false
     /// Invalidates outstanding deferred work. `DispatchQueue.asyncAfter` cannot be
@@ -200,6 +204,35 @@ public final class FleetConnector: @unchecked Sendable {
     /// The phone reconnects by discarding the connector and building a new one rather than by
     /// re-calling `start()`, so today this guard never fires. It is here for the caller that
     /// does not know that yet.
+    /// Where this connector would resume from right now: the sequence its fleet has applied
+    /// up to, and the epoch that sequence was counted in. Read together with `onFleet`'s
+    /// snapshot by a caller persisting the fleet, because a cached fleet is only resumable
+    /// from the exact point it was folded to — see `FleetSnapshotCache`.
+    public var resumePoint: (seq: Int, epoch: String?) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return (mac.lastSeq, epoch)
+    }
+
+    /// Start from a fleet held over from an earlier launch instead of from nothing, so the
+    /// first `hello` asks only for what changed since it was saved.
+    ///
+    /// **All three or none.** A resume cursor applied to any fleet but the one it was folded
+    /// to replays deltas onto the wrong base, and the result looks entirely plausible — the
+    /// failure `FleetModel.init` once shipped, where a persisted `lastSeq` resumed onto an
+    /// empty list. So this takes the fleet, its sequence and its epoch as one call, and
+    /// refuses a cursor with no epoch: without one the Mac cannot tell this cursor from the
+    /// same number counted by a later run of itself.
+    ///
+    /// Before `start()` only, and `onFleet` is not called: the caller already holds what it
+    /// passed in.
+    public func restore(fleet: FleetSnapshot, seq: Int, epoch: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        precondition(!running, "restore(fleet:seq:epoch:) after start()")
+        self.fleet = fleet
+        self.epoch = epoch
+        mac.lastSeq = seq
+    }
+
     public func start() {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !running else { return }
@@ -542,7 +575,7 @@ public final class FleetConnector: @unchecked Sendable {
         client.onDisconnect = { [weak self] _ in
             self?.noteDisconnect(candidate, client: client)
         }
-        client.connect(to: candidate.endpoint, lastSeq: mac.lastSeq)
+        client.connect(to: candidate.endpoint, lastSeq: mac.lastSeq, epoch: epoch)
     }
 
     private func startBrowsing() {
@@ -630,15 +663,18 @@ public final class FleetConnector: @unchecked Sendable {
         apply(frame)
     }
 
-    /// Note a gap the spine's review left here deliberately: when a resuming client is already
-    /// current, the server answers `.replay([])` and therefore sends *nothing*. The connector
-    /// cannot distinguish "you are up to date" from "your hello was ignored", so it must treat
-    /// reaching `.ready` and sending `hello` as the success signal — not the arrival of a
-    /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
+    /// A resuming client that is already current is answered `.caughtUp` alone by a Mac that
+    /// knows this client decodes it (`FleetCapability.caughtUp`) — the frame that lets the race
+    /// pick a winner. An older Mac still answers `.replay([])` with *nothing*, which the
+    /// connector cannot tell from a `hello` that was ignored. Do not add a receive-timeout
+    /// that assumes a frame always follows `hello`: against an older Mac, none does.
     private func apply(_ frame: ServerFrame) {
         switch frame {
-        case .snapshot(let seq, let snapshot, let reason):
+        case .snapshot(let seq, let snapshot, let reason, let epoch):
             fleet = snapshot
+            // Unconditionally, nil included: a Mac that stopped sending one (a downgrade) must
+            // not leave this connector vouching for a cursor under the newer build's epoch.
+            self.epoch = epoch
             adopt(seq)
             // After `adopt`, so a handler that reads the connector's own resume point sees the
             // one this snapshot just established rather than the one it replaced.
@@ -646,6 +682,11 @@ public final class FleetConnector: @unchecked Sendable {
             // No endpoint refresh here. It is fired from `accept()` the moment `.connected`
             // is reported, which covers a replayed resume as well as a snapshot — see the
             // comment there for why a snapshot is not every connect.
+        case .caughtUp:
+            // Nothing to fold and no resume point to move. Its whole job is done by arriving:
+            // `accept()` installs the winner and reports `.connected` on the first frame a
+            // candidate delivers, and for a resume that was already current this is that frame.
+            return
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)

@@ -28,6 +28,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// — a fleet that has never been live must not claim it "last said" anything, which is
     /// why the stale banner branches on this being `nil` rather than assuming a value.
     private(set) var lastLive: Date?
+    /// Whether `fleet` is the copy restored from disk at launch and nothing live has replaced
+    /// or confirmed it yet. True from `init` until the first `.connected`; the list says so
+    /// rather than drawing a cached fleet as if the Mac had just said it.
+    private(set) var isShowingCache = false
     /// Where a typed pairing has got to, or `nil` when none is running. Drives the pairing
     /// screen's progress line; `nil` again the moment it ends, either way.
     private(set) var pairingProgress: PairingRunner.Progress?
@@ -37,6 +41,19 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     private(set) var pairingFailure: String?
 
     @ObservationIgnored private let store: any PairedMacStoring
+    /// The disk copy of the fleet and of each opened session's feed. `nil` caches nothing —
+    /// what every test that does not ask for it gets, so no test opens onto another test's
+    /// leftovers; the app passes the real one.
+    @ObservationIgnored let cache: PhoneCache?
+    /// Where the next connector resumes from: the sequence `fleet` was folded to and the epoch
+    /// it was counted in, updated with every `onFleet`. `nil` means resume from nothing.
+    ///
+    /// Held here rather than read back off `mac` because `mac` is the copy loaded at launch:
+    /// the connector advances and saves its own, so a `reconnect()` built from `mac` used to
+    /// dial with the launch value — a full snapshot on every return from the background.
+    @ObservationIgnored private var resume: (seq: Int, epoch: String)?
+    /// The pending debounced fleet save, if one is scheduled. See `scheduleFleetSave()`.
+    @ObservationIgnored private var fleetSave: Task<Void, Never>?
     @ObservationIgnored private var connector: FleetConnector?
     @ObservationIgnored private var runner: PairingRunner?
     /// One open session's model per tab id, kept so that going back to the list and forward
@@ -88,35 +105,36 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// it is its own observable and never reassigned.
     @ObservationIgnored private(set) var flightControl: FlightControlModel!
 
-    init(store: any PairedMacStoring = KeychainPairedMacStore()) {
+    init(store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil) {
         self.store = store
+        self.cache = cache
         self.mac = store.load()
         self.flightControl = FlightControlModel(fetcher: self, commander: self)
-        // A cold launch asks for EVERYTHING, whatever cursor the pairing was saved with.
+        // A cold launch resumes from the fleet cached on disk, or asks for EVERYTHING.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
         // only what changed after that", and only zero means "send the whole snapshot"
-        // (Frames.swift). It is persisted with the pairing, but `fleet` is NOT — it starts at
-        // `.empty` every launch and nothing restores it. So a relaunch used to say "I am at
-        // seq N" while holding no snapshot at all, get a handful of deltas back, apply them to
-        // nothing, and sit there fully connected and completely empty — which the list then
-        // reported, correctly and uselessly, as "No sessions yet".
+        // (Frames.swift). The keychain copy saved with the pairing is NOT one this launch can
+        // use: it describes a fleet that was only ever in memory. A relaunch used to send it
+        // while holding no snapshot at all, get a handful of deltas back, apply them to
+        // nothing, and sit there fully connected and completely empty — and never recover,
+        // since the cursor was current and the Mac had nothing further to send.
         //
-        // It never recovered on its own, either: the cursor was already current, so the Mac
-        // had nothing further to send and no reason to resend what it had.
+        // The invariant is that a resume cursor and the snapshot it resumes onto persist
+        // together or not at all. `PhoneCache` keeps them as one record — fleet, sequence and
+        // the Mac's epoch, written atomically — so the cursor used here is always the one
+        // that fleet was folded to, and the epoch lets the Mac refuse it with a snapshot if it
+        // has restarted since. With no such record it is still "not at all": zero.
         //
-        // The invariant this restores is that a resume cursor and the snapshot it resumes onto
-        // must persist together or not at all. Here that is "not at all" — one extra full
-        // snapshot per launch, which is what this protocol does for a first-time pairing
-        // anyway. Reconnects DURING a run still resume, because `mac.lastSeq` advances
-        // normally from here; only the value inherited from disk is discarded.
-        //
-        // Persisting the snapshot instead would also close this, and would additionally make
-        // the list appear instantly. It is the better end state and is deliberately not done
-        // here: a restored snapshot must also restore `lastLive`, or the list renders stale
-        // data with no way to tell it from live — the exact failure `FleetListScreen`'s stale
-        // banner exists to prevent.
+        // `lastLive` is restored with it, which is the half the stale banner depends on: a
+        // restored fleet drawn with no "last live" time is indistinguishable from a live one.
         mac?.lastSeq = 0
+        if let mac, let cached = cache?.fleet(for: mac.serviceName) {
+            fleet = cached.fleet
+            lastLive = cached.savedAt
+            isShowingCache = true
+            resume = (cached.seq, cached.epoch)
+        }
         if mac != nil { connect() }
 
         // UIKit posts this on the main thread, so `assumeIsolated` is sound here even though
@@ -143,6 +161,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         let payload = try PairingPayload(decoding: code)
         let mac = PairedMac(adopting: payload)
         try store.save(mac)
+        forgetCache()
         self.mac = mac
         connect()
     }
@@ -220,6 +239,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             pairingFailure = "Couldn't save this pairing to the keychain."
             return
         }
+        forgetCache()
         self.mac = mac
         runner = nil
         connect()
@@ -287,6 +307,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // too, only parked on disk instead of in memory, and it must not survive a revoked
         // pairing merely because it happened to be paged out at the moment of unpairing.
         TimelineSpillStore.purgeAll()
+        // And the disk copies of the fleet and of every feed, for the same reason again.
+        forgetCache()
         // Same reasoning as the transcripts above: a closed tab's title is this pairing's
         // content, not fleet-independent fact, and the next Mac's project paths coinciding
         // with this one's would otherwise render titles that Mac never closed.
@@ -510,7 +532,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         if let existing = timelineModels[id] {
             model = existing
         } else {
-            model = SessionTimelineModel(sessionID: id, fleet: self)
+            model = SessionTimelineModel(sessionID: id, fleet: self, cache: cache)
             timelineModels[id] = model
         }
         evictIdleTimelineModels()
@@ -550,6 +572,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// The per-model bookkeeping shared by both eviction paths: drop the model itself, its
     /// place in view order, and record it as evicted so a reopen rebuilds rather than reuses it.
     private func evictTimelineModel(_ id: UUID) {
+        // Written out first, so reopening an evicted session opens on its disk copy and asks
+        // only for what is newer, instead of re-downloading the end of the conversation.
+        timelineModels[id]?.persist()
         timelineModels.removeValue(forKey: id)
         timelineViewOrder.removeAll { $0 == id }
         evictedTimelineModelIDs.insert(id)
@@ -784,6 +809,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // on every event and silently overwriting the pairing this call just wrote.
         connector?.stop()
         let connector = FleetConnector(mac: mac, store: store, deviceName: Self.deviceName)
+        // Every dial resumes from what this model holds, not only the first: see `resume`.
+        if let resume { connector.restore(fleet: fleet, seq: resume.seq, epoch: resume.epoch) }
         // `MainActor.assumeIsolated`, not `Task { @MainActor in }`. FlightDeckMobile builds in
         // Swift 6, and these callbacks are plain non-isolated closures, so assigning
         // main-actor state from one is an error the compiler cannot see past on its own. But
@@ -794,9 +821,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         //
         // This is only true while the connector runs on `.main`. If it is ever given its own
         // queue, these must become hops and this comment must go.
-        connector.onFleet = { [weak self] fleet in
+        connector.onFleet = { [weak self, weak connector] fleet in
             MainActor.assumeIsolated {
                 self?.fleet = fleet
+                // Read in the same breath as `fleet`, which is what makes the pair a valid
+                // resume point: the connector's queue is this one, so nothing can land between.
+                if let point = connector?.resumePoint {
+                    self?.resume = point.epoch.map { (point.seq, $0) }
+                }
+                self?.scheduleFleetSave()
                 // Every session's current `activity`, on every snapshot and every folded event
                 // alike, is exactly the input `noteFleet` needs to tell a resolved blocked
                 // episode from one still open — see its own comment for why this is the hook
@@ -854,17 +887,18 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                 self?.state = state
                 if case .connected = state {
                     self?.lastLive = Date()
+                    self?.isShowingCache = false
                     // Every model is told, not only the one on screen: `timelineModels` is
                     // never evicted, so a reader who has opened ten sessions holds ten of
                     // these, and each decides for itself via `isOnScreen` whether a resumed
                     // link is its business. `.connected` is the right signal to fan out here
                     // because it fires once per successful dial that actually has something to
-                    // report — a snapshot or the first event of a replay — unlike the open
+                    // report — a snapshot, the first event of a replay, or `caughtUp` — unlike the open
                     // session's own triggers (`.task(id:)`, its two `.onChange`s, the busy
                     // poll), none of which fire on a reconnect that changes nothing the screen
-                    // was already watching. A fully-up-to-date resume never fires `.connected`
-                    // at all (see the deferral comment below), but there is nothing there for
-                    // `linkResumed()` to care about either — nothing changed. `accept(_:from:
+                    // was already watching. A fully-up-to-date resume fires it on `caughtUp`
+                    // (and, against a Mac too old to send that, never — see the deferral comment
+                    // below); either way `linkResumed()` asks only for what is newer. `accept(_:from:
                     // client:)` sets `winner` before calling `report(.connected(...))`, so the
                     // calls this makes back out through `fleet` already ride the new link
                     // rather than a dead one.
@@ -884,11 +918,12 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // same frame synchronously later in the same call — before `accept()`
                     // returns, so before this closure's own call frame unwinds — so hopping to
                     // the next turn is enough to see it, no polling, no second hook. This is not
-                    // racing an empty-replay case: an up-to-date resume answers with zero
-                    // frames (see `apply`'s doc comment), so `client.onFrame` never fires,
-                    // `accept()` never runs, and `.connected` itself does not get reported
-                    // until a frame — snapshot or a genuine event — eventually does. There is
-                    // nothing here for the deferral to race against.
+                    // racing an empty-replay case: an up-to-date resume answers with `caughtUp`,
+                    // which `accept()` handles exactly like any first frame, or — from a Mac too
+                    // old to send it — with zero frames, so `accept()` never runs and
+                    // `.connected` is not reported until a frame eventually arrives. A restored
+                    // fleet is already in `fleet` either way. There is nothing here for the
+                    // deferral to race against.
                     //
                     // This ordering guarantee holds only because the connector's callbacks all
                     // land on `.main` (see the identical caveat on the `onFleet` closure above).
@@ -912,8 +947,14 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // every folded event alike, so it cannot say which of the two just happened — and
         // "I threw away my history and took a whole new snapshot" is exactly the fact a
         // stale-card report needs from this end.
-        connector.onSnapshot = { seq, reason in
+        connector.onSnapshot = { [weak self] seq, reason in
             MainActor.assumeIsolated {
+                // A snapshot is the whole fleet, so it is the moment a feed cached for a session
+                // the Mac no longer has can go.
+                if let self, let cache = self.cache {
+                    let live = Set(self.fleet.projects.flatMap(\.sessions).map(\.id))
+                    cache.pruneTimelines(keeping: live)
+                }
                 PhoneLog.connection.notice(
                     "snapshot seq=\(seq) reason=\(reason.rawValue, privacy: .public)"
                 )
@@ -949,10 +990,57 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // Before `start()`, so the line is in the log ahead of whatever the dial produces.
         // `lastSeq` is what this phone is about to ask to resume from — zero on a cold launch
         // by design, see `init`.
-        let dialing = "dialing lastSeq=\(mac.lastSeq) endpoints=\(mac.endpoints.count)"
+        let dialing = "dialing lastSeq=\(resume?.seq ?? 0) cached=\(resume != nil)"
+            + " endpoints=\(mac.endpoints.count)"
         PhoneLog.connection.notice("\(dialing, privacy: .public)")
         self.connector = connector
         connector.start()
+    }
+
+    /// Write the fleet to disk soon, coalescing whatever else changes in the meantime.
+    ///
+    /// Debounced because `onFleet` fires on every folded event — activity flaps arrive at a
+    /// couple a second per busy session — and a 100 KB encode per flap is waste for a copy
+    /// that is only read at the next launch. Two seconds loses nothing that matters: a launch
+    /// that finds a slightly older cache resumes from that older point and is replayed the
+    /// difference. `persistNow()` covers the moment the app may be killed.
+    private func scheduleFleetSave() {
+        guard cache != nil, fleetSave == nil else { return }
+        fleetSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.persistNow()
+        }
+    }
+
+    /// Write the fleet to disk now. The app calls this on entering the background, the last
+    /// moment it is sure to run before iOS may kill it.
+    func persistNow() {
+        fleetSave?.cancel()
+        fleetSave = nil
+        // Not while the restored copy is all there is: nothing live has confirmed it, so
+        // re-saving it would only stamp an old fleet with a new "last live" time.
+        guard let cache, let mac, let resume, !isShowingCache else { return }
+        cache.save(CachedFleet(
+            mac: mac.serviceName, epoch: resume.epoch, seq: resume.seq,
+            // Connected, the fleet is current as of now; otherwise as of the last live moment.
+            fleet: fleet, savedAt: isConnected ? Date() : (lastLive ?? Date())
+        ))
+        timelineModels.values.forEach { $0.persist() }
+    }
+
+    private var isConnected: Bool {
+        if case .connected = state { return true }
+        return false
+    }
+
+    /// A different pairing, or none: nothing cached under the old one may open again.
+    private func forgetCache() {
+        fleetSave?.cancel()
+        fleetSave = nil
+        resume = nil
+        isShowingCache = false
+        cache?.purgeAll()
     }
 
     /// One short, structural word per state — never the Mac's name, which is a user-chosen

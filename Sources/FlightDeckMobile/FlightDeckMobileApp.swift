@@ -1,10 +1,11 @@
+import FleetKit
 import MarkdownUI
 import Network
 import SwiftUI
 
 @main
 struct FlightDeckMobileApp: App {
-    @State private var model = FleetModel()
+    @State private var model = FleetModel(cache: PhoneCache())
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Remembers whether the app was actually suspended. See `RedialOnReturn` — reading it off
@@ -84,6 +85,9 @@ struct FlightDeckMobileApp: App {
         // `.background` behind it. `RedialOnReturn` carries the whole argument, including the
         // banner case this still deliberately ignores.
         .onChange(of: scenePhase) { _, phase in
+            // The last moment this process is sure to run: write what it holds, so the next
+            // launch opens on it and resumes rather than re-downloading.
+            if phase == .background { model.persistNow() }
             guard redial.phaseChanged(to: phase), model.mac != nil else { return }
             model.reconnect()
         }

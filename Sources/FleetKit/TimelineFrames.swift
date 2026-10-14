@@ -91,10 +91,23 @@ public struct TimelinePage: Codable, Equatable, Sendable {
     /// re-snapshot is: silently serving from wherever the file happens to be now is how a
     /// phone ends up confidently displaying a conversation that no longer exists.
     public var reset: Bool
+    /// Which file the cursors index: an opaque token that changes when the transcript at
+    /// this session is a different file, even one at least as long as the cursor.
+    ///
+    /// `reset` only sees a file that SHRANK past the cursor (`TranscriptPager.reset`), so a
+    /// replacement as long as the old one read as a continuation. Harmless-ish while a feed
+    /// lived for one screen visit; not once the phone keeps a feed on disk across launches
+    /// (`TimelineFeedCache`), where "a different conversation is at this tab now" is an
+    /// ordinary thing to have happened overnight. A client compares it with the token its
+    /// held cursors came with and treats a difference exactly as it treats `reset`.
+    ///
+    /// `nil` from a Mac built before it. A client must then not trust held cursors across a
+    /// launch, which is why the cache refuses to keep a feed with no token.
+    public var source: String?
 
     public init(
         session: UUID, items: [TimelineItem], start: Int, end: Int,
-        hasMore: Bool, reset: Bool
+        hasMore: Bool, reset: Bool, source: String? = nil
     ) {
         self.session = session
         self.items = items
@@ -102,9 +115,10 @@ public struct TimelinePage: Codable, Equatable, Sendable {
         self.end = end
         self.hasMore = hasMore
         self.reset = reset
+        self.source = source
     }
 
-    enum CodingKeys: String, CodingKey { case session, items, start, end, hasMore, reset }
+    enum CodingKeys: String, CodingKey { case session, items, start, end, hasMore, reset, source }
 
     /// Hand-written for the same reason `TimelineItem.Body`'s is: the two flags are false on
     /// the ordinary page and absent costs less than `false` on a cellular link.
@@ -116,6 +130,7 @@ public struct TimelinePage: Codable, Equatable, Sendable {
         try c.encode(end, forKey: .end)
         if hasMore { try c.encode(hasMore, forKey: .hasMore) }
         if reset { try c.encode(reset, forKey: .reset) }
+        try c.encodeIfPresent(source, forKey: .source)
     }
 
     /// This one travels Mac → phone, so it is the direction where a peer can send something
@@ -133,6 +148,7 @@ public struct TimelinePage: Codable, Equatable, Sendable {
         end = try c.decode(Int.self, forKey: .end)
         hasMore = try c.decodeIfPresent(Bool.self, forKey: .hasMore) ?? false
         reset = try c.decodeIfPresent(Bool.self, forKey: .reset) ?? false
+        source = try c.decodeIfPresent(String.self, forKey: .source)
     }
 }
 

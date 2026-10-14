@@ -17,7 +17,7 @@ import Foundation
 /// **It holds no `seq` and must never be wired to one.** A `TimelinePage` carries none
 /// (`TimelineFrames`), and the resume point a reconnect uses belongs to `FleetConnector`'s
 /// event stream. Scrolling up is a history read; it cannot move where a reconnect resumes.
-public struct TimelineFeed: Equatable, Sendable {
+public struct TimelineFeed: Codable, Equatable, Sendable {
     /// **Oldest first, always** — `items[0]` is the top of the screen and `items.last` is the
     /// newest thing the agent said — whichever direction the page that delivered them was
     /// fetched in. `TimelinePage.items` arrives in file order for every anchor, including
@@ -135,6 +135,62 @@ public struct TimelineFeed: Equatable, Sendable {
         for index in items.indices {
             if let full = bodies[items[index].id] { items[index].body = full }
         }
+    }
+
+    /// The newest end of this feed, cut down to what is worth keeping on disk, or `nil` when
+    /// nothing is.
+    ///
+    /// **Cut at a record boundary, and the new top cursor is that record's offset.** That is
+    /// the one place this type derives a cursor from an item, and it is sound here where the
+    /// `oldest` doc forbids it in general: the hazard there is a page whose `start` names a
+    /// blank line a byte *above* its first record, so moving the cursor down to the record
+    /// would skip the blank — but this cursor is a record's own first byte, and a
+    /// `.before(cursor)` reads strictly the bytes below it (`TranscriptPager.page`'s `.around`
+    /// note), so the record above, and any blank line between, are exactly the next page up.
+    /// Every item sharing an offset is one record, and all of them are kept or none are: half
+    /// a record on screen is the thing `TimelineReader`'s budget refuses too.
+    ///
+    /// **A spilled placeholder ends the cut.** Its text lives in `TimelineSpillStore`, under
+    /// `Caches`, which may be purged before the cache is read back — so a cached placeholder
+    /// could be a body that no longer exists anywhere on the phone. Nothing older than it is
+    /// kept either, or the feed would hold a hole.
+    ///
+    /// `maxBytes` counts body text and always admits the newest record, however large: a feed
+    /// whose last record is one huge tool result must still open on that record.
+    public func cacheable(maxItems: Int, maxBytes: Int) -> TimelineFeed? {
+        guard hasLoadedAnything, !items.isEmpty else { return nil }
+        var keptFrom = items.endIndex
+        var bytes = 0
+        var index = items.endIndex
+        while index > items.startIndex {
+            // One record: every item at the same offset as `items[index - 1]`.
+            let offset = Self.order(of: items[index - 1].id).offset
+            guard offset != .max else { break }
+            var recordStart = index - 1
+            while recordStart > items.startIndex,
+                  Self.order(of: items[recordStart - 1].id).offset == offset {
+                recordStart -= 1
+            }
+            let record = items[recordStart..<index]
+            guard !record.contains(where: { $0.body.isPlaceholder }) else { break }
+            let recordBytes = record.reduce(0) { $0 + $1.body.text.utf8.count }
+            let isFirst = keptFrom == items.endIndex
+            if !isFirst {
+                guard items.endIndex - recordStart <= maxItems,
+                      bytes + recordBytes <= maxBytes else { break }
+            }
+            bytes += recordBytes
+            keptFrom = recordStart
+            index = recordStart
+        }
+        guard keptFrom < items.endIndex else { return nil }
+        guard keptFrom > items.startIndex else { return self }
+        var cut = self
+        cut.items = Array(items[keptFrom...])
+        cut.oldest = Self.order(of: items[keptFrom].id).offset
+        // Something was cut off above, so there is older history whatever this feed knew.
+        cut.hasOlder = true
+        return cut
     }
 
     /// Two lists of items in file order, folded into one, in file order, with an id held once.

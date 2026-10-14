@@ -63,7 +63,7 @@ final class FleetServiceTests: XCTestCase {
         let client = FleetClient(key: key)
         self.client = client
         client.onFrame = { frame in
-            if case .snapshot(_, let fleet, .initial) = frame {
+            if case .snapshot(_, let fleet, .initial, _) = frame {
                 snapshot = fleet
                 arrived.fulfill()
             }

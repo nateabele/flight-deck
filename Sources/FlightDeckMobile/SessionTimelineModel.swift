@@ -338,16 +338,81 @@ final class SessionTimelineModel {
     /// `spillDirectory` is injectable the same way, so those tests can point the spill store at
     /// a temp directory rather than the real `Caches`. Nothing in the app passes it either —
     /// `TimelineSpillStore`'s own `nil` default finds `Caches`.
+    ///
+    /// `cache` is where this session's feed is kept between launches (`PhoneCache`); `nil`
+    /// keeps nothing. A cached feed is restored here, before the screen's first `open()`, so
+    /// the conversation is on screen at once and that `open()` asks only for what is newer.
     init(
         sessionID: UUID,
         fleet: any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting,
         timeout: Duration = .seconds(15),
-        spillDirectory: URL? = nil
+        spillDirectory: URL? = nil,
+        cache: PhoneCache? = nil
     ) {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
         self.spillStore = TimelineSpillStore(session: sessionID, directory: spillDirectory)
+        self.cache = cache
+        if let cached = cache?.timeline(for: sessionID) {
+            feed = cached.feed
+            source = cached.source
+            isRestored = true
+            rebuild()
+        }
+    }
+
+    /// The disk copy of this feed. See `persist()`.
+    @ObservationIgnored private let cache: PhoneCache?
+    /// `TimelinePage.source` of the file `feed`'s cursors index, or `nil` when unknown — a
+    /// fresh feed, or a Mac that does not send one (and then nothing is cached).
+    @ObservationIgnored private var source: String?
+    /// Whether `feed` came off disk and no page has landed on it since. The first forward
+    /// page decides whether the copy is close enough to the live edge to keep — see `fetch`.
+    @ObservationIgnored private var isRestored = false
+    /// The pending debounced save, if one is scheduled.
+    @ObservationIgnored private var cacheSave: Task<Void, Never>?
+
+    /// How much of a feed is kept on disk. Enough to open on a screenful and then some, small
+    /// enough that reading it back on the main thread, before the first frame, stays cheap.
+    static let cachedItems = 300
+    static let cachedBytes = 1_000_000
+
+    /// Write the newest end of the feed to disk now. Called on a debounce after each page that
+    /// changed the items, when the model is evicted, and when the app goes to the background.
+    func persist() {
+        cacheSave?.cancel()
+        cacheSave = nil
+        guard let cache, let source,
+              let cut = feed.cacheable(maxItems: Self.cachedItems, maxBytes: Self.cachedBytes)
+        else { return }
+        cache.save(CachedTimeline(source: source, feed: cut, savedAt: Date()), for: sessionID)
+    }
+
+    /// Debounced for the reason `FleetModel.scheduleFleetSave()` is: a live turn lands a page
+    /// every poll, and one encode per page is waste for a copy only the next launch reads.
+    private func schedulePersist() {
+        guard cache != nil, cacheSave == nil else { return }
+        cacheSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.persist()
+        }
+    }
+
+    /// What `fetch` does with a page whose cursors cannot be trusted against what is held:
+    /// drop the feed, its spilled bodies and its disk copy, and start again from `.latest`.
+    private func discardHeldFeed() {
+        spillStore.purge()
+        visibleFirstID = nil
+        visibleLastID = nil
+        feed = TimelineFeed()
+        source = nil
+        isRestored = false
+        cacheSave?.cancel()
+        cacheSave = nil
+        cache?.removeTimeline(for: sessionID)
+        rebuild()
     }
 
     /// The screen came on: the reader is looking at this session, and the feed has to be
@@ -1284,6 +1349,28 @@ final class SessionTimelineModel {
             guard let self, self.claim(fetch) else { return }
             switch result {
             case .success(let page):
+                // **A different file, or a disk copy too far behind: start over.** Both are
+                // decided before anything is merged, because merging is what would do the
+                // damage. A changed `source` means the held cursors index another file —
+                // `reset` cannot see that when the new file is at least as long (see
+                // `TimelinePage.source`), and item ids are byte offsets, so a merge would
+                // interleave two conversations. A restored feed whose first forward page
+                // still `hasMore` is more than a page behind the live edge, and `chase` would
+                // walk it there one 40-record page per round trip — on a session that ran all
+                // night, far slower than the single `.latest` a cold open costs.
+                let replaced = page.source != nil && self.source != nil && page.source != self.source
+                let farBehind: Bool
+                if self.isRestored, case .after = anchor, page.hasMore, !page.reset {
+                    farBehind = true
+                } else {
+                    farBehind = false
+                }
+                self.isRestored = false
+                if replaced || farBehind {
+                    self.discardHeldFeed()
+                    self.phase = .idle
+                    return self.loadLatest()
+                }
                 let hadOlder = self.feed.hasOlder
                 let outboxBefore = self.outbox
                 // Read before the merge, though nothing here actually depends on the order:
@@ -1296,7 +1383,11 @@ final class SessionTimelineModel {
                     self.spillStore.purge()
                     self.visibleFirstID = nil
                     self.visibleLastID = nil
+                    self.cache?.removeTimeline(for: self.sessionID)
                 }
+                // The file these cursors now index. Taken from every page that says, so a
+                // reset page's token is the one the `.latest` after it is checked against.
+                if let source = page.source { self.source = source } else if page.reset { self.source = nil }
                 // **Merged into a copy and assigned back only if it moved**, and the same for the
                 // outbox below. `@Observable` notifies on every in-place mutation — a `mutating`
                 // call through the property's `_modify` — whether or not anything changed, so
@@ -1324,6 +1415,7 @@ final class SessionTimelineModel {
                 if itemsChanged || self.feed.hasOlder != hadOlder || self.outbox != outboxBefore {
                     self.rebuild()
                 }
+                if itemsChanged { self.schedulePersist() }
                 self.phase = .idle
                 // A reset emptied the feed: the transcript these cursors came from is gone,
                 // so start again from the end rather than leaving a blank screen that will

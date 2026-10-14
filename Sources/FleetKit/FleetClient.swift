@@ -83,7 +83,9 @@ public final class FleetClient: @unchecked Sendable {
         self.queue = queue
     }
 
-    public func connect(to endpoint: NWEndpoint, lastSeq: Int) {
+    /// `epoch` is the one the snapshot `lastSeq` descends from carried — see
+    /// `ClientFrame.hello`. `nil` claims none, which is what a client resuming nothing sends.
+    public func connect(to endpoint: NWEndpoint, lastSeq: Int, epoch: String? = nil) {
         guard case .paired(let key) = transport else {
             preconditionFailure("a local FleetClient dials connect(toLocal:)")
         }
@@ -92,7 +94,7 @@ public final class FleetClient: @unchecked Sendable {
                 to: FleetSocket.webSocketEndpoint(for: endpoint),
                 using: FleetSocket.webSocketParameters(FleetTLS.clientParameters(key: key))
             ),
-            lastSeq: lastSeq
+            lastSeq: lastSeq, epoch: epoch
         )
     }
 
@@ -107,7 +109,7 @@ public final class FleetClient: @unchecked Sendable {
     }
 
     /// Shared body of both `connect` overloads, from the point their parameters diverge.
-    private func open(_ connection: NWConnection, lastSeq: Int) {
+    private func open(_ connection: NWConnection, lastSeq: Int, epoch: String? = nil) {
         disconnect()
         // Cleared after `disconnect()`, which sets it: the flag is per-connection, and this
         // is a new one.
@@ -126,7 +128,7 @@ public final class FleetClient: @unchecked Sendable {
                 FleetSocket.send(
                     ClientFrame.hello(
                         lastSeq: lastSeq, device: self.deviceName, caps: self.caps,
-                        caller: callerForHello
+                        caller: callerForHello, epoch: epoch
                     ),
                     over: connection
                 )
