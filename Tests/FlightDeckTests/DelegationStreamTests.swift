@@ -5,9 +5,17 @@ import XCTest
 /// terminal one, and still answers every other request exactly once.
 @MainActor
 final class DelegationStreamTests: XCTestCase {
-    /// Sends `first`, then a `recentlyClosed` sentinel on the same connection, and returns every
-    /// frame that arrived for `first`'s cid before the sentinel's reply. One connection is
-    /// FIFO, so anything the server let through for `first` has arrived by then.
+    /// Sends `first`, waits for its terminal frame, then sends a `recentlyClosed` sentinel on the
+    /// same connection and returns every frame that arrived for `first`'s cid before the
+    /// sentinel's reply.
+    ///
+    /// **The sentinel waits for the terminal frame** rather than following `first` at once.
+    /// Stream frames are encoded and written on the stream's own queue while an ordinary reply
+    /// is written inline, so a sentinel sent right behind a stream can be answered before the
+    /// stream's tail reaches the socket: the order across cids is not promised, only within
+    /// one. What the server lets through after the terminal frame is decided on the server's
+    /// queue before the sentinel is even sent; `DelegationReplyStreamTests` covers that rule
+    /// itself.
     private func frames(for first: FleetRequest,
                         answer: @escaping (_ cid: Int, _ reply: (ServerFrame) -> Void) -> Void) async throws -> [ServerFrame] {
         let path = "/tmp/fdds-\(UUID().uuidString.prefix(8)).sock"
@@ -29,10 +37,12 @@ final class DelegationStreamTests: XCTestCase {
         client.onFrame = { frame in
             if case .snapshot = frame {
                 firstCID = client.send(first)
-                sentinel = client.send(FleetRequest.recentlyClosed)
                 return
             }
-            if frame.correlationID == firstCID { got.append(frame) }
+            if frame.correlationID == firstCID {
+                got.append(frame)
+                if !frame.continuesStream { sentinel = client.send(FleetRequest.recentlyClosed) }
+            }
             if frame.correlationID == sentinel { done.fulfill() }
         }
         client.connect(toLocal: path, lastSeq: 0)
