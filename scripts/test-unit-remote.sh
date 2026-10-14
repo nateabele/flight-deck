@@ -35,6 +35,7 @@
 # Holds the same remote lock as smoke-remote.sh, so a unit run never overlaps an XCUITest run (or
 # another worktree's unit run), but not its run-rate throttle: this is the TDD loop.
 # Never falls back to running here: an unreachable host is a failure that says so.
+# Tests that behave differently there (older macOS): docs/AGENT-OPERATIONS.md §5.
 set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
