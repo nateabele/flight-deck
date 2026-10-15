@@ -331,6 +331,36 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The reader at Refine 1 with notes written on earlier versions: in a block of this plan
+    /// (the version named on the card) and listed under their version below the plan, each group
+    /// a row that opens that version. Never "can't find".
+    func testDrawReaderWithNotesFromOtherVersions() throws {
+        try begin()
+        let detail = Fixture.steering(Fixture.running, enabled: ["pause", "stop", "extend", "trim"])
+        let id = detail.summary.id
+        var plan = Fixture.plan
+        plan.notes = [
+            WireNote(id: UUID(), kind: "question", text: "Five minutes from when?", quote: "a ceiling of five minutes",
+                     section: "Approach", blockIndex: 6, checkpoint: 3, version: "Refine 1"),
+            WireNote(id: UUID(), kind: "comment", text: "Why not Postgres?", quote: "Run PostgreSQL on encrypted gp3 EBS storage",
+                     section: "Approach", consumed: true, blockIndex: nil, checkpoint: 1, version: "Draft · Round 0"),
+            WireNote(id: UUID(), kind: "mustChange", text: "Invite lists are optional.", quote: "specific invite list",
+                     section: "Approach", consumed: true, blockIndex: nil, checkpoint: 1, version: "Draft · Round 0"),
+            WireNote(id: UUID(), kind: "comment", text: "Name the snapshot cadence.", quote: "snapshots nightly",
+                     section: "Approach", consumed: true, blockIndex: nil, checkpoint: 2, version: "Synthesis · Round 0"),
+        ]
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let fetcher = stub(detail)
+            fetcher.plan = plan
+            let reader = NavigationStack {
+                PlanReaderScreen(intake: id, checkpoint: nil, startBlock: nil, changes: false,
+                                 flightControl: FlightControlModel(fetcher: fetcher))
+            }
+            try write(screenImage(of: reader, style: style, size: nil, height: 2300),
+                      to: "reader-other-versions-\(Self.styleName(style)).png")
+        }
+    }
+
     // MARK: - Drawing
 
     private func draw(intake detail: WireIntakeDetail, style: UIUserInterfaceStyle, size: DynamicTypeSize?,
@@ -450,6 +480,8 @@ final class IntakeRenderHarness: XCTestCase {
 private final class StubFetcher: IntakeFetching {
     let detail: WireIntakeDetail
     private var served = false
+    /// Served instead of `Fixture.plan` when set.
+    var plan: WireIntakePlan?
     init(detail: WireIntakeDetail) { self.detail = detail }
 
     func intakeDetail(_ id: UUID, ifNot: String?, then: @escaping (Result<WireIntakeDetail?, FleetRequestError>) -> Void) {
@@ -457,7 +489,7 @@ private final class StubFetcher: IntakeFetching {
     }
 
     func intakePlan(_ id: UUID, checkpoint: Int?, changes: Bool, then: @escaping (Result<WireIntakePlan, FleetRequestError>) -> Void) {
-        var plan = Fixture.plan
+        var plan = self.plan ?? Fixture.plan
         if !changes { plan.added = nil; plan.removed = nil }
         then(.success(plan))
     }

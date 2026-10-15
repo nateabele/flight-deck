@@ -251,7 +251,7 @@ final class NotesRailRenderTests: XCTestCase {
         }
         let (tape, controller, load) = pinnedTape()
         controller.checkpoint = 2
-        let view = HStack(spacing: 0) {
+        let view = HStack(alignment: .top, spacing: 0) {
             PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, notes: controller)
                 .padding(20)
             Divider()
@@ -259,10 +259,32 @@ final class NotesRailRenderTests: XCTestCase {
                 .frame(width: 340)
         }
         let base = URL(fileURLWithPath: path).deletingPathExtension().path
-        let size = NSSize(width: 1000, height: 820)
+        let size = NSSize(width: 1000, height: 640)
         try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-pinned-dark.png"))
         try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-pinned-light.png"), appearance: .aqua)
+        // A short window: the collapsed row is all the other versions take.
+        let short = NSSize(width: 1000, height: 420)
+        try PlanningRender.write(view, size: short, to: URL(fileURLWithPath: base + "-pinned-short-dark.png"))
+        try PlanningRender.write(view, size: short, to: URL(fileURLWithPath: base + "-pinned-short-light.png"), appearance: .aqua)
+        // Opened by the human, over a version that has notes of its own: its own scroll area, after the lane.
+        controller.intakeID = UUID()
+        controller.otherVersionsExpanded = true
+        try PlanningRender.write(view, size: short, to: URL(fileURLWithPath: base + "-pinned-open-short-dark.png"))
+        try PlanningRender.write(view, size: NSSize(width: 1000, height: 640), to: URL(fileURLWithPath: base + "-pinned-open-light.png"), appearance: .aqua)
         XCTAssertEqual(controller.pendingCount, 1)
+
+        // Only notes from the drafts, on the synthesis plan: nothing of this version to crowd, so the section is open.
+        let bare = PlanNotesController()
+        bare.versionLabel = controller.versionLabel
+        bare.tapeNotes = controller.tapeNotes.filter { $0.consumedBy != nil }
+        bare.checkpoint = 2
+        let only = HStack(alignment: .top, spacing: 0) {
+            PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, notes: bare).padding(20)
+            Divider()
+            NotesRail(controller: bare, roundName: { _ in "Synthesis" }, focusesDraft: false).frame(width: 340)
+        }
+        try PlanningRender.write(only, size: size, to: URL(fileURLWithPath: base + "-pinned-only-dark.png"))
+        try PlanningRender.write(only, size: size, to: URL(fileURLWithPath: base + "-pinned-only-light.png"), appearance: .aqua)
     }
 
     /// What "Show in that version" arrives at: the drafts' plan, the note beside its own quote
@@ -277,7 +299,7 @@ final class NotesRailRenderTests: XCTestCase {
         let postgres = try XCTUnwrap(controller.notes.first { $0.note.note.hasPrefix("Why not SQLite") })
         controller.showInVersion(postgres.id)
         XCTAssertNotNil(controller.pendingReveal, "waiting for the drafts' plan to load")
-        let view = HStack(spacing: 0) {
+        let view = HStack(alignment: .top, spacing: 0) {
             PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, selection: .constant(1), notes: controller)
                 .padding(20)
             Divider()
@@ -285,11 +307,12 @@ final class NotesRailRenderTests: XCTestCase {
                 .frame(width: 340)
         }
         let base = URL(fileURLWithPath: path).deletingPathExtension().path
-        let size = NSSize(width: 1000, height: 820)
+        let size = NSSize(width: 1000, height: 640)
         try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-shown-dark.png"))
         XCTAssertNil(controller.pendingReveal, "the drafts' plan loaded and used the request")
         controller.pendingReveal = nil
         try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-shown-light.png"), appearance: .aqua)
+        try PlanningRender.write(view, size: NSSize(width: 1000, height: 420), to: URL(fileURLWithPath: base + "-shown-short-dark.png"))
     }
 
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

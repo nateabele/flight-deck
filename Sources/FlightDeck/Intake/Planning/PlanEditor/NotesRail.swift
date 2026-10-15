@@ -92,6 +92,16 @@ enum NotesRailModel {
             + grouped
     }
 
+    /// Whether the other-versions section is open: the human's choice once made; before that,
+    /// closed while this version has notes of its own (it must not crowd them) and open when it has none.
+    static func otherVersionsExpanded(choice: Bool?, hasOwnNotes: Bool) -> Bool { choice ?? !hasOwnNotes }
+
+    /// The collapsed section's row: "1 note on another version", "3 notes on other versions".
+    static func otherVersionsTitle(_ pinned: [NoteCardModel]) -> String {
+        let versions = Set(pinned.compactMap { $0.pin?.checkpoint }).count
+        return "\(pinned.count) note\(pinned.count == 1 ? "" : "s") on \(versions == 1 ? "another version" : "other versions")"
+    }
+
     /// "4 notes for the next round" for the chip (nil with no pending notes), and "Sends your 3
     /// edits and 4 notes" for the play keys' tooltip (nil when the next round gets nothing of
     /// the human's). Counts, never estimates.
@@ -286,6 +296,20 @@ final class PlanNotesController: ObservableObject {
     /// Switches the plan section to its plan view (it may be showing a diff); bound by it.
     var showPlan: () -> Void = {}
     private var reportedLost: Set<UUID> = []
+    /// The intake these notes belong to, and whether the human opened or closed the rail's
+    /// other-versions section for it (nil: the rail decides — closed while a note of this
+    /// version sits beside its line, open when there is none). Kept for the session, per
+    /// intake, past `reset()` and past the detail view being made again.
+    var intakeID: UUID?
+    private static var versionSectionChoices: [UUID: Bool] = [:]
+    var otherVersionsExpanded: Bool? {
+        get { intakeID.flatMap { Self.versionSectionChoices[$0] } }
+        set {
+            guard let intakeID else { return }
+            Self.versionSectionChoices[intakeID] = newValue
+            objectWillChange.send()
+        }
+    }
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "notes")
     /// The editor's text as it stands, typed-but-uncommitted edits included: anchors are
     /// located in what the human sees.
@@ -594,6 +618,7 @@ private struct NotesLane: View {
 
     private static let gap: CGFloat = 8
     private static let inset: CGFloat = 10
+    private static let otherVersionsHeight: CGFloat = 220
 
     var body: some View {
         let cards = self.cards
@@ -636,20 +661,40 @@ private struct NotesLane: View {
                 .clipped()
             }
             if !pinned.isEmpty {
-                if hasLane { Divider() }
-                ScrollView {
-                    VStack(spacing: Self.gap) {
-                        ForEach(Array(pinned.enumerated()), id: \.element.id) { i, card in
-                            // A version's notes sit under its name, which says once what plan they are about.
-                            if let pin = card.pin, i == 0 || pinned[i - 1].pin != pin { VersionHeader(pin: pin) }
-                            self.card(for: card)
-                        }
+                let expanded = NotesRailModel.otherVersionsExpanded(choice: controller.otherVersionsExpanded, hasOwnNotes: !here.isEmpty)
+                Divider()
+                Button { controller.otherVersionsExpanded = !expanded } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pin")
+                        Text(NotesRailModel.otherVersionsTitle(pinned))
+                        Spacer(minLength: 0)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right").imageScale(.small)
                     }
-                    .padding(Self.inset)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .frame(height: 32)
+                    .contentShape(Rectangle())
                 }
-                // About a card and a half when the lane has notes to line up; the rest of the rail when it has none.
-                .frame(maxHeight: hasLane ? 220 : .infinity, alignment: .top)
-                .accessibilityIdentifier("notes-other-versions")
+                .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "expanded" : "collapsed")
+                .accessibilityIdentifier("notes-other-versions-toggle")
+                if expanded {
+                    ScrollView {
+                        VStack(spacing: Self.gap) {
+                            ForEach(Array(pinned.enumerated()), id: \.element.id) { i, card in
+                                // A version's notes sit under its name, which says once what plan they are about.
+                                if let pin = card.pin, i == 0 || pinned[i - 1].pin != pin { VersionHeader(pin: pin) }
+                                self.card(for: card)
+                            }
+                        }
+                        .padding(Self.inset)
+                    }
+                    // Its own scroll area, after the lane, never over it: a card of this version
+                    // beside its line stays where its line is. With nothing to line up it takes the rail.
+                    .frame(maxHeight: hasLane ? Self.otherVersionsHeight : .infinity, alignment: .top)
+                    .accessibilityIdentifier("notes-other-versions")
+                }
             }
         }
         .onPreferenceChange(CardHeightKey.self) { if $0 != heights { heights = $0 } }
