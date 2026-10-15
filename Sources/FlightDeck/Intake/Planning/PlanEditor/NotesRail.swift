@@ -310,7 +310,7 @@ final class PlanNotesController: ObservableObject {
             objectWillChange.send()
         }
     }
-    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "notes")
+    static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "notes")
     /// The editor's text as it stands, typed-but-uncommitted edits included: anchors are
     /// located in what the human sees.
     private(set) var plan = ""
@@ -393,7 +393,12 @@ final class PlanNotesController: ObservableObject {
     /// A toolbar choice on `range` of `text`. A kind starts a focused draft in the rail;
     /// Highlight (nil) is sent at once as an empty comment — the tint is the whole note.
     func choose(_ kind: NoteKind?, range: NSRange, in text: String) {
-        guard let checkpoint, let span = Range(range, in: text), !span.isEmpty else { return }
+        let label = kind.map { NoteStyle.label($0) } ?? "Highlight"
+        guard let checkpoint, let span = Range(range, in: text), !span.isEmpty else {
+            Self.logger.debug("choose \(label, privacy: .public) refused: checkpoint \(self.checkpoint.map(String.init) ?? "nil", privacy: .public), range \(range.location),\(range.length) of \((text as NSString).length)")
+            return
+        }
+        Self.logger.debug("choose \(label, privacy: .public) on checkpoint \(checkpoint), range \(range.location),\(range.length)")
         let anchor = NoteAnchor(checkpoint: checkpoint, selecting: span, in: text)
         guard let kind else { return submit(PlanNote(kind: .comment, note: "", anchor: anchor)) }
         begin(NoteDraft(kind: kind, anchor: anchor))
@@ -433,6 +438,7 @@ final class PlanNotesController: ObservableObject {
     private func begin(_ next: NoteDraft) {
         commitDraft()
         draft = next
+        Self.logger.debug("draft opened: \(next.kind.rawValue, privacy: .public)")
         showRail()
     }
 
@@ -494,6 +500,7 @@ final class PlanNotesController: ObservableObject {
     }
 
     private func submit(_ note: PlanNote) {
+        Self.logger.debug("note sent: \(note.kind.rawValue, privacy: .public), anchored \(note.anchor != nil)")
         removed.remove(note.id)
         if !sent.contains(where: { $0.id == note.id }) { sent.append(note) }
         marksChanged()
