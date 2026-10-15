@@ -32,8 +32,32 @@ final class HarnessCommandGeminiTests: XCTestCase {
         XCTAssertEqual(cmd.executable, "agy")
         XCTAssertEqual(cmd.arguments, ["-p", "P" + HeadlessCommand.geminiReadOnlyNote, "--output-format", "stream-json",
                                        "--json-schema", "{}", "--model", "gemini-3.8-flash-low", "--disable-slash-commands",
-                                       "--sandbox", "--add-dir", "/intake", "--add-dir", "/shadow"])
+                                       "--project", "flight-deck-planning", "--add-dir", "/intake", "--add-dir", "/shadow"])
         XCTAssertEqual(cmd.unsetEnvironment, [])
+    }
+
+    /// Reads come from the FD-owned agy project; the integrator (accept-edits in its work dir)
+    /// reads nothing but its own directory and must not carry the read grants.
+    func testOnlyReadOnlySeatsRunUnderThePlanningProject() throws {
+        XCTAssertEqual(geminiFlag("--project", in: try HeadlessCommand.build(geminiRequest(), home: noHome).arguments),
+                       GeminiPlanningProject.id)
+        let work = URL(fileURLWithPath: "/intake/work")
+        let integrator = try HeadlessCommand.build(geminiRequest(access: .writeInWork(work), cwd: "/intake/work"), home: noHome)
+        XCTAssertFalse(integrator.arguments.contains("--project"))
+    }
+
+    /// Building a read-only seat's command puts the project in place (a fresh machine, or one
+    /// where it was deleted); a write-mode build does not touch the operator's agy config.
+    func testBuildInstallsTheProjectForReadOnlySeatsOnly() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("fd-gemini-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".gemini"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = GeminiPlanningProject.fileURL(home: home)
+        let work = URL(fileURLWithPath: "/intake/work")
+        _ = try HeadlessCommand.build(geminiRequest(access: .writeInWork(work), cwd: "/intake/work"), home: home)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        _ = try HeadlessCommand.build(geminiRequest(), home: home)
+        XCTAssertEqual(try Data(contentsOf: file), GeminiPlanningProject.fileContents())
     }
 
     /// The model id carries the effort; a separate `--effort` could only contradict it.
@@ -78,13 +102,16 @@ final class HarnessCommandGeminiTests: XCTestCase {
     }
 
     /// Read-only rests on agy's permission system: no mode that approves edits, never the
-    /// skip flag (probed: with it, plan mode wrote files), and the sandbox for commands.
+    /// skip flag (probed: with it, plan mode wrote files). No `--sandbox` either: on agy 1.3.6 it
+    /// hides every directory outside the project from the seat's shell and is no write boundary
+    /// (`sed -i` ran under it); the planning project's rules are.
     func testReadOnlyNeverGrantsEditsOrSkipsPermissions() throws {
         for resume in [nil, "conv-7"] {
             let args = try HeadlessCommand.build(geminiRequest(resume: resume), home: noHome).arguments
             XCTAssertNil(geminiFlag("--mode", in: args))
             XCTAssertFalse(args.contains("--dangerously-skip-permissions"))
-            XCTAssertTrue(args.contains("--sandbox"))
+            XCTAssertFalse(args.contains("--sandbox"))
+            XCTAssertEqual(geminiFlag("--project", in: args), GeminiPlanningProject.id)
         }
     }
 
@@ -182,9 +209,148 @@ final class HarnessOutputGeminiTests: XCTestCase {
     }
 }
 
+// MARK: - Planning project
+
+/// The permission rules a read-only Gemini seat runs under. The live behaviour (reads allowed,
+/// writes refused) was probed on agy 1.3.6 on 2026-10-15; these pin what Flight Deck writes.
+final class GeminiPlanningProjectTests: XCTestCase {
+    private func grants() throws -> (allow: [String], deny: [String], root: [String: Any]) {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: GeminiPlanningProject.fileContents()) as? [String: Any])
+        let outer = try XCTUnwrap(root["permissionGrants"] as? [String: Any])
+        let inner = try XCTUnwrap(outer["permissionGrants"] as? [String: Any])
+        XCTAssertEqual(outer["v2Migrated"] as? Bool, true)
+        return (try XCTUnwrap(inner["allow"] as? [String]), try XCTUnwrap(inner["deny"] as? [String]), root)
+    }
+
+    private func tempHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("fd-gemini-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".gemini"), withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        return home
+    }
+
+    func testTheFileIsAnAgyProject() throws {
+        let root = try grants().root
+        XCTAssertEqual(root["id"] as? String, "flight-deck-planning")
+        XCTAssertEqual(root["name"] as? String, GeminiPlanningProject.displayName)
+        XCTAssertNotNil(root["projectResources"] as? [String: Any])
+        XCTAssertEqual(GeminiPlanningProject.fileURL(home: URL(fileURLWithPath: "/h")).path,
+                       "/h/.gemini/config/projects/flight-deck-planning.json")
+    }
+
+    /// What a planning seat reads: any file (the plan files, the task-graph snapshot, AGENTS.md,
+    /// README, source, a sibling repository) and the listing and search commands.
+    func testAllowsReadsAnywhereAndTheReadingCommands() throws {
+        let allow = try grants().allow
+        XCTAssertTrue(allow.contains("read_file(/)"))
+        for command in ["ls", "cat", "head", "tail", "wc", "rg", "grep", "cd", "git log", "git diff", "git status", "br list", "br show"] {
+            XCTAssertTrue(allow.contains("command(\(command))"), command)
+        }
+    }
+
+    /// Writes stay refused: every writer is denied by name (a deny is an error the seat reads;
+    /// an unlisted command ends its turn), and nothing that can write is allowed.
+    func testDeniesEveryWriterAndAllowsNone() throws {
+        let (allow, deny, _) = try grants()
+        XCTAssertTrue(deny.contains("write_file(/)"))
+        for command in ["rm", "mv", "cp", "touch", "mkdir", "tee", "sed", "awk", "find", "xargs", "sh", "bash",
+                        "git add", "git commit", "git push", "git checkout", "git reset", "br create", "br close", "br update"] {
+            XCTAssertTrue(deny.contains("command(\(command))"), command)
+        }
+        XCTAssertTrue(Set(allow).isDisjoint(with: deny), "an allow that a deny shadows is a rule nobody can read")
+        XCTAssertFalse(allow.contains { $0.hasPrefix("write_file") })
+        for writer in ["sed", "awk", "find", "tee", "sh", "bash", "xargs", "git commit", "git add"] {
+            XCTAssertFalse(allow.contains("command(\(writer))"), writer)
+        }
+    }
+
+    func testBytesAreStable() {
+        XCTAssertEqual(GeminiPlanningProject.fileContents(), GeminiPlanningProject.fileContents())
+    }
+
+    func testInstallWritesTheFileOnceAndRepairsAnEdit() throws {
+        let home = try tempHome()
+        let file = GeminiPlanningProject.fileURL(home: home)
+        XCTAssertTrue(GeminiPlanningProject.install(home: home))
+        XCTAssertEqual(try Data(contentsOf: file), GeminiPlanningProject.fileContents())
+        // An unchanged file is not rewritten.
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
+        XCTAssertTrue(GeminiPlanningProject.install(home: home))
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date, before)
+        // A hand edit (or an agy rewrite that dropped the rules) is put back.
+        try Data("{}".utf8).write(to: file)
+        XCTAssertTrue(GeminiPlanningProject.install(home: home))
+        XCTAssertEqual(try Data(contentsOf: file), GeminiPlanningProject.fileContents())
+    }
+
+    /// No `~/.gemini` means agy has never run: nothing to write for, and no stray directories.
+    func testInstallSkipsAHomeWithoutAgy() {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("fd-no-agy-\(UUID().uuidString)")
+        XCTAssertFalse(GeminiPlanningProject.install(home: home))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.path))
+    }
+
+    /// The operator's own agy config is never opened for writing.
+    func testInstallOnlyCreatesTheProjectFile() throws {
+        let home = try tempHome()
+        let settings = home.appendingPathComponent(".gemini/antigravity-cli/settings.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"trustedWorkspaces":[]}"#.utf8).write(to: settings)
+        XCTAssertTrue(GeminiPlanningProject.install(home: home))
+        XCTAssertEqual(try Data(contentsOf: settings), Data(#"{"trustedWorkspaces":[]}"#.utf8))
+    }
+}
+
 // MARK: - Diagnosis
 
 final class GeminiFailureDiagnosisTests: XCTestCase {
+    private func classify(_ stdoutName: String, stderrName: String? = nil) throws -> Diagnosis {
+        let stdout = try fixture(stdoutName, "jsonl", Self.self)
+        let stderr = try stderrName.map { String(decoding: try fixture($0, "txt", Self.self), as: UTF8.self) } ?? ""
+        var parseError: Error?
+        do { _ = try HeadlessOutput.parse(.gemini, stdout: stdout) } catch { parseError = error }
+        return FailureDiagnosis.classify(exitCode: 0, stdout: stdout, stderr: stderr, parseError: parseError, agent: .gemini)
+    }
+
+    /// A real planning drafter (agy 1.3.6): it read the task graph, README and AGENTS.md, then
+    /// ran `ls` on a sibling repository and agy auto-denied the shell command. It must read as
+    /// a refused tool with the reason, not as a model that broke its schema — and still carry
+    /// the marker `SchemaRepair` resumes on.
+    func testADeniedShellCommandNamesTheCommandNotTheSchema() throws {
+        let d = try classify("gemini-denied-command-stream", stderrName: "gemini-denied-command-stderr")
+        XCTAssertEqual(d.category, .invalidOutput)
+        XCTAssertTrue(d.detail.contains(GeminiProfile.answerlessTurnMarker), d.detail)
+        XCTAssertTrue(d.detail.contains("(denied: command)"), d.detail)
+        XCTAssertTrue(d.detail.contains("a shell command"), d.detail)
+        XCTAssertFalse(d.detail.contains("schema"), d.detail)
+        XCTAssertTrue(d.action.contains("flight-deck-planning"), d.action)
+        XCTAssertNotNil(SchemaRepair.retry(profile: GeminiProfile(), failure: d, sessionID: "C1", access: .readOnly, isRepair: false),
+                        "the one resume still fires on the reworded detail")
+    }
+
+    /// A `view_file` outside the workspace (agy 1.3.6, probed): `read_file` denied.
+    func testADeniedFileReadNamesTheRead() throws {
+        let d = try classify("gemini-denied-read-stream")
+        XCTAssertEqual(d.category, .invalidOutput)
+        XCTAssertTrue(d.detail.contains("(denied: read_file)"), d.detail)
+        XCTAssertTrue(d.detail.contains("a file read"), d.detail)
+        XCTAssertTrue(d.action.contains("Retry the round"), d.action)
+    }
+
+    /// A refused write is the read-only boundary working: the advice is about the model, not
+    /// about the permissions.
+    func testADeniedWriteIsNotAdvisedAsAPermissionFix() throws {
+        let d = try classify("gemini-denied-stream")
+        XCTAssertTrue(d.detail.contains("(denied: write_file)"), d.detail)
+        XCTAssertFalse(d.action.contains("flight-deck-planning"), d.action)
+    }
+
+    func testOtherFailuresKeepTheGenericWording() {
+        let d = FailureDiagnosis.classify(exitCode: 0, stdout: Data(), stderr: "", parseError: HeadlessOutput.ParseError.noResult, agent: .gemini)
+        XCTAssertEqual(d.detail, "noResult")
+        XCTAssertNil(GeminiProfile.deniedToolDiagnosis(HeadlessOutput.ParseError.isError("authentication failed")))
+    }
+
     func testSignedOutRunIsAuthExpiredWithTheAgyFix() throws {
         let d = FailureDiagnosis.classify(exitCode: 1, stdout: try fixture("gemini-auth-stdout", "jsonl", Self.self),
                                           stderr: String(decoding: try fixture("gemini-auth-stderr", "txt", Self.self), as: UTF8.self),
@@ -507,7 +673,7 @@ final class GeminiSeatTests: XCTestCase {
             XCTAssertFalse(seat.isResume)
             XCTAssertFalse(seat.arguments.contains("--continue"))
             XCTAssertNil(geminiFlag("--mode", in: seat.arguments))
-            XCTAssertTrue(seat.arguments.contains("--sandbox"))
+            XCTAssertEqual(geminiFlag("--project", in: seat.arguments), GeminiPlanningProject.id)
         }
     }
 

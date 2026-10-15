@@ -3173,12 +3173,23 @@ native cloud budgets (AWS Budgets / GCP Budgets) as a backstop to Flight Deck's 
 
 ## Gemini as a planning harness (2026-10-07, Track M)
 
-- **Read-only depends on agy's own settings.** A Gemini seat is read-only because agy's default
-  permission mode, with `--sandbox`, auto-denies every write in a headless run. `--mode plan` is
-  NOT a boundary: in a probe it wrote files. If the maintainer ever adds a `write_file(...)` **allow** rule
-  to `~/.gemini/antigravity-cli/settings.json` or to a project under `~/.gemini/config/projects/`,
-  read-only seats could write there. Fix: an FD-owned deny rule. Flight Deck does not write to
-  agy's config today.
+- **Read-only is an FD-owned agy project (2026-10-15, agy 1.3.6).** agy's default permission mode
+  auto-denies every write in a headless run, but since 1.3.6 it also auto-denies every shell
+  command (`ls` included) and every `view_file` outside the workspace, and a denied tool ends the
+  turn with no answer — the "failed" Gemini seats read a repository's neighbour with `ls` or
+  `read_file`. `GeminiPlanningProject` writes `~/.gemini/config/projects/flight-deck-planning.json`
+  (additive, rewritten when it differs, before every read-only seat) and `--project` selects it:
+  allow `read_file(/)` and the reading commands, deny every writer by name (an explicit deny is an
+  error the seat reads; an unlisted command ends its turn). Deny beats allow wherever the allow
+  comes from, so an operator's own `write_file(...)` allow in `~/.gemini/antigravity-cli/settings.json`
+  cannot make a seat write. `--sandbox` is no longer passed: on 1.3.6 it hides directories outside
+  the project from the shell and is no write boundary (`sed -i` ran under it). Probed live: reads
+  and a sibling repository's `ls` succeed; `write_to_file`, `touch`, `rm`, `sed -i`, a redirect
+  and `python3` are refused, including an unsandboxed retry. Not covered: `git -C` (no rule can
+  match it; the seat's note says to run git from inside the repository) and `rg --pre` /
+  `git diff --output=` style writes, which no rule can tell apart. Settings in a workspace's
+  `.agents/` are ignored by agy, and a HOME override signs it out, so the project file is the only
+  non-invasive place.
 - **Lost answers cost a resume.** agy ENDS a turn on any tool it auto-denies, with no answer.
   The one schema-repair resume (`AgentProfile.answerlessTurnMarker`) recovers it. The first
   four-family live round needed 1 such resume for its 1 Gemini seat. Expect about one per seat.

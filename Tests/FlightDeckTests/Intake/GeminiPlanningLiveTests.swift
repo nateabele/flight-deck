@@ -76,6 +76,22 @@ final class GeminiPlanningLiveTests: XCTestCase {
         XCTAssertTrue(second.plan.contains("417"), second.plan)
     }
 
+    /// agy 1.3.6 auto-denies every shell command and every `view_file` outside the workspace in a
+    /// headless run, which ended the turn ("failed"); `GeminiPlanningProject` allows both. A seat
+    /// must list and read a directory that is NOT its project, as a plan about a neighbouring
+    /// repository needs.
+    func testReadOnlySeatListsAndReadsAnotherDirectory() async throws {
+        let other = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".fd-gemini-live-other-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: other) }
+        let token = "tok-\(UUID().uuidString.prefix(8).lowercased())"
+        try Data("neighbour token: \(token)\n".utf8).write(to: other.appendingPathComponent("NEIGHBOUR.md"))
+        let result = try await run("Use ls to list the directory \(other.path), then read the NEIGHBOUR.md in it. "
+                                   + "Put the token it contains in plan.")
+        XCTAssertTrue(result.plan.contains(token), result.plan)
+    }
+
     /// A read-only seat must not write — `.md` included (the gemini CLI's plan mode allowed
     /// `*.md` writes, and agy's `--mode plan` wrote files once permissions were skipped).
     func testReadOnlySeatCannotWriteAMarkdownFile() async throws {

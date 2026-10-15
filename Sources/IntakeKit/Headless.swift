@@ -199,7 +199,8 @@ public enum HeadlessCommand {
 
     /// `home` is where `CodexUserConfig` reads the built-in account's `service_tier` from —
     /// injectable so a test never reads the operator's own config. A bound `r.account` reads
-    /// its own home's instead (`CodexProfile.serviceTierArguments`).
+    /// its own home's instead (`CodexProfile.serviceTierArguments`). It is also where a
+    /// read-only Gemini seat's `GeminiPlanningProject` is written, the one side effect here.
     public static func build(_ r: HeadlessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
         throws(HeadlessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         if case .writeInWork = r.access {
@@ -278,6 +279,7 @@ public enum HeadlessCommand {
             // counted as the Gemini family by coverage and cross-check (see
             // `GeminiProfile.isGeminiModel`), so it is refused, never run.
             guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(agent: r.agent, model: r.model) }
+            if r.access == .readOnly { GeminiPlanningProject.install(home: home) }
             return ("agy", geminiArguments(r), [])
         case .opencode:
             return ("opencode", openCodeArguments(r), [])
@@ -318,7 +320,9 @@ public enum HeadlessCommand {
     /// write or an unsandboxed command loses its whole turn; saying so up front avoids most of
     /// those, and `SchemaRepair` resumes the rest once.
     public static let geminiReadOnlyNote = "\n\n(This run is read-only. Writing or editing files, or running commands "
-        + "that change anything, is denied and ends your turn without an answer. Read and search only.)"
+        + "that change anything, is denied and ends your turn without an answer. Read and search only: view_file reads "
+        + "any file, and ls, cat, head, tail, wc, rg, grep and read-only git commands list and search "
+        + "(run git from inside the repository, not with -C).)"
 
     /// Every headless `agy` run (probed on agy 1.3.1, 2026-10-07):
     /// - stream-json so the seat shows live activity; the final `result` event carries the same
@@ -337,12 +341,19 @@ public enum HeadlessCommand {
             // READ-ONLY IS THE PERMISSION SYSTEM, NOT `--mode plan`. Probed: `--mode plan` only
             // changes the agent's workflow — with permissions skipped it wrote NOTES.md and
             // edited README.md. In the default mode every write needs a permission headless
-            // mode cannot grant, so it is auto-denied (no file appeared). `--sandbox` lets
-            // read-only shell commands (`ls`, `rg`, `git log`) run without a permission and
-            // blocks their writes ("Operation not permitted"). Never
+            // mode cannot grant, so it is auto-denied (no file appeared). Never
             // `--dangerously-skip-permissions`: with it a sandbox-blocked `touch` was simply
             // retried unsandboxed, and succeeded.
-            args = ["-p", r.prompt + geminiReadOnlyNote] + args + ["--sandbox"]
+            //
+            // `--project` carries the READS: agy 1.3.6 auto-denies every shell command and every
+            // `view_file` outside the workspace in a headless run, ending the turn (see
+            // `GeminiPlanningProject`). No `--sandbox` since 1.3.6: it no longer lets read-only
+            // commands run, it hides every directory outside the project from them (so `ls` on a
+            // sibling repository fails), and it is not a write boundary either — `sed -i` ran
+            // under it inside the workspace (probed 2026-10-15). The project's rules are the
+            // boundary: they allow the reading commands and deny every writer by name, and an
+            // unsandboxed retry of a denied command is checked against them too (probed).
+            args = ["-p", r.prompt + geminiReadOnlyNote] + args + ["--project", GeminiPlanningProject.id]
             for d in r.readableDirs { args += ["--add-dir", d.path] }
         case .writeInWork:
             // `accept-edits` approves edits inside the workspace — the cwd, which `validate`

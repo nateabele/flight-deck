@@ -82,6 +82,35 @@ public struct GeminiProfile: AgentProfile {
     public static let answerlessTurnMarker = "agy ended the turn without an answer"
     public var answerlessTurnMarker: String? { Self.answerlessTurnMarker }
 
+    /// The diagnosis for an answerless turn (`HeadlessOutput.parse` threw `answerlessTurnMarker`
+    /// plus `(denied: …)`), or nil for any other failure. The generic "returned something other
+    /// than the schema" sent people looking at the model; the cause was a tool agy refused. The
+    /// detail keeps the marker, which `SchemaRepair` keys its one resume on. `denied` are agy's
+    /// `denied_actions` names: `read_file` (a `view_file` outside what the run may read),
+    /// `command` (ANY shell command, `ls` and `cat` included, that no allow rule covers) and
+    /// `write_file` (a write — read-only seats are meant to be refused that).
+    public static func deniedToolDiagnosis(_ error: Error) -> (detail: String, action: String)? {
+        guard case HeadlessOutput.ParseError.isError(let message) = error, message.hasPrefix(answerlessTurnMarker) else { return nil }
+        let denied = message.components(separatedBy: "(denied: ").dropFirst().first
+            .map { $0.prefix { $0 != ")" }.components(separatedBy: ", ") } ?? []
+        let readsOrCommands = denied.contains { $0 == "read_file" || $0 == "command" }
+        let what = denied.map { name -> String in
+            switch name {
+            case "read_file": return "a file read (read_file)"
+            case "command": return "a shell command (command), which is how agy lists and searches files"
+            case "write_file": return "a write (write_file), which a planning agent may not do"
+            default: return name
+            }
+        }
+        let reason = what.isEmpty ? "a tool" : what.joined(separator: " and ")
+        return ("\(message): agy refused \(reason). Headless agy cannot ask for permission, so the turn ended with no answer.",
+                readsOrCommands
+                    ? "Retry the round. Flight Deck rewrites this agent's read permissions (the agy project `\(GeminiPlanningProject.id)`) "
+                        + "before every run; if it keeps happening, ~/.gemini/config/projects/\(GeminiPlanningProject.id).json could not be "
+                        + "written or agy changed its permission rules."
+                    : "Retry the round, or switch this slot's model: it tried to change something in a read-only run.")
+    }
+
     public var headlessSignInPreflight: Bool { true }
 
     /// The spellings `agy` uses for the failures a seat row must name. Auth: "Authentication
