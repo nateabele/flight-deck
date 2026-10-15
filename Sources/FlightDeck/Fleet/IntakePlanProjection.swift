@@ -61,8 +61,10 @@ enum IntakePlanProjection {
 
     /// `note` with the block its quote now sits in. A quote no block contains any more is left
     /// detached (`blockIndex` nil) rather than pinned to a near miss — a note on the wrong
-    /// paragraph is worse than one listed apart.
-    static func locate(_ note: PlanNote, consumed: Bool, in blocks: PlanBlocks) -> WireNote {
+    /// paragraph is worse than one listed apart. `version` is the checkpoint the note was
+    /// written on (`NoteVersion.resolve`): it rides along, with its name, so the phone can say
+    /// which plan a quote is from when it is not the one on screen.
+    static func locate(_ note: PlanNote, consumed: Bool, in blocks: PlanBlocks, version: Checkpoint? = nil) -> WireNote {
         let quote = note.anchor?.quote
         let index = quote.flatMap { q -> Int? in
             let needle = normalized(q)
@@ -70,7 +72,8 @@ enum IntakePlanProjection {
             return blocks.blocks.first { normalized($0.text).contains(needle) }?.index
         }
         return WireNote(id: note.id, kind: note.kind.rawValue, text: note.note, quote: quote,
-                        section: note.anchor?.section, consumed: consumed, blockIndex: index)
+                        section: note.anchor?.section, consumed: consumed, blockIndex: index,
+                        checkpoint: version?.id ?? note.anchor?.checkpoint, version: version.map(NoteVersion.label(of:)))
     }
 
     /// Blocks by verbatim text: a block of `current` the parent lacks is added; a block of the
@@ -105,8 +108,13 @@ enum IntakePlanProjection {
         else { return nil }
         let blocks = PlanBlocks.split(markdown)
         let (churn, diverging) = churnSource(service.convergence[id] ?? [], checkpoint: checkpointID)
-        let notes = tape.checkpoints.flatMap(\.record.annotations).map { locate($0, consumed: true, in: blocks) }
-            + tape.pendingNotes.map { locate($0, consumed: false, in: blocks) }
+        let entries = tape.checkpoints.flatMap { c in c.record.annotations.map { TapeNote(note: $0, consumedBy: c.id) } }
+            + tape.pendingNotes.map { TapeNote(note: $0, consumedBy: nil) }
+        let notes = entries.map { entry in
+            let written = NoteVersion.resolve(entry, checkpoints: tape.checkpoints) { PlanSection.effectivePlan(checkpoint: $0, tape: tape, loadFile: load) }
+            return locate(entry.note, consumed: entry.consumedBy != nil, in: blocks,
+                          version: tape.checkpoints.first { $0.id == written })
+        }
         var added: [Int]?, removed: [WireRemovedBlock]?
         if changes,
            let parentID = ShapingModel.previousPlanCheckpoint(before: checkpointID, in: tape, loadFile: load),

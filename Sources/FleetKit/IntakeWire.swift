@@ -321,13 +321,20 @@ public struct WireNote: Codable, Equatable, Sendable, Identifiable {
     public var section: String?
     public var consumed: Bool
     public var blockIndex: Int?
+    /// The checkpoint whose plan the note was written on, and that round's name ("Draft ·
+    /// Round 0"). A note is pinned to this version: on any other it is listed with the version
+    /// and its quote rather than placed in the text. nil for a note about the whole plan, and
+    /// from a Mac that predates pinning.
+    public var checkpoint: Int?
+    public var version: String?
 
     public init(
         id: UUID, kind: String, text: String, quote: String? = nil, section: String? = nil,
-        consumed: Bool = false, blockIndex: Int? = nil
+        consumed: Bool = false, blockIndex: Int? = nil, checkpoint: Int? = nil, version: String? = nil
     ) {
         self.id = id; self.kind = kind; self.text = text; self.quote = quote
         self.section = section; self.consumed = consumed; self.blockIndex = blockIndex
+        self.checkpoint = checkpoint; self.version = version
     }
 }
 

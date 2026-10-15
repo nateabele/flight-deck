@@ -108,6 +108,22 @@ final class IntakePlanProjectionTests: XCTestCase {
         XCTAssertEqual(located[1].kind, "question")
     }
 
+    /// A note names the version it was written on, so the phone can list it under that version
+    /// when it is not the plan on screen; a note about the whole plan names none.
+    func testALocatedNoteCarriesItsVersion() {
+        let blocks = PlanBlocks.split(markdown)
+        let draft = Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date(timeIntervalSince1970: 1_790_000_000))
+        let note = PlanNote(kind: .comment, note: "x", anchor: NoteAnchor(checkpoint: 1, quote: "a sentence only the draft had"))
+        let located = IntakePlanProjection.locate(note, consumed: true, in: blocks, version: draft)
+        XCTAssertEqual(located.checkpoint, 1)
+        XCTAssertEqual(located.version, "Draft · Round 0")
+        XCTAssertNil(located.blockIndex, "not in this plan; the phone lists it under its version")
+        let bare = IntakePlanProjection.locate(note, consumed: true, in: blocks)
+        XCTAssertEqual(bare.checkpoint, 1, "the anchor's own checkpoint when no version is resolved")
+        XCTAssertNil(bare.version)
+        XCTAssertNil(IntakePlanProjection.locate(PlanNote(note: "overall"), consumed: false, in: blocks).checkpoint)
+    }
+
     func testNotesLocateInALongRealisticPlan() throws {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("Fixtures/sample-plan.md")

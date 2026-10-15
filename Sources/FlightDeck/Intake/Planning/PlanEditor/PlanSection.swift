@@ -275,6 +275,7 @@ struct PlanSectionBody: View {
                 .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
         }
         .accessibilityIdentifier("plan-viewer")
+        .onAppear { notes?.showPlan = { [$mode] in $mode.wrappedValue = .plan } }
         .onChange(of: key, initial: true) { _, key in reload(key) }
         .onChange(of: !hunks.isEmpty, initial: true) { _, edited in
             // Once per plan: the first time it carries edits, and never again for this intake.

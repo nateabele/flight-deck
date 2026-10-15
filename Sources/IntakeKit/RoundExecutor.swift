@@ -773,12 +773,25 @@ public struct RoundExecutor: Sendable {
         }
         return RoundContext(intent: inputs.intake.intent, qa: inputs.intake.exchanges, graphFile: graphFile.path,
                             agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"),
-                            notes: inputs.tape.pendingNotes,
+                            notes: inputs.tape.pendingNotes, noteVersions: noteVersions(inputs),
                             humanEdits: userEdits(inputs).map { PlanLayers.promptDiff(generated: $0.generated, edited: $0.edited) },
                             observedAt: observedAt,
                             // Read fresh every round, like AGENTS.md: a kind proposed and released
                             // by another intake is offered to this one's next round.
                             kinds: KindRegistryStore.promptKinds(project: inputs.project))
+    }
+
+    /// The version each pending note was written on, for those written on a plan other than the
+    /// one this round reads (the head plan checkpoint).
+    private func noteVersions(_ inputs: RoundInputs) -> [UUID: String] {
+        let head = inputs.store.headPlanCheckpoint(in: inputs.tape)
+        var out: [UUID: String] = [:]
+        for entry in inputs.tape.pendingNotes.map({ TapeNote(note: $0, consumedBy: nil) }) {
+            guard let id = NoteVersion.resolve(entry, checkpoints: inputs.tape.checkpoints, planText: { inputs.store.effectivePlan(checkpoint: $0) }),
+                  id != head, let checkpoint = inputs.tape.checkpoints.first(where: { $0.id == id }) else { continue }
+            out[entry.id] = NoteVersion.label(of: checkpoint)
+        }
+        return out
     }
 
     /// The head plan checkpoint's two layers when the human has edited it — read fresh each

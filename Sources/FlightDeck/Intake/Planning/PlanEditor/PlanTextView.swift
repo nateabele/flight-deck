@@ -242,6 +242,8 @@ struct PlanTextView: NSViewRepresentable {
         }
         container.revert.onRevert = { [weak coordinator] in coordinator?.revert(hunk: $0) }
         coordinator.revertButton = container.revert
+        // Before the first load, which a pending "Show in that version" is waiting for.
+        coordinator.notesBridge.attach(notes, to: container.textView)
         coordinator.load(text)
         if focusOnAppear {
             // After the view is in a window; `makeNSView` runs before it is.
@@ -268,6 +270,9 @@ struct PlanTextView: NSViewRepresentable {
         container.textView.setAccessibilityIdentifier(identifier)
         container.textView.projectPath = projectPath
         container.textView.obscuredTop = context.environment.pageObscuredTop
+        // Before the load, so the first text an editor gets is already seen by the notes (a
+        // pending "Show in that version" is waiting for exactly that load).
+        coordinator.notesBridge.attach(notes, to: container.textView)
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
@@ -275,7 +280,6 @@ struct PlanTextView: NSViewRepresentable {
         container.bannerVisible = coordinator.session.held != nil
         coordinator.layEditLayer(over: generated)
         container.revert.enabled = editable
-        coordinator.notesBridge.attach(notes, to: container.textView)
         coordinator.reading = context.environment.planReading
         container.churnLane.update(churn)
         coordinator.churnChanged()
@@ -347,6 +351,7 @@ struct PlanTextView: NSViewRepresentable {
         init(_ parent: PlanTextView) {
             self.parent = parent
             super.init()
+            MainActor.assumeIsolated { notesBridge.reveal = { [weak self] in self?.reveal($0) } }
             // ⌘Z and ⇧⌘Z change the text without a `textDidChange` (measured: NSTextView's
             // undo of a replacement posts no NSText change), which left the edit layer, the
             // notes and the idle commit on the text from before the undo — an undone Revert

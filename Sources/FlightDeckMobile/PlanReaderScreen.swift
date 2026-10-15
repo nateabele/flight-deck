@@ -90,13 +90,18 @@ struct PlanReaderScreen: View {
                                 .id(block.index)
                             removed(after: block.index, plan, show: showDiff)
                         }
-                        let detached = allNotes.filter { $0.blockIndex == nil && !$0.consumed }
+                        let detached = allNotes.filter { $0.blockIndex == nil && !$0.consumed && !PlanReaderStyle.isElsewhere($0, viewing: plan.checkpoint) }
                         let unsentWide = outbox.unsent.filter { $0.target.block == nil }
                         if !detached.isEmpty || !unsentWide.isEmpty {
                             Divider()
                             Text("Notes not pinned to a passage").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                             ForEach(detached, id: \.id) { n in noteCard(n) }
                             ForEach(unsentWide) { d in unsentCard(d) }
+                        }
+                        ForEach(PlanReaderStyle.otherVersions(allNotes, viewing: plan.checkpoint), id: \.checkpoint) { group in
+                            Divider()
+                            versionHeader(group.version, checkpoint: group.checkpoint, link: true)
+                            ForEach(group.notes, id: \.id) { n in noteCard(n) }
                         }
                         if notesAllowed {
                             Divider()
@@ -215,8 +220,30 @@ struct PlanReaderScreen: View {
         }
     }
 
+    /// "On Draft · Round 0", opening that version's plan. A note written on another version of
+    /// the plan is listed under this, with its quote: it is not lost, it is about a plan the
+    /// maintainer is not reading. The head is opened as the head (`checkpoint: nil`).
+    @ViewBuilder private func versionHeader(_ version: String, checkpoint target: Int, link: Bool) -> some View {
+        let label = Label("On \(version)", systemImage: "pin").font(.footnote.weight(.semibold))
+        if link {
+            NavigationLink(value: IntakeRoute.reader(intake: intake, checkpoint: target == detailModel.detail?.headCheckpoint ? nil : target,
+                                                     block: nil, changes: false)) {
+                HStack { label; Spacer(); Text("Show in that version").font(.footnote); Image(systemName: "chevron.right").imageScale(.small) }
+                    .frame(minHeight: 44)
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityHint("Opens the plan this note was written on")
+        } else {
+            label.foregroundStyle(.secondary)
+        }
+    }
+
     private func noteCard(_ n: WireNote) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let plan, PlanReaderStyle.isElsewhere(n, viewing: plan.checkpoint), let version = n.version, n.blockIndex != nil {
+                // Listed under its version below when it has no block here; in a block, it says so itself.
+                versionHeader(version, checkpoint: n.checkpoint ?? plan.checkpoint, link: false)
+            }
             kindLabel(n)
             if let q = n.quote { Text("“\(q)”").font(.subheadline).italic().foregroundStyle(.secondary) }
             if !n.text.isEmpty { Text(n.text).font(.body) }
@@ -427,6 +454,29 @@ enum PlanReaderStyle {
     /// thumb; and a note is for the next round, which refines the head.
     static func notesAllowed(detail: WireIntakeDetail?, checkpoint: Int?) -> Bool {
         checkpoint == nil && NoteComposer.notesAllowed(detail: detail)
+    }
+
+    /// Whether `note` was written on a version of the plan other than the checkpoint shown. A
+    /// note from a Mac that predates pinning names no version and is never elsewhere.
+    static func isElsewhere(_ note: WireNote, viewing checkpoint: Int) -> Bool {
+        note.checkpoint.map { $0 != checkpoint } ?? false
+    }
+
+    /// One version's notes under its name.
+    struct VersionGroup: Equatable {
+        let checkpoint: Int
+        let version: String
+        let notes: [WireNote]
+    }
+
+    /// The notes written on other versions that have no block in the plan shown, grouped by
+    /// version, the latest first; each group keeps its notes in the order the Mac listed them.
+    /// A version the Mac did not name is called "an earlier version".
+    static func otherVersions(_ notes: [WireNote], viewing checkpoint: Int) -> [VersionGroup] {
+        let elsewhere = notes.filter { isElsewhere($0, viewing: checkpoint) && $0.blockIndex == nil && $0.quote != nil }
+        return Dictionary(grouping: elsewhere) { $0.checkpoint ?? 0 }
+            .map { VersionGroup(checkpoint: $0.key, version: $0.value.lazy.compactMap(\.version).first ?? "an earlier version", notes: $0.value) }
+            .sorted { $0.checkpoint > $1.checkpoint }
     }
 
     /// The notes button's text and accessibility label.

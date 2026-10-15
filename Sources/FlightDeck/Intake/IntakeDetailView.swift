@@ -567,6 +567,18 @@ struct IntakeDetailView: View {
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
         notes.projectPath = intake.projectPath
+        notes.versionOf = { [service, id = intake.id] entry in
+            let tape = service.storedTape(id)
+            return NoteVersion.resolve(entry, checkpoints: tape.checkpoints) { checkpoint in
+                PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape) { service.checkpointFile(id, checkpoint: $0, $1) }
+            }
+        }
+        notes.versionLabel = { [service, id = intake.id] checkpoint in
+            service.storedTape(id).checkpoints.first { $0.id == checkpoint }.map(NoteVersion.label(of:))
+        }
+        notes.openCheckpoint = { [$selectedCheckpoint, $planHead] checkpoint in
+            $selectedCheckpoint.wrappedValue = checkpoint == $planHead.wrappedValue ? nil : checkpoint
+        }
         notes.showRail = { [$showsInspector, service, id = intake.id] in
             service.setInspectorMode(.notes, for: id)
             $showsInspector.wrappedValue = true

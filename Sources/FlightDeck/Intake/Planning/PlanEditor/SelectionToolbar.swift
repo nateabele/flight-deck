@@ -118,6 +118,9 @@ final class PlanNotesBridge {
     /// be followed (a whole-text replacement), which re-finds everything.
     private var edits: [TextEdit]? = []
 
+    /// Brings a range into view and flashes it: the editor's half of "Show in that version".
+    var reveal: ((NSRange) -> Void)?
+
     /// Nonisolated so the editor's (nonisolated) coordinator can own one.
     nonisolated init() {}
 
@@ -137,6 +140,7 @@ final class PlanNotesBridge {
         guard let controller, let textView else { return }
         controller.lineTop = { [weak self] in self?.lineTop($0) }
         controller.onMarksChanged = { [weak self] in self?.marksChanged() }
+        controller.revealPending = { [weak self] in self?.revealNow() }
         controller.undoManager = textView.undoManager
         let center = NotificationCenter.default
         observeScrolls()
@@ -164,6 +168,7 @@ final class PlanNotesBridge {
         observedClips = []
         controller?.lineTop = nil
         controller?.onMarksChanged = nil
+        controller?.revealPending = {}
         controller = nil
         bands.removeFromSuperview()
         bands.marks = []
@@ -206,13 +211,38 @@ final class PlanNotesBridge {
 
     /// The text was loaded or edited: anchors move with it.
     func textChanged() {
-        guard let textView, let controller else { return }
-        let text = textView.string
-        relocate(in: text)
+        guard let textView, controller != nil else { return }
+        relocate(in: textView.string)
         tint()
-        let located = self.located.compactMapValues { $0 }
-        // Async: a load runs inside a SwiftUI view update, where publishing is not allowed.
-        DispatchQueue.main.async { [weak controller] in controller?.editorChanged(text, located: located) }
+        // Async: a load runs inside a SwiftUI view update, where publishing is not allowed. Read
+        // when it runs, not now: a note sent or a checkpoint changed in between has already
+        // published newer ranges, and a snapshot taken here would put the old ones back.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let controller = self.controller, let textView = self.textView else { return }
+            controller.editorChanged(textView.string, located: self.located.compactMapValues { $0 })
+        }
+    }
+
+    /// The quote "Show in that version" is taking the editor to, found in `text` — the text just
+    /// loaded for that version. Taken once; a request older than `Self.revealWindow` is stale
+    /// (the version never came) and is dropped rather than applied to some later text.
+    func takeReveal(in text: String) -> NSRange? {
+        guard let controller, let reveal = controller.pendingReveal else { return nil }
+        guard Date().timeIntervalSince(reveal.asked) < Self.revealWindow else {
+            controller.pendingReveal = nil
+            return nil
+        }
+        guard let found = reveal.anchor.locate(in: text) else { return nil }
+        controller.pendingReveal = nil
+        return NSRange(found, in: text)
+    }
+
+    static let revealWindow: TimeInterval = 5
+
+    /// The version is already on screen: scroll to the quote now.
+    private func revealNow() {
+        guard let textView, let range = takeReveal(in: textView.string) else { return }
+        reveal?(range)
     }
 
     /// The notes or the draft changed: every range is found afresh.
@@ -247,7 +277,11 @@ final class PlanNotesBridge {
                 touched = edits.contains { edit in
                     let line = ns.lineRange(for: NSRange(location: min(edit.range.location, ns.length), length: 0))
                     let pad = (mark.anchor.quote as NSString).length
-                    let window = NSIntersectionRange(NSRange(location: line.location - pad, length: line.length + 2 * pad + edit.range.length),
+                    // Clamped at the start: NSRange is unsigned underneath, so a window that began
+                    // before the text (any edit on the first lines, and a whole-text replacement)
+                    // intersected nothing and a detached note was never found again.
+                    let start = max(line.location - pad, 0)
+                    let window = NSIntersectionRange(NSRange(location: start, length: line.length + 2 * pad + edit.range.length),
                                                      NSRange(location: 0, length: ns.length))
                     return ns.range(of: mark.anchor.quote, options: [], range: window).location != NSNotFound
                 }

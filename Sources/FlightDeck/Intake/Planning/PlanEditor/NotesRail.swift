@@ -1,6 +1,14 @@
 import AppKit
 import IntakeKit
+import OSLog
 import SwiftUI
+
+/// The plan version a note was written on, when that is not the one on screen: its checkpoint
+/// and the name the rail gives it ("Draft · Round 0").
+struct NotePin: Equatable {
+    let checkpoint: Int
+    let label: String
+}
 
 /// One card on the notes rail (spec §7.3). `anchorY` is where its quote's line sits, in the
 /// rail's own coordinates; nil for a note with no place beside the text — unanchored, detached,
@@ -16,25 +24,33 @@ struct NoteCardModel: Equatable, Identifiable {
     /// An earlier round already read it: dimmed and read-only (`.removeNote` only withdraws a
     /// pending note — the prompt it shaped can't be taken back).
     let consumed: Bool
+    /// Written on another version of the plan than the one shown: listed under that version
+    /// (never as lost), with its quote, and openable there.
+    var pin: NotePin?
 }
 
 /// The rail decided without a view: which cards, in what order, where each sits, and the words
 /// for the summary chip and the next-round tooltip. Pure, so `NotesRailModelTests` pins it.
 enum NotesRailModel {
-    /// Pending notes first, then the ones earlier rounds consumed. Within each: notes with no
-    /// place in the text — detached (their quote is gone), then unanchored (about the whole
-    /// plan) — at the top, then anchored notes in document order. A detached note keeps its
-    /// quote: that is how the human recognises what it was about.
-    static func cards(notes: [TapeNote], plan: String,
+    /// The notes written on the version shown come first: pending, then the ones earlier rounds
+    /// consumed. Within each: notes with no place in the text — detached (their quote is gone
+    /// from the very version it was selected in), then unanchored (about the whole plan) — at the
+    /// top, then anchored notes in document order. A detached note keeps its quote: that is how
+    /// the human recognises what it was about.
+    ///
+    /// Notes written on another version (`pinned` says which) follow, grouped by version, the
+    /// latest first. They have no place in this text and are not looked for in it: each keeps its
+    /// quote, its version and its tape order, and never reads as lost.
+    static func cards(notes: [TapeNote], plan: String, pinned: (TapeNote) -> NotePin? = { _ in nil },
                       lineY: (Range<String.Index>) -> CGFloat?) -> [NoteCardModel] {
         cards(notes: notes, located: { entry in entry.note.anchor?.locate(in: plan).map { NSRange($0, in: plan) } },
-              lineY: { range in Range(range, in: plan).flatMap(lineY) })
+              pinned: pinned, lineY: { range in Range(range, in: plan).flatMap(lineY) })
     }
 
     /// The same, with each note's quote already found (`located`, nil when it can't be) — the
     /// rail's own form: it redraws on every scroll beat, and finding every quote in a long plan
     /// on each one was most of the cost of a scroll.
-    static func cards(notes: [TapeNote], located: (TapeNote) -> NSRange?,
+    static func cards(notes: [TapeNote], located: (TapeNote) -> NSRange?, pinned: (TapeNote) -> NotePin? = { _ in nil },
                       lineY: (NSRange) -> CGFloat?) -> [NoteCardModel] {
         func group(_ notes: [TapeNote], consumed: Bool) -> [NoteCardModel] {
             var detached: [NoteCardModel] = [], unanchored: [NoteCardModel] = []
@@ -59,8 +75,21 @@ enum NotesRailModel {
             let ordered = anchored.enumerated().sorted { ($0.element.at, $0.offset) < ($1.element.at, $1.offset) }
             return detached + unanchored + ordered.map(\.element.card)
         }
-        return group(notes.filter { $0.consumedBy == nil }, consumed: false)
-            + group(notes.filter { $0.consumedBy != nil }, consumed: true)
+        let pins = notes.map { ($0, pinned($0)) }
+        let here = pins.filter { $0.1 == nil }.map(\.0)
+        let elsewhere: [NoteCardModel] = pins.compactMap { entry, pin in
+            guard let pin, let anchor = entry.note.anchor else { return nil }
+            return NoteCardModel(id: entry.id, kind: entry.note.kind, quote: anchor.quote, note: entry.note.note, anchorY: nil,
+                                 detached: false, consumed: entry.consumedBy != nil, pin: pin)
+        }
+        // Stable sort by version, latest first: notes of one version keep their tape order.
+        let grouped = elsewhere.enumerated().sorted { a, b in
+            let (x, y) = (a.element.pin?.checkpoint ?? 0, b.element.pin?.checkpoint ?? 0)
+            return x != y ? x > y : a.offset < b.offset
+        }.map(\.element)
+        return group(here.filter { $0.consumedBy == nil }, consumed: false)
+            + group(here.filter { $0.consumedBy != nil }, consumed: true)
+            + grouped
     }
 
     /// "4 notes for the next round" for the chip (nil with no pending notes), and "Sends your 3
@@ -237,7 +266,27 @@ final class PlanNotesController: ObservableObject {
     /// What a dropped file's path is made relative to — the intake's project directory.
     var projectPath: String?
     /// The checkpoint whose plan the editor shows — what a new anchor is selected in.
-    var checkpoint: Int?
+    var checkpoint: Int? { didSet { if checkpoint != oldValue { marksChanged() } } }
+    /// The checkpoint a note was written on (`NoteVersion.resolve`), and the name the rail gives
+    /// a checkpoint; bound by the detail pane, which holds the tape and its plan files.
+    var versionOf: (TapeNote) -> Int? = { $0.note.anchor?.checkpoint }
+    var versionLabel: (Int) -> String? = { _ in nil }
+    /// Takes the plan view to a checkpoint's plan (the same navigation as the round list's).
+    var openCheckpoint: (Int) -> Void = { _ in }
+    /// Where "Show in that version" is taking the editor: the version and the anchor to find in
+    /// its text. Held until the editor has that text, then used once (`PlanNotesBridge.takeReveal`).
+    struct Reveal: Equatable {
+        let checkpoint: Int
+        let anchor: NoteAnchor
+        var asked = Date()
+    }
+    var pendingReveal: Reveal?
+    /// The editor's answer to a reveal when the version is already on screen.
+    var revealPending: () -> Void = {}
+    /// Switches the plan section to its plan view (it may be showing a diff); bound by it.
+    var showPlan: () -> Void = {}
+    private var reportedLost: Set<UUID> = []
+    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "notes")
     /// The editor's text as it stands, typed-but-uncommitted edits included: anchors are
     /// located in what the human sees.
     private(set) var plan = ""
@@ -270,11 +319,33 @@ final class PlanNotesController: ObservableObject {
 
     var pendingCount: Int { notes.filter { $0.consumedBy == nil }.count }
 
+    /// The version `entry` was written on when that is not the one on screen — the rail lists it
+    /// under that version instead of looking for its quote here. nil on its own version, for a
+    /// note about the whole plan, and while no plan is shown.
+    func pin(for entry: TapeNote) -> NotePin? {
+        guard let checkpoint, let version = versionOf(entry), version != checkpoint,
+              let label = versionLabel(version) else { return nil }
+        return NotePin(checkpoint: version, label: label)
+    }
+
+    /// "Show in that version": the plan the note was written on, scrolled to its quote with
+    /// the quote flashed. A version already on screen just scrolls.
+    func showInVersion(_ id: UUID) {
+        guard let entry = notes.first(where: { $0.id == id }), let anchor = entry.note.anchor,
+              let version = versionOf(entry) else { return }
+        pendingReveal = Reveal(checkpoint: version, anchor: anchor)
+        showPlan()
+        if checkpoint == version { revealPending() } else { openCheckpoint(version) }
+    }
+
     var summary: (chip: String?, tooltip: String?) { NotesRailModel.summary(pending: pendingCount, edits: edits) }
 
+    /// A note written on another version is marked in this text only where its quote is found
+    /// unchanged, and dimmed like a read one: the note stays labelled with its own version.
     var marks: [NoteMark] {
         var out = notes.compactMap { entry in
-            entry.note.anchor.map { NoteMark(id: entry.id, kind: entry.note.kind, anchor: $0, consumed: entry.consumedBy != nil, draft: false) }
+            entry.note.anchor.map { NoteMark(id: entry.id, kind: entry.note.kind, anchor: $0,
+                                             consumed: entry.consumedBy != nil || pin(for: entry) != nil, draft: false) }
         }
         if let draft, let anchor = draft.anchor {
             out.append(NoteMark(id: draft.id, kind: draft.kind, anchor: anchor, consumed: false, draft: true))
@@ -291,6 +362,8 @@ final class PlanNotesController: ObservableObject {
         edits = 0
         checkpoint = nil
         selection = nil
+        pendingReveal = nil
+        reportedLost = []
     }
 
     /// A toolbar choice on `range` of `text`. A kind starts a focused draft in the rail;
@@ -411,6 +484,18 @@ final class PlanNotesController: ObservableObject {
         plan = text
         self.located = located
         geometry.bump()
+        reportLost(in: text)
+    }
+
+    /// A quote that can't be found in the very version it was selected in is not an expected
+    /// outcome of the plan moving on (such a note is listed under its version instead): the tape
+    /// and the plan disagree. Said once per note.
+    private func reportLost(in text: String) {
+        guard let checkpoint, !text.isEmpty else { return }
+        for entry in notes where entry.note.anchor != nil && located[entry.id] == nil && pin(for: entry) == nil
+            && reportedLost.insert(entry.id).inserted {
+            Self.logger.error("note \(entry.id.uuidString, privacy: .public) cannot find its quote in checkpoint \(checkpoint), the version it was written on")
+        }
     }
 
     /// The human's edit hunks on the plan head — `EditLayer.chip`'s count, from the plan section.
@@ -512,8 +597,15 @@ private struct NotesLane: View {
 
     var body: some View {
         let cards = self.cards
-        let placed = NotesRailModel.layout(cards, heights: heights, minGap: Self.gap)
-        let stacked = cards.filter { placed[$0.id] == nil }
+        // Notes written on another version have no line here: they are listed after the lane,
+        // so the stack above it stays small enough to leave the placed cards beside their lines.
+        let pinned = cards.filter { $0.pin != nil }
+        let here = cards.filter { $0.pin == nil }
+        let placed = NotesRailModel.layout(here, heights: heights, minGap: Self.gap)
+        let stacked = here.filter { placed[$0.id] == nil }
+        // The lane stays while any card of this version has a quote to sit beside, even before it
+        // is measured: the probe in it is what measures.
+        let hasLane = here.contains { $0.quote != nil && !$0.detached } || cards.isEmpty
         VStack(spacing: 0) {
             if !stacked.isEmpty {
                 VStack(spacing: Self.gap) {
@@ -521,26 +613,44 @@ private struct NotesLane: View {
                 }
                 .padding(Self.inset)
             }
-            // A fixed card width: offset cards in a bare ZStack sized the stack to their own
-            // ideal widths, which ran past the column's edges and clipped the trash buttons.
-            GeometryReader { lane in
-                ZStack(alignment: .topLeading) {
-                    ForEach(cards.filter { placed[$0.id] != nil }) { card in
-                        self.card(for: card)
-                            .frame(width: max(lane.size.width - 2 * Self.inset, 0))
-                            .offset(x: Self.inset, y: placed[card.id] ?? 0)
+            if hasLane {
+                // A fixed card width: offset cards in a bare ZStack sized the stack to their own
+                // ideal widths, which ran past the column's edges and clipped the trash buttons.
+                GeometryReader { lane in
+                    ZStack(alignment: .topLeading) {
+                        ForEach(here.filter { placed[$0.id] != nil }) { card in
+                            self.card(for: card)
+                                .frame(width: max(lane.size.width - 2 * Self.inset, 0))
+                                .offset(x: Self.inset, y: placed[card.id] ?? 0)
+                        }
+                        if cards.isEmpty {
+                            InspectorPlaceholder(title: "No Notes",
+                                                 message: "Select text in the plan to comment on it, ask about it, or ask for a change.")
+                                .padding(.horizontal, Self.inset)
+                        }
                     }
-                    if cards.isEmpty {
-                        InspectorPlaceholder(title: "No Notes",
-                                             message: "Select text in the plan to comment on it, ask about it, or ask for a change.")
-                            .padding(.horizontal, Self.inset)
-                    }
+                    .frame(width: lane.size.width, height: lane.size.height, alignment: .topLeading)
                 }
-                .frame(width: lane.size.width, height: lane.size.height, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(WindowTopProbe { top in if laneTop.map({ abs($0 - top) > 0.5 }) ?? true { laneTop = top } })
+                .clipped()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(WindowTopProbe { top in if laneTop.map({ abs($0 - top) > 0.5 }) ?? true { laneTop = top } })
-            .clipped()
+            if !pinned.isEmpty {
+                if hasLane { Divider() }
+                ScrollView {
+                    VStack(spacing: Self.gap) {
+                        ForEach(Array(pinned.enumerated()), id: \.element.id) { i, card in
+                            // A version's notes sit under its name, which says once what plan they are about.
+                            if let pin = card.pin, i == 0 || pinned[i - 1].pin != pin { VersionHeader(pin: pin) }
+                            self.card(for: card)
+                        }
+                    }
+                    .padding(Self.inset)
+                }
+                // About a card and a half when the lane has notes to line up; the rest of the rail when it has none.
+                .frame(maxHeight: hasLane ? 220 : .infinity, alignment: .top)
+                .accessibilityIdentifier("notes-other-versions")
+            }
         }
         .onPreferenceChange(CardHeightKey.self) { if $0 != heights { heights = $0 } }
         // The cards sliding to make room for a draft is motion, so Reduce Motion drops it (spec
@@ -557,7 +667,7 @@ private struct NotesLane: View {
         }
         let lineTop = controller.lineTop
         let located = controller.located
-        return NotesRailModel.cards(notes: notes, located: { located[$0.id] }) { range in
+        return NotesRailModel.cards(notes: notes, located: { located[$0.id] }, pinned: { controller.pin(for: $0) }) { range in
             guard let laneTop, let lineTop, let y = lineTop(range) else { return nil }
             return laneTop - y
         }
@@ -571,6 +681,7 @@ private struct NotesLane: View {
             } else {
                 let consumedBy = card.consumed ? controller.notes.first { $0.id == card.id }?.consumedBy : nil
                 NoteCard(card: card, readBy: consumedBy.flatMap(roundName),
+                         onShow: card.pin == nil ? nil : { controller.showInVersion(card.id) },
                          onRemove: card.consumed ? nil : { controller.remove(card.id) },
                          canChange: { controller.canSetKind(card.id, to: $0) },
                          onChange: { controller.setKind(card.id, to: $0) })
@@ -664,9 +775,26 @@ private struct KindMenu: View {
     }
 }
 
+/// "On Draft · Round 0": the quiet heading over the notes written on that version of the plan.
+private struct VersionHeader: View {
+    let pin: NotePin
+
+    var body: some View {
+        Label("On \(pin.label)", systemImage: "pin")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("note-version-header")
+    }
+}
+
 private struct NoteCard: View {
     let card: NoteCardModel
     let readBy: String?
+    /// "Show in that version", on a note written on another version of the plan.
+    var onShow: (() -> Void)?
     let onRemove: (() -> Void)?
     let canChange: (NoteKind) -> Bool
     let onChange: (NoteKind) -> Void
@@ -684,6 +812,13 @@ private struct NoteCard: View {
                     .font(.system(size: 12))
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+            }
+            if let onShow {
+                Button(action: onShow) { Label("Show in that version", systemImage: "arrow.turn.up.right") }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Open the plan this note was written on, scrolled to its quote")
+                    .accessibilityIdentifier("note-show-in-version")
             }
             HStack(spacing: 6) {
                 KindMenu(card: card, canChange: canChange, onChange: onChange)
@@ -711,6 +846,7 @@ private struct NoteCard: View {
     private var accessibilityText: String {
         var parts = [NoteStyle.label(card.kind)]
         if let quote = card.quote { parts.append("on “\(quote)”") }
+        if let pin = card.pin { parts.append("written on \(pin.label)") }
         if card.detached { parts.append("can't find this text any more") }
         if !card.note.isEmpty { parts.append(card.note) }
         if let readBy { parts.append("read by \(readBy)") }
