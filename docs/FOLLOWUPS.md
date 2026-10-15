@@ -7,6 +7,20 @@ carried forward on trust.
 
 ## Resolved (kept for the reasoning trail)
 
+- **Phone log fetches blocked the phone's main thread and always timed out — FIXED
+  (2026-10-15).** Open since 2026-09-26. `connector.onPhoneRequest` read
+  `OSLogStore(scope: .currentProcessIdentifier)` inside `MainActor.assumeIsolated`: 18.7 s on an
+  iPhone 15 Pro, so every fetch missed `askDeadline`'s 10 s and froze the UI for the whole read.
+  A diagnosis pass on 2026-10-14 froze the phone itself, once per fetch. Timed by stage over a
+  60 s window: open 119 ms, `position(date:)` 0 ms (it seeks nothing), 14.1 s to walk 1,019
+  entries unfiltered, and 27.3 s for the app's 6 lines through the subsystem/category predicate,
+  evaluated per entry in-process. So `askDeadline` was never the problem. Every `PhoneLog` line
+  now also goes to `PhoneJournal` (`Caches/phone.log`). Fetches read that file on a utility
+  queue: 6 ms, 0.22 s end to end. The same work added `MainStallWatch` (stack samples of every
+  main-thread stall over 250 ms, written as taken) and `scripts/phone-stalls.sh`, which reads
+  both over `devicectl` and symbolicates them (`PhoneJournalTests`, `PhoneLogTests`,
+  `MainStallWatchTests`).
+
 - **Every paired host stuck "offline" behind one Keychain prompt — FIXED (2026-10-10).** The
   11:57 Release was signed by `Apple Development: the maintainer (NEXCPPHDU2)`, team 2T9E3N27J8.
   The `dev.flightdeck.host` items trust `Apple Development: dana@personal.example (KH7XHRF6M9)` with
@@ -1878,24 +1892,6 @@ independently answers spike B7 in the control-surface plan, which recorded the p
 proxy tier would be far cheaper than the plan assumed. That does not make the proxy a good idea
 (it is observation, never control, and blind to everything client-side); it just removes the
 feasibility unknown.
-
-## Phone log fetches block the phone's main thread (2026-09-26)
-
-- **`PhoneLog.entries` enumerates `OSLogStore` on the main actor, and on a real device that is
-  slow enough to miss the Mac's deadline and freeze the phone.** `FleetModel`'s
-  `connector.onPhoneRequest` handler wraps the whole answer in `MainActor.assumeIsolated`, so
-  the store read — `getEntries` and the walk over its results — runs on the UI thread. Seen
-  while diagnosing the keyboard-lift regression on an iPhone 15 Pro (iOS 18.3.1): fetches via
-  `scripts/answer-trigger.sh logs` repeatedly came back `timed_out`, i.e. past
-  `FleetSocketServer.askDeadline`'s 10 s, even for a 120 s window; and a burst of ~8 fetches
-  froze the phone's UI while they ran. The deadline's own doc comment sizes 10 s against "a
-  phone reading its own `OSLogStore`", which this contradicts. Not fixed with that work. The
-  suggested direction is to run the store read off the main actor (a detached task or a
-  utility queue) and hop back only to log the served line and call `reply` — the handler's
-  `assumeIsolated` is there for the `FleetModel` state it touches, not for the read itself, and
-  `PhoneLog.entries` touches none. Worth confirming before relying on it: whether a single
-  unloaded fetch alone exceeds 10 s, or only fetches that queue behind each other on the main
-  thread, which decides whether `askDeadline` needs raising too.
 
 ## From Flight Control intake, phases 1–3 (2026-09-26)
 

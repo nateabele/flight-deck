@@ -96,7 +96,11 @@ enum PhoneLog {
     /// fetch.** `OSLogStore(scope: .currentProcessIdentifier)` took 18.7 s on a handset to
     /// return a few dozen lines (measured 2026-10-14), past the Mac's 10 s `askDeadline`, so
     /// every fetch timed out — and it ran on the main thread then, freezing the UI for as
-    /// long. The journal is this app's own file of exactly these lines: reading it is a file
+    /// long. Timed by stage on an iPhone 15 Pro (2026-10-15), for a 60 s window: opening the
+    /// store 119 ms, `position(date:)` 0 ms — it seeks nothing, the walk does the work — then
+    /// 14.1 s to enumerate the window's 1,019 entries unfiltered, and 27.3 s to get this app's
+    /// 6 lines through the subsystem/category predicate, which is evaluated per entry on this
+    /// side rather than by the store. No query shape fixes that; not asking it does. The journal is this app's own file of exactly these lines: reading it is a file
     /// read and a scan from the end, milliseconds. It also outlives a launch, which the
     /// current-process log store never did, so a phone that was killed still has the lines
     /// leading up to it.
@@ -130,46 +134,6 @@ enum PhoneLog {
         }
         perfNote("logs read ms=\(elapsed(since: start)) lines=\(lines.count) served=\(newest.count)")
         return .success(WirePhoneLogs(entries: newest.reversed(), truncated: truncated))
-    }
-}
-
-/// A one-time measurement of why `OSLogStore` was too slow to serve a fetch: the read that
-/// `PhoneLog.entries` used to make, timed stage by stage, run once per installed build at
-/// background priority, off the main thread, with the result written to the journal as one
-/// `perf` line (`oslogstore probe …`). It costs one background read of the system store per
-/// install and nothing after; delete it once the numbers are in hand.
-enum OSLogStoreProbe {
-    static func runOncePerBuild() {
-        let key = "oslogstore-probe." + StackSymbols.appImageSummary()
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
-        DispatchQueue.global(qos: .background).async {
-            let ms = { (start: UInt64) in PhoneLog.elapsed(since: start) }
-            var t = DispatchTime.now().uptimeNanoseconds
-            guard let store = try? OSLogStore(scope: .currentProcessIdentifier) else {
-                return PhoneLog.perfNote("oslogstore probe open failed")
-            }
-            let open = ms(t)
-            t = DispatchTime.now().uptimeNanoseconds
-            let since = store.position(date: Date().addingTimeInterval(-60))
-            let position = ms(t)
-            // The fetch's own query: this app's subsystem and categories, last 60 s.
-            let predicate = NSPredicate(
-                format: "subsystem == %@ AND category IN %@", PhoneLog.subsystem, PhoneLog.categories
-            )
-            t = DispatchTime.now().uptimeNanoseconds
-            let filtered = (try? store.getEntries(with: [], at: since, matching: predicate)).map { Array($0).count } ?? -1
-            let filteredMs = ms(t)
-            // The same window with no predicate: how much the store walks to find those few.
-            t = DispatchTime.now().uptimeNanoseconds
-            let everything = (try? store.getEntries(with: [], at: since)).map { Array($0).count } ?? -1
-            let everythingMs = ms(t)
-            PhoneLog.perfNote("""
-                oslogstore probe open=\(open)ms position=\(position)ms \
-                filtered=\(filtered) entries in \(filteredMs)ms \
-                unfiltered=\(everything) entries in \(everythingMs)ms window=60s
-                """)
-        }
     }
 }
 
@@ -298,7 +262,10 @@ enum MainStallWatch {
                 Thread.sleep(forTimeInterval: 0.1)
             }
         }
-        thread.qualityOfService = .utility
+        // Not `.utility`: under load a utility thread was starved past the stall it was timing,
+        // woke after the main thread had already answered, and logged nothing (1 run in 4 of
+        // `MainStallWatchTests` while other builds ran). The watch costs ten wakeups a second.
+        thread.qualityOfService = .userInitiated
         thread.name = "MainStallWatch"
         thread.start()
     }

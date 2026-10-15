@@ -14,14 +14,14 @@ final class MainStallWatchTests: XCTestCase {
     func testABlockedMainThreadIsLoggedWithItsStack() async throws {
         MainStallWatch.start()
         let before = (try? Data(contentsOf: perfLog).count) ?? 0
-        usleep(700_000)
+        usleep(1_500_000)
 
         var logged = ""
         for _ in 0..<50 {
             try await Task.sleep(for: .milliseconds(100))
             let data = (try? Data(contentsOf: perfLog)) ?? Data()
             logged = String(decoding: data.dropFirst(before), as: UTF8.self)
-            if logged.contains("stack[") { break }
+            if logged.contains("main stall ms=") { break }
         }
         let stall = try XCTUnwrap(
             logged.split(separator: "\n").first { $0.contains("main stall ms=") },

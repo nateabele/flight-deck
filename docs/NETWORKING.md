@@ -192,9 +192,12 @@ this frame and is otherwise silent.
 **The phone answers from its own journal, never from `OSLogStore`, and never on its main
 thread.** Every line goes to the unified log *and* to `PhoneJournal`, a rotating file in the
 app's `Caches` (`phone.log`, 1 MB, then `phone.1.log`); a fetch reads that file on a utility
-queue. Reading `OSLogStore(scope: .currentProcessIdentifier)` instead took 18.7 s on an iPhone
-15 Pro for a few dozen lines, past `askDeadline`'s 10 s, so every fetch timed out — and it ran on
-the main thread, so every fetch also froze the phone for as long. The journal outlives a launch,
+queue, in milliseconds (6 ms, 0.22 s end to end from the Mac). Reading
+`OSLogStore(scope: .currentProcessIdentifier)` instead took 18.7 s on an iPhone 15 Pro for a few
+dozen lines, past `askDeadline`'s 10 s, so every fetch timed out — and it ran on the main
+thread, so every fetch also froze the phone for as long. Timed by stage: `position(date:)`
+seeks nothing (0 ms), walking one minute's 1,019 entries took 14.1 s, and the
+subsystem/category predicate, evaluated per entry in the app, doubled it to 27.3 s for 6 lines. The journal outlives a launch,
 so a phone that was killed still answers with what led up to it.
 
 When the socket cannot get through at all — a phone whose main thread is stuck is exactly that
