@@ -268,6 +268,8 @@ rsync -a -e "$RSYNC_SSH" "$HOST:$REMOTE_DIR/run.log" "$HOST:$REMOTE_DIR/run.xcre
   || echo "[smoke] warning: could not copy the log/xcresult back from $HOST"
 cat "$OUT/run.log" >>"$LOG" 2>/dev/null || true
 
+[ -n "${FD_TRACE_BEEPS:-}" ] && [ -f "$OUT/beeps.log" ] && python3 scripts/beeptrace/report.py "$OUT/beeps.log"
+
 # Compact summary, identical to smoke.sh's: per-test lines, assertion failures, final banner.
 grep -E "Test Case '.*' (passed|failed|skipped)|XCTAssert|error:|\*\* TEST (SUCCEEDED|FAILED)" "$OUT/run.log" \
   | tail -n 40 || true

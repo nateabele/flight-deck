@@ -404,12 +404,21 @@ FD_TRACE_BEEPS=1 ./scripts/smoke.sh        # the XCUITest runner AND the app und
 ```
 
 The log comes back as `DerivedData/fd-test-shards/beeps.log` (unit) or
-`DerivedData/smoke-remote/beeps.log` (smoke). Every traced process writes one `LOAD` line, so a log
-with no `BEEP` lines is the pass and proves the tracer was in the processes: `rg -c '^BEEP'` is the
-count, `rg -o '^BEEP.*' | sed -E 's/.*via=//' | sort | uniq -c` the per-test tally. In the smoke
-log the app's records say `test=(no test running)` (XCTest is not loaded in the app): match them
-by time against the runner's records and `run.log`. `fd_beep_count()` is exported for a test that
-wants the count, `dlsym(RTLD_DEFAULT, "fd_beep_count")`, NULL when not traced.
+`DerivedData/smoke-remote/beeps.log` (smoke), and the run ends with `scripts/beeptrace/report.py`'s
+tally, one row per test and call site, then `BEEPS: <n>`. Every traced process writes one `LOAD`
+line, so a log with no `BEEP` lines is the pass and proves the tracer was in the processes. The
+app under test has no XCTest, so its beeps are given the test case the runner had open at that
+moment (`CASE` lines on one clock). `fd_beep_count()` is exported for a test that wants the count,
+`dlsym(RTLD_DEFAULT, "fd_beep_count")`, NULL when not traced.
+
+Measured 2026-10-15: the whole unit suite (7318 cases, six shards, the serial lane, the menu-bar
+harness) and the smoke UI suite beep zero times. The beeps heard on that Mac came from a UI test
+that typed arrows, Tab and text before the plan editor had taken focus: `NSWindow.keyDown` with no
+responder is `noResponder(for:)`, so every key was a beep (9 in 11 s, ~10/min for as long as the run
+looped). The system log names it without the tracer: `log show --last 1h --predicate 'process ==
+"systemsoundserverd" AND eventMessage CONTAINS "Incoming Request"'` lists each alert sound and the
+client process that asked. A UI test that types should prove its first key landed (the
+value changed, the caret moved) before it sends the rest, not click and fire blind.
 
 Code that beeps on purpose goes through an injectable seam (`PlanLinks.beep`), so a test is silent
 and can assert it beeped. Do not mute the UI-test Mac or touch its sound settings.

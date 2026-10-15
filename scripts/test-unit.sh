@@ -110,6 +110,12 @@ if [ -n "${FD_BEEP_DYLIB:-}" ]; then
   BEEP_ENV=(DYLD_INSERT_LIBRARIES="$FD_BEEP_DYLIB" FD_BEEP_LOG="$PWD/DerivedData/fd-test-shards/beeps.log")
 fi
 
+# The tally of what the tracer saw: by test and call site, ending "BEEPS: <n>".
+beep_report() {
+  [ -n "${FD_BEEP_DYLIB:-}" ] && python3 scripts/beeptrace/report.py DerivedData/fd-test-shards/beeps.log
+  return 0
+}
+
 run_xctest() {  # $1: an -XCTest selector, or empty for the whole bundle
   if [ -n "$1" ]; then set -- -XCTest "$1"; else set --; fi
   env ${BEEP_ENV[@]+"${BEEP_ENV[@]}"} DYLD_LIBRARY_PATH="$APPMACOS$SHIM_PATH" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS$SHIM_PATH" \
@@ -148,8 +154,9 @@ if [ -n "${FD_TEST_FILTER:-}" ]; then
     rg -qx "$cls" <<<"$ALL_CLASSES" \
       || { echo "error: FD_TEST_FILTER names unknown test class '$cls'" >&2; exit 2; }
   done
-  run_xctest "$FD_TEST_FILTER"
-  exit
+  rc=0; run_xctest "$FD_TEST_FILTER" || rc=$?
+  beep_report
+  exit "$rc"
 fi
 
 SERIAL_FILE="scripts/test-serial-classes.txt"
@@ -167,8 +174,9 @@ fi
 CLASSES="$(comm -23 <(printf '%s\n' "$ALL_CLASSES") <(printf '%s\n' "$SERIAL_CLASSES"))"
 
 if [ "$SHARDS" -le 1 ]; then
-  run_xctest ""
-  exit
+  rc=0; run_xctest "" || rc=$?
+  beep_report
+  exit "$rc"
 fi
 
 # Why shards: the suite's cost is wall-clock WAITING, not CPU. A serial run measured 107s
@@ -235,6 +243,8 @@ if [ -z "${FD_SKIP_MENUBAR:-}" ]; then
     grep -E "^MENUBAR|removals=\[[^]]" "$LOGDIR/menubar.log" >&2 || true
   fi
 fi
+
+beep_report
 
 # Refresh the per-class timings the next run balances with, and report one total.
 cat "$LOGDIR"/shard*.log "$SERIAL_LOG" | python3 -c '
