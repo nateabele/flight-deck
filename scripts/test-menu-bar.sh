@@ -22,6 +22,7 @@ cd "$(dirname "$0")/.."
 #        FD_MENUBAR_PREBUILT=1 runs the harness as already compiled, never touching swiftc.
 #        test-unit-remote.sh uses the pair: the harness is compiled on THIS Mac with this Xcode,
 #        and run on the UI-test Mac, whose older Xcode could not compile it.
+#        FD_BEEP_DYLIB=<path> inserts the NSBeep tracer (scripts/beeptrace) into the harness.
 
 P="DerivedData/Build/Products/Debug"
 APP="$P/Flight Deck.app/Contents"
@@ -49,6 +50,10 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos14 "${FLAGS[@]}" \
   -o "$OUT/MenuBarHarness" 2>"$OUT/build.log" || { grep -E "error:" "$OUT/build.log" >&2; exit 1; }
 fi
 [ -n "${FD_MENUBAR_BUILD_ONLY:-}" ] && exit 0
+
+# FD_BEEP_DYLIB (test-unit.sh, FD_TRACE_BEEPS=1): the NSBeep tracer goes in here, not by passing
+# DYLD_INSERT_LIBRARIES down, because the /usr/bin/env and bash above are SIP binaries and strip it.
+[ -n "${FD_BEEP_DYLIB:-}" ] && export DYLD_INSERT_LIBRARIES="$FD_BEEP_DYLIB"
 
 # 120 s is generous: the run itself is ~30 s.
 status=0
