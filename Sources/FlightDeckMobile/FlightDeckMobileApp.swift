@@ -60,7 +60,6 @@ struct FlightDeckMobileApp: App {
             .onAppear {
                 ClaudeCodeHighlightEngine.shared.prewarm()
                 MainStallWatch.start()
-                OSLogStoreProbe.runOncePerBuild()
                 pathWatcher.onRedial = {
                     guard model.mac != nil else { return }
                     model.reconnect()
