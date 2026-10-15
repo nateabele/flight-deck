@@ -71,6 +71,7 @@ final class SelectionToolbarPresenter {
         if anchor.superview !== textView { textView.addSubview(anchor) }
         anchor.frame = rect
         if range != shownFor { anchor.present(nil) }
+        if range != shownFor { PlanNotesController.logger.debug("toolbar shown for \(range.location),\(range.length)") }
         shownFor = range
         anchor.present(AnyView(SelectionToolbar(onChoose: onChoose)))
     }
@@ -305,6 +306,7 @@ final class PlanNotesBridge {
             return toolbar.hide()
         }
         toolbar.update(in: textView, range: range, rect: rect) { [weak self, weak controller] kind in
+            PlanNotesController.logger.debug("toolbar button pressed: \(kind.map { NoteStyle.label($0) } ?? "Highlight", privacy: .public), alive \(self != nil && controller != nil && self?.textView != nil)")
             guard let self, let controller, let textView = self.textView else { return }
             self.toolbar.hide()
             controller.choose(kind, range: range, in: textView.string)

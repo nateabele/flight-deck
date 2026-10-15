@@ -442,7 +442,8 @@ See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
 
 `PlanningUIFixture.swift` is Debug only. Launch with `-FlightDeckPlanningFixture shaping
 -FlightDeckResetState YES` to seed a temp state dir with one paused Feature plan that has notes.
-`PlanningInspectorUITests` uses it.
+`PlanningInspectorUITests` uses it. `-FlightDeckPlanningFixture synthesized` seeds a draft, a synthesis that
+consumed notes, and two refines, each a long plan with tables (`NotesToolbarUITests`).
 
 ---
 
@@ -689,12 +690,13 @@ their own version, and none on the current plan.
 
 ### 6.6 Notes: open items
 
-- **The selection toolbar after synthesis (reported, not reproduced): open bug.**
+- **The selection toolbar after synthesis (reported 2026-10-15, not reproduced even with real events): open bug.**
   - The maintainer reported that the kind buttons did nothing on a later version.
-  - Real mouse presses work in `NotesOnLaterVersionTests` and in `ProjectViewNotesOnLaterVersionLiveTests`.
-  - Suspects: the reading-position restore scrolling while the toolbar is up (each scroll closes the toolbar's panel), and the real app's board panels.
-  - Being worked on in `notes-toolbar-clicks` (section 7).
-  - If it recurs, record whether `PlanNotesController.draft` is set after the press.
+  - `NotesToolbarUITests` drives the real app through the window server (the `synthesized` fixture: a draft, a synthesis that consumed notes, two refines, long plans with tables). Each case drags to select, clicks Comment by its label, and checks a second "Add Note" button (the draft card's) appears in the rail. All pass: on the latest version, after switching tabs and back (during and after the reading restore), selecting inside a table, after switching versions in the round list, and with the inspector on Notes and on Rounds.
+  - Not covered: the maintainer's own plan size (about 80 KB) and a plan whose restore runs long; other kinds than Comment; a window smaller than full screen.
+  - Diagnostics (os.Logger, category `notes`, debug level) log each step. When it recurs, within a few minutes run:
+    `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "notes"' --last 5m --debug`
+    and read the sequence: `toolbar shown for L,N`; `selection toolbar closed itself` (a scroll, resign-key or app deactivation closed it); `toolbar button pressed: <kind>, alive true|false` (the click reached the action; false means the editor or controller was gone); `choose <kind> on checkpoint C, range` or `choose <kind> refused: ...` (the reason: no checkpoint, or an empty range); `draft opened`; `note sent`. The first missing line is the step that fails. No "button pressed" after "shown" means the click never reached the panel.
 - **No note creation time: gap.** Inference uses the consuming round as the bound. Adding a
   `createdAt` would make it exact for new notes.
 - **A note on removed text does not follow its replacement: gap.**
@@ -734,7 +736,7 @@ rejected under agy 1.3.6), landed on master as `3416e35e` while this doc was wri
 | Branch | What | State |
 |---|---|---|
 | `heatmap-names` | **Open bug:** the heatmap squeezes unnumbered section names into the 30 pt "§" badge column. **Open bug:** the reviewer seat row lists "§Phase" once per section (51 times). | Uncommitted, about 91+/15−. `HeatmapModel.title(of:)` gives a "§n" badge only to numbered headings. `nameRow` gets a tail-truncating fallback plus a tooltip. `SeatRowModel.sectionsPhrase` dedupes the sections: "across §2 §4 §7" for up to three, "in N sections" above that. Adds `FD_PLANNING_RENDER_DIR` to the remote forward list. Adds a new render test, `testRenderHeatmapWithUnnumberedHeadings`. |
-| `notes-toolbar-clicks` | **Open bug:** dead note-toolbar buttons after synthesis (6.6) | Uncommitted. `FloatingCard` is no longer hidden from accessibility when interactive. A `synthesized` planning fixture. A new untracked `NotesToolbarUITests.swift` drives real-mouse clicks. |
+| `notes-toolbar-clicks` | **Open bug:** dead note-toolbar buttons after synthesis (6.6) | Merged: `NotesToolbarUITests`, the `synthesized` fixture, and the `notes` debug logging (6.6). Not reproduced. |
 
 Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rounds-edit-paused`,
 `inspector-*`, `planning-4way`, `intake-archive`, `flywheel-intake`, `tab-model-pickers`,

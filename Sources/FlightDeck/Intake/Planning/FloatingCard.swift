@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 
 /// Where a label's card goes, in AppKit screen coordinates (y up): under the label with leading
@@ -233,7 +234,7 @@ final class FloatingCardAnchor: NSView {
         guard !dismissed, let window, !window.isMiniaturized else { return close() }
         let room = Self.shadowRoom
         let content = { (nub: CardChrome.Nub?) in
-            AnyView(CardChrome(card: card, nub: nub, entrance: !self.interactive).padding(room).accessibilityHidden(true))
+            AnyView(CardChrome(card: card, nub: nub, entrance: !self.interactive).padding(room).accessibilityHidden(!self.interactive))
         }
         let host = self.host ?? FirstMouseHostingView(rootView: content(nub))
         host.rootView = content(nub)
@@ -353,6 +354,7 @@ final class FloatingCardAnchor: NSView {
     /// block the next hover.
     private func dismiss() {
         guard card != nil else { return }
+        if interactive { Logger(subsystem: "dev.flightdeck.FlightDeck", category: "notes").debug("selection toolbar closed itself (scroll, resign key or app deactivation)") }
         dismissed = true
         close()
         onDismiss?()
