@@ -306,7 +306,8 @@ enum EditLayer {
                     storage.addAttribute(.planEditInserted, value: true, range: r)
                 }
             case .deleted:
-                addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme)
+                // A grid's removed words and rows are laid and drawn by the grid, in its cells and rows.
+                if !PlanTableMarks.owns(mark, in: storage) { addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme) }
             }
         }
     }
@@ -547,9 +548,10 @@ final class EditLayerFragment: NSTextLayoutFragment {
         drawBlockDecoration(at: point, in: context)
         if let ref = tableRow {
             drawTableRow(ref, at: point, in: context)
-        } else {
-            super.draw(at: point, in: context)
+            drawTableBars(ref, at: point, in: context)
+            return
         }
+        super.draw(at: point, in: context)
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
         let ghosts = ghosts
         var inserted = Set<Int>()
@@ -566,12 +568,7 @@ final class EditLayerFragment: NSTextLayoutFragment {
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
         defer { NSGraphicsContext.restoreGraphicsState() }
 
-        let laneX = point.x + PlanGutter.offset(.edit) - layoutFragmentFrame.minX
-        func bar(_ minY: CGFloat, _ maxY: CGFloat, _ color: NSColor) {
-            color.setFill()
-            NSBezierPath(roundedRect: CGRect(x: laneX, y: point.y + minY, width: PlanGutter.editWidth, height: maxY - minY),
-                         xRadius: 1.5, yRadius: 1.5).fill()
-        }
+        func bar(_ minY: CGFloat, _ maxY: CGFloat, _ color: NSColor) { drawBar(minY, maxY, color, at: point) }
 
         var removedIn = Set<Int>()
         for (index, ghost) in ghosts {
@@ -622,15 +619,26 @@ final class EditLayerFragment: NSTextLayoutFragment {
         }
     }
 
-    /// A grid row's cells, with the fill the decoration layers (the edit tint, a note's highlight)
-    /// and the selection give its hidden text: those paint behind glyphs, and a row's glyphs are
-    /// nothing, so the row takes the colour as a whole.
+    /// The edit lane's bar from `minY` to `maxY` of this fragment.
+    private func drawBar(_ minY: CGFloat, _ maxY: CGFloat, _ color: NSColor, at point: CGPoint) {
+        color.setFill()
+        NSBezierPath(roundedRect: CGRect(x: point.x + PlanGutter.offset(.edit) - layoutFragmentFrame.minX, y: point.y + minY,
+                                         width: PlanGutter.editWidth, height: maxY - minY), xRadius: 1.5, yRadius: 1.5).fill()
+    }
+
+    /// A grid row's cells, with the fills the decoration layers (the edit tint, the churn wash, a
+    /// note's highlight) give its hidden text — those paint behind glyphs, and a row's glyphs
+    /// are nothing, so the grid paints them in the cells they reach — and the selection.
     private func drawTableRow(_ ref: PlanTableRowRef, at point: CGPoint, in context: CGContext) {
-        guard let layout = textLayoutManager else { return }
-        var tint: NSColor?
-        layout.enumerateRenderingAttributes(from: rangeInElement.location, reverse: false) { _, attributes, range in
+        guard let layout = textLayoutManager, let content = layout.textContentManager else { return }
+        var fills: [PlanTableLayout.Fill] = []
+        let start = rangeInElement.location
+        layout.enumerateRenderingAttributes(from: start, reverse: false) { _, attributes, range in
             guard range.location.compare(rangeInElement.endLocation) == .orderedAscending else { return false }
-            if let color = attributes[.backgroundColor] as? NSColor { tint = color }
+            if let color = attributes[.backgroundColor] as? NSColor {
+                let from = max(content.offset(from: start, to: range.location), 0), to = content.offset(from: start, to: range.endLocation)
+                if to > from { fills.append((NSRange(location: from, length: to - from), color)) }
+            }
             return true
         }
         let selected = layout.textSelections.contains { selection in
@@ -640,8 +648,37 @@ final class EditLayerFragment: NSTextLayoutFragment {
         // Colours resolve in the text view's appearance, not whatever a layer's draw happens to run in.
         let appearance = layout.textContainer?.textView?.effectiveAppearance ?? NSApp.effectiveAppearance
         appearance.performAsCurrentDrawingAppearance {
-            ref.layout.draw(row: ref.row, at: origin, in: context, theme: .standard, tint: tint, selected: selected)
+            ref.layout.draw(row: ref.row, at: origin, in: context, theme: .standard, fills: fills, selected: selected)
         }
+    }
+
+    /// The edit lane beside a grid row's band: red beside each removed row, and beside the row
+    /// itself green if the human inserted into it, red if words were removed from it, both (green
+    /// over red) if both — as a paragraph's line gets.
+    private func drawTableBars(_ ref: PlanTableRowRef, at point: CGPoint, in context: CGContext) {
+        guard let text = paragraphText, text.length > 0 else { return }
+        let row = ref.layout.rows[ref.row]
+        guard !row.isHidden else { return }
+        var inserted = false
+        text.enumerateAttribute(.planEditInserted, in: NSRange(location: 0, length: text.length)) { value, _, stop in
+            if value != nil { inserted = true; stop.pointee = true }
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        var y = tableOrigin.y
+        for ghost in row.above { drawBar(y, y + ghost.height, EditLayer.deletedColor, at: point); y += ghost.height }
+        let removed = row.hasGhost
+        switch (inserted, removed) {
+        case (true, true):
+            drawBar(y, y + row.bodyHeight / 2, EditLayer.barColor, at: point)
+            drawBar(y + row.bodyHeight / 2, y + row.bodyHeight, EditLayer.deletedColor, at: point)
+        case (true, false): drawBar(y, y + row.bodyHeight, EditLayer.barColor, at: point)
+        case (false, true): drawBar(y, y + row.bodyHeight, EditLayer.deletedColor, at: point)
+        default: break
+        }
+        y += row.bodyHeight
+        for ghost in row.below { drawBar(y, y + ghost.height, EditLayer.deletedColor, at: point); y += ghost.height }
     }
 
     /// A code line's share of its block's rounded box, or a quote line's bar — under the text.
