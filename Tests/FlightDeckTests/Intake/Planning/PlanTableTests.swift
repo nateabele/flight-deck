@@ -194,8 +194,7 @@ final class PipeTableFitTests: XCTestCase {
     }
 }
 
-/// The styler's two states for a table: grid (source hidden, held to the grid's heights) and
-/// source (the caret in it).
+/// The styler's one state for a table: a grid, its source hidden and held to the grid's heights.
 final class PlanTableStyleTests: XCTestCase {
     static let plan = "# T\n\n| a | bb |\n|---|---|\n| ccc | d |\n\nafter"
 
@@ -227,15 +226,15 @@ final class PlanTableStyleTests: XCTestCase {
         XCTAssertNil(storage.attribute(.planTableRow, at: 0, effectiveRange: nil), "other blocks are untouched")
     }
 
-    func testWithTheCaretInItItShowsItsSourceInMonospaceWithAlignedColumns() throws {
+    func testAskingToRevealATableNeverShowsItsSource() throws {
         let (storage, blocks) = styled(reveal: 2)
         XCTAssertEqual(blocks[2].kind, .table)
         XCTAssertEqual(storage.string, Self.plan)
         let at = blocks[2].range.location
-        XCTAssertNil(storage.attribute(.planTableRow, at: at, effectiveRange: nil))
+        XCTAssertNotNil(storage.attribute(.planTableRow, at: at, effectiveRange: nil), "a revealed block that is a table stays a grid")
         let font = try XCTUnwrap(storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont)
-        XCTAssertTrue(font.isFixedPitch, "a table that fits is shown aligned, in monospace")
-        XCTAssertNotNil(storage.attribute(.kern, at: at + 3, effectiveRange: nil))
+        XCTAssertLessThan(font.pointSize, 1, "its source stays hidden")
+        XCTAssertNil(storage.attribute(.kern, at: at + 3, effectiveRange: nil))
     }
 
     func testASourceTooWideForTheEditorWrapsAsBodyText() throws {
@@ -343,27 +342,22 @@ final class PlanTableEditorTests: XCTestCase {
         return f
     }
 
-    func testRevealsOnCaretEntryAndHidesOnExit() {
-        let f = Self.editor()
-        defer { f.window.close() }
-        let table = f.tableRange
-        XCTAssertTrue(f.isGrid(at: table.location), "caret at the top: the table is a grid")
-        f.view.setSelectedRange(NSRange(location: table.location + 9, length: 0))
-        XCTAssertFalse(f.isGrid(at: table.location), "the caret entered: the source shows")
-        XCTAssertFalse(f.isGrid(at: (f.view.string as NSString).range(of: "| Data").location), "every row of the table, not just the caret's")
-        f.view.setSelectedRange(NSRange(location: 3, length: 0))
-        XCTAssertTrue(f.isGrid(at: table.location), "the caret left: the grid is back")
-        XCTAssertEqual(f.view.string, Self.plan, "the plan is as typed throughout")
-    }
-
-    func testAnUnfocusedEditorShowsTheGridWhereverTheCaretWas() {
-        let f = Self.editor(focused: false)
-        defer { f.window.close() }
-        f.view.setSelectedRange(NSRange(location: f.tableRange.location + 9, length: 0))
-        XCTAssertTrue(f.isGrid(at: f.tableRange.location))
-        f.view.isFocused = true
-        f.coordinator.focusChanged()
-        XCTAssertFalse(f.isGrid(at: f.tableRange.location), "focus reveals the caret's table")
+    func testTheTableIsAGridWhereverTheCaretIsAndWhetherOrNotTheEditorIsFocused() {
+        for focused in [true, false] {
+            let f = Self.editor(focused: focused)
+            defer { f.window.close() }
+            let table = f.tableRange
+            XCTAssertTrue(f.isGrid(at: table.location), "caret at the top")
+            f.view.setSelectedRange(NSRange(location: table.location + 9, length: 0))
+            XCTAssertTrue(f.isGrid(at: table.location), "the caret entered: still a grid")
+            XCTAssertTrue(f.isGrid(at: (f.view.string as NSString).range(of: "| Data").location))
+            f.view.isFocused = true
+            f.coordinator.focusChanged()
+            XCTAssertTrue(f.isGrid(at: table.location), "focus reveals nothing")
+            f.view.setSelectedRange(NSRange(location: 3, length: 0))
+            XCTAssertTrue(f.isGrid(at: table.location))
+            XCTAssertEqual(f.view.string, Self.plan, "the plan is as typed throughout")
+        }
     }
 
     func testTheGridRowsLayOutAtTheirHeightAndTheNextSectionFollows() throws {
@@ -378,11 +372,11 @@ final class PlanTableEditorTests: XCTestCase {
         let heading = try XCTUnwrap(f.view.caretRect(at: ns.range(of: "## Next section").location))
         XCTAssertGreaterThanOrEqual(heading.minY, span.maxY, "the section after the table starts below it")
         XCTAssertLessThan(heading.minY - span.maxY, 60, "the table's own spacing plus the heading's, not a gap of hidden source")
-        // Editing the source makes the plan taller: the grid is the shorter of the two.
+        // The caret in the table changes nothing about its height.
         let before = f.view.frame.height
         f.view.setSelectedRange(NSRange(location: table.location + 9, length: 0))
         f.settle()
-        XCTAssertNotEqual(f.view.frame.height, before)
+        XCTAssertEqual(f.view.frame.height, before)
     }
 
     func testEachSourceLineIsExactlyItsRowsHeight() throws {
@@ -452,7 +446,7 @@ final class PlanTableEditorTests: XCTestCase {
         XCTAssertEqual(inThird, ns.range(of: "Tenant membership").location)
         XCTAssertNil(f.view.tableCaret(at: NSPoint(x: origin.x + 60, y: 2)), "not on the table")
         f.view.setSelectedRange(NSRange(location: caret, length: 0))
-        XCTAssertFalse(f.isGrid(at: f.tableRange.location), "the caret in the cell shows the table's source")
+        XCTAssertTrue(f.isGrid(at: f.tableRange.location), "the caret in the cell leaves the table a grid")
     }
 
     func testTypingInTheSourceAndUndoRestoreTheText() {
@@ -462,20 +456,19 @@ final class PlanTableEditorTests: XCTestCase {
         f.view.setSelectedRange(NSRange(location: at, length: 0))
         f.view.insertText("Now ", replacementRange: f.view.selectedRange())
         XCTAssertTrue(f.view.string.contains("| Now Stored per tenant |"))
-        XCTAssertFalse(f.isGrid(at: f.tableRange.location))
+        XCTAssertTrue(f.isGrid(at: f.tableRange.location), "typing in a cell keeps the grid")
         f.coordinator.undo.undo()
         XCTAssertEqual(f.view.string, Self.plan)
-        f.view.setSelectedRange(NSRange(location: 3, length: 0))
         XCTAssertTrue(f.isGrid(at: f.tableRange.location))
     }
 
-    func testFindLandsOnTheMatchInTheSource() {
+    func testFindLandsOnTheMatchInTheCell() {
         let f = Self.editor()
         defer { f.window.close() }
-        // A find selects the match: a match inside the table is the caret entering it.
+        // A find selects the match; a match inside the table leaves it a grid.
         let match = (f.view.string as NSString).range(of: "Never shared")
         f.view.setSelectedRange(match)
-        XCTAssertFalse(f.isGrid(at: f.tableRange.location))
+        XCTAssertTrue(f.isGrid(at: f.tableRange.location))
         XCTAssertEqual((f.view.string as NSString).substring(with: f.view.selectedRange()), "Never shared")
     }
 

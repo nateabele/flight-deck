@@ -611,7 +611,7 @@ enum MarkdownStyler {
         [.font: font, .foregroundColor: theme.text]
     }
 
-    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
+    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, edits: [EditMark], _ theme: PlanTheme) {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
@@ -619,7 +619,7 @@ enum MarkdownStyler {
         switch block.kind {
         case .heading, .paragraph, .blank, .table:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
-            if case .table = block.kind { styleTable(storage, block, revealed: revealed, edits: edits, theme) }
+            if case .table = block.kind { styleTable(storage, block, edits: edits, theme) }
         case .quote:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
             storage.addAttribute(.foregroundColor, value: theme.quoteText, range: block.range)
@@ -708,10 +708,10 @@ enum MarkdownStyler {
     /// monospace with the columns lined up by kern, if it fits the editor's width; as wrapped
     /// body text if it doesn't. The source can't be padded (it is the plan), so a cell shorter
     /// than its column's widest gets the missing width as kern on its last character.
-    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
+    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, edits: [EditMark], _ theme: PlanTheme) {
         let u = Array(storage.mutableString.substring(with: block.range).utf16)
         let base = block.range.location
-        if !revealed, let table = PlanTable.parse(u) {
+        if let table = PlanTable.parse(u) {
             let marks = PlanTableMarks.make(edits, block: block.range, source: u, table: table)
             let layout = PlanTableLayout.cached(table, u, theme: theme, available: theme.contentWidth > 0 ? theme.contentWidth : 600, marks: marks)
             for (i, row) in table.rows.enumerated() {

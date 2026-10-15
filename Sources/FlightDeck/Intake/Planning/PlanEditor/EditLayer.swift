@@ -641,14 +641,11 @@ final class EditLayerFragment: NSTextLayoutFragment {
             }
             return true
         }
-        let selected = layout.textSelections.contains { selection in
-            selection.textRanges.contains { !$0.isEmpty && $0.intersection(rangeInElement).map { !$0.isEmpty } ?? false }
-        }
         let origin = CGPoint(x: point.x + tableOrigin.x, y: point.y + tableOrigin.y)
         // Colours resolve in the text view's appearance, not whatever a layer's draw happens to run in.
         let appearance = layout.textContainer?.textView?.effectiveAppearance ?? NSApp.effectiveAppearance
         appearance.performAsCurrentDrawingAppearance {
-            ref.layout.draw(row: ref.row, at: origin, in: context, theme: .standard, fills: fills, selected: selected)
+            ref.layout.draw(row: ref.row, at: origin, in: context, theme: .standard, fills: fills)
         }
     }
 
