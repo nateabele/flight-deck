@@ -621,8 +621,14 @@ final class PlanTableAXCell: NSAccessibilityElement {
 }
 
 extension PlanTableController {
-    /// Every grid table in the text, as accessibility elements in the text view's space.
-    func accessibilityTables() -> [NSAccessibilityElement] {
+    /// `rect` (the text view's coordinates) on the screen, where accessibility frames are.
+    private func screen(_ rect: CGRect) -> CGRect {
+        guard let window = view.window else { return rect }
+        return window.convertToScreen(view.convert(rect, to: nil))
+    }
+
+    /// Every grid table in the text, as accessibility elements.
+    func accessibilityTables(parent: Any? = nil) -> [NSAccessibilityElement] {
         guard let storage = view.textStorage else { return [] }
         var starts: [Int] = []
         storage.enumerateAttribute(.planTableRow, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
@@ -634,15 +640,15 @@ extension PlanTableController {
             let element = PlanTableAXTable()
             element.setAccessibilityRole(.table)
             element.setAccessibilityLabel("Table, \(layout.rows.filter { !$0.isHidden }.count) rows, \(layout.columns.count) columns")
-            element.setAccessibilityParent(view)
-            element.setAccessibilityFrameInParentSpace(CGRect(x: top.x, y: top.y, width: layout.width, height: layout.height))
+            element.setAccessibilityParent(parent ?? view)
+            element.setAccessibilityFrame(screen(CGRect(x: top.x, y: top.y, width: layout.width, height: layout.height)))
             var shownRow = 0
             for (r, row) in layout.rows.enumerated() where !row.isHidden {
                 guard let origin = bandOrigin(lineStart: table.rowStarts[r]) else { continue }
                 let rowElement = NSAccessibilityElement()
                 rowElement.setAccessibilityRole(.row)
                 rowElement.setAccessibilityParent(element)
-                rowElement.setAccessibilityFrameInParentSpace(CGRect(x: origin.x, y: origin.y, width: layout.width, height: row.height))
+                rowElement.setAccessibilityFrame(screen(CGRect(x: origin.x, y: origin.y, width: layout.width, height: row.height)))
                 var cells: [NSAccessibilityElement] = []
                 for (c, cell) in row.cells.enumerated() {
                     let ax = PlanTableAXCell()
@@ -652,7 +658,7 @@ extension PlanTableController {
                     ax.setAccessibilityParent(rowElement)
                     ax.rows = NSRange(location: shownRow, length: 1)
                     ax.columns = NSRange(location: c, length: 1)
-                    ax.setAccessibilityFrameInParentSpace(layout.cellRect(row: r, column: c).offsetBy(dx: origin.x, dy: origin.y))
+                    ax.setAccessibilityFrame(screen(layout.cellRect(row: r, column: c).offsetBy(dx: origin.x, dy: origin.y)))
                     cells.append(ax)
                 }
                 rowElement.setAccessibilityChildren(cells)

@@ -1471,6 +1471,14 @@ class PlanNSTextView: NSTextView {
         (super.accessibilityChildren() ?? []) + tables.accessibilityTables()
     }
 
+    /// The accessibility server asks for children by attribute, which a text view answers its own
+    /// way, not through `accessibilityChildren()`.
+    override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        let value = super.accessibilityAttributeValue(attribute)
+        guard attribute == .children else { return value }
+        return ((value as? [Any]) ?? []) + tables.accessibilityTables()
+    }
+
     override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         if let table = tables.place(at: range.location), let rect = tables.caretRect(at: range.location, in: table), let window {
             actualRange?.pointee = NSRange(location: range.location, length: 0)
