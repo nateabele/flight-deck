@@ -3,8 +3,8 @@ import XCTest
 @testable import FlightDeck
 
 /// The plan editor's tables as pictures, for design review: several tables, light and dark, at
-/// the editor's usual width and a narrow one, with the caret outside (the grid) and inside (the
-/// source). Skipped unless `FD_PLAN_TABLE_RENDER_DIR` names an output directory. Pictures, not
+/// the editor's usual width and a narrow one, with the caret outside and inside (the grid either way).
+/// Skipped unless `FD_PLAN_TABLE_RENDER_DIR` names an output directory. Pictures, not
 /// assertions — the layout is asserted in `PlanTable*Tests`.
 @MainActor
 final class PlanTableRenderTests: XCTestCase {
@@ -81,7 +81,7 @@ final class PlanTableRenderTests: XCTestCase {
                         let table = ns.range(of: "|")
                         f.view.setSelectedRange(NSRange(location: caretInside ? table.location + 4 : ns.range(of: "\n").location, length: 0))
                         f.settle()
-                        let file = "\(name)-\(mode)-\(size)-\(caretInside ? "source" : "grid").png"
+                        let file = "\(name)-\(mode)-\(size)-\(caretInside ? "caret" : "grid").png"
                         try Self.write(f, width: width, to: URL(fileURLWithPath: dir).appendingPathComponent(file))
                     }
                 }
