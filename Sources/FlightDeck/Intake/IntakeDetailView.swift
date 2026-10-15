@@ -567,6 +567,7 @@ struct IntakeDetailView: View {
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
         notes.projectPath = intake.projectPath
+        notes.intakeID = intake.id
         notes.versionOf = { [service, id = intake.id] entry in
             let tape = service.storedTape(id)
             return NoteVersion.resolve(entry, checkpoints: tape.checkpoints) { checkpoint in

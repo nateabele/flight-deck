@@ -198,4 +198,44 @@ final class NotePinningTests: XCTestCase {
         XCTAssertNil(bridge.takeReveal(in: draft))
         XCTAssertNil(c.pendingReveal)
     }
+
+    // MARK: The other-versions section
+
+    func testTheSectionTitleCountsNotesAndVersions() {
+        func card(_ v: Int) -> NoteCardModel {
+            NoteCardModel(id: UUID(), kind: .comment, quote: "q", note: "n", anchorY: nil, detached: false, consumed: true,
+                          pin: NotePin(checkpoint: v, label: "L\(v)"))
+        }
+        XCTAssertEqual(NotesRailModel.otherVersionsTitle([card(1)]), "1 note on another version")
+        XCTAssertEqual(NotesRailModel.otherVersionsTitle([card(1), card(1)]), "2 notes on another version")
+        XCTAssertEqual(NotesRailModel.otherVersionsTitle([card(1), card(2), card(2)]), "3 notes on other versions")
+    }
+
+    /// Closed over a version that has notes of its own, open when it has none; the human's
+    /// choice beats both.
+    func testTheSectionOpensOnlyWhenNothingElseNeedsTheRoom() {
+        XCTAssertFalse(NotesRailModel.otherVersionsExpanded(choice: nil, hasOwnNotes: true))
+        XCTAssertTrue(NotesRailModel.otherVersionsExpanded(choice: nil, hasOwnNotes: false))
+        XCTAssertTrue(NotesRailModel.otherVersionsExpanded(choice: true, hasOwnNotes: true))
+        XCTAssertFalse(NotesRailModel.otherVersionsExpanded(choice: false, hasOwnNotes: false))
+    }
+
+    /// The choice is kept per intake for the session: a rail made again for the same intake
+    /// finds it, another intake does not.
+    func testTheChoiceIsRememberedPerIntake() {
+        let a = UUID(), b = UUID()
+        let first = PlanNotesController()
+        first.intakeID = a
+        XCTAssertNil(first.otherVersionsExpanded)
+        first.otherVersionsExpanded = true
+        first.reset()
+        XCTAssertEqual(first.otherVersionsExpanded, true, "past a reset")
+        let again = PlanNotesController()
+        again.intakeID = a
+        XCTAssertEqual(again.otherVersionsExpanded, true)
+        again.intakeID = b
+        XCTAssertNil(again.otherVersionsExpanded)
+        again.intakeID = a
+        again.otherVersionsExpanded = nil
+    }
 }

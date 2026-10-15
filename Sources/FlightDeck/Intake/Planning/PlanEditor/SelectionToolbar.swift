@@ -118,6 +118,9 @@ final class PlanNotesBridge {
     /// be followed (a whole-text replacement), which re-finds everything.
     private var edits: [TextEdit]? = []
 
+    /// The notes this editor is bound to (for tests that need to look at them).
+    var boundNotes: PlanNotesController? { controller }
+
     /// Brings a range into view and flashes it: the editor's half of "Show in that version".
     var reveal: ((NSRange) -> Void)?
 
