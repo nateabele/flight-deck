@@ -119,10 +119,18 @@ public enum HeadroomPolicy {
             return AccountHeadroom(account: account, worstUtilization: 1, state: .overHard, resetsAt: rejection.expiry)
         }
         let unknown = AccountHeadroom(account: account, worstUtilization: nil, state: .unknown, resetsAt: nil)
-        guard let reading, isFresh(reading, now: now) else { return unknown }
-        let scored = reading.windows.map { ($0, effectiveUtilization(of: $0, readAt: reading.readAt, now: now)) }
+        guard let reading else { return unknown }
+        let fresh = isFresh(reading, now: now)
+        // A stale reading still bounds usage from BELOW until each window resets — usage never
+        // falls inside a window — so it can say "over a limit" but never "has room". Only its
+        // windows with a reset still ahead count. Without this an account maxed days ago (Radify,
+        // 2026-10-15: weekly gone in two days, so nothing has run on it or reported since) aged
+        // into `unknown`, which `LeasePolicy` leases right after any under-soft member.
+        let windows = fresh ? reading.windows : reading.windows.filter { ($0.resetsAt ?? .distantPast) > now }
+        let scored = windows.map { ($0, effectiveUtilization(of: $0, readAt: reading.readAt, now: now)) }
         guard let worst = scored.max(by: { $0.1 < $1.1 }) else { return unknown }
         let state: HeadroomState = worst.1 >= hard ? .overHard : worst.1 >= soft ? .overSoft : .underSoft
+        if !fresh, state == .underSoft { return unknown }
         return AccountHeadroom(account: account, worstUtilization: worst.1, state: state, resetsAt: worst.0.resetsAt)
     }
 }

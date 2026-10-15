@@ -30,6 +30,9 @@ struct UsageEnvironment {
     /// agy's `/usage` answer as raw JSON, or nil (`GeminiUsageSource.read`). Run off the main
     /// actor by the caller; defaulted to nothing so a test environment never spawns agy.
     var geminiUsage: @Sendable () async -> Data? = { nil }
+    /// Where each account's latest reading survives a relaunch (`saveReadings`), or nil to keep
+    /// it in memory only — the default, so a test environment never writes the user's file.
+    var ledgerFile: URL? = nil
 
     static var empty: UsageEnvironment {
         UsageEnvironment(sessions: { [] }, apiErrors: { [:] }, accounts: { [] },
@@ -66,7 +69,10 @@ struct UsageEnvironment {
                 await Task.detached(priority: .utility) {
                     GeminiUsageSource.read(path: LoginShellPath.repairing()["PATH"])
                 }.value
-            })
+            },
+            // Beside the status line's files, so it splits by build the same way. Not `.json`:
+            // `ClaudeUsageFileSource` reads every `<uuid>.json` there as a tab's file.
+            ledgerFile: ClaudePluginLocation.usageDirectory.appendingPathComponent("accounts.ledger"))
     }
 }
 
@@ -122,6 +128,8 @@ final class UsageService: ObservableObject {
     /// predicate L3-S installed before it.
     private var swarmPredicate: (@MainActor (UUID) -> Bool)?
     private var codexReadsInFlight: Set<UUID> = []
+    /// A reading reached the ledger since `ledgerFile` was last written.
+    private var readingsChanged = false
 
     private var usageFiles: ClaudeUsageFileSource
     private let headless = HeadlessClaudeUsageSource()
@@ -169,6 +177,7 @@ final class UsageService: ObservableObject {
         guard !isAttached else { return }
         isAttached = true
         replaceEnvironment(.live(store: store, preferences: preferences))
+        restoreReadings()
         usageFiles.prune(olderThan: Self.fileRetention, now: now())
         store.onCodexNotification = { [weak self] account, method, params in
             self?.ingestCodexNotification(account: account, method: method, params: params)
@@ -209,6 +218,7 @@ final class UsageService: ObservableObject {
 
     func ingest(_ reading: UsageReading) {
         ledger.ingest(reading)
+        readingsChanged = true
         taps.removeAll { $0.tap == nil }
         for box in taps where box.tap?.accountID == reading.account.id { box.tap?.send(reading) }
         revision += 1
@@ -235,6 +245,31 @@ final class UsageService: ObservableObject {
         await pollGemini(sessions, seats: seats, at: t)
         flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
+        saveReadings()
+        revision += 1
+    }
+
+    /// Writes every account's latest reading to `ledgerFile`, when any arrived since last time.
+    ///
+    /// The status line's files are per TAB, and a closed tab's file names no account any more,
+    /// so without this the ledger forgot an account the moment its last tab closed — and at
+    /// every relaunch. An account that is maxed is exactly the one nobody opens tabs on: Radify
+    /// (2026-10-15) spent its weekly window in two days, went quiet, read "unknown", and the
+    /// pool would lease it again. A reading kept here still counts after it goes stale, for the
+    /// windows whose reset is ahead (`HeadroomPolicy.evaluate`).
+    func saveReadings() {
+        guard readingsChanged, let url = environment.ledgerFile,
+              let data = try? JSONEncoder().encode(ledger.allReadings) else { return }
+        readingsChanged = false
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// Seeds the ledger from `ledgerFile`. Through `ingest`'s merge, so a reading that arrived
+    /// first is never lowered by the older one on disk.
+    func restoreReadings() {
+        guard let url = environment.ledgerFile, let data = try? Data(contentsOf: url),
+              let readings = try? JSONDecoder().decode([UsageReading].self, from: data) else { return }
+        for reading in readings { ledger.ingest(reading) }
         revision += 1
     }
 

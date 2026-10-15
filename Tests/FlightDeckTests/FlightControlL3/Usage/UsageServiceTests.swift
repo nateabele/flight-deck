@@ -38,7 +38,7 @@ final class UsageServiceTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
 
-    private func service(codexReadTimeout: TimeInterval = 20,
+    private func service(codexReadTimeout: TimeInterval = 20, ledgerFile: URL? = nil,
                          geminiUsage: @escaping @Sendable () async -> Data? = { nil }) -> UsageService {
         let c = clock!
         let env = UsageEnvironment(
@@ -58,7 +58,7 @@ final class UsageServiceTests: XCTestCase {
             notifier: { [unowned self] in self.notifier },
             isSwarmSession: { [unowned self] in self.swarm.contains($0) },
             isLive: { [unowned self] in self.live?.contains($0) ?? true },
-            geminiUsage: geminiUsage)
+            geminiUsage: geminiUsage, ledgerFile: ledgerFile)
         return UsageService(environment: env, ledger: CapacityLedger(now: { c.now }), now: { c.now }, codexReadTimeout: codexReadTimeout)
     }
 
@@ -69,6 +69,27 @@ final class UsageServiceTests: XCTestCase {
     private func writeModFile(named stem: String, percent: Double, readAt: Date) throws {
         let body = #"{"v":1,"tab":null,"session":"s","readAt":"\#(ISO8601DateFormatter().string(from: readAt))","rateLimits":[{"kind":"five_hour","percentUsed":\#(percent),"resetsAt":null}]}"#
         try Data(body.utf8).write(to: dir.appendingPathComponent("\(stem).json"))
+    }
+
+    /// Radify, 2026-10-15: maxed its weekly window, every tab on it closed, and the ledger —
+    /// memory only, fed by per-TAB files — forgot it; after a relaunch it read "unknown" and the
+    /// pool would lease it again. The latest reading per account now survives on disk and still
+    /// counts, stale, until its window resets.
+    func testAMaxedAccountsReadingSurvivesARelaunchWithNoTabsOpen() async {
+        let file = dir.appendingPathComponent("accounts.ledger")
+        let weekReset = clock.now.addingTimeInterval(4 * 86_400)
+        let first = service(ledgerFile: file)
+        first.ingest(UsageReading(account: CapacityPreferences.accountRef(accounts[1]),
+                                  windows: [UsageWindow(name: "seven_day", utilization: 1.0, resetsAt: weekReset)],
+                                  readAt: clock.now, source: "claude status line", hardRejection: false))
+        await first.tick()
+
+        clock.advance(2 * 86_400)
+        let relaunched = service(ledgerFile: file)
+        relaunched.restoreReadings()
+        let spare = relaunched.ledger.headroom(pool: CapacityPool.defaultID(for: .claude))
+            .first { $0.account.id == UsageRefs.spareID }
+        XCTAssertEqual(spare?.state, .overHard, "two days stale, still maxed until the week resets")
     }
 
     func testAModFileLandsOnItsTabsAccount() async throws {
