@@ -163,12 +163,34 @@ final class UsageServiceTests: XCTestCase {
     func testARateLimitAPIErrorRefusesTheAccountOncePerOccurrence() async throws {
         let tab = claudeTab(on: UsageRefs.workID)
         sessions = [tab]
-        apiErrors = [tab.id: SessionAPIError(status: 429, kind: "rate_limit")]
         let svc = service()
         await svc.tick()
+        apiErrors = [tab.id: SessionAPIError(status: 429, kind: "rate_limit")]
+        clock.advance(30); await svc.tick()
         let first = try XCTUnwrap(svc.ledger.rejection(account: UsageRefs.workID))
         clock.advance(30); await svc.tick()
         XCTAssertEqual(svc.ledger.rejection(account: UsageRefs.workID)?.at, first.at, "a standing error is one refusal, not one per tick")
+    }
+
+    /// 2026-10-15, after a swap: four tabs moved onto Default still wore the 429 badge from a
+    /// week Default had since left behind. The badge is persisted with the tab and the "already
+    /// counted" set is not, so every launch refused Default for 15 minutes — with every other
+    /// Personal member over its limit, ⌘N fell back to Summer Friday at 92%. An error already
+    /// showing at the first tick is history, not news.
+    func testARateLimitErrorAlreadyShowingAtLaunchIsNotANewRefusal() async {
+        let tab = claudeTab(on: UsageRefs.workID)
+        sessions = [tab]
+        apiErrors = [tab.id: SessionAPIError(status: 429, kind: "rate_limit")]
+        let svc = service()
+        await svc.tick()
+        clock.advance(30); await svc.tick()
+        XCTAssertNil(svc.ledger.rejection(account: UsageRefs.workID))
+
+        apiErrors = [:]
+        clock.advance(30); await svc.tick()
+        apiErrors = [tab.id: SessionAPIError(status: 429, kind: "rate_limit")]
+        clock.advance(30); await svc.tick()
+        XCTAssertNotNil(svc.ledger.rejection(account: UsageRefs.workID), "the same tab hitting its limit again is news")
     }
 
     func testAnOverloadedAPIIsNotThisAccountsLimit() async {
