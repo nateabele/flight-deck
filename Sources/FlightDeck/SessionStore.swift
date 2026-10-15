@@ -6513,30 +6513,15 @@ final class SessionStore: ObservableObject {
     /// spinner, and the collapsed header already carries a number (the session count); two
     /// adjacent numerals read as two counts of the same thing.
     ///
-    /// An intake that needs the human (`IntakeService.attentionCount`) enters the same
-    /// candidate pool as a synthetic `.waiting` status — a project sitting on an unanswered
-    /// triage question is exactly as demanding as a session with a permission prompt open,
-    /// and a collapsed header that only reported sessions would hide that entirely. Reading
-    /// `intakeService` here is safe to do unconditionally: its `IntakeStore` only creates its
-    /// root on the first `save(_:)`, never merely by being asked to list what is already
-    /// there, so a project with no intakes never creates the directory just because its header
-    /// rendered — and a store built without an `intakesRoot` (every test's) reads a scratch
-    /// path, never the real one (`resolvedIntakesRoot`).
+    /// Plans are deliberately NOT folded in. They used to enter as a synthetic `.waiting`
+    /// session, which made a plan needing you read as a tab needing you; Flight Control has its
+    /// own indicator at the row's trailing edge (`FlightControlSidebarIndicator`).
     func collapsedStatus(forProjectAt id: Repo.ID) -> SessionStatus? {
         guard let repo = repos.first(where: { $0.id == id }) else { return nil }
-        var candidates = repo.sessions
+        guard var best = repo.sessions
             .compactMap({ statuses[$0.id] })
             .filter({ $0.activity != .idle })
-        let attention = intakeService.attentionCount(forProject: repo.url.standardizedFileURL.path)
-        if attention > 0 {
-            candidates.append(SessionStatus(
-                activity: .waiting,
-                waitingFor: "\(attention) intake\(attention == 1 ? "" : "s") need\(attention == 1 ? "s" : "") you",
-                subagentCount: 0,
-                answerless: false
-            ))
-        }
-        guard var best = candidates.max(by: { $0.activity.summaryRank < $1.activity.summaryRank })
+            .max(by: { $0.activity.summaryRank < $1.activity.summaryRank })
         else { return nil }
         best.subagentCount = 0
         return best

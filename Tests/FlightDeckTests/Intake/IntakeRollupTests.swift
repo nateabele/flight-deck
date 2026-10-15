@@ -2,9 +2,9 @@ import XCTest
 import IntakeKit
 @testable import FlightDeck
 
-/// `SessionStore.collapsedStatus(forProjectAt:)` folding in `IntakeService.attentionCount` —
-/// so a project whose intake is sitting on an unanswered triage question still shows up as
-/// `.waiting` in the collapsed header, the same as a session with a permission prompt open.
+/// `SessionStore.collapsedStatus(forProjectAt:)` is about SESSIONS only. A plan that needs you
+/// used to enter it as a synthetic `.waiting`, so it read as a tab needing you; it has its own
+/// indicator now (`FlightControlSidebarStatus`), and these cases pin that the two stay apart.
 ///
 /// Each case hands its store a scratch `intakesRoot`, so the fixture intakes seeded here are
 /// the only ones the store can see, and the developer's real
@@ -32,7 +32,7 @@ final class IntakeRollupTests: XCTestCase {
 
     private var intakesRoot: URL { scratchDir.appendingPathComponent("intakes", isDirectory: true) }
 
-    func testProjectWithAnIntakeNeedingAnswersRollsUpToWaiting() throws {
+    func testAPlanNeedingAnswersDoesNotMakeTheCollapsedProjectWaiting() throws {
         let (store, _) = makeStore()
         let projectURL = URL(fileURLWithPath: "/w/a", isDirectory: true)
         store.newSession(in: projectURL)
@@ -42,15 +42,11 @@ final class IntakeRollupTests: XCTestCase {
         intake.state = .needsAnswers
         try IntakeStore(root: intakesRoot).save(intake)
 
-        let status = store.collapsedStatus(forProjectAt: project)
-
-        XCTAssertEqual(status?.activity, .waiting)
-        XCTAssertEqual(status?.waitingFor, "1 intake needs you")
+        XCTAssertNil(store.collapsedStatus(forProjectAt: project))
     }
 
-    /// Plural wording, and the tie-break against a real busy session: an intake waiting on the
-    /// human outranks a session merely working, matching `.waiting` > `.busy` in `summaryRank`.
-    func testTwoIntakesOutrankABusySession() throws {
+    /// Plans needing you neither outrank nor replace a busy session's own status.
+    func testPlansLeaveABusySessionsStatusAlone() throws {
         let (store, _) = makeStore()
         let projectURL = URL(fileURLWithPath: "/w/b", isDirectory: true)
         let a = store.newSession(in: projectURL)
@@ -64,13 +60,10 @@ final class IntakeRollupTests: XCTestCase {
             try IntakeStore(root: intakesRoot).save(intake)
         }
 
-        let status = store.collapsedStatus(forProjectAt: project)
-
-        XCTAssertEqual(status?.activity, .waiting)
-        XCTAssertEqual(status?.waitingFor, "2 intakes need you")
+        XCTAssertEqual(store.collapsedStatus(forProjectAt: project)?.activity, .busy)
     }
 
-    /// The hazard this rollup risks: `IntakeService.init` reads `IntakeStore.all()`, which lists
+    /// The hazard a status read risks: `IntakeService.init` reads `IntakeStore.all()`, which lists
     /// `root`'s contents but never creates it, so a project with no intakes must not leave a
     /// stray `intakes/` directory behind just because its header asked for a status.
     func testCollapsedStatusDoesNotCreateTheIntakesDirectoryWhenThereIsNoIntake() {
