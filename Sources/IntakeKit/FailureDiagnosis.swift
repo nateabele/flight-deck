@@ -57,6 +57,9 @@ public enum FailureDiagnosis {
             return Diagnosis(category: .timeout, detail: tail(stderr, errorText), action: "Retry the round.")
         }
         if exitCode == 0, let parseError {
+            if agent == .gemini, let denied = GeminiProfile.deniedToolDiagnosis(parseError) {
+                return Diagnosis(category: .invalidOutput, detail: denied.detail, action: denied.action)
+            }
             return Diagnosis(category: .invalidOutput, detail: "\(parseError)",
                               action: "The model returned something other than the schema — retry, or switch this slot's model.")
         }
