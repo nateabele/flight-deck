@@ -112,6 +112,36 @@ Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` wor
   isolation on the router, or keep the phone off a guest network. The proxy routes around the
   router; it does not fix it.
 
+#### When the phone freezes
+
+```
+scripts/phone-stalls.sh [lines]    # the phone's journal, stall stacks symbolicated
+```
+
+The app watches its own main thread (`MainStallWatch`, in `PhoneLog.swift`). When the main
+queue fails to answer within 250 ms, the watch samples the main thread's stack: at 250 ms, then
+every 500 ms, up to four samples. Each sample goes to the journal the moment it's taken, written
+synchronously from the watch's own thread, so a freeze that ends in a watchdog kill still leaves
+its stacks behind. When the thread recovers, a `main stall ms=… samples=…` line gives the total.
+Slow highlighting, rebuilds, cache reads and log reads log themselves under `perf` too.
+
+The script reads the journal with `devicectl`, not over the fleet socket, because a frozen
+phone is the one that can't answer a socket request. It resolves the app's own frames with
+`atos`, against the dSYM whose UUID matches that launch's `stall watch armed uuid=…` line. A
+launch whose build has since been overwritten in `DerivedData` prints its offsets unresolved,
+so keep the dSYM of any build you leave on the phone.
+
+Two things that cost time:
+- **Instruments and lldb are not alternatives over Wi-Fi.** `xctrace` lists a wireless phone
+  as offline even while CoreDevice reaches it. `lldb`'s `device process attach` does attach, but
+  a scripted batch that errors out quits while attached, and that kills the app.
+- **A SIGKILL report with the main thread in layout is a watchdog kill.** Check
+  `xcrun devicectl device info files --device Mobile3 --domain-type systemCrashLogs` for
+  `FlightDeckMobile-*.ips`. On 2026-10-14 three of them, each with the main thread in
+  `NSTextLayoutManager` and `GraphHost.updatePreferences`, came from a 294-item cached
+  conversation drawn before the first frame at every launch. That's why
+  `SessionTimelineModel.cachedItems` is 60.
+
 ### An offscreen render
 
 The way to compare two renderings, or to see a state you cannot navigate to.

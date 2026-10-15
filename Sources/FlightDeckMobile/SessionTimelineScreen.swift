@@ -126,6 +126,20 @@ struct SessionTimelineScreen: View {
                 // `olderAnchor` is non-nil at the top of history too.
                 if model.feed.hasOlder || model.olderFailure != nil {
                     olderStatusRow
+                        // **The backstop for the trigger row below.** A page that lands while
+                        // the reader is within `prefetchDepth` rows of the top moves the trigger
+                        // to a row beneath them, one already scrolled past, and nothing asked
+                        // again: a 34 MB transcript stopped at whatever the runway reached. This
+                        // row is the top of what is held, so while it is on screen the reader is
+                        // at that top, and each page that moves `oldest` asks for the next one.
+                        // It stops by itself: once pages push this row out of the list's
+                        // realised range, the task is cancelled. A 40-row "any of these asks"
+                        // zone was tried instead and paged through a whole transcript on launch,
+                        // because rows inserted above the viewport count as appearing.
+                        .task(id: model.feed.oldest) {
+                            guard model.olderFailure == nil else { return }
+                            model.prefetchOlder()
+                        }
                 }
                 ForEach(model.rendered) { entry in
                     entryRow(entry)

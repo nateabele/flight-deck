@@ -565,7 +565,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             evictTimelineModel(id)
         }
         PhoneLog.connection.notice(
-            "memory-warning evicted timeline models kept=\(self.timelineModels.count, privacy: .public)"
+            "memory-warning evicted timeline models kept=\(self.timelineModels.count)"
         )
     }
 
@@ -939,7 +939,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                         self?.flightControl.baseline(self?.fleet ?? .empty)
                     }
                 }
-                PhoneLog.connection.notice("state \(Self.describe(state), privacy: .public)")
+                PhoneLog.connection.notice("state \(Self.describe(state))")
             }
         }
         // The counterpart to the Mac's own `resume lastSeq=… mode=…` line, and the reason
@@ -956,7 +956,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     cache.pruneTimelines(keeping: live)
                 }
                 PhoneLog.connection.notice(
-                    "snapshot seq=\(seq) reason=\(reason.rawValue, privacy: .public)"
+                    "snapshot seq=\(seq) reason=\(reason.rawValue)"
                 )
             }
         }
@@ -964,7 +964,13 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // because reading `OSLogStore` needs `OSLog`, which FleetKit deliberately does not
         // import — see `FleetConnector.onPhoneRequest`.
         connector.onPhoneRequest = { request, reply in
-            MainActor.assumeIsolated {
+            // **Off the main thread, always.** This read used to be `OSLogStore`, which took
+            // 18.7 s on a handset and ran here on main, so every log fetch froze the phone's
+            // UI for that long. It is the app's own journal now (`PhoneLog.entries`), which is
+            // quick, but a diagnostic still has no business on the thread it diagnoses.
+            // `reply` may be called from any queue — see `FleetConnector.onPhoneRequest` — and
+            // nothing below touches the model.
+            DispatchQueue.global(qos: .utility).async {
                 switch request {
                 case .logs(let seconds, let limit):
                     let answer = PhoneLog.entries(seconds: seconds, limit: limit)
@@ -977,10 +983,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                         // not a `String` and cannot be concatenated.
                         let served = "logs served seconds=\(seconds)"
                             + " entries=\(logs.entries.count) truncated=\(logs.truncated)"
-                        PhoneLog.connection.notice("\(served, privacy: .public)")
+                        PhoneLog.connection.notice("\(served)")
                     case .failure(let refusal):
                         PhoneLog.connection.error(
-                            "logs refused code=\(refusal.code, privacy: .public)"
+                            "logs refused code=\(refusal.code)"
                         )
                     }
                     reply(answer)
@@ -992,7 +998,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // by design, see `init`.
         let dialing = "dialing lastSeq=\(resume?.seq ?? 0) cached=\(resume != nil)"
             + " endpoints=\(mac.endpoints.count)"
-        PhoneLog.connection.notice("\(dialing, privacy: .public)")
+        PhoneLog.connection.notice("\(dialing)")
         self.connector = connector
         connector.start()
     }
@@ -1009,24 +1015,38 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         fleetSave = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
-            self?.persistNow()
+            self?.persistNow(timelines: false)
         }
     }
 
     /// Write the fleet to disk now. The app calls this on entering the background, the last
     /// moment it is sure to run before iOS may kill it.
-    func persistNow() {
+    ///
+    /// `timelines: false` is the debounced save's: each feed already saves itself on its own
+    /// debounce when its items change, so re-encoding every open conversation on every fleet
+    /// tick — every two seconds while any agent is busy — wrote unchanged files for nothing.
+    /// Going to the background still writes them all, since a pending debounce may never fire.
+    func persistNow(timelines: Bool = true) {
         fleetSave?.cancel()
         fleetSave = nil
         // Not while the restored copy is all there is: nothing live has confirmed it, so
         // re-saving it would only stamp an old fleet with a new "last live" time.
         guard let cache, let mac, let resume, !isShowingCache else { return }
+        let start = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = PhoneLog.elapsed(since: start)
+            if ms >= 10 {
+                PhoneLog.perfNote("""
+                    fleet persist ms=\(ms) timelines=\(self.timelineModels.count)
+                    """)
+            }
+        }
         cache.save(CachedFleet(
             mac: mac.serviceName, epoch: resume.epoch, seq: resume.seq,
             // Connected, the fleet is current as of now; otherwise as of the last live moment.
             fleet: fleet, savedAt: isConnected ? Date() : (lastLive ?? Date())
         ))
-        timelineModels.values.forEach { $0.persist() }
+        if timelines { timelineModels.values.forEach { $0.persist() } }
     }
 
     private var isConnected: Bool {
