@@ -566,6 +566,7 @@ struct IntakeDetailView: View {
         dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
+        notes.projectPath = intake.projectPath
         notes.showRail = { [$showsInspector, service, id = intake.id] in
             service.setInspectorMode(.notes, for: id)
             $showsInspector.wrappedValue = true
@@ -634,6 +635,7 @@ struct IntakeDetailView: View {
                             .labelsHidden()
                             .lineLimit(2...6)
                             .textFieldStyle(.roundedBorder)
+                            .dropsFilePaths(into: answerBinding(i), projectPath: intake.projectPath)
                     }
                 }
             }

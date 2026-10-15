@@ -234,6 +234,8 @@ final class PlanNotesController: ObservableObject {
     /// hand the rail the inspector too, which took the Rounds editor away whenever the human
     /// clicked into the plan just to read it.
     var showRail: () -> Void = {}
+    /// What a dropped file's path is made relative to — the intake's project directory.
+    var projectPath: String?
     /// The checkpoint whose plan the editor shows — what a new anchor is selected in.
     var checkpoint: Int?
     /// The editor's text as it stands, typed-but-uncommitted edits included: anchors are
@@ -737,6 +739,8 @@ private struct NoteDraftCard: View {
                 .font(.system(size: 12))
                 .lineLimit(2...8)
                 .focused($focused)
+                .dropsFilePaths(into: Binding(get: { controller.draft?.text ?? "" }, set: { controller.draft?.text = $0 }),
+                                projectPath: controller.projectPath)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 5)
                 .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
