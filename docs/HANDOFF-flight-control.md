@@ -451,6 +451,48 @@ See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
 `PlanningInspectorUITests` uses it. `-FlightDeckPlanningFixture synthesized` seeds a draft, a synthesis that
 consumed notes, and two refines, each a long plan with tables (`NotesToolbarUITests`).
 
+### 3.11 The sidebar status
+
+A project's row in the sidebar shows what its Flight Control is doing, at the **trailing** edge.
+Session tabs show their own status at the leading edge, in a different shape, so a plan never
+reads as a tab.
+
+| State | Shows |
+|---|---|
+| Needs you (a plan in a `needsAttention` state) | an orange clipboard in a capsule, with the count when more than one |
+| Working (a plan triaging, releasing, or shaping with no stop) | an accent clipboard that pulses; still under Reduce Motion |
+| Idle, or only released plans | nothing |
+
+Needs you outranks working. It shows on collapsed and expanded rows alike. Hover and VoiceOver
+say it in words: "LarkOS plan: Refine 2 running", "2 plans need you: answer questions; choose a
+fidelity". Several working plans get a line each.
+
+- **Derivation:** `Intake/FlightControlSidebarStatus.swift` folds the phone's
+  `WireIntakeSummary` rows (`IntakeSummaryProjection`), so the attention rule and the "now"
+  wording are the phone's. It is pure and has the table of reasons.
+- **Click:** a tap on the glyph calls `FlightControlSidebarModel.open`. It selects the project
+  and selects, in its Intakes list, the first plan that needs you, else the first working one.
+  It is a tap gesture, not a `Button`: a control in the row would take the mouse-down that the
+  list's drag needs (see `ProjectHeaderRow`). A drag that starts exactly on the glyph does not
+  reorder.
+- **Redraws:** `FlightControlSidebarModel` (one per header, a `@StateObject`) absorbs the
+  service's publishes, re-derives and publishes only when the status changed.
+  `FlightControlSidebarIndicator` is `Equatable` on the status. `RenderProbe` counts
+  "projectHeader" and "fcIndicator"; `FlightControlSidebarModelTests` asserts five publishes
+  that change nothing shown redraw the indicator zero times. The header still re-evaluates on
+  every publish, because it observes the whole store; that cost was there before.
+- **Only while Flight Control is on for the project.** The model is attached only then, so a plain
+  project never builds `IntakeService`.
+- **What was removed:** the orange question mark that the header drew while expanded, and the
+  fold of plans into `SessionStore.collapsedStatus` as a synthetic "waiting" session. Both
+  made a plan needing you look like a tab needing you.
+- **Not covered:** an edit conflict (`editConflicts`) does not count as needing you, because
+  `IntakeService.needsAttention` does not. Add it there, and the sidebar and phone follow.
+- **Renders:** `FlightControlSidebarRenderTests`, `FD_FC_SIDEBAR_RENDER_DIR` (forwarded to the
+  UI-test Mac, and the PNGs are copied back by `test-unit-remote.sh`). The sidebar picture is a
+  replica column built from the real glyph views, because a running plan in a real store makes
+  its runner controller try to resume it; the `fc-header-*` pictures are the real header.
+
 ---
 
 ## 4. The phone UI and the wire

@@ -20,8 +20,8 @@ final class SessionStoreIntakeWiringTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Hundreds of tests build a bare store, and `collapsedStatus` builds the lazy service on
-    /// first read. Pointed at the real `<state dir>/intakes`, its launch recovery would rewrite
+    /// Hundreds of tests build a bare store, and a header's Flight Control indicator builds the lazy
+    /// service on first read. Pointed at the real `<state dir>/intakes`, its launch recovery would rewrite
     /// the developer's live `.triaging`/`.releasing` intakes to `.interrupted` — from a unit
     /// test. Only `FlightDeckApp.makeStore` names the real root; everything else gets none.
     func testAStoreGivenNoIntakesRootNeverResolvesTheRealOne() {
@@ -41,9 +41,8 @@ final class SessionStoreIntakeWiringTests: XCTestCase {
         XCTAssertEqual(store.intakeService.attentionCount(forProject: "/w/a"), 1)
     }
 
-    /// `ProjectHeaderRow` and `collapsedStatus` read the service through the store and observe
-    /// only the store, so without the forward an intake that stopped needing the human left
-    /// its orange badge on the header until something unrelated republished the store.
+    /// `ProjectHeaderRow` reads the service through the store and observes only the store, so
+    /// without the forward an intake that stopped needing the human left its badge on the header until something unrelated republished the store.
     func testAnIntakeChangeRepublishesTheStore() throws {
         var intake = Intake(projectPath: "/w/a", intent: "x")
         intake.state = .needsAnswers

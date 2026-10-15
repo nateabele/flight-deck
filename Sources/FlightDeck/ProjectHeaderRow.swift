@@ -27,6 +27,10 @@ struct ProjectHeaderRow: View {
     @State private var showingSwarmPopover = false
     @State private var showingTurnOff = false
     @State private var showingRemoval = false
+    /// This project's Flight Control status, absorbing `IntakeService`'s publishes so the
+    /// indicator redraws only when the status changes. Attached below, only while Flight
+    /// Control is on for the project, so a plain project never builds the service.
+    @StateObject private var flightControl = FlightControlSidebarModel()
 
     /// Whether this row should draw as the selected project. A pure static function rather than
     /// a computed property so `SidebarSelectionTests` can assert it without standing up a
@@ -61,6 +65,7 @@ struct ProjectHeaderRow: View {
     }
 
     var body: some View {
+        let _ = RenderProbe.hit("projectHeader")
         HStack(spacing: 4) {
             // Nothing in this row toggles anything, and that is load-bearing: a `Button` — or
             // a tap gesture, or an `NSViewRepresentable`, or a recognizer on the table —
@@ -158,10 +163,8 @@ struct ProjectHeaderRow: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                // Reused rather than reimplemented so the collapsed and expanded renderings
-                // of the same state cannot drift apart. `collapsedStatus` already folds an
-                // intake needing attention into its candidate pool (see its doc comment), so
-                // this one icon covers both a busy/waiting session AND a stalled intake.
+                // Sessions only: Flight Control's own state is the indicator at the row's
+                // trailing edge, drawn collapsed and expanded alike.
                 SessionStatusIcon(status: store.collapsedStatus(forProjectAt: repo.id))
                 // Independent of the icon above: `collapsedStatus` filters out idle children,
                 // so a project whose only active tab is idle-with-background-work would
@@ -170,21 +173,13 @@ struct ProjectHeaderRow: View {
                 if store.projectHasBackgroundWork(forProjectAt: repo.id) {
                     BackgroundWorkBadge()
                 }
-            } else if intakeAttentionCount > 0 {
-                // `collapsedStatus` already surfaces this via the icon above when the project
-                // is collapsed; expanded, there is no header-level status row to fold it into,
-                // so this draws it directly. Same glyph and tint as `SessionStatusIcon`'s
-                // `.waiting` case (`questionmark.circle.fill`, orange) so a stalled intake reads
-                // the same way whether the project is open or shut — but its own `Image` rather
-                // than a `SessionStatusIcon(status:)` call, since there is no session-shaped
-                // `SessionStatus` for "an intake, not a session, needs you" to construct.
-                Image(systemName: "questionmark.circle.fill")
-                    .imageScale(.small)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.orange)
-                    .help(intakeAttentionTooltip)
-                    .accessibilityHidden(true)
             }
+
+            // Flight Control, at the far end from where a session's status sits. Before the
+            // hover-only close button, as the sub-agent count is, so it rests flush right.
+            FlightControlSidebarIndicator(status: flightControl.status)
+                .equatable()
+                .onTapGesture { flightControl.open(in: store, repoID: repo.id) }
 
             if isHovered {
                 Button(action: onClose) {
@@ -224,7 +219,11 @@ struct ProjectHeaderRow: View {
         // inside the closure incremented on every `@Published` re-render, 11 builds for 1
         // mount + 10 state changes with the menu never opened) — so `flywheelStatus`'s on-demand
         // probe has to be memoized here rather than left to run on every render.
-        .onAppear { probeFlywheelStatusIfNeeded() }
+        .onAppear {
+            probeFlywheelStatusIfNeeded()
+            attachFlightControl()
+        }
+        .onChange(of: isFlywheelEnabled) { attachFlightControl() }
         .contextMenu {
             Button("New Session") { store.newClaudeTab(in: repo.url) }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
@@ -397,20 +396,11 @@ struct ProjectHeaderRow: View {
         probedFlywheelStatus = FlywheelProjectProbe.status(of: repo.url)
     }
 
-    /// How many of this project's intakes need the human — `IntakeService.attentionCount`,
-    /// keyed the same way `SessionStore.collapsedStatus` keys it (the standardized path, since
-    /// that is the spelling `SessionStore` keys flywheel identities by).
-    private var intakeAttentionCount: Int {
-        store.intakeService.attentionCount(forProject: repo.url.standardizedFileURL.path)
-    }
-
-    /// Same wording `collapsedStatus` builds for the synthetic `.waiting` status it folds an
-    /// intake into — kept in sync by eye rather than shared, since the two call sites want
-    /// slightly different sentences around it ("Waiting for you — N intakes need you" there,
-    /// a bare tooltip here).
-    private var intakeAttentionTooltip: String {
-        let n = intakeAttentionCount
-        return "\(n) intake\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") you"
+    /// Follows the project's plans while Flight Control is on, and goes quiet when it is off.
+    /// The standardized path, the spelling `IntakeService` keys a project's plans by.
+    private func attachFlightControl() {
+        let path = repo.url.standardizedFileURL.path
+        flightControl.attach(service: isFlywheelEnabled ? store.intakeService : nil, path: path)
     }
 
     /// The count and the status glyph reach VoiceOver as words here; on screen they are a
@@ -428,11 +418,10 @@ struct ProjectHeaderRow: View {
             if store.projectHasBackgroundWork(forProjectAt: repo.id) {
                 parts.append("background command running")
             }
-        } else if intakeAttentionCount > 0 {
-            // The badge itself is `.accessibilityHidden(true)` (its glyph carries no name of
-            // its own), so this is the only route this fact has to VoiceOver while expanded.
-            parts.append(intakeAttentionTooltip)
         }
+        // The indicator is inside this combined element, whose explicit label replaces its
+        // children's, so its words are added here.
+        if flightControl.status.kind != .idle { parts.append(flightControl.status.accessibilityLabel) }
         parts.append(contentsOf: Self.swarmAccessibilityParts(swarmSummary))
         return parts.joined(separator: ", ")
     }
