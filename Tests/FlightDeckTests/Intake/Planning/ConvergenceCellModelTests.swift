@@ -160,6 +160,28 @@ final class ConvergenceCellModelTests: XCTestCase {
         XCTAssertEqual(map.row(of: hot), 2)
     }
 
+    /// An unnumbered heading has no "§n" badge: its whole heading is the row's words, never
+    /// squeezed into the badge's 30 pt column (where it read "Re…", the maintainer 2026-10-15).
+    func testUnnumberedHeadingsAreTheRowsWordsNotABadge() {
+        let map = HeatmapModel(cycle: cycle([point(1, 9, churn: ["## Requirements": 4, "## 2. Technicians": 3, "## Phase 1 — Foundations": 2])]))
+        let titles = map.sections.indices.map { map.title(of: $0) }
+        XCTAssertTrue(titles.contains { $0.badge == "§2" && $0.words == "Technicians" })
+        XCTAssertTrue(titles.contains { $0.badge == nil && $0.words == "Requirements" })
+        XCTAssertTrue(titles.contains { $0.badge == nil && $0.words == "Phase 1 — Foundations" })
+    }
+
+    /// A reviewer's "N changes" names each section once, numbered ones as "§n" and others by
+    /// their words, and counts them past three (the maintainer, 2026-10-15: 51 changes once listed 51
+    /// chips, "§Phase" over and over).
+    func testReviewerSectionsAreListedOnceAndCountedWhenMany() {
+        XCTAssertEqual(SeatRowModel.sectionsPhrase(["## 2. Scope", "## 4. Rules", "## 2. Scope", "## 7. Rollout"]), " across §2 §4 §7")
+        XCTAssertEqual(SeatRowModel.sectionsPhrase(["## Requirements", "## Requirements", "## Phase 1 — Foundations"]),
+                       " across Requirements, Phase 1 — Foundations")
+        let many = ["## Intro", "## System context", "## System context", "## Phase 1", "## Product decisions", "## Phase 2", "## Release"]
+        XCTAssertEqual(SeatRowModel.sectionsPhrase(many), " in 6 sections")
+        XCTAssertEqual(SeatRowModel.sectionsPhrase([]), "")
+    }
+
     func testHeatmapWithNoChurnIsEmptyButKeepsRounds() {
         let map = HeatmapModel(cycle: cycle([point(1, 3), point(2, 1)]))
         XCTAssertEqual(map.sections, [])

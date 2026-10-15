@@ -32,6 +32,29 @@ final class ConvergenceRenderTests: XCTestCase {
         super.tearDown()
     }
 
+    /// The heatmap with unnumbered headings ("## Requirements"), at a roomy and a narrow width:
+    /// each row names its section in full rather than "Re…" in the "§n" badge column.
+    func testRenderHeatmapWithUnnumberedHeadings() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the convergence PNGs")
+        }
+        let headings = ["## Requirements", "## System context", "## Product decisions", "## Phase 1 — Foundations",
+                        "## Delivery plan", "## Phase 2 — Mini-app builder", "## Final review", "## 8. Rollout"]
+        let points = (1...4).map { r in
+            ConvergencePoint(checkpoint: r + 2, stage: .refine, round: r, changeCount: 20 - r * 3,
+                             linesChurned: 40, agreeRatio: 0.6 + Double(r) * 0.05,
+                             sectionChurn: Dictionary(uniqueKeysWithValues: headings.enumerated().map { ($1, max(0, 12 - r * 2 - $0 % 3)) }),
+                             reviewerModel: codex)
+        }
+        let map = HeatmapModel(cycle: ConvergenceSeries.assess(.refine, points))
+        let out = URL(fileURLWithPath: dir)
+        for width in [1100.0, 700.0] {
+            try PlanningRender.write(ConvergenceHeatmap(model: map, cell: nil, columns: { _ in nil }, onSelect: { _, _ in }, onClose: {}),
+                                     size: NSSize(width: width, height: 560),
+                                     to: out.appendingPathComponent("pui-heatmap-unnumbered-\(Int(width)).png"))
+        }
+    }
+
     func testRenderConvergenceStates() async throws {
         guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
             throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the convergence PNGs")
