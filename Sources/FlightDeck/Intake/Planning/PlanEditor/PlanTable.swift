@@ -54,19 +54,51 @@ final class PlanTableLayout: NSObject {
     struct Cell {
         let text: NSAttributedString
         /// `map[i]` is where display character `i` sits in the source, from the row's line start.
+        /// A ghost character (words the edit layer shows as removed) is not in the source: it
+        /// carries the place the words were.
         let map: [Int]
+        /// Display characters that are ghosts.
+        let ghost: [Bool]
         /// The cell's source extent, from the row's line start: where a click on empty space goes.
         let sourceStart: Int
         let sourceEnd: Int
+
+        init(text: NSAttributedString, map: [Int], ghost: [Bool]? = nil, sourceStart: Int, sourceEnd: Int) {
+            self.text = text
+            self.map = map
+            self.ghost = ghost ?? [Bool](repeating: false, count: map.count)
+            self.sourceStart = sourceStart
+            self.sourceEnd = sourceEnd
+        }
+
+        var hasGhost: Bool { ghost.contains(true) }
+    }
+
+    /// A removed row, drawn struck through above or below a real one.
+    struct GhostRow {
+        let cells: [Cell]
+        let height: CGFloat
     }
 
     struct Row {
+        /// The row's band: any removed rows above it, the row, any below. `top` and `height` are
+        /// the band's — what the source line is held to.
         let top: CGFloat
         let height: CGFloat
+        let above: [GhostRow]
+        let below: [GhostRow]
         let cells: [Cell]
         let isHeader: Bool
         /// The delimiter row, which takes no room.
         let isHidden: Bool
+        /// The row's own length, from its line start.
+        let lineLength: Int
+
+        /// The row itself within its band.
+        var bodyTop: CGFloat { above.reduce(0) { $0 + $1.height } }
+        var bodyHeight: CGFloat { height - bodyTop - below.reduce(0) { $0 + $1.height } }
+        /// Words were removed from one of its cells.
+        var hasGhost: Bool { cells.contains { $0.hasGhost } }
     }
 
     let rows: [Row]
@@ -79,12 +111,14 @@ final class PlanTableLayout: NSObject {
     let padding: CGSize
     /// The last row that is drawn.
     let lastVisible: Int
+    let theme: PlanTheme
 
-    init(rows: [Row], columns: [CGFloat], alignments: [PlanTable.Alignment], padding: CGSize) {
+    init(rows: [Row], columns: [CGFloat], alignments: [PlanTable.Alignment], padding: CGSize, theme: PlanTheme = .standard) {
         self.rows = rows
         self.columns = columns
         self.alignments = alignments
         self.padding = padding
+        self.theme = theme
         var x: CGFloat = 0
         var starts: [CGFloat] = []
         for column in columns { starts.append(x); x += column }
@@ -106,12 +140,14 @@ final class PlanTableLayout: NSObject {
         return cache
     }()
 
-    /// The layout of `table` (parsed from `u`) in `available` points of width.
-    static func cached(_ table: PlanTable, _ u: [UInt16], theme: PlanTheme, available: CGFloat) -> PlanTableLayout {
+    /// The layout of `table` (parsed from `u`) in `available` points of width, with room for the
+    /// words and rows the edit layer removed (`marks`).
+    static func cached(_ table: PlanTable, _ u: [UInt16], theme: PlanTheme, available: CGFloat,
+                       marks: PlanTableMarks = .none) -> PlanTableLayout {
         let source = String(utf16CodeUnits: u, count: u.count)
-        let key = "\(Int(available.rounded()))|\(theme.body.pointSize)|\(theme.tablePadding.width)|\(source)" as NSString
+        let key = "\(Int(available.rounded()))|\(theme.body.pointSize)|\(theme.tablePadding.width)|\(marks.key)|\(source)" as NSString
         if let hit = cache.object(forKey: key) { return hit }
-        let layout = make(table, u, theme: theme, available: available)
+        let layout = make(table, u, theme: theme, available: available, marks: marks)
         cache.setObject(layout, forKey: key)
         return layout
     }
@@ -119,7 +155,8 @@ final class PlanTableLayout: NSObject {
     /// Layouts built, cache hits not counted — for tests of what a keystroke costs.
     nonisolated(unsafe) private(set) static var built = 0
 
-    static func make(_ table: PlanTable, _ u: [UInt16], theme: PlanTheme, available: CGFloat) -> PlanTableLayout {
+    static func make(_ table: PlanTable, _ u: [UInt16], theme: PlanTheme, available: CGFloat,
+                     marks: PlanTableMarks = .none) -> PlanTableLayout {
         built += 1
         let basePad = theme.tablePadding
         let count = table.columnCount
@@ -127,17 +164,31 @@ final class PlanTableLayout: NSObject {
         var styled: [[Cell]] = []
         for (r, row) in table.rows.enumerated() {
             var cells: [Cell] = []
+            let ghosts = marks.inline.filter { $0.row == r }
             for c in 0..<count {
                 cells.append(c < row.cells.count
-                    ? cell(u, row.cells[c], lineStart: row.line.location, header: r == 0, alignment: table.alignments[c], theme)
+                    ? cell(u, row.cells[c], lineStart: row.line.location, header: r == 0, alignment: table.alignments[c], theme,
+                           ghosts: ghosts.filter { $0.column == c })
                     : Cell(text: NSAttributedString(), map: [], sourceStart: row.line.length, sourceEnd: row.line.length))
             }
             styled.append(cells)
         }
+        // Removed rows sit above the row they were before, or below the last one drawn.
+        let lastDrawn = table.rows.indices.last { $0 != PlanTable.delimiterRow } ?? 0
+        var removed: [Int: (above: [[Cell]], below: [[Cell]])] = [:]
+        for ghost in marks.rows {
+            let below = ghost.before >= table.rows.count
+            let row = below ? lastDrawn : ghost.before
+            for line in ghost.lines {
+                let cells = ghostCells(line, count: count, alignments: table.alignments, theme)
+                if below { removed[row, default: ([], [])].below.append(cells) } else { removed[row, default: ([], [])].above.append(cells) }
+            }
+        }
         // Natural width: the cell on one line. Minimum: its longest word.
         var natural = [CGFloat](repeating: 0, count: count)
         var longest = [CGFloat](repeating: 0, count: count)
-        for (r, cells) in styled.enumerated() where r != PlanTable.delimiterRow {
+        let extra = removed.values.flatMap { $0.above + $0.below }
+        for cells in styled.enumerated().filter({ $0.offset != PlanTable.delimiterRow }).map(\.element) + extra {
             for (c, cell) in cells.enumerated() where cell.text.length > 0 {
                 natural[c] = max(natural[c], ceil(measure(cell.text, width: 100_000).width))
                 longest[c] = max(longest[c], ceil(longestWord(cell.text)))
@@ -149,21 +200,27 @@ final class PlanTableLayout: NSObject {
         let widths = fitted.widths.map { CGFloat($0) }
         let pad = CGSize(width: CGFloat(fitted.padding), height: basePad.height)
 
+        func rowHeight(_ cells: [Cell]) -> CGFloat {
+            var height: CGFloat = 0
+            for (c, cell) in cells.enumerated() where cell.text.length > 0 {
+                height = max(height, ceil(measure(cell.text, width: widths[c] - 2 * pad.width).height))
+            }
+            return max(height, ceil(theme.body.ascender - theme.body.descender + theme.body.leading)) + 2 * pad.height
+        }
+        func ghostRows(_ lines: [[Cell]]) -> [GhostRow] { lines.map { GhostRow(cells: $0, height: rowHeight($0)) } }
+
         var rows: [Row] = []
         var top: CGFloat = 0
         for (r, cells) in styled.enumerated() {
             let hidden = r == PlanTable.delimiterRow
-            var height: CGFloat = 0
-            if !hidden {
-                for (c, cell) in cells.enumerated() where cell.text.length > 0 {
-                    height = max(height, ceil(measure(cell.text, width: widths[c] - 2 * pad.width).height))
-                }
-                height = max(height, ceil(theme.body.ascender - theme.body.descender + theme.body.leading)) + 2 * pad.height
-            }
-            rows.append(Row(top: top, height: hidden ? hiddenHeight : height, cells: cells, isHeader: r == 0, isHidden: hidden))
-            top += hidden ? hiddenHeight : height
+            let above = ghostRows(removed[r]?.above ?? []), below = ghostRows(removed[r]?.below ?? [])
+            let height = hidden ? hiddenHeight
+                : above.reduce(0) { $0 + $1.height } + rowHeight(cells) + below.reduce(0) { $0 + $1.height }
+            rows.append(Row(top: top, height: height, above: above, below: below, cells: cells, isHeader: r == 0, isHidden: hidden,
+                            lineLength: table.rows[r].line.length))
+            top += height
         }
-        return PlanTableLayout(rows: rows, columns: widths, alignments: table.alignments, padding: pad)
+        return PlanTableLayout(rows: rows, columns: widths, alignments: table.alignments, padding: pad, theme: theme)
     }
 
     private static func measure(_ text: NSAttributedString, width: CGFloat) -> CGSize {
@@ -185,10 +242,20 @@ final class PlanTableLayout: NSObject {
         return best.length == 0 ? 0 : measure(text.attributedSubstring(from: best), width: 100_000).width
     }
 
+    private static func paragraphStyle(_ theme: PlanTheme, _ alignment: PlanTable.Alignment) -> NSMutableParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byWordWrapping
+        para.lineSpacing = theme.lineSpacing * 0.5
+        para.alignment = alignment == .center ? .center : alignment == .right ? .right : .left
+        return para
+    }
+
     /// One cell's text as the grid shows it: the source less its Markdown delimiters and the
-    /// backslash of an escaped pipe, with the inline styling the rest of the editor gives it.
+    /// backslash of an escaped pipe, with the inline styling the rest of the editor gives it —
+    /// and `ghosts`, words the edit layer removed, struck through where they were (`offset`
+    /// counts the shown characters ahead of them).
     private static func cell(_ u: [UInt16], _ cell: PlanTable.Cell, lineStart: Int, header: Bool,
-                             alignment: PlanTable.Alignment, _ theme: PlanTheme) -> Cell {
+                             alignment: PlanTable.Alignment, _ theme: PlanTheme, ghosts: [PlanTableMarks.Ghost] = []) -> Cell {
         let a = cell.range.location, b = NSMaxRange(cell.range)
         var dropped = [Bool](repeating: false, count: b - a)
         for r in cell.syntax { for i in max(r.location, a)..<min(NSMaxRange(r), b) { dropped[i - a] = true } }
@@ -204,10 +271,7 @@ final class PlanTableLayout: NSObject {
         before[b - a] = chars.count
 
         let font = header ? PlanTheme.serif(theme.body.pointSize, weight: .semibold) : theme.body
-        let para = NSMutableParagraphStyle()
-        para.lineBreakMode = .byWordWrapping
-        para.lineSpacing = theme.lineSpacing * 0.5
-        para.alignment = alignment == .center ? .center : alignment == .right ? .right : .left
+        let para = paragraphStyle(theme, alignment)
         let text = NSMutableAttributedString(string: String(utf16CodeUnits: chars, count: chars.count),
                                              attributes: [.font: font, .foregroundColor: theme.text, .paragraphStyle: para])
         for span in cell.spans {
@@ -224,20 +288,71 @@ final class PlanTableLayout: NSObject {
             case .link: text.addAttribute(.foregroundColor, value: theme.link, range: range)
             }
         }
-        return Cell(text: text, map: map, sourceStart: cell.range.location - lineStart, sourceEnd: b - lineStart)
+
+        // The removed words go in last, so the styling above found its characters where they
+        // were. Latest first, so an insertion leaves the offsets of the ones before it alone.
+        var isGhost = [Bool](repeating: false, count: map.count)
+        for ghost in ghosts.enumerated().sorted(by: { ($0.element.offset, $0.offset) > ($1.element.offset, $1.offset) }).map(\.element) {
+            let k = min(max(ghost.offset, 0), text.length)
+            let words = EditGhost(text: ghost.text, font: text.length == 0 ? font : text.attribute(.font, at: min(k, text.length - 1), effectiveRange: nil) as? NSFont ?? font,
+                                  placement: .inline).attributed(ghost.text)
+            let struck = NSMutableAttributedString(attributedString: words)
+            struck.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: struck.length))
+            // The same air round them as in a paragraph (`EditGhost.room`).
+            struck.addAttribute(.kern, value: 3, range: NSRange(location: struck.length - 1, length: 1))
+            if k > 0 { text.addAttribute(.kern, value: 3, range: NSRange(location: k - 1, length: 1)) }
+            text.insert(struck, at: k)
+            map.insert(contentsOf: [Int](repeating: k < map.count ? map[k] : b - lineStart, count: struck.length), at: k)
+            isGhost.insert(contentsOf: [Bool](repeating: true, count: struck.length), at: k)
+        }
+        return Cell(text: text, map: map, ghost: isGhost, sourceStart: cell.range.location - lineStart, sourceEnd: b - lineStart)
+    }
+
+    /// The cells of a removed row: the line read as the row it was, struck through like removed
+    /// words (`EditGhost`) but for the tint, which the row has as a whole.
+    private static func ghostCells(_ line: String, count: Int, alignments: [PlanTable.Alignment], _ theme: PlanTheme) -> [Cell] {
+        let u = Array((line + "\n" + String(repeating: "|---", count: max(count, 1)) + "|").utf16)
+        let pieces = PlanTable.parse(u)?.rows.first?.cells ?? []
+        var strike = EditGhost(text: "", font: theme.body, placement: .above).attributed("x").attributes(at: 0, effectiveRange: nil)
+        strike[.font] = nil
+        strike[.backgroundColor] = nil
+        return (0..<count).map { c in
+            guard c < pieces.count, pieces[c].range.length > 0 else { return Cell(text: NSAttributedString(), map: [], sourceStart: 0, sourceEnd: 0) }
+            let text = NSMutableAttributedString(attributedString: cell(u, pieces[c], lineStart: 0, header: false, alignment: alignments[c], theme).text)
+            let all = NSRange(location: 0, length: text.length)
+            text.removeAttribute(.backgroundColor, range: all)
+            text.addAttributes(strike, range: all)
+            return Cell(text: text, map: [Int](repeating: 0, count: text.length), ghost: [Bool](repeating: true, count: text.length),
+                        sourceStart: 0, sourceEnd: 0)
+        }
     }
 
     // MARK: Drawing
 
+    /// A colour laid over a span of a row's source (offsets from the row's line start, and may
+    /// reach past it): what the decoration layers tint — the edit layer's insertions, the churn
+    /// wash, a note's highlight. A row's source is hidden, so the grid paints it in the cells
+    /// the span reaches (`paintFills`).
+    typealias Fill = (range: NSRange, color: NSColor)
+
     /// Row `index` with its top-left corner at `origin` (flipped coordinates). A row paints its
     /// own share of the table's frame, so rows drawn by separate fragments meet without a seam:
     /// the rounded border is the whole table's, clipped to this row.
-    func draw(row index: Int, at origin: CGPoint, in context: CGContext, theme: PlanTheme, tint: NSColor? = nil, selected: Bool = false) {
+    func draw(row index: Int, at origin: CGPoint, in context: CGContext, theme: PlanTheme, fills: [Fill] = [], selected: Bool = false) {
         let row = rows[index]
         guard !row.isHidden else { return }
         let band = CGRect(x: origin.x - 1, y: origin.y, width: width + 2, height: row.height)
         let frame = CGRect(x: origin.x, y: origin.y - row.top, width: width, height: height)
         let outline = CGPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), cornerWidth: theme.tableRadius, cornerHeight: theme.tableRadius, transform: nil)
+
+        // The band's parts, top down: removed rows above, the row, removed rows below.
+        var parts: [(top: CGFloat, height: CGFloat, cells: [Cell], removed: Bool)] = []
+        var y = origin.y
+        for ghost in row.above { parts.append((y, ghost.height, ghost.cells, true)); y += ghost.height }
+        let body = CGRect(x: origin.x - 1, y: y, width: width + 2, height: row.bodyHeight)
+        parts.append((y, row.bodyHeight, row.cells, false))
+        y += row.bodyHeight
+        for ghost in row.below { parts.append((y, ghost.height, ghost.cells, true)); y += ghost.height }
 
         context.saveGState()
         context.clip(to: band)
@@ -245,15 +360,15 @@ final class PlanTableLayout: NSObject {
         context.clip()
         if row.isHeader {
             context.setFillColor(theme.tableHeaderBackground.cgColor)
-            context.fill(band)
+            context.fill(body)
         }
-        if let tint {
-            context.setFillColor(tint.cgColor)
-            context.fill(band)
-        }
+        // A removed row is tinted whole, as a paragraph's removed words are (`EditGhost.attributed`).
+        context.setFillColor(EditLayer.deletedColor.withAlphaComponent(0.1).cgColor)
+        for part in parts where part.removed { context.fill(CGRect(x: origin.x - 1, y: part.top, width: width + 2, height: part.height)) }
+        paintFills(row: index, at: origin, fills: fills, in: context)
         if selected {
             context.setFillColor(NSColor.selectedTextBackgroundColor.withAlphaComponent(0.45).cgColor)
-            context.fill(band)
+            context.fill(body)
         }
         context.restoreGState()
 
@@ -268,9 +383,13 @@ final class PlanTableLayout: NSObject {
             context.move(to: CGPoint(x: line, y: top))
             context.addLine(to: CGPoint(x: line, y: bottom))
         }
-        if index != lastVisible, !row.isHeader {
-            context.move(to: CGPoint(x: origin.x, y: origin.y + row.height - 0.5))
-            context.addLine(to: CGPoint(x: origin.x + width, y: origin.y + row.height - 0.5))
+        // A rule under each part of the band; under the band itself too, but the table's last
+        // row (the outline) and the header (its own, darker rule, below).
+        var rules = parts.dropLast().map { $0.top + $0.height }
+        if index != lastVisible, !row.isHeader { rules.append(origin.y + row.height) }
+        for rule in rules {
+            context.move(to: CGPoint(x: origin.x, y: rule - 0.5))
+            context.addLine(to: CGPoint(x: origin.x + width, y: rule - 0.5))
         }
         context.strokePath()
         if row.isHeader, index != lastVisible {
@@ -289,19 +408,111 @@ final class PlanTableLayout: NSObject {
 
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-        for (c, cell) in row.cells.enumerated() where cell.text.length > 0 {
-            let rect = CGRect(x: origin.x + columnX[c] + padding.width, y: origin.y + padding.height,
-                              width: columns[c] - 2 * padding.width, height: row.height - 2 * padding.height)
-            cell.text.draw(with: rect, options: Self.drawOptions)
+        for part in parts {
+            for (c, cell) in part.cells.enumerated() where cell.text.length > 0 {
+                let rect = CGRect(x: origin.x + columnX[c] + padding.width, y: part.top + padding.height,
+                                  width: columns[c] - 2 * padding.width, height: part.height - 2 * padding.height)
+                cell.text.draw(with: rect, options: Self.drawOptions)
+            }
         }
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// The fills under a row's words, cell by cell: a span over the whole line is the whole row;
+    /// one over all of a cell's words is the cell; any other is the words it reaches, line by
+    /// line — the same fill a paragraph's text gets.
+    private func paintFills(row index: Int, at origin: CGPoint, fills: [Fill], in context: CGContext) {
+        let row = rows[index]
+        let bodyY = origin.y + row.bodyTop
+        for (range, color) in fills where range.length > 0 {
+            context.setFillColor(color.cgColor)
+            if range.location <= 0, NSMaxRange(range) >= row.lineLength {
+                context.fill(CGRect(x: origin.x - 1, y: bodyY, width: width + 2, height: row.bodyHeight))
+                continue
+            }
+            for (c, cell) in row.cells.enumerated() {
+                let runs = Self.runs(of: cell, in: range)
+                guard !runs.isEmpty else { continue }
+                if runs.reduce(0, { $0 + $1.length }) == cell.ghost.filter({ !$0 }).count {
+                    context.fill(CGRect(x: origin.x + columnX[c], y: bodyY, width: columns[c], height: row.bodyHeight))
+                    continue
+                }
+                let text = cellText(row: index, column: c)
+                for run in runs {
+                    for rect in text.rects(for: run) {
+                        context.fill(rect.insetBy(dx: -1, dy: 0).offsetBy(dx: origin.x + columnX[c] + padding.width, dy: bodyY + padding.height))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The runs of `cell`'s display characters that come from the source in `range` — never a
+    /// ghost, which was not there to be changed.
+    static func runs(of cell: Cell, in range: NSRange) -> [NSRange] {
+        var out: [NSRange] = []
+        var start: Int?
+        for i in 0...cell.map.count {
+            let inside = i < cell.map.count && !cell.ghost[i] && NSLocationInRange(cell.map[i], range)
+            if inside, start == nil { start = i }
+            if !inside, let from = start { out.append(NSRange(location: from, length: i - from)); start = nil }
+        }
+        return out
+    }
+
+    // MARK: Cell text
+
+    /// A cell's text in TextKit 1: the boxes of a span of it, where `NSAttributedString.draw`,
+    /// which paints it, can't say. Made when first asked, kept with the layout.
+    final class CellText {
+        private let manager = NSLayoutManager()
+        private let container: NSTextContainer
+        private let storage: NSTextStorage
+
+        init(_ text: NSAttributedString, width: CGFloat) {
+            storage = NSTextStorage(attributedString: text)
+            container = NSTextContainer(size: CGSize(width: max(width, 1), height: 100_000))
+            container.lineFragmentPadding = 0
+            manager.addTextContainer(container)
+            storage.addLayoutManager(manager)
+            manager.ensureLayout(for: container)
+        }
+
+        /// The boxes of the text in `range`, one per line, each the height of its line's text
+        /// (not the leading under it), in the cell text's own coordinates.
+        func rects(for range: NSRange) -> [CGRect] {
+            guard range.length > 0, manager.numberOfGlyphs > 0 else { return [] }
+            var lines: [CGRect] = []
+            manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) { _, used, _, _, _ in
+                lines.append(used)
+            }
+            var out: [CGRect] = []
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            manager.enumerateEnclosingRects(forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                            in: container) { rect, _ in
+                let line = lines.first { rect.midY >= $0.minY && rect.midY <= $0.maxY + 0.5 } ?? rect
+                out.append(CGRect(x: rect.minX, y: line.minY, width: rect.width, height: line.height))
+            }
+            return out
+        }
+    }
+
+    private var cellTexts: [Int: CellText] = [:]
+
+    private func cellText(row: Int, column: Int) -> CellText {
+        let key = row * 4096 + column
+        if let hit = cellTexts[key] { return hit }
+        let made = CellText(rows[row].cells[column].text, width: columns[column] - 2 * padding.width)
+        cellTexts[key] = made
+        return made
     }
 
     // MARK: Hit-testing
 
     /// Where in the source a click at `point` — x from the table's left edge, y from the top of
-    /// row `index` — puts the caret: the character under it in that cell's text, or the cell's
-    /// end when the click is past its words. From the row's line start. Nil outside the table.
+    /// row `index`'s band — puts the caret: the character under it in that cell's text, or the
+    /// cell's end when the click is past its words. From the row's line start. Nil outside the
+    /// table.
     func sourceOffset(row index: Int, at point: CGPoint) -> Int? {
         guard rows.indices.contains(index), !rows[index].isHidden, point.x >= 0, point.x <= width,
               let column = columnX.lastIndex(where: { $0 <= point.x }) else { return nil }
@@ -314,14 +525,14 @@ final class PlanTableLayout: NSObject {
         manager.addTextContainer(container)
         storage.addLayoutManager(manager)
         manager.ensureLayout(for: container)
-        let local = CGPoint(x: point.x - columnX[column] - padding.width, y: point.y - padding.height)
+        let local = CGPoint(x: point.x - columnX[column] - padding.width, y: max(point.y, rows[index].bodyTop) - rows[index].bodyTop - padding.height)
         let used = manager.usedRect(for: container)
         // Past the last line or the last word: the cell's end.
         guard local.y <= used.maxY else { return cell.sourceEnd }
         var fraction: CGFloat = 0
         let at = manager.characterIndex(for: local, in: container, fractionOfDistanceBetweenInsertionPoints: &fraction)
         guard at < cell.map.count else { return cell.sourceEnd }
-        return cell.map[at] + (fraction > 0.5 ? 1 : 0)
+        return cell.map[at] + (fraction > 0.5 && !cell.ghost[at] ? 1 : 0)
     }
 }
 

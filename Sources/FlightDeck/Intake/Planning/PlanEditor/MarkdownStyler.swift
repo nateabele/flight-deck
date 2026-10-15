@@ -577,24 +577,24 @@ enum MarkdownStyler {
     /// Styles the whole text. Syntax is hidden everywhere except in `revealBlock` — the one
     /// holding the caret — where it shows, quieter than the words.
     ///
-    /// `alsoRevealed` are blocks shown as source without the caret in them — a table the edit
-    /// layer has to draw a deleted cell's words in.
-    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, alsoRevealed: Set<Int> = [], theme: PlanTheme) {
+    /// `edits` are the edit layer's marks: a table's grid takes room for the words and rows they
+    /// removed (`PlanTableMarks`).
+    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, edits: [EditMark] = [], theme: PlanTheme) {
         storage.beginEditing()
         storage.setAttributes(baseAttributes(theme.body, theme), range: NSRange(location: 0, length: storage.length))
-        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock || alsoRevealed.contains(i), theme) }
+        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, edits: edits, theme) }
         storage.endEditing()
     }
 
     /// Restyles only `indices` — a caret move touches the block it left and the one it
     /// entered, never the rest of the plan.
-    static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, alsoRevealed: Set<Int> = [],
+    static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, edits: [EditMark] = [],
                         theme: PlanTheme) {
         storage.beginEditing()
         for i in Set(indices) where blocks.indices.contains(i) {
             let block = blocks[i]
             storage.setAttributes(baseAttributes(theme.font(for: block.kind), theme), range: paragraphRange(block, storage))
-            style(storage, block, revealed: i == revealBlock || alsoRevealed.contains(i), theme)
+            style(storage, block, revealed: i == revealBlock, edits: edits, theme)
         }
         storage.endEditing()
     }
@@ -611,7 +611,7 @@ enum MarkdownStyler {
         [.font: font, .foregroundColor: theme.text]
     }
 
-    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, _ theme: PlanTheme) {
+    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
@@ -619,7 +619,7 @@ enum MarkdownStyler {
         switch block.kind {
         case .heading, .paragraph, .blank, .table:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
-            if case .table = block.kind { styleTable(storage, block, revealed: revealed, theme) }
+            if case .table = block.kind { styleTable(storage, block, revealed: revealed, edits: edits, theme) }
         case .quote:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
             storage.addAttribute(.foregroundColor, value: theme.quoteText, range: block.range)
@@ -708,11 +708,12 @@ enum MarkdownStyler {
     /// monospace with the columns lined up by kern, if it fits the editor's width; as wrapped
     /// body text if it doesn't. The source can't be padded (it is the plan), so a cell shorter
     /// than its column's widest gets the missing width as kern on its last character.
-    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, _ theme: PlanTheme) {
+    private static func styleTable(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
         let u = Array(storage.mutableString.substring(with: block.range).utf16)
         let base = block.range.location
         if !revealed, let table = PlanTable.parse(u) {
-            let layout = PlanTableLayout.cached(table, u, theme: theme, available: theme.contentWidth > 0 ? theme.contentWidth : 600)
+            let marks = PlanTableMarks.make(edits, block: block.range, source: u, table: table)
+            let layout = PlanTableLayout.cached(table, u, theme: theme, available: theme.contentWidth > 0 ? theme.contentWidth : 600, marks: marks)
             for (i, row) in table.rows.enumerated() {
                 let start = base + row.line.location
                 let range = NSRange(location: start, length: min(row.line.length + 1, storage.length - start))

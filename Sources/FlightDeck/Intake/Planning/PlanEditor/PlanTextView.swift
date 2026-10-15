@@ -453,18 +453,6 @@ struct PlanTextView: NSViewRepresentable {
             return theme
         }
 
-        /// Tables the edit layer has words to draw inside — a deleted cell's text, struck through
-        /// where it was. A grid has no place for them, so such a table shows its source, as under
-        /// the caret.
-        private func sourceTables() -> Set<Int> {
-            Set(marks.compactMap { mark -> Int? in
-                guard mark.kind == .deleted, mark.inline,
-                      let index = MarkdownStyler.blockIndex(at: min(mark.range.location, max((textView?.string as NSString?)?.length ?? 1, 1) - 1), in: blocks),
-                      blocks[index].kind == .table else { return nil }
-                return index
-            })
-        }
-
         /// The width the tables were last laid out in.
         private var tableWidth: CGFloat = 0
 
@@ -495,16 +483,15 @@ struct PlanTextView: NSViewRepresentable {
         private func style(_ storage: NSTextStorage, indices: [Int]?, reveal: Int?) {
             let theme = styleTheme
             tableWidth = theme.contentWidth
-            let source = sourceTables()
             if let indices {
-                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, alsoRevealed: source, theme: theme)
+                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, edits: marks, theme: theme)
                 let ranges = Set(indices).filter(blocks.indices.contains).map { i -> NSRange in
                     let r = blocks[i].range
                     return NSRange(location: r.location, length: min(r.length + 1, storage.length - r.location))
                 }
                 EditLayer.apply(marks, to: storage, within: ranges, theme: theme)
             } else {
-                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, alsoRevealed: source, theme: theme)
+                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, theme: theme)
                 EditLayer.apply(marks, to: storage, within: nil, theme: theme)
             }
         }
@@ -535,7 +522,9 @@ struct PlanTextView: NSViewRepresentable {
                 return r.location
             } + marks.filter { !before.contains(key($0, moved: false)) }.map { $0.range.location }
             let length = (text as NSString).length
-            return Set(changed.map { min($0, max(length - 1, 0)) }.compactMap { MarkdownStyler.blockIndex(at: $0, in: blocks) }).sorted()
+            // A table's removed rows can sit just below it, at the start of the next line.
+            let places = changed.flatMap { [$0, $0 - 1] }.filter { $0 >= 0 }
+            return Set(places.map { min($0, max(length - 1, 0)) }.compactMap { MarkdownStyler.blockIndex(at: $0, in: blocks) }).sorted()
         }
 
         /// Lays the churn highlight and then the edit tint over `text` — see `churnTint`. After
