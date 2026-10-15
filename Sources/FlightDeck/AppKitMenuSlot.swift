@@ -22,9 +22,20 @@ import AppKit
 ///   AppKit top-level menu does not. State is answered on demand (`validateMenuItem`) or
 ///   written into these items in place (`setItems`), neither of which SwiftUI ever sees.
 ///
-/// Even so, every add or remove in the bar or in the host menu is answered a turn later by
-/// putting the block back where `place` says if it is not exactly there — a backstop for a
-/// rebuild SwiftUI might still make on its own (a first activation, a new SwiftUI release).
+/// **SwiftUI still rebuilds the host menu, lazily.** That measurement ran in an app that never
+/// became active. In the real, active app SwiftUI empties File and refills it with its own items
+/// after every tab switch or new tab (12 items down to 7), and it does so in its delegate's
+/// `menuNeedsUpdate(_:)` — which AppKit calls while it searches the menu for a key equivalent.
+/// So the first ⌘N after a tab switch emptied File mid-search and missed (a beep), the block came
+/// back a turn later, and the second ⌘N worked. Measured on the UI-test Mac (2026-10-15,
+/// `FirstPressUITests`): 6 of 6 first presses after a row click missed.
+///
+/// Two things put the block back, then:
+/// - **Before every key equivalent** (`prepareForKeyEquivalent`): a local key-down monitor, which
+///   runs before AppKit dispatches the key, has SwiftUI run any pending rebuild now, down each
+///   slot's path, then heals. The search that follows finds nothing left to rebuild.
+/// - **After any other add or remove** in the bar or on the path, a turn later — for a rebuild
+///   SwiftUI makes outside a key press (opening the menu, a first activation, a new release).
 @MainActor
 final class AppKitMenuSlot {
     /// Titles from the main menu down to the menu that holds the block: `["File"]`,
@@ -47,10 +58,19 @@ final class AppKitMenuSlot {
         self.place = place
     }
 
+    private final class WeakSlot {
+        weak var slot: AppKitMenuSlot?
+        init(_ slot: AppKitMenuSlot) { self.slot = slot }
+    }
+    private static var installed: [WeakSlot] = []
+    private static var keyMonitor: Any?
+
     func install(in mainMenu: NSMenu) {
         self.mainMenu = mainMenu
         heal()
         guard observers.isEmpty else { return }
+        Self.installed.append(WeakSlot(self))
+        Self.installKeyMonitor()
         for name in [NSMenu.didRemoveItemNotification, NSMenu.didAddItemNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 // A turn later: this fires during the mutation, and changing a menu inside its
@@ -67,6 +87,40 @@ final class AppKitMenuSlot {
                     }
                 }
             })
+        }
+    }
+
+    /// One for every slot. Passive: it never consumes the event, so the key goes on to the view
+    /// hierarchy and the menu exactly as before. Only keys that can be a key equivalent of ours
+    /// pay for it; plain typing does not.
+    private static func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if !event.modifierFlags.isDisjoint(with: [.command, .control, .option, .function]) {
+                MainActor.assumeIsolated { prepareForKeyEquivalent() }
+            }
+            return event
+        }
+    }
+
+    /// Has SwiftUI make any rebuild it has pending on every slot's path now, then puts each block
+    /// back, so AppKit's key-equivalent search sees the blocks in place. `menuNeedsUpdate(_:)`
+    /// is the one hook SwiftUI's menu delegate answers, and AppKit would call it during the
+    /// search anyway; with nothing pending it changes nothing.
+    static func prepareForKeyEquivalent() {
+        installed.removeAll { $0.slot == nil }
+        for box in installed { box.slot?.flushPendingRebuilds() }
+        for box in installed { box.slot?.heal() }
+    }
+
+    /// Top down, re-reading the path at each level: rebuilding a parent can replace the submenu
+    /// below it (View's rebuild makes a new Inspector menu).
+    private func flushPendingRebuilds() {
+        guard let mainMenu else { return }
+        for depth in path.indices {
+            let menus = menusOnPath(in: mainMenu)
+            guard depth < menus.count else { return }
+            menus[depth].delegate?.menuNeedsUpdate?(menus[depth])
         }
     }
 
