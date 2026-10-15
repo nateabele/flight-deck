@@ -147,6 +147,7 @@ final class UsageService: ObservableObject {
     private var firstSeen: [UUID: Date] = [:]
     private var reported: Set<UUID> = []
     private var rejectedTabs: Set<UUID> = []
+    private var apiErrorsSeeded = false
     /// Accounts already announced for the current crossing; keyed by account, not tab, so eight
     /// tabs on one account make one notice.
     private var notifiedOverHard: Set<UUID> = []
@@ -444,6 +445,19 @@ final class UsageService: ObservableObject {
 
     private func ingestAPIErrors(_ sessions: [Session], at t: Date) {
         let errors = environment.apiErrors()
+        // The first tick only records what is already showing. A tab's error badge is persisted
+        // with the tab and `rejectedTabs` is not, so without this every launch replayed each
+        // standing 429 as a refusal stamped NOW: on 2026-10-15 four tabs on Default still wore a
+        // badge from a week Default had left behind, and each relaunch refused it for 15 minutes.
+        if !apiErrorsSeeded {
+            apiErrorsSeeded = true
+            for s in sessions {
+                if let e = errors[s.id], RateLimitClassifier.isRateLimit(status: e.status, kind: e.kind) {
+                    rejectedTabs.insert(s.id)
+                }
+            }
+            return
+        }
         for s in sessions {
             guard let e = errors[s.id], RateLimitClassifier.isRateLimit(status: e.status, kind: e.kind) else {
                 rejectedTabs.remove(s.id)
