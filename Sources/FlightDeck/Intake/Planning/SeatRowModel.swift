@@ -349,7 +349,7 @@ struct SeatRowModel: Equatable, Identifiable {
         case "reviewer", "synthesizer":
             guard let n = record.changeCount else { return nil }
             guard n > 0 else { return "No changes proposed" }
-            let sections = record.sectionsChanged.isEmpty ? "" : " across " + record.sectionsChanged.map(sectionChip).joined(separator: " ")
+            let sections = sectionsPhrase(record.sectionsChanged)
             return "\(n) change\(n == 1 ? "" : "s")\(sections)"
         case "integrator":
             guard let tally = record.tally else { return nil }
@@ -371,7 +371,7 @@ struct SeatRowModel: Equatable, Identifiable {
         case .reviewer:
             guard let n = r.changeCount else { return nil }
             guard n > 0 else { return "No changes proposed" }
-            let sections = r.sections.isEmpty ? "" : " across " + r.sections.map(sectionChip).joined(separator: " ")
+            let sections = sectionsPhrase(r.sections)
             return "\(n) change\(n == 1 ? "" : "s")\(sections)"
         case .integrator:
             var parts: [String] = []
@@ -392,12 +392,27 @@ struct SeatRowModel: Equatable, Identifiable {
         }
     }
 
-    /// "§2" from a heading like "## 2. Scope"; a heading with no leading number chips on its
-    /// first word instead, so an older or hand-edited plan still gets something short.
-    private static func sectionChip(_ heading: String) -> String {
+    /// Where a round's changes landed, after "N changes": " across §2 §4 §7" for up to three
+    /// sections, else " in 12 sections". Each section once, in the order the round reported it
+    /// — the reviewer lists a section per change, and 51 changes once read as 51 chips, most of
+    /// them the same "§Phase".
+    static func sectionsPhrase(_ headings: [String]) -> String {
+        var seen = Set<String>(), unique: [String] = []
+        for heading in headings where seen.insert(sectionChip(heading)).inserted { unique.append(sectionChip(heading)) }
+        switch unique.count {
+        case 0: return ""
+        case 1...3: return " across " + unique.joined(separator: unique.contains { !$0.hasPrefix("§") } ? ", " : " ")
+        default: return " in \(unique.count) sections"
+        }
+    }
+
+    /// "§2" from a heading like "## 2. Scope"; a heading with no leading number is named by its
+    /// words ("Phase 1 — Foundations"): its first word alone ("§Phase") named nothing, and
+    /// several sections shared it.
+    static func sectionChip(_ heading: String) -> String {
         let stripped = heading.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
         if let range = stripped.range(of: #"^\d+"#, options: .regularExpression) { return "§\(stripped[range])" }
-        return "§" + (stripped.split(separator: " ").first.map(String.init) ?? stripped)
+        return stripped
     }
 }
 

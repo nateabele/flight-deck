@@ -215,6 +215,14 @@ struct HeatmapModel: Equatable {
 
     func row(of section: String) -> Int? { sections.firstIndex(of: section) }
 
+    /// A row's name as the name column draws it: the "§4" badge in its narrow column and the
+    /// words beside it for a numbered heading; no badge and the whole heading as the words for
+    /// an unnumbered one, whose label IS its words ("Requirements"). The badge column is 30 pt:
+    /// an unnumbered heading drawn there read "Re…".
+    func title(of row: Int) -> (badge: String?, words: String) {
+        names[row].isEmpty ? (nil, labels[row]) : (labels[row], names[row])
+    }
+
     /// Plan order without the plan: numbered headings by number (so §10 follows §4, which a
     /// string sort gets wrong), the preamble first, unnumbered headings after, by first change.
     private static func number(_ heading: String) -> Int {

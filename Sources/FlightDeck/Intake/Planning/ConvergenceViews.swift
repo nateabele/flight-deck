@@ -330,10 +330,12 @@ struct ConvergenceHeatmap: View {
         let span = (layout.columns.first!.lowerBound - 4)...(layout.columns.last!.upperBound + 4)
         return ZStack(alignment: .topLeading) {
             // The caption goes before the name is cut short: the row's cells and the churn lane
-            // both say it again, and "Dispatch ru…" names nothing.
+            // both say it again, and "Dispatch ru…" names nothing. Only a name too long for the
+            // column on its own is then truncated, at its end.
             ViewThatFits(in: .horizontal) {
                 nameRow(s, hot: hot, caption: model.captions[s])
                 nameRow(s, hot: hot, caption: nil)
+                nameRow(s, hot: hot, caption: nil, truncating: true)
             }
             .frame(width: layout.names.upperBound - layout.names.lowerBound, height: M.cellHeight)
             .offset(x: layout.names.lowerBound, y: y)
@@ -351,18 +353,24 @@ struct ConvergenceHeatmap: View {
         }
     }
 
-    private func nameRow(_ s: Int, hot: Bool, caption: String?) -> some View {
-        HStack(spacing: 8) {
-            Text(model.labels[s])
-                .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                .foregroundStyle(hot ? CardTone.amber : CardTone.ph3)
-                .frame(width: 30, alignment: .leading)
-            Text(model.names[s]).font(.system(size: 13)).foregroundStyle(hot ? CardTone.amber : CardTone.ph).lineLimit(1).fixedSize()
+    private func nameRow(_ s: Int, hot: Bool, caption: String?, truncating: Bool = false) -> some View {
+        let title = model.title(of: s)
+        return HStack(spacing: 8) {
+            if let badge = title.badge {
+                Text(badge)
+                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(hot ? CardTone.amber : CardTone.ph3)
+                    .frame(width: 30, alignment: .leading)
+            }
+            Text(title.words).font(.system(size: 13)).foregroundStyle(hot ? CardTone.amber : CardTone.ph).lineLimit(1)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: !truncating, vertical: false)
             Spacer(minLength: 6)
             if let caption {
                 Text(caption).font(.system(size: 11.5)).foregroundStyle(hot ? CardTone.amber : CardTone.ph3).lineLimit(1).fixedSize()
             }
         }
+        .help(title.badge.map { "\($0) \(title.words)" } ?? title.words)
     }
 
     private func heatCell(section s: Int, round r: Int, column: ClosedRange<CGFloat>) -> some View {
