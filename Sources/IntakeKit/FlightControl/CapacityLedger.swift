@@ -40,6 +40,7 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
                 return
             }
             if let current = meters[id], current.readAt > reading.readAt { return }
+            let reading = meters[id].map { Self.merged(reading, over: $0, now: now()) } ?? reading
             meters[id] = reading
             errors[id] = nil
             // "The state clears … with the next reading that is below hard" (L3-U §3). Below the
@@ -91,6 +92,37 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
 
     public func activeLeases(pool id: PoolID) -> [AccountLease] {
         lock.withLock { active.values.filter { $0.pool == id }.sorted { $0.id.uuidString < $1.id.uuidString } }
+    }
+
+    /// `newer` laid over `older`, never lowering a window it cannot show has reset.
+    ///
+    /// A reading's `readAt` is when a tab's status line WROTE it, not when the vendor measured
+    /// it: claude re-renders its status line from the rate limits of its last API response, so a
+    /// tab idle for hours reports hours-old numbers stamped now. On 2026-10-15 one such tab wrote
+    /// 71% weekly seconds after live tabs on the same account wrote 92% for the same week; the
+    /// 71% won, the account read under soft, and the pool leased it. Usage only rises within a
+    /// window, so for the same window (same name, same reset) the higher number is the current
+    /// one. A later reset is a new window and replaces the old outright. A window `newer` leaves
+    /// out is kept while its reset is still ahead — the stale tab above had no 5-hour window at
+    /// all. Windows with no reset time cannot be matched to one another, so `newer`'s stand.
+    static func merged(_ newer: UsageReading, over older: UsageReading, now: Date) -> UsageReading {
+        func sameWindow(_ a: UsageWindow, _ b: UsageWindow) -> Bool {
+            guard a.name == b.name, let ra = a.resetsAt, let rb = b.resetsAt else { return false }
+            return abs(ra.timeIntervalSince(rb)) < 60
+        }
+        var windows = newer.windows.map { window -> UsageWindow in
+            guard let prior = older.windows.first(where: { sameWindow($0, window) }),
+                  prior.utilization > window.utilization else { return window }
+            var kept = window
+            kept.utilization = prior.utilization
+            return kept
+        }
+        for prior in older.windows where !newer.windows.contains(where: { $0.name == prior.name }) {
+            if let resets = prior.resetsAt, resets > now { windows.append(prior) }
+        }
+        var result = newer
+        result.windows = windows
+        return result
     }
 
     // MARK: - Under the lock

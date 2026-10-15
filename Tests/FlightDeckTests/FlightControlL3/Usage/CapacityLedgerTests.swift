@@ -28,6 +28,39 @@ final class CapacityLedgerTests: XCTestCase {
         XCTAssertNil(LeasePolicy.pick([a]))
     }
 
+    /// 2026-10-15, live: Summer Friday's tabs reported 92% weekly, then an older tab re-rendered
+    /// its status line from rate limits it had fetched hours before and reported 71% for the SAME
+    /// window (same reset). Newest-written won, the account read under soft, and ⌘N in its pool
+    /// opened a tab on it. Within one window usage only rises, so the lower number is stale.
+    func testAStaleLowerReadingOfTheSameWindowNeverLowersIt() {
+        let weekReset = clock.now.addingTimeInterval(3 * 86_400)
+        let hourReset = clock.now.addingTimeInterval(3_600)
+        ledger.ingest(UsageReading(account: UsageRefs.work, windows: [
+            UsageWindow(name: "five_hour", utilization: 0.44, resetsAt: hourReset),
+            UsageWindow(name: "seven_day", utilization: 0.92, resetsAt: weekReset),
+        ], readAt: clock.now, source: "test", hardRejection: false))
+        clock.advance(5)
+        ledger.ingest(UsageReading(account: UsageRefs.work, windows: [
+            UsageWindow(name: "seven_day", utilization: 0.71, resetsAt: weekReset),
+        ], readAt: clock.now, source: "test", hardRejection: false))
+
+        let windows = ledger.latestReading(account: UsageRefs.workID)?.windows ?? []
+        XCTAssertEqual(windows.first { $0.name == "seven_day" }?.utilization, 0.92)
+        XCTAssertEqual(windows.first { $0.name == "five_hour" }?.utilization, 0.44,
+                       "a window the stale tab left out is kept until it resets")
+        XCTAssertEqual(ledger.headroom(pool: "claude-default").first?.state, .overSoft)
+        XCTAssertEqual(ledger.lease(pool: "claude-default")?.account, UsageRefs.spare, "the pool skips it")
+    }
+
+    /// A NEW window (a later reset) is a real drop: the vendor rolled the week over.
+    func testALowerReadingOfANewWindowReplacesTheOldOne() {
+        ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.92, at: clock.now, resetsAt: clock.now.addingTimeInterval(60)))
+        clock.advance(120)
+        ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.03, at: clock.now, resetsAt: clock.now.addingTimeInterval(7 * 86_400)))
+        XCTAssertEqual(ledger.latestReading(account: UsageRefs.workID)?.windows.map(\.utilization), [0.03])
+        XCTAssertEqual(ledger.headroom(pool: "claude-default").first?.state, .underSoft)
+    }
+
     func testUnknownAccountsLeaseInPoolOrder() {
         XCTAssertEqual(ledger.lease(pool: "claude-default")?.account, UsageRefs.work, "no readings yet: first unknown")
     }
