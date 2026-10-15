@@ -40,7 +40,7 @@ input=${input%x}
 record_usage() {
   export LC_ALL=C
   local pl=/usr/bin/plutil dir=$FLIGHT_DECK_USAGE_DIR
-  local limits last name session tab fp file old kinds kind pct resets at windows sep now tmp
+  local limits last name session tab fp file old kinds kind pct resets at windows sep now tmp home
   limits=$(printf '%s' "$input" | $pl -extract rate_limits json -o - - 2>/dev/null) || return 0
   [ -n "$limits" ] || return 0
 
@@ -73,12 +73,17 @@ record_usage() {
   done
   [ -n "$windows" ] || return 0
 
+  # The login this claude bills, so a second claude left in the tab on another account (a move
+  # that missed its daemon) is credited to its own account, not the tab's. Dropped, not escaped,
+  # when it holds a character JSON would need escaped: the reader then falls back to the tab.
+  home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  case "$home" in *'"'* | *'\'* | *[[:cntrl:]]*) home="" ;; esac
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   [ -n "$tab" ] && tab="\"$tab\"" || tab=null
   [ -n "$session" ] && session="\"$session\"" || session=null
   tmp="$dir/.$name.$$.tmp"
-  if printf '{"v":1,"tab":%s,"session":%s,"readAt":"%s","fp":"%s","rateLimits":[%s]}' \
-       "$tab" "$session" "$now" "$fp" "$windows" > "$tmp" 2>/dev/null; then
+  if printf '{"v":1,"tab":%s,"session":%s,"home":"%s","readAt":"%s","fp":"%s","rateLimits":[%s]}' \
+       "$tab" "$session" "$home" "$now" "$fp" "$windows" > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
   else
     rm -f "$tmp"

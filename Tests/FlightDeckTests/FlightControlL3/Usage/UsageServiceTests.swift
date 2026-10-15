@@ -92,6 +92,20 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertEqual(spare?.state, .overHard, "two days stale, still maxed until the week resets")
     }
 
+    /// 2026-10-15: a tab moved to Default kept a second claude, still on Summer Friday, whose
+    /// daemon the move failed to kill. Both wrote the tab's one usage file, so Summer Friday's
+    /// numbers were billed to Default. The file names the login that wrote it; that wins.
+    func testAModFileLandsOnTheAccountWhoseHomeWroteIt() async throws {
+        let tab = claudeTab(on: UsageRefs.workID)
+        sessions = [tab]
+        let body = #"{"v":1,"tab":"\#(tab.id.uuidString)","session":"s","home":"/tmp/fd-usage/s","readAt":"\#(ISO8601DateFormatter().string(from: clock.now))","rateLimits":[{"kind":"seven_day","percentUsed":88,"resetsAt":null}]}"#
+        try Data(body.utf8).write(to: dir.appendingPathComponent("\(tab.id.uuidString).json"))
+        let svc = service()
+        await svc.tick()
+        XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.spareID)?.windows.first?.utilization, 0.88)
+        XCTAssertNil(svc.ledger.latestReading(account: UsageRefs.workID), "not the tab's account")
+    }
+
     func testAModFileLandsOnItsTabsAccount() async throws {
         let tab = claudeTab(on: UsageRefs.spareID)
         sessions = [tab]
