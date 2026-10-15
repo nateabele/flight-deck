@@ -1433,6 +1433,7 @@ private struct DocumentPlan: View, Equatable {
                                          liveTape: { [service, intakeID] in service.tapes[intakeID] },
                                          router: final ? nil : service.editRouter(intakeID),
                                          folds: service.planFolds(intakeID),
+                                         scroll: service.planScroll(intakeID),
                                          projectPath: projectPath))
                 .churnLane(churn)
                 .focus(focus)

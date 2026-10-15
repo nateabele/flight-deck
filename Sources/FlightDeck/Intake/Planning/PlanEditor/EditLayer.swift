@@ -833,6 +833,9 @@ struct PlanEditHooks {
     /// The intake's folded sections (`IntakeService.planFolds`), which outlive the section; nil
     /// keeps them in the editor for as long as it lives.
     var folds: PlanFoldStore?
+    /// The intake's reading position and caret (`IntakeService.planScroll`), which outlive the
+    /// section; nil keeps none.
+    var scroll: PlanScrollMemory?
     /// The intake's project directory, which the plan's relative file links resolve against
     /// (`PlanLinks`); nil resolves only absolute and `~` paths.
     var projectPath: String?

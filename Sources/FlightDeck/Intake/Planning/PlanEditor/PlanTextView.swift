@@ -119,6 +119,9 @@ struct PlanTextView: NSViewRepresentable {
     /// Where the folded sections are kept — the intake's (`IntakeService.planFolds`), so they
     /// outlive this view; nil keeps them in the editor for as long as it lives.
     var folds: PlanFoldStore?
+    /// Where the reading position and the caret are kept (`IntakeService.planScroll`), so they
+    /// outlive this view; nil keeps none.
+    var scrollMemory: PlanScrollMemory?
     /// What the plan's relative file links resolve against — the intake's project directory.
     var projectPath: String?
     /// Writes `text` on every keystroke rather than after `EditPolicy.idle`. For an editor whose
@@ -181,6 +184,13 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// Puts the page back where it was left when this view is made again — see `scrollMemory`.
+    func remembering(_ memory: PlanScrollMemory?) -> PlanTextView {
+        var view = self
+        view.scrollMemory = memory
+        return view
+    }
+
     /// Resolves the plan's relative file links against `path` — see `projectPath`.
     func links(projectPath path: String?) -> PlanTextView {
         var view = self
@@ -219,6 +229,10 @@ struct PlanTextView: NSViewRepresentable {
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
         if let folds { coordinator.foldStore = folds }
+        coordinator.readingMemory = scrollMemory
+        container.textView.onWindowChange = { [weak coordinator] entering in
+            if entering { coordinator?.stepReadingRestore() } else { coordinator?.leavingReading() }
+        }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
         container.textView.onHover = { [weak container, weak coordinator] point in
@@ -272,6 +286,7 @@ struct PlanTextView: NSViewRepresentable {
         // Switching to the diff, or away from the intake, must not drop the last two seconds
         // of typing.
         coordinator.timer?.invalidate()
+        coordinator.leavingReading()
         coordinator.undo.removeAllActions()
         if let text = coordinator.session.endEditing() { coordinator.commit(text) }
         coordinator.notesBridge.detach()
@@ -350,6 +365,9 @@ struct PlanTextView: NSViewRepresentable {
             lastBound = text
             session.load(text)
             guard let textView, let storage = textView.textStorage else { return }
+            // The line being read, before the text it is in goes (`resumeReading`).
+            let firstLoad = !scrolling.loaded
+            let reading = readingBeforeLoad()
             if textView.string != text { textView.string = text }
             undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
@@ -366,6 +384,7 @@ struct PlanTextView: NSViewRepresentable {
             taking = nil
             MainActor.assumeIsolated { notesBridge.textChanged() }
             textView.layOutWholePlan()
+            resumeReading(reading, in: text, firstLoad: firstLoad)
         }
 
         func receive(_ incoming: String?, navigation: Bool) {
@@ -438,6 +457,7 @@ struct PlanTextView: NSViewRepresentable {
         /// Focus came or went: reveal or re-hide the caret block's syntax.
         func focusChanged() {
             MainActor.assumeIsolated { notesBridge.focusChanged() }
+            rememberCaret()
             guard let storage = textView?.textStorage else { return }
             let next = caretBlock()
             guard next != revealed else { return }
@@ -652,6 +672,8 @@ struct PlanTextView: NSViewRepresentable {
 
         /// Where this editor's folds live — the parent's store when it hands one in.
         var foldStore = PlanFoldStore()
+        /// The reading position and the caret across editors — see `PlanReadingRestore.swift`.
+        let scrolling = PlanScrollState()
         let foldFilter = PlanFoldFilter()
         let foldGutter = PlanFoldGutter()
         /// Where the pane shows the section being read; set from the environment.
@@ -681,7 +703,10 @@ struct PlanTextView: NSViewRepresentable {
             textView.onFoldKey = { [weak self] fold in self?.foldCaretSection(fold) ?? false }
             textView.visibleProxy = { [weak self] range in self?.visibleProxy(range) ?? range }
             textView.outline = { [weak self] in self?.headings ?? [] }
-            textView.onScroll = { [weak self] in self?.layOutFoldGutter() }
+            textView.onScroll = { [weak self] in
+                self?.layOutFoldGutter()
+                self?.scrollTick()
+            }
             textView.linkAt = { [weak self] location in self?.link(at: location) }
             foldGutter.measure = { [weak self] in self?.foldMarks() ?? [] }
             textView.addSubview(foldGutter, positioned: .below, relativeTo: nil)
@@ -702,6 +727,8 @@ struct PlanTextView: NSViewRepresentable {
                 textView.needsLayout = true
                 textView.needsDisplay = true
                 textView.layOutWholePlan()
+                // The lines above the reading line changed height: what is read there is another line.
+                scrollTick()
             }
             layOutFoldGutter()
         }
@@ -791,7 +818,7 @@ struct PlanTextView: NSViewRepresentable {
 
         /// The page's reading line — just under the pinned block — in text-container
         /// coordinates; nil outside a scroll view.
-        private var readingLine: CGFloat? {
+        var readingLine: CGFloat? {
             guard let textView, let clip = textView.enclosingScrollView?.contentView else { return nil }
             return textView.convert(clip.bounds, from: clip).minY + textView.obscuredTop - textView.textContainerOrigin.y
         }
@@ -900,6 +927,10 @@ struct PlanTextView: NSViewRepresentable {
                 pendingEdit = nil
                 editCount = 0
                 foldsFollowEdit()
+                if let edit = single, let memory = scrolling.memory, let anchor = memory.anchor {
+                    memory.anchor = anchor.shifted(by: TextEdit(range: edit.range, delta: edit.delta))
+                }
+                scrollTick()
             }
             MainActor.assumeIsolated { notesBridge.textChanged() }
             if parent.commitsEachKeystroke, !textView.hasMarkedText(), let text = session.flush() {
@@ -922,6 +953,7 @@ struct PlanTextView: NSViewRepresentable {
             // text typed at a folded heading's end read as inside its old body.
             if editCount == 0, let textView { unfold(containing: textView.selectedRange()) }
             MainActor.assumeIsolated { notesBridge.selectionChanged() }
+            rememberCaret()
             // Mid-edit selection changes arrive before `textDidChange` re-parses; that pass
             // restyles the caret block itself.
             guard editCount == 0, let storage = textView?.textStorage else { return }
@@ -1191,6 +1223,9 @@ class PlanNSTextView: NSTextView {
     var outline: (() -> [PlanHeading])?
     /// The page scrolled (any enclosing clip view): what is drawn against the viewport follows.
     var onScroll: (() -> Void)?
+    /// The view reached a window (true) or is about to leave it (false) — while its layout and
+    /// first responder are still its own, which is when the reading position is saved.
+    var onWindowChange: ((Bool) -> Void)?
     private var scrollObservers: [NSObjectProtocol] = []
     private var observedClips: [ObjectIdentifier] = []
 
@@ -1318,9 +1353,15 @@ class PlanNSTextView: NSTextView {
         if hoveredLink != nil { updateLinkHover(at: nil, command: false) }
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil, window != nil { onWindowChange?(false) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observeScrolls()
+        if window != nil { onWindowChange?(true) }
         if window == nil { stopWatchingModifiers() }
     }
 

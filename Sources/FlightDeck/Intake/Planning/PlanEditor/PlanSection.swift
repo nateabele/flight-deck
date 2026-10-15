@@ -414,6 +414,7 @@ struct PlanSectionBody: View {
                 .editLayer(generated: generated[shown.checkpoint])
                 .handle(editor)
                 .folds(hooks.folds)
+                .remembering(hooks.scroll)
                 .links(projectPath: hooks.projectPath)
                 .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
