@@ -43,6 +43,10 @@ fi
 #   FD_SKIP_BUILD=1                     reuse the last build-for-testing as is.
 #   FD_SKIP_MENUBAR=1                   leave out the menu-bar lane of a full run.
 #   FD_TEST_LOCAL=1                     run on THIS Mac instead of the UI-test Mac (it opens windows).
+#   FD_BEEP_DYLIB=<path>                insert the NSBeep tracer (scripts/beeptrace) into every xctest
+#                                       process and the menu-bar harness; beeps and the test that made
+#                                       them land in DerivedData/fd-test-shards/beeps.log. Set by
+#                                       test-unit-remote.sh for FD_TRACE_BEEPS=1.
 #   FD_XCTEST_SHIM=<dir>                use <dir>/xctest and the test frameworks beside it instead of
 #                                       this machine's Xcode. Set by test-unit-remote.sh only: the
 #                                       UI-test Mac's Xcode is older than the one that built the bundle.
@@ -97,9 +101,18 @@ fi
 # Contents/Frameworks joins the search path for FleetKit.framework, which the test bundle
 # links but does not embed. Without it `xctest` aborts at load with an @rpath failure that
 # reads like a missing symbol rather than a missing directory.
+# FD_BEEP_DYLIB: the tracer is inserted by variable, never by default; DYLD_INSERT_LIBRARIES is
+# stripped by SIP for system binaries, which the shim's xctest is not.
+BEEP_ENV=()
+if [ -n "${FD_BEEP_DYLIB:-}" ]; then
+  mkdir -p DerivedData/fd-test-shards
+  : > DerivedData/fd-test-shards/beeps.log   # a filtered run does not wipe the directory
+  BEEP_ENV=(DYLD_INSERT_LIBRARIES="$FD_BEEP_DYLIB" FD_BEEP_LOG="$PWD/DerivedData/fd-test-shards/beeps.log")
+fi
+
 run_xctest() {  # $1: an -XCTest selector, or empty for the whole bundle
   if [ -n "$1" ]; then set -- -XCTest "$1"; else set --; fi
-  DYLD_LIBRARY_PATH="$APPMACOS$SHIM_PATH" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS$SHIM_PATH" \
+  env ${BEEP_ENV[@]+"${BEEP_ENV[@]}"} DYLD_LIBRARY_PATH="$APPMACOS$SHIM_PATH" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS$SHIM_PATH" \
     "$XCTEST" "$@" "$BUNDLE"
 }
 
@@ -216,7 +229,7 @@ fi
 # removes from the main menu across tab, plan, inspector and Settings transitions — the Tools
 # menu blinking (2026-10-09). Off with FD_SKIP_MENUBAR=1.
 if [ -z "${FD_SKIP_MENUBAR:-}" ]; then
-  if ! FD_SKIP_BUILD=1 ./scripts/test-menu-bar.sh > "$LOGDIR/menubar.log" 2>&1; then
+  if ! env ${BEEP_ENV[@]+"${BEEP_ENV[@]}"} FD_SKIP_BUILD=1 ./scripts/test-menu-bar.sh > "$LOGDIR/menubar.log" 2>&1; then
     rc=1
     echo "=== menu-bar lane FAILED ($LOGDIR/menubar.log)" >&2
     grep -E "^MENUBAR|removals=\[[^]]" "$LOGDIR/menubar.log" >&2 || true

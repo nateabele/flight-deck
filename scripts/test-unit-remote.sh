@@ -6,6 +6,10 @@
 #   FD_TEST_SHARDS=N                    parallel xctest processes for a full run
 #   FD_SKIP_BUILD=1                     reuse the last build-for-testing here
 #   FD_SKIP_MENUBAR=1                   leave out the menu-bar lane of a full run
+#   FD_TRACE_BEEPS=1                    find what makes the macOS "can't do that" beep: inserts the
+#                                       NSBeep tracer (scripts/beeptrace) into every xctest process
+#                                       and the menu-bar harness; the log comes back as
+#                                       DerivedData/fd-test-shards/beeps.log. Off by default.
 #   FD_REMOTE_LOAD_RUNS=N               repeat the run N times under CPU burners (two per core)
 #
 # Why another machine: the suite is not headless. *LiveTests classes open real windows (a
@@ -197,6 +201,11 @@ if [ -z "${FD_TEST_FILTER:-}" ] && [ -z "${FD_SKIP_MENUBAR:-}" ]; then
   remote "$ROOT/DerivedData/menubar-harness" <<<'mkdir -p "$1"'
   ship DerivedData/menubar-harness/MenuBarHarness "$HOST:$ROOT/DerivedData/menubar-harness/"
 fi
+if [ -n "${FD_TRACE_BEEPS:-}" ]; then
+  ./scripts/beeptrace/build.sh >>"$LOG" 2>&1 || { echo "UNIT FAIL: could not build the beep tracer — see $LOG"; exit 1; }
+  remote "$ROOT/DerivedData/beeptrace" <<<'mkdir -p "$1"'
+  ship DerivedData/beeptrace/libBeepTrace.dylib "$HOST:$ROOT/DerivedData/beeptrace/"
+fi
 [ -f DerivedData/fd-test-class-timings.tsv ] \
   && ship DerivedData/fd-test-class-timings.tsv "$HOST:$ROOT/DerivedData/"
 
@@ -222,6 +231,7 @@ ENVARGS=(FD_TEST_LOCAL=1 FD_SKIP_BUILD=1 FD_MENUBAR_PREBUILT=1)
 for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS FD_PLAN_TABLE_RENDER_DIR FD_NOTES_RENDER FD_PLAN_TYPE_RENDER_DIR; do
   [ -n "${!name:-}" ] && ENVARGS+=("$name=${!name}")
 done
+[ -n "${FD_TRACE_BEEPS:-}" ] && ENVARGS+=("FD_BEEP_DYLIB=$ROOT/DerivedData/beeptrace/libBeepTrace.dylib")
 echo "[unit] running${FD_TEST_FILTER:+ $FD_TEST_FILTER} on the UI-test Mac…"
 set +e
 # Stdout is test-unit.sh's own compact summary (or xctest's output for a filtered run), the same
