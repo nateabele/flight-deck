@@ -103,7 +103,7 @@ extension PlanTableLayout {
         return made
     }
 
-    func cellText(row: Int, column: Int) -> PlanCellText {
+    func gridText(row: Int, column: Int) -> PlanCellText {
         let key = row * 4096 + column
         if let hit = texts.byCell[key] { return hit }
         let alignment: NSTextAlignment = alignments[column] == .center ? .center : alignments[column] == .right ? .right : .left
@@ -114,20 +114,51 @@ extension PlanTableLayout {
         return made
     }
 
-    /// The cell's box.
+    /// The cell's box, in its row's band: below any removed rows above it.
     func cellRect(row: Int, column: Int) -> CGRect {
-        CGRect(x: columnX[column], y: 0, width: columns[column], height: rows[row].height)
+        CGRect(x: columnX[column], y: rows[row].bodyTop, width: columns[column], height: rows[row].bodyHeight)
     }
 
     func textOrigin(row: Int, column: Int) -> CGPoint {
-        CGPoint(x: columnX[column] + padding.width, y: padding.height)
+        CGPoint(x: columnX[column] + padding.width, y: rows[row].bodyTop + padding.height)
+    }
+
+    // The model counts a cell's shown characters; the cell's display text also holds the words
+    // the edit layer shows as removed. A caret is never among those.
+
+    /// The display position of the caret `shown` real characters in: ahead of any removed words
+    /// there.
+    func displayCaret(row: Int, column: Int, shown: Int) -> Int {
+        let cell = rows[row].cells[column]
+        var real = 0
+        for i in 0..<cell.text.length {
+            if !cell.ghost[i] { if real == shown { return i }; real += 1 }
+        }
+        return cell.text.length
+    }
+
+    /// The display position of the real character `shown`, past any removed words before it.
+    func displayStart(row: Int, column: Int, shown: Int) -> Int {
+        let cell = rows[row].cells[column]
+        var real = 0
+        for i in 0..<cell.text.length where !cell.ghost[i] {
+            if real == shown { return i }
+            real += 1
+        }
+        return cell.text.length
+    }
+
+    /// The real characters before display position `at`.
+    func shown(row: Int, column: Int, display at: Int) -> Int {
+        let cell = rows[row].cells[column]
+        return (0..<min(at, cell.text.length)).filter { !cell.ghost[$0] }.count
     }
 
     /// The caret at `shown` characters into a cell's shown text. A caret past the words (spaces
     /// typed after them) is `extraSpaces` spaces on.
     func caretRect(row: Int, column: Int, shown: Int, extraSpaces: Int = 0) -> CGRect {
-        let text = cellText(row: row, column: column)
-        var box = text.caret(at: shown)
+        let text = gridText(row: row, column: column)
+        var box = text.caret(at: displayCaret(row: row, column: column, shown: shown))
         if extraSpaces > 0, text.text.length > 0 {
             let font = (text.text.attribute(.font, at: text.text.length - 1, effectiveRange: nil) as? NSFont) ?? PlanTheme.standard.body
             let space = (" " as NSString).size(withAttributes: [.font: font]).width
@@ -140,20 +171,26 @@ extension PlanTableLayout {
     /// The boxes of the shown text in `range` of a cell.
     func textRects(row: Int, column: Int, shown range: NSRange) -> [CGRect] {
         let origin = textOrigin(row: row, column: column)
-        return cellText(row: row, column: column).rects(for: range).map { $0.offsetBy(dx: origin.x, dy: origin.y) }
+        let from = displayStart(row: row, column: column, shown: range.location)
+        let to = displayCaret(row: row, column: column, shown: NSMaxRange(range))
+        return gridText(row: row, column: column).rects(for: NSRange(location: from, length: max(to - from, 0)))
+            .map { $0.offsetBy(dx: origin.x, dy: origin.y) }
     }
 
-    /// The column at `x` and the shown offset nearest `point`; nil outside the table.
+    /// The column at `x` and the shown offset nearest `point`; nil outside the table. A point in a
+    /// removed row above or below the row counts as on the row itself.
     func hit(row: Int, at point: CGPoint) -> (column: Int, shown: Int)? {
         guard rows.indices.contains(row), !rows[row].isHidden, point.x >= 0, point.x <= width,
               let column = columnX.lastIndex(where: { $0 <= point.x }) else { return nil }
-        let text = cellText(row: row, column: column)
+        let text = gridText(row: row, column: column)
         let origin = textOrigin(row: row, column: column)
-        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let body = rows[row]
+        let y = min(max(point.y, body.bodyTop + padding.height), body.bodyTop + body.bodyHeight - padding.height)
+        let local = CGPoint(x: point.x - origin.x, y: y - origin.y)
         guard text.text.length > 0 else { return (column, 0) }
         // Past the last line: the end of the words.
-        guard local.y <= text.usedHeight else { return (column, text.text.length) }
-        return (column, text.index(at: local))
+        guard local.y <= text.usedHeight else { return (column, shown(row: row, column: column, display: text.text.length)) }
+        return (column, shown(row: row, column: column, display: text.index(at: local)))
     }
 
     func column(atX x: CGFloat) -> Int? {
@@ -164,19 +201,19 @@ extension PlanTableLayout {
     /// The shown offset one wrapped line up or down in the cell at the caret's x; nil on the
     /// first or last line (the move leaves the cell).
     func verticalStep(row: Int, column: Int, shown: Int, down: Bool) -> Int? {
-        let text = cellText(row: row, column: column)
-        let caret = text.caret(at: shown)
+        let text = gridText(row: row, column: column)
+        let caret = text.caret(at: displayCaret(row: row, column: column, shown: shown))
         let lines = text.lines
         guard let current = lines.firstIndex(where: { caret.midY >= $0.box.minY && caret.midY <= $0.box.maxY + 0.5 }) else { return nil }
         let target = current + (down ? 1 : -1)
         guard lines.indices.contains(target) else { return nil }
-        return text.index(at: CGPoint(x: caret.minX, y: lines[target].box.midY))
+        return self.shown(row: row, column: column, display: text.index(at: CGPoint(x: caret.minX, y: lines[target].box.midY)))
     }
 
     /// The shown offset in a cell at `x` (the table's), on its first or last line.
     func shownOffset(row: Int, column: Int, nearX x: CGFloat, lastLine: Bool) -> Int {
-        let text = cellText(row: row, column: column)
+        let text = gridText(row: row, column: column)
         guard let line = lastLine ? text.lines.last : text.lines.first else { return 0 }
-        return text.index(at: CGPoint(x: x - textOrigin(row: row, column: column).x, y: line.box.midY))
+        return shown(row: row, column: column, display: text.index(at: CGPoint(x: x - textOrigin(row: row, column: column).x, y: line.box.midY)))
     }
 }
