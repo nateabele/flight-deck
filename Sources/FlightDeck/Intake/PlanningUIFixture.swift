@@ -69,6 +69,8 @@ enum PlanningUIFixture {
     /// document starts at its top rather than somewhere above the window.
     static let plan: String = {
         var text = "# Fixture Plan\n\nA synthetic plan for the planning inspector UI test.\n\n"
+        // A table for `PlanTableUITests`, which types in its cells.
+        text += "| Area | Decision |\n|---|---|\n| Users | Any employee |\n| Data | Per tenant |\n\n"
         for section in 1...12 {
             text += "## \(section). Fixture section \(section)\n\n"
             for step in 1...5 {
