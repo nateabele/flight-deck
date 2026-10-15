@@ -3,7 +3,7 @@
 **Feature:** the notes a person leaves on a plan for the planning rounds to read: on the Mac
 (the notes rail beside the plan editor) and on the phone (the plan reader).
 **State as of 2026-10-15, `master` `18682f2e`:** notes are pinned to the plan version they were
-written on. A layout fix for the notes rail is in flight on branch `notes-pinned-to-version` and
+written on. A layout fix for the notes rail is in flight on branch `notes-pinned-collapse` and
 is not merged yet (see "Open").
 **Audience:** agents extending this feature. Read it before touching notes. Claims here were
 checked against the code at that commit; where something is unverified it says so.
@@ -126,7 +126,7 @@ synthesis was expected; the switch-back failure was the bug.
 
 ## Open
 
-- **Rail layout, in flight on branch `notes-pinned-to-version`:** the other-versions section
+- **Rail layout, in flight on branch `notes-pinned-collapse`:** the other-versions section
   could cover cards in the aligned lane, cutting off a card on a short window. The fix being
   made: the section is collapsible, collapsed by default when it would overlap, and scrolls on
   its own when expanded. Also on that branch: checking a blank gap above the editor in one render
