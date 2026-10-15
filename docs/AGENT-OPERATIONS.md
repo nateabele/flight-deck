@@ -386,6 +386,34 @@ there, and each was a real difference between the OSes, which is why that Mac is
   an ambient `withAnimation`. The column now carries its own animation and the toggle sets state
   with none.
 
+### Finding what makes the UI-test Mac beep (`FD_TRACE_BEEPS=1`)
+
+A "you can't do that" beep on the UI-test Mac is AppKit's `NSBeep` (it ends in
+`AudioServicesPlayAlertSound`): `NSSound.beep()`, a key no responder handles (`noResponder(for:)`),
+`deleteBackward` or `moveLeft` at a text boundary, a menu action validated off. Nothing in the
+logs says which test did it, so `scripts/beeptrace/BeepTrace.m` records it. It is a dylib that
+interposes `NSBeep` and the `AudioServices` alert calls (dyld `__DATA,__interpose`; AppKit's own
+call to its own `NSBeep` cannot be interposed, the call underneath it can) and appends, per beep,
+the time, process, the running XCTest case (an `XCTestObservation` observer) and a 30-frame
+symbolicated backtrace to a log, then calls through. Opt-in; off by default; nothing ships it
+otherwise.
+
+```bash
+FD_TRACE_BEEPS=1 ./scripts/test-unit.sh    # every xctest shard, the serial lane and the menu-bar harness
+FD_TRACE_BEEPS=1 ./scripts/smoke.sh        # the XCUITest runner AND the app under test
+```
+
+The log comes back as `DerivedData/fd-test-shards/beeps.log` (unit) or
+`DerivedData/smoke-remote/beeps.log` (smoke). Every traced process writes one `LOAD` line, so a log
+with no `BEEP` lines is the pass and proves the tracer was in the processes: `rg -c '^BEEP'` is the
+count, `rg -o '^BEEP.*' | sed -E 's/.*via=//' | sort | uniq -c` the per-test tally. In the smoke
+log the app's records say `test=(no test running)` (XCTest is not loaded in the app): match them
+by time against the runner's records and `run.log`. `fd_beep_count()` is exported for a test that
+wants the count, `dlsym(RTLD_DEFAULT, "fd_beep_count")`, NULL when not traced.
+
+Code that beeps on purpose goes through an injectable seam (`PlanLinks.beep`), so a test is silent
+and can assert it beeped. Do not mute the UI-test Mac or touch its sound settings.
+
 ### The UI suite runs on another Mac
 
 `smoke.sh` hands off to `scripts/smoke-remote.sh`, which runs the suite on the dedicated UI-test

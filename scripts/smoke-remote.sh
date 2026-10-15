@@ -17,6 +17,9 @@
 # Both are read from the environment or from scripts/local.env (git-ignored; copy
 # scripts/local.env.example). No default host is committed: this repo is public.
 #   TEST_RUNNER_*     forwarded into the runner, prefix stripped, as `xcodebuild test` does
+#   FD_TRACE_BEEPS=1  find what makes the macOS "can't do that" beep: inserts the NSBeep tracer
+#                     (scripts/beeptrace) into the runner and the app under test; the log comes
+#                     back as DerivedData/smoke-remote/beeps.log. Off by default.
 #   FLIGHTDECK_TEST_THROTTLE  minimum seconds between runs on the UI-test Mac (default 120)
 #   FD_UITEST_ONLY    space-separated -only-testing: identifiers (default FlightDeckUITests), so
 #                     any UI-test script can run its own selection here instead of on this
@@ -181,6 +184,14 @@ FORWARD=()
 while IFS='=' read -r name value; do
   [ -n "$name" ] && FORWARD+=("${name#TEST_RUNNER_}=$value")
 done < <(env | grep '^TEST_RUNNER_' || true)
+if [ -n "${FD_TRACE_BEEPS:-}" ]; then
+  ./scripts/beeptrace/build.sh >>"$LOG" 2>&1 || { echo "SMOKE FAIL: could not build the beep tracer — see $LOG"; exit 1; }
+  REMOTE_ABS=$(remote "$REMOTE_DIR" <<<'cd "$1" && pwd')
+  BEEP_DYLIB="$REMOTE_ABS/DerivedData/beeptrace/libBeepTrace.dylib"
+  for prefix in "" "APP:"; do
+    FORWARD+=("${prefix}DYLD_INSERT_LIBRARIES=$BEEP_DYLIB" "${prefix}FD_BEEP_LOG=$REMOTE_ABS/beeps.log")
+  done
+fi
 python3 scripts/patch-xctestrun.py "$XCTESTRUN" "$OUT/smoke-remote.xctestrun" ${FORWARD[@]+"${FORWARD[@]}"}
 
 echo "[smoke] syncing products to ${HOST}…"
@@ -216,6 +227,11 @@ if [ "$(remote "$SHIM" <<<'cat "$1/.xcode-build" 2>/dev/null')" != "$XCODE_BUILD
   remote "$SHIM" "$XCODE_BUILD" <<<'echo "$2" > "$1/.xcode-build"'
 fi
 rsync -a -e "$RSYNC_SSH" "$OUT/smoke-remote.xctestrun" "$HOST:$REMOTE_PRODUCTS/" >>"$LOG" 2>&1
+if [ -n "${FD_TRACE_BEEPS:-}" ]; then
+  remote "$REMOTE_DIR/DerivedData/beeptrace" <<<'mkdir -p "$1"'
+  rsync -a -e "$RSYNC_SSH" DerivedData/beeptrace/libBeepTrace.dylib "$HOST:$REMOTE_DIR/DerivedData/beeptrace/" >>"$LOG" 2>&1 \
+    || { echo "SMOKE FAIL: rsync of the beep tracer to $HOST failed — see $LOG"; exit 1; }
+fi
 
 echo "[smoke] running ${ONLY[*]} on ${HOST}… (full output → $LOG)"
 set +e
@@ -233,6 +249,7 @@ do
 done
 rm -rf ~/Library/Saved\ Application\ State/dev.flightdeck.FlightDeck.savedState
 rm -rf run.xcresult
+: > beeps.log
 xcodebuild test-without-building \
   -xctestrun DerivedData/Build/Products/smoke-remote.xctestrun \
   -destination platform=macOS "$@" \
@@ -245,6 +262,8 @@ rc=$?
 set -e
 
 rm -rf "$OUT/run.xcresult"
+rm -f "$OUT/beeps.log"
+[ -n "${FD_TRACE_BEEPS:-}" ] && rsync -a -e "$RSYNC_SSH" "$HOST:$REMOTE_DIR/beeps.log" "$OUT/" >>"$LOG" 2>&1
 rsync -a -e "$RSYNC_SSH" "$HOST:$REMOTE_DIR/run.log" "$HOST:$REMOTE_DIR/run.xcresult" "$OUT/" >>"$LOG" 2>&1 \
   || echo "[smoke] warning: could not copy the log/xcresult back from $HOST"
 cat "$OUT/run.log" >>"$LOG" 2>/dev/null || true

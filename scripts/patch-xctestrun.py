@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rewrite an .xctestrun so the UI tests run on a Mac with an OLDER Xcode. Used by smoke-remote.sh.
 
-    patch-xctestrun.py <in.xctestrun> <out.xctestrun> [NAME=VALUE ...]
+    patch-xctestrun.py <in.xctestrun> <out.xctestrun> [NAME=VALUE | APP:NAME=VALUE ...]
 
 The bundle is built here, with this Mac's Xcode, but run by `xcodebuild test-without-building`
 on the UI-test Mac, whose Xcode can be older. The xctestrun this Mac writes resolves XCTest
@@ -27,6 +27,8 @@ Each NAME=VALUE goes into the UI-test runner's environment. `xcodebuild` forward
 `TEST_RUNNER_*` variables to the runner (prefix stripped) only from its OWN environment, and the
 remote xcodebuild's environment is an ssh session's, so a flake-hunt gate set on this Mac would
 otherwise never arrive and its case would silently SKIP. The caller strips the prefix.
+APP:NAME=VALUE goes into the environment of the app under test instead (UITargetAppEnvironmentVariables),
+which the runner's own environment does not reach: smoke-remote.sh's FD_TRACE_BEEPS=1 uses it.
 
 Handles both xctestrun layouts: FormatVersion 1 keys targets at the top level, 2 nests them
 under TestConfigurations.
@@ -43,7 +45,7 @@ def remote_safe(paths):
     return [p for p in paths.split(":") if p and not p.startswith(("__SHAREDFRAMEWORKS__", "__PLATFORMS__", "__DEVELOPERUSRLIB__"))]
 
 
-def patch_target(target, extra):
+def patch_target(target, extra, app_extra):
     env = target.setdefault("TestingEnvironmentVariables", {})
     env["DYLD_FRAMEWORK_PATH"] = ":".join(
         remote_safe(env.get("DYLD_FRAMEWORK_PATH", "")) + ["__TESTHOST__/Contents/Frameworks", SHIM]
@@ -58,11 +60,14 @@ def patch_target(target, extra):
         env.pop("DYLD_INSERT_LIBRARIES", None)
     target.setdefault("EnvironmentVariables", {}).update(extra)
     env.update(extra)
+    if app_extra:
+        target.setdefault("UITargetAppEnvironmentVariables", {}).update(app_extra)
 
 
 def main():
     src, dst, *pairs = sys.argv[1:]
-    extra = dict(pair.split("=", 1) for pair in pairs)
+    extra = dict(pair.split("=", 1) for pair in pairs if not pair.startswith("APP:"))
+    app_extra = dict(pair[4:].split("=", 1) for pair in pairs if pair.startswith("APP:"))
     with open(src, "rb") as f:
         run = plistlib.load(f)
 
@@ -71,13 +76,13 @@ def main():
         for config in run["TestConfigurations"]:
             config["TestTargets"] = [t for t in config["TestTargets"] if t.get("BlueprintName") == UI_TARGET]
             for target in config["TestTargets"]:
-                patch_target(target, extra)
+                patch_target(target, extra, app_extra)
                 patched += 1
     else:
         for key in [k for k in run if not k.startswith("__") and k != UI_TARGET]:
             del run[key]
         if UI_TARGET in run:
-            patch_target(run[UI_TARGET], extra)
+            patch_target(run[UI_TARGET], extra, app_extra)
             patched += 1
 
     # A silent no-op would ship an unpatched file and fail remotely with the XCTest symbol error
