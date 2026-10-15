@@ -220,6 +220,28 @@ final class PlanTableMarksTests: XCTestCase {
         }
     }
 
+    /// The removed row sits at the start of the line after the table, which belongs to another block:
+    /// the table is restyled to take it when the layer lands, and again when it goes.
+    func testARemovedLastRowComesAndGoesWithTheLayer() throws {
+        let plan = PlanTableEditorTests.plan
+        let generated = plan.replacingOccurrences(of: "| Data | Stored per tenant | Never shared |\n", with: "| Data | Stored per tenant | Never shared |\n| Extra | x | y |\n")
+        let f = PlanTableEditorTests.editor(plan)
+        defer { f.window.close() }
+        let data = (f.view.string as NSString).range(of: "| Data").location
+        func ref() throws -> PlanTableRowRef { try XCTUnwrap(f.storage.attribute(.planTableRow, at: data, effectiveRange: nil) as? PlanTableRowRef) }
+        XCTAssertEqual(try ref().layout.rows[3].below.count, 0)
+        f.coordinator.layEditLayer(over: generated)
+        f.settle()
+        XCTAssertEqual(try ref().layout.rows[3].below.count, 1, "the table below which a row was removed shows it")
+        XCTAssertEqual(try ref().layout.rows[3].below[0].cells.map(\.text.string), ["Extra", "x", "y"])
+        let heading = (f.view.string as NSString).range(of: "## Next section").location
+        XCTAssertNil(f.storage.attribute(.planEditGhosts, at: heading, effectiveRange: nil), "and the next line draws nothing of it")
+        f.coordinator.layEditLayer(over: plan)
+        f.settle()
+        XCTAssertEqual(try ref().layout.rows[3].below.count, 0)
+        XCTAssertEqual(f.view.string, plan)
+    }
+
     func testRemovedWordsOutsideAGridKeepTheirOldPlace() {
         // A paragraph's ghost is still kern in the line: the grid takes only a grid row's.
         let generated = "A job stays Unassigned for 24 hours.\n", edited = "A job stays Unassigned.\n"
