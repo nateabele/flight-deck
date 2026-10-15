@@ -46,6 +46,13 @@ public struct PipeTable: Equatable, Sendable {
 
     public static func parse(_ text: String) -> PipeTable? { parse(Array(text.utf16)) }
 
+    /// The cells of the one line `line` of `u`, as `parse` makes them for a row. For the editor,
+    /// which reads the row a keystroke is in rather than the whole table.
+    public static func cells(in u: [UInt16], line: NSRange) -> [NSRange] { split(u, line) }
+
+    /// The alignments the line `line` of `u` declares as a delimiter row; nil when it is not one.
+    public static func alignments(ofDelimiter u: [UInt16], line: NSRange) -> [Alignment]? { delimiter(u, line) }
+
     /// A cell's text as shown: an escaped pipe is a pipe.
     public static func display(_ cell: String) -> String { cell.replacingOccurrences(of: "\\|", with: "|") }
 
