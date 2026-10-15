@@ -3708,3 +3708,23 @@ GUI check for the maintainer, in a Release build with two claude accounts in a p
    `flightdeck account switch --session <id> <email>`: the half sentence returns unsent.
 4. `/switch-account nope` answers with the list of valid choices; `/switch-account <pool>` with
    every other member over soft answers that nothing is below its limit and moves nothing.
+
+## Orphaned agents after an account move or a swap (2026-10-15, unresolved)
+
+Five conversations each had two `claude` processes, the older one under an fd-abduco daemon whose
+socket path had since been taken by a newer daemon, so nothing could reach it:
+
+- `ca1b2dcb` ("Flywheel Planning"): Summer Friday claude from 10-13 12:18 survived the tab's
+  move to Default at 10-15 17:09. It kept writing the tab's usage file, which billed Summer
+  Friday's numbers to Default (c9cabb58 now attributes by config home) and was the source of
+  the stale 71% that let ⌘N lease Summer Friday at 92% (448b1e3d).
+- `f7f7dec9`, `1b1f66bb`, `f4b9789f`: second daemons started 10-13 20:46, the time of a release
+  swap; the older daemons were never terminated.
+- `a4c9067b`: a 10-05 daemon with no socket file, beside a different tab resuming the same
+  conversation since 10-12.
+
+All five older pairs were reaped by hand on 10-15 (SIGTERM claude, then daemon). The build that
+ran the 17:09 move already had `terminateCore`'s argv fallback (3cdacb66), and the unified log
+kept nothing from it, so why the move missed daemon 46819 is unknown. Next step: reproduce a
+`/switch-account` on a tab whose daemon predates pidfiles, with `log stream` on the
+`DaemonControl` logger, and have restore/reconcile flag any conversation with two live claudes.
