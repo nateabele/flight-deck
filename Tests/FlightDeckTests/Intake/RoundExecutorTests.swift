@@ -1360,4 +1360,21 @@ extension RoundExecutorTests {
         XCTAssertTrue(p.contains("1. [must change] in section \"## Scope\":\n   > One\n   This must change: say which platforms"), p)
         XCTAssertTrue(p.contains("The human steering this plan says:\n- keep it small"), p)
     }
+
+    /// A note written on the drafts (checkpoint 1), read by a round whose plan is the synthesis
+    /// (checkpoint 2), names the version its quote is from; a note on the plan being read doesn't.
+    func testANoteFromAnEarlierVersionNamesItsVersionInThePrompt() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        var tape = try refineTape()
+        let early = PlanNote(kind: .question, note: "why", anchor: NoteAnchor(checkpoint: 1, quote: "One", section: "## Scope"))
+        let current = PlanNote(kind: .comment, note: "fine", anchor: NoteAnchor(checkpoint: 2, quote: "Two", section: "## Scope"))
+        tape.pendingNotes = [early, current]
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                          inputs(config(), tape: tape)))
+        let p = try XCTUnwrap(runner.calls("reviewer").first).prompt
+        XCTAssertTrue(p.contains("   > One\n   (Quoted from the Draft · Round 0 version of the plan"), p)
+        XCTAssertEqual(p.components(separatedBy: "Quoted from the").count, 2, "only the note from the earlier version says so")
+    }
 }

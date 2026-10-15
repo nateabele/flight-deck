@@ -66,6 +66,23 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertTrue(FleetCapability.supported.contains(FleetCapability.flightControl))
     }
 
+    /// A note names the version it was written on; a Mac that predates that sends neither key,
+    /// and the phone still decodes the note (as one with no version).
+    func testANoteRoundTripsItsVersionAndDecodesWithout() throws {
+        let id = UUID()
+        let pinned = WireNote(id: id, kind: "comment", text: "Why not SQLite?", quote: "Run PostgreSQL", section: "## Storage",
+                              consumed: true, blockIndex: nil, checkpoint: 1, version: "Draft · Round 0")
+        let data = try JSONEncoder().encode(pinned)
+        XCTAssertEqual(try JSONDecoder().decode(WireNote.self, from: data), pinned)
+
+        let old = Data(#"{"id":"\#(id.uuidString)","kind":"comment","text":"Why not SQLite?","quote":"Run PostgreSQL","consumed":true}"#.utf8)
+        let decoded = try JSONDecoder().decode(WireNote.self, from: old)
+        XCTAssertNil(decoded.checkpoint)
+        XCTAssertNil(decoded.version)
+        XCTAssertEqual(decoded.quote, "Run PostgreSQL")
+        XCTAssertEqual(decoded.id, id)
+    }
+
     func testADetailRoundTripsEveryNestedType() throws {
         let note = WireNote(id: UUID(), kind: "mustChange", text: "Not enough.",
                             quote: "Require explicit proof", section: "7. Model-credential paths",

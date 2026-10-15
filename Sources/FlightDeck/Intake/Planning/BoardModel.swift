@@ -401,17 +401,7 @@ struct BoardModel: Equatable {
 
     // MARK: - Names
 
-    static func name(stage: Stage, round: Int) -> String {
-        switch stage {
-        case .draft: "Draft"
-        case .synthesis: "Synthesis"
-        case .refine: "Refine \(round)"
-        case .encode: "Encode"
-        case .polish: "Polish \(round)"
-        case .freshEyes: "Fresh eyes"
-        case .dedup: "Dedup"
-        }
-    }
+    static func name(stage: Stage, round: Int) -> String { stage.versionName(round: round) }
 
     static func code(stage: Stage, round: Int) -> String {
         switch stage {

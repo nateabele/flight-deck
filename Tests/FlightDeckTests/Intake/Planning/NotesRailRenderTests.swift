@@ -184,6 +184,114 @@ final class NotesRailRenderTests: XCTestCase {
                                  appearance: .aqua)
     }
 
+    // MARK: Notes pinned to the version they were written on
+
+    private static let draftPlan = """
+    # Field-service scheduling
+
+    ## Storage
+
+    Run PostgreSQL on encrypted gp3 EBS storage as the system of record for every app.
+
+    ## Access
+
+    Each owner controls a specific invite list for use and can publish their own drafts after automated checks.
+    """
+
+    private static let synthesisPlan = """
+    # Field-service scheduling
+
+    ## Storage
+
+    One SQLite file per app, on a volume the platform snapshots nightly.
+
+    ## Access
+
+    Apps are open to the whole company unless the owner narrows them to an invite list.
+    """
+
+    /// The tape after synthesis: two notes written on the drafts (checkpoint 1) and read by
+    /// synthesis (checkpoint 2), one written on the synthesis plan and still pending.
+    private func pinnedTape() -> (tape: Tape, controller: PlanNotesController, load: (Int, String) -> Data?) {
+        let draft = Self.draftPlan, synthesis = Self.synthesisPlan
+        func anchor(_ quote: String, in plan: String, checkpoint: Int) -> NoteAnchor {
+            NoteAnchor(checkpoint: checkpoint, selecting: plan.range(of: quote)!, in: plan)
+        }
+        let postgres = PlanNote(kind: .question, note: "Why not SQLite? Most of the state can live in memory anyway.",
+                                anchor: anchor("Run PostgreSQL on encrypted gp3 EBS storage", in: draft, checkpoint: 1))
+        let invites = PlanNote(kind: .comment, note: "Invite lists are optional. By default, apps are open to everyone.",
+                               anchor: anchor("specific invite list", in: draft, checkpoint: 1))
+        let cadence = PlanNote(kind: .mustChange, note: "Say how long snapshots are kept.",
+                               anchor: anchor("snapshots nightly", in: synthesis, checkpoint: 2))
+        let date = Date(timeIntervalSince1970: 1_790_000_000)
+        var tape = Tape(checkpoints: [
+            Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: date),
+            Checkpoint(id: 2, parent: 1, stage: .synthesis, round: 0, major: true, createdAt: date),
+        ], target: .none, status: .paused)
+        tape.checkpoints[1].record.annotations = [postgres, invites]
+        tape.pendingNotes = [cadence]
+        let load: (Int, String) -> Data? = { id, file in
+            switch (id, file) {
+            case (1, "drafts/0.md"): Data(draft.utf8)
+            case (2, "plan.md"): Data(synthesis.utf8)
+            default: nil
+            }
+        }
+        let controller = PlanNotesController()
+        controller.versionLabel = { id in tape.checkpoints.first { $0.id == id }.map(NoteVersion.label(of:)) }
+        controller.tapeNotes = TapeStore(intakeDirectory: FileManager.default.temporaryDirectory).notes(in: tape)
+        return (tape, controller, load)
+    }
+
+    /// The rail on the synthesis plan, showing the notes written on the drafts under their
+    /// version. Written beside `FD_NOTES_RENDER` as `<name>-pinned-light.png` / `-pinned-dark.png`.
+    func testRenderNotesPinnedToAnEarlierVersion() throws {
+        guard let path = ProcessInfo.processInfo.environment["FD_NOTES_RENDER"] else {
+            throw XCTSkip("set FD_NOTES_RENDER to a PNG path to render the notes rail")
+        }
+        let (tape, controller, load) = pinnedTape()
+        controller.checkpoint = 2
+        let view = HStack(spacing: 0) {
+            PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, notes: controller)
+                .padding(20)
+            Divider()
+            NotesRail(controller: controller, roundName: { _ in "Synthesis" }, focusesDraft: false)
+                .frame(width: 340)
+        }
+        let base = URL(fileURLWithPath: path).deletingPathExtension().path
+        let size = NSSize(width: 1000, height: 820)
+        try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-pinned-dark.png"))
+        try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-pinned-light.png"), appearance: .aqua)
+        XCTAssertEqual(controller.pendingCount, 1)
+    }
+
+    /// What "Show in that version" arrives at: the drafts' plan, the note beside its own quote
+    /// (no version header, anchored as always), and the synthesis-plan note now the one listed
+    /// under another version. Written as `<name>-shown-light.png` / `-shown-dark.png`.
+    func testRenderShowInThatVersionResult() throws {
+        guard let path = ProcessInfo.processInfo.environment["FD_NOTES_RENDER"] else {
+            throw XCTSkip("set FD_NOTES_RENDER to a PNG path to render the notes rail")
+        }
+        let (tape, controller, load) = pinnedTape()
+        controller.checkpoint = 2
+        let postgres = try XCTUnwrap(controller.notes.first { $0.note.note.hasPrefix("Why not SQLite") })
+        controller.showInVersion(postgres.id)
+        XCTAssertNotNil(controller.pendingReveal, "waiting for the drafts' plan to load")
+        let view = HStack(spacing: 0) {
+            PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, selection: .constant(1), notes: controller)
+                .padding(20)
+            Divider()
+            NotesRail(controller: controller, roundName: { _ in "Synthesis" }, focusesDraft: false)
+                .frame(width: 340)
+        }
+        let base = URL(fileURLWithPath: path).deletingPathExtension().path
+        let size = NSSize(width: 1000, height: 820)
+        try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-shown-dark.png"))
+        XCTAssertNil(controller.pendingReveal, "the drafts' plan loaded and used the request")
+        controller.pendingReveal = nil
+        try PlanningRender.write(view, size: size, to: URL(fileURLWithPath: base + "-shown-light.png"), appearance: .aqua)
+    }
+
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let match = view as? T { return match }
         for sub in view.subviews { if let match = find(type, in: sub) { return match } }

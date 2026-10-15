@@ -178,6 +178,39 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertFalse(p.contains("The human steering this plan says:"))
     }
 
+    // MARK: - Notes from an earlier version
+
+    private func passageNote(_ body: String) -> PlanNote {
+        PlanNote(kind: .question, note: body,
+                 anchor: NoteAnchor(checkpoint: 1, quote: "Run PostgreSQL on encrypted gp3 EBS storage", section: "## Phase 3"))
+    }
+
+    /// A note written on a plan other than the one the round reads says which, after its quote —
+    /// the quote is how the passage read THERE.
+    func testANoteFromAnEarlierVersionSaysWhichVersionItsQuoteIsFrom() {
+        let note = passageNote("Why not SQLite?")
+        var c = context()
+        c.notes = [note]
+        c.noteVersions = [note.id: "Draft · Round 0"]
+        let p = RoundPrompts.review(c, planFile: "/i/plan.md", round: 1)
+        XCTAssertTrue(p.contains("""
+        1. [question] in section "## Phase 3":
+           > Run PostgreSQL on encrypted gp3 EBS storage
+           (Quoted from the Draft · Round 0 version of the plan, not the one you are reading; the passage may read differently here, or be gone.)
+           Question (answer it in the plan): Why not SQLite?
+        """), p)
+        XCTAssertFalse(p.lowercased().contains("bead"))
+    }
+
+    /// A note on the plan the round reads gets no such line, and a plan-wide note never does.
+    func testANoteOnThePlanBeingReadHasNoVersionLine() {
+        var c = context()
+        c.notes = [passageNote("Why not SQLite?"), PlanNote(note: "Keep it Mac-only")]
+        let p = RoundPrompts.review(c, planFile: "/i/plan.md", round: 1)
+        XCTAssertFalse(p.contains("Quoted from the"), p)
+        XCTAssertTrue(p.contains("> Run PostgreSQL on encrypted gp3 EBS storage"))
+    }
+
     // MARK: - Steering and context, every stage
 
     /// Every stage that reads the intake takes the human's annotations, in the same words —

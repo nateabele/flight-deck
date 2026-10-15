@@ -194,6 +194,9 @@ public struct RoundContext: Sendable {
     public var readmeFile: String?
     /// The pending notes this round consumes.
     public var notes: [PlanNote]
+    /// For a note written on a plan other than the one this round reads, the version it was
+    /// written on ("Draft · Round 0"); a note on the plan being read is absent.
+    public var noteVersions: [UUID: String]
     /// The generated → edited diff of the head checkpoint's plan, already capped
     /// (`PlanLayers.promptDiff`); nil when the human hasn't edited it.
     public var humanEdits: String?
@@ -201,13 +204,15 @@ public struct RoundContext: Sendable {
     /// The project's task kinds, offered to every round that creates tasks (spec L3-R §4).
     public var kinds: [TaskKind]
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
-                readmeFile: String?, notes: [PlanNote] = [], humanEdits: String? = nil, observedAt: Date, kinds: [TaskKind] = []) {
+                readmeFile: String?, notes: [PlanNote] = [], noteVersions: [UUID: String] = [:], humanEdits: String? = nil,
+                observedAt: Date, kinds: [TaskKind] = []) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
         self.agentsFile = agentsFile
         self.readmeFile = readmeFile
         self.notes = notes
+        self.noteVersions = noteVersions
         self.humanEdits = humanEdits
         self.observedAt = observedAt
         self.kinds = kinds
@@ -270,7 +275,7 @@ public enum RoundPrompts {
         }
         let anchored = c.notes.compactMap { note in note.anchor.map { (note, $0) } }
         if !anchored.isEmpty {
-            let items = anchored.enumerated().map { i, pair in anchoredNote(i + 1, pair.0, pair.1) }
+            let items = anchored.enumerated().map { i, pair in anchoredNote(i + 1, pair.0, pair.1, version: c.noteVersions[pair.0.id]) }
             s += "\n\nThe human's notes on specific passages of the plan:\n" + items.joined(separator: "\n\n")
         }
         return s
@@ -304,10 +309,15 @@ public enum RoundPrompts {
     }
 
     /// `n. [kind] in <section>:`, the quoted passage as a `>` block, then what to do with it.
-    private static func anchoredNote(_ n: Int, _ note: PlanNote, _ anchor: NoteAnchor) -> String {
+    /// A note written on an earlier version says so after its quote: the passage is quoted as it
+    /// read THERE, and may read differently (or be gone) in the plan the round is reading.
+    private static func anchoredNote(_ n: Int, _ note: PlanNote, _ anchor: NoteAnchor, version: String? = nil) -> String {
         let indent = "   "
         var s = "\(n). [\(label(note.kind))]" + (anchor.section.map { " in section \"\($0)\"" } ?? "") + ":"
         s += planLines(anchor.quote).map { "\n\(indent)> \($0)" }.joined()
+        if let version {
+            s += "\n\(indent)(Quoted from the \(version) version of the plan, not the one you are reading; the passage may read differently here, or be gone.)"
+        }
         let body = note.note.trimmingCharacters(in: .whitespacesAndNewlines)
         switch note.kind {
         case .comment: if !body.isEmpty { s += "\n\(indent)\(body)" }

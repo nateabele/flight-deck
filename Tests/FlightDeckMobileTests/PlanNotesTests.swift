@@ -24,6 +24,42 @@ final class PlanNotesTests: XCTestCase {
         XCTAssertNil(NoteComposer.checkpoint(for: NoteDraftTarget(block: nil, quote: nil), showing: 7))
     }
 
+    // MARK: Notes written on another version of the plan
+
+    private func note(_ text: String, checkpoint: Int?, version: String? = nil, block: Int? = nil,
+                      quote: String? = "the quote", consumed: Bool = true) -> WireNote {
+        WireNote(id: UUID(), kind: "comment", text: text, quote: quote, consumed: consumed, blockIndex: block,
+                 checkpoint: checkpoint, version: version)
+    }
+
+    /// A note is elsewhere when it names a version other than the one shown; a Mac that predates
+    /// pinning names none, and its notes behave as they always did.
+    func testANoteIsElsewhereOnlyWhenItNamesAnotherVersion() {
+        XCTAssertTrue(PlanReaderStyle.isElsewhere(note("a", checkpoint: 1), viewing: 2))
+        XCTAssertFalse(PlanReaderStyle.isElsewhere(note("a", checkpoint: 2), viewing: 2))
+        XCTAssertFalse(PlanReaderStyle.isElsewhere(note("a", checkpoint: nil), viewing: 2))
+    }
+
+    /// The list under the plan: notes from other versions with no block here, never as "can't find",
+    /// grouped by version with the latest first; those with a block here stay in their block.
+    func testOtherVersionsListsTheirNotesGroupedLatestFirst() {
+        let a = note("a", checkpoint: 1, version: "Draft · Round 0")
+        let b = note("b", checkpoint: 2, version: "Synthesis · Round 0")
+        let c = note("c", checkpoint: 1, version: "Draft · Round 0")
+        let inBlock = note("in a block", checkpoint: 1, version: "Draft · Round 0", block: 4)
+        let here = note("here", checkpoint: 3, version: "Refine 1")
+        let whole = note("whole plan", checkpoint: nil, quote: nil)
+        let groups = PlanReaderStyle.otherVersions([a, b, here, c, inBlock, whole], viewing: 3)
+        XCTAssertEqual(groups.map(\.checkpoint), [2, 1])
+        XCTAssertEqual(groups.map(\.version), ["Synthesis · Round 0", "Draft · Round 0"])
+        XCTAssertEqual(groups[1].notes.map(\.text), ["a", "c"], "in the order the Mac listed them")
+    }
+
+    func testAVersionTheMacDidNotNameIsAnEarlierVersion() {
+        let groups = PlanReaderStyle.otherVersions([note("a", checkpoint: 1, version: nil)], viewing: 2)
+        XCTAssertEqual(groups.map(\.version), ["an earlier version"])
+    }
+
     // MARK: Which kinds the sheet offers
 
     /// A Highlight is an empty comment on a selection. On the whole plan it would be a note that

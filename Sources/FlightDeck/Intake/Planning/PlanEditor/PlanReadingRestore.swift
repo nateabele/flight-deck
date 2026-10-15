@@ -20,6 +20,8 @@ final class PlanScrollState {
     var unreachable = 0
     var polling = false
     var restoreFocus = false
+    /// A range to flash once the page is there: "Show in that version" arriving at its quote.
+    var flash: NSRange?
     /// The scroll view kept invisible until the position is reachable, so the page never shows
     /// the top of the document for the frames it takes to grow.
     weak var hidden: NSScrollView?
@@ -220,7 +222,23 @@ extension PlanTextView.Coordinator {
         scrolling.hidden?.alphaValue = 1
         scrolling.hidden = nil
         if live { scrolling.live = true }
+        if let range = scrolling.flash {
+            scrolling.flash = nil
+            if range.upperBound <= (textView?.string as NSString?)?.length ?? 0 { textView?.showFindIndicator(for: range) }
+        }
     }
+
+    /// Takes the page to `range` (opening any fold that hides it) and flashes it when it lands:
+    /// the quote a note was written on, a little below the pinned block rather than under it.
+    func reveal(_ range: NSRange) {
+        guard let textView else { return }
+        unfold(containing: range)
+        scrolling.flash = range
+        beginReadingRestore(.at(range.location, within: -((textView.obscuredTop) + Self.revealMargin),
+                                in: textView.string as NSString, headings: headings))
+    }
+
+    private static let revealMargin: CGFloat = 48
 
     /// The keyboard back in the editor that had it, before the page is put back: with the caret's
     /// block showing its syntax the lines are the height they were when the position was read.
@@ -250,6 +268,8 @@ extension PlanTextView.Coordinator {
 
     func resumeReading(_ reading: PlanReadingAnchor?, in text: String, firstLoad: Bool) {
         scrolling.loaded = true
+        // "Show in that version" has the page go to the note's quote, not to where it was reading.
+        if let range = MainActor.assumeIsolated({ notesBridge.takeReveal(in: text) }) { return reveal(range) }
         guard let memory = scrolling.memory else { return }
         if firstLoad, memory.focused, let selection = memory.selection, NSMaxRange(selection) <= (text as NSString).length {
             textView?.setSelectedRange(selection)

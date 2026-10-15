@@ -136,7 +136,7 @@ final class PlanReadingMemoryTests: XCTestCase {
         deinit { window.close() }
 
         /// What `PlanTextView.makeNSView` does, with SwiftUI's part (`fit`) done by hand.
-        func mount(_ text: String, memory: PlanScrollMemory?, folds: PlanFoldStore? = nil) {
+        func mount(_ text: String, memory: PlanScrollMemory?, folds: PlanFoldStore? = nil, notes: PlanNotesController? = nil) {
             let editor = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {})
             let coordinator = editor.makeCoordinator()
             let container = PlanEditorContainer(onShow: {})
@@ -152,6 +152,7 @@ final class PlanReadingMemoryTests: XCTestCase {
             container.textView.obscuredTop = PlanReadingMemoryTests.obscured
             if let folds { coordinator.foldStore = folds }
             coordinator.readingMemory = memory
+            if let notes { MainActor.assumeIsolated { coordinator.notesBridge.attach(notes, to: container.textView) } }
             coordinator.load(text)
             // The page is made again, at the top, as the project view's document is.
             let page = Page(frame: NSRect(x: 0, y: 0, width: outer.frame.width, height: 700))
@@ -370,5 +371,80 @@ final class PlanReadingMemoryTests: XCTestCase {
         let after = try XCTUnwrap(rig.coordinator.readingAnchor())
         XCTAssertEqual(after.offset, 0)
         XCTAssertEqual(after.within, -Self.obscured, accuracy: 1, "the plan's first line just under the pinned block")
+    }
+
+    /// "Show in that version": the editor loads the version the note was written on and the page
+    /// goes to the note's quote, just under the pinned block, not to where it was reading.
+    func testShowInThatVersionTakesThePageToTheQuote() throws {
+        let rig = Rig()
+        let notes = PlanNotesController()
+        notes.checkpoint = 2
+        let memory = PlanScrollMemory()
+        rig.mount("# The plan that replaced it\n\nNothing alike.\n", memory: memory, notes: notes)
+        rig.ready()
+
+        let version = Self.plan()
+        let quote = "Techs check in on arrival 90."
+        let anchor = NoteAnchor(checkpoint: 1, selecting: version.range(of: quote)!, in: version)
+        notes.tapeNotes = [TapeNote(note: PlanNote(note: "n", anchor: anchor), consumedBy: 2)]
+        notes.pendingReveal = PlanNotesController.Reveal(checkpoint: 1, anchor: anchor)
+        rig.coordinator.load(version)
+        rig.ready()
+
+        XCTAssertNil(notes.pendingReveal, "used on the load")
+        let offset = (rig.view.string as NSString).range(of: quote).location
+        let top = try XCTUnwrap(rig.coordinator.lineTop(at: offset))
+        let page = try XCTUnwrap(rig.coordinator.viewportTop)
+        XCTAssertGreaterThan(rig.origin, 1_000, "the page left the top of the plan")
+        XCTAssertGreaterThanOrEqual(top - page, Self.obscured, "below the pinned block, not behind it")
+        XCTAssertLessThan(top - page, Self.obscured + 200, "and near the top of the page")
+        XCTAssertNil(rig.coordinator.scrolling.flash, "flashed when it landed")
+    }
+
+    /// The version is already on screen: the same arrival, without a load.
+    func testShowInThatVersionOnTheVersionShownScrollsThere() throws {
+        let rig = Rig()
+        let notes = PlanNotesController()
+        notes.checkpoint = 1
+        let version = Self.plan()
+        let memory = PlanScrollMemory()
+        rig.mount(version, memory: memory, notes: notes)
+        rig.ready()
+        XCTAssertEqual(rig.origin, 0)
+        let quote = "Techs check in on arrival 110."
+        let anchor = NoteAnchor(checkpoint: 1, selecting: version.range(of: quote)!, in: version)
+        notes.tapeNotes = [TapeNote(note: PlanNote(note: "n", anchor: anchor), consumedBy: 2)]
+        notes.showInVersion(notes.tapeNotes[0].id)
+        rig.ready()
+        let top = try XCTUnwrap(rig.coordinator.lineTop(at: (rig.view.string as NSString).range(of: quote).location))
+        XCTAssertGreaterThan(rig.origin, 1_000)
+        XCTAssertGreaterThanOrEqual(top - (try XCTUnwrap(rig.coordinator.viewportTop)), Self.obscured)
+    }
+
+    /// The maintainer's bug: notes written on the drafts lose their place after the editor shows another
+    /// version, and do not come back when it shows the drafts again. A text swap left every note
+    /// "detached" for good: the search for a detached note's quote began before the start of the
+    /// text and so looked nowhere.
+    func testNotesFindTheirQuotesAgainWhenTheirVersionIsShownAgain() throws {
+        let rig = Rig()
+        let notes = PlanNotesController()
+        notes.checkpoint = 1
+        let drafts = Self.plan(), synthesis = "# The plan that replaced it\n\nNothing alike.\n"
+        rig.mount(drafts, memory: PlanScrollMemory(), notes: notes)
+        let quotes = ["Techs check in on arrival 3.", "Techs check in on arrival 60.", "Techs check in on arrival 110."]
+        notes.tapeNotes = quotes.map { q in
+            TapeNote(note: PlanNote(note: "n", anchor: NoteAnchor(checkpoint: 1, selecting: drafts.range(of: q)!, in: drafts)), consumedBy: 2)
+        }
+        rig.ready()
+        func found() -> Int { settleMainRunLoop(0.1); return notes.located.count }
+        XCTAssertEqual(found(), 3, "on their own version")
+        rig.coordinator.load(synthesis)
+        notes.checkpoint = 2
+        rig.ready()
+        XCTAssertEqual(found(), 0, "the rewritten plan holds none of them")
+        rig.coordinator.load(drafts)
+        notes.checkpoint = 1
+        rig.ready()
+        XCTAssertEqual(found(), 3, "back on their own version every note is beside its quote again")
     }
 }
