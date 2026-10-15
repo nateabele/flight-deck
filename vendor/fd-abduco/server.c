@@ -61,6 +61,14 @@ static void server_mark_socket_exec(bool exec, bool usr) {
 	chmod(sockaddr.sun_path, mode);
 }
 
+/* Flight Deck fork: the socket file this daemon bound, by identity. A path is only a name: once
+ * this daemon's socket file is gone (unlinked by someone else) a NEW daemon can bind the same
+ * path, and unlinking by name at exit would then delete the new daemon's socket. See
+ * server_atexit_handler(). */
+static bool server_sock_bound;
+static dev_t server_sock_dev;
+static ino_t server_sock_ino;
+
 static int server_create_socket(const char *name) {
 	if (!set_socket_name(&sockaddr, name))
 		return -1;
@@ -83,6 +91,12 @@ static int server_create_socket(const char *name) {
 		return -1;
 	}
 
+	struct stat st;
+	if (stat(sockaddr.sun_path, &st) == 0) {
+		server_sock_bound = true;
+		server_sock_dev = st.st_dev;
+		server_sock_ino = st.st_ino;
+	}
 	return fd;
 }
 
@@ -234,14 +248,32 @@ static bool server_write_pidfile(void) {
 	return ok;
 }
 
+/* Flight Deck fork: removes the pidfile only while it still names this process. A daemon whose
+ * path was taken over (see server_sock_bound) must not delete its successor's pidfile, which
+ * Flight Deck reads to find the live daemon. */
 static void server_remove_pidfile(void) {
 	char path[sizeof(sockaddr.sun_path) + 4];
-	if (server_pidfile_path(path, sizeof(path)))
+	if (!server_pidfile_path(path, sizeof(path)))
+		return;
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	long pid = 0;
+	int n = fscanf(f, "%ld", &pid);
+	fclose(f);
+	if (n == 1 && pid == (long)getpid())
 		unlink(path);
 }
 
+/* Flight Deck fork: unlinks the socket only if the path still IS the file this daemon bound.
+ * 2026-10-15: an orphaned daemon whose path had been reused exited and unlinked it by name,
+ * deleting the live daemon's socket; Flight Deck's next launch read the tab as dead and resumed
+ * its conversation a second time. */
 static void server_atexit_handler(void) {
-	unlink(sockaddr.sun_path);
+	struct stat st;
+	if (server_sock_bound && stat(sockaddr.sun_path, &st) == 0 &&
+	    st.st_dev == server_sock_dev && st.st_ino == server_sock_ino)
+		unlink(sockaddr.sun_path);
 	server_remove_pidfile();
 }
 

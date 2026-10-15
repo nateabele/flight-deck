@@ -21,4 +21,5 @@ bash run_trim_test.sh
 bash run_mode_preamble_test.sh
 bash run_alt_screen_test.sh
 bash run_pidfile_test.sh
+bash run_reused_path_test.sh
 echo "ALL fd-abduco tests OK"
