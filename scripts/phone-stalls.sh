@@ -16,7 +16,9 @@
 # The app's own frames arrive as FlightDeckMobile+0xOFFSET and are resolved with `atos`
 # against the dSYM whose UUID matches the `stall watch armed uuid=…` line of the same launch.
 # The dSYMs searched are every Release/Debug iphoneos build under this checkout and its
-# worktrees; a launch whose build has since been overwritten prints its offsets unresolved.
+# worktrees, plus any directories in PHONE_DSYM_DIRS (space-separated) — put a copy of a build's
+# dSYM there before DerivedData is rebuilt over it. A launch whose dSYM is nowhere prints its
+# offsets unresolved.
 set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
@@ -41,8 +43,8 @@ while IFS= read -r dsym; do
   bin="$dsym/Contents/Resources/DWARF/FlightDeckMobile"
   [ -f "$bin" ] || continue
   dwarfdump --uuid "$bin" | awk -v b="$bin" '{print $2, b}' >> "$OUT/dsyms"
-done < <(find DerivedData .claude/worktrees/*/DerivedData -maxdepth 4 \
-           -path '*-iphoneos/FlightDeckMobile.app.dSYM' 2>/dev/null)
+done < <(find DerivedData .claude/worktrees/*/DerivedData ${PHONE_DSYM_DIRS:-} -maxdepth 4 \
+           -path '*FlightDeckMobile.app.dSYM' 2>/dev/null)
 touch "$OUT/dsyms"
 
 bin=""
