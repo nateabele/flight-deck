@@ -126,4 +126,21 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
             "a content-size-category change must reassign even though the markdown is identical"
         )
     }
+
+    /// The height memo `sizeThatFits` answers from survives a re-apply of the same prose and
+    /// is dropped the moment the prose changes: a stale height is a clipped or gapped row.
+    func testMeasuredHeightsLastExactlyAsLongAsTheText() {
+        let view = makeView()
+        let coordinator = SelectableProseView.Coordinator(actions: [])
+        coordinator.apply("First paragraph.", to: view)
+        coordinator.measured[300] = 42
+        coordinator.apply("First paragraph.", to: view)
+        XCTAssertEqual(coordinator.measured[300], 42, "same text, same answer, no relayout")
+        coordinator.apply("A different paragraph.", to: view)
+        XCTAssertTrue(coordinator.measured.isEmpty)
+        coordinator.measured[300] = 42
+        coordinator.serif = true
+        coordinator.apply("A different paragraph.", to: view)
+        XCTAssertTrue(coordinator.measured.isEmpty, "a new face is a new height")
+    }
 }

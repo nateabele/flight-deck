@@ -73,8 +73,18 @@ struct SelectableProseView: UIViewRepresentable {
         guard width > 0, width < .greatestFiniteMagnitude else { return nil }
         context.coordinator.serif = serif
         context.coordinator.apply(markdown, to: uiView)
+        if let height = context.coordinator.measured[width] {
+            return CGSize(width: width, height: height)
+        }
+        let start = DispatchTime.now().uptimeNanoseconds
         let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        return CGSize(width: width, height: ceil(size.height))
+        let height = ceil(size.height)
+        context.coordinator.measured[width] = height
+        let ms = PhoneLog.elapsed(since: start)
+        if ms >= 50 {
+            PhoneLog.perfNote("prose measure ms=\(ms) chars=\(markdown.utf16.count) width=\(Int(width))")
+        }
+        return CGSize(width: width, height: height)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(actions: actions, serif: serif) }
@@ -106,6 +116,17 @@ struct SelectableProseView: UIViewRepresentable {
         /// is invalidated, which is every case that legitimately needs a reassignment.
         private var appliedCachedAttributed = false
 
+        /// Heights already measured for the current text, by offered width.
+        ///
+        /// **Without this every sizing question was a full TextKit layout.** SwiftUI asks a
+        /// representable for its size several times per layout pass, usually at the same width,
+        /// and `UITextView.sizeThatFits` lays the whole document out each time. A conversation
+        /// of ordinary-sized messages ("The Plan Part 3", 2026-10-15) kept the main thread in
+        /// `sizeThatFits` → `NSTextLayoutManager` for over two seconds until iOS killed the
+        /// app. Cleared with everything else whenever the text, the text size or the face
+        /// changes — the only things a height depends on besides the width.
+        var measured: [CGFloat: CGFloat] = [:]
+
         /// How many times `apply` has actually assigned `attributedText`, kept only so a test
         /// can see the guard above short-circuit without timing anything.
         private(set) var assignmentCount = 0
@@ -125,6 +146,7 @@ struct SelectableProseView: UIViewRepresentable {
                 cachedCategory = category
                 cachedSerif = serif
                 appliedCachedAttributed = false
+                measured.removeAll()
             }
             guard let attributed = cachedAttributed, !appliedCachedAttributed else { return }
             // See `appliedCachedAttributed` above for why this can't be a `view.attributedText
