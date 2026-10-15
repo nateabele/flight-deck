@@ -35,6 +35,29 @@ final class HeadroomPolicyTests: XCTestCase {
         XCTAssertEqual(evaluate(r, at: at.addingTimeInterval(30 * 60 + 1)).state, .unknown)
     }
 
+    /// Radify, 2026-10-15: maxed its weekly window in two days, so no tab has run on it since
+    /// and its last reading is days old. Age made it "unknown", which the pool leases after any
+    /// under-soft member — onto a login that will be refused. Usage never falls inside a window,
+    /// so a stale reading is still a floor until that window resets: over a limit it stays over.
+    func testAStaleReadingOverALimitStaysOverUntilItsWindowResets() {
+        let at = usageISO("2026-10-13T12:00:00Z")
+        let r = UsageRefs.reading(UsageRefs.work, 1.0, at: at, resetsAt: usageISO("2026-10-18T22:00:00Z"))
+        let later = evaluate(r, at: usageISO("2026-10-15T21:00:00Z"))
+        XCTAssertEqual(later.state, .overHard)
+        XCTAssertEqual(later.resetsAt, usageISO("2026-10-18T22:00:00Z"))
+        let soft = UsageRefs.reading(UsageRefs.work, 0.85, at: at, resetsAt: usageISO("2026-10-18T22:00:00Z"))
+        XCTAssertEqual(evaluate(soft, at: usageISO("2026-10-15T21:00:00Z")).state, .overSoft)
+        XCTAssertEqual(evaluate(r, at: usageISO("2026-10-18T22:00:01Z")).state, .unknown, "reset: nothing known now")
+    }
+
+    /// The other half: a stale LOW number is no evidence of headroom — usage may have risen
+    /// since — so it stays unknown rather than under soft.
+    func testAStaleReadingUnderSoftStaysUnknown() {
+        let at = usageISO("2026-10-13T12:00:00Z")
+        let r = UsageRefs.reading(UsageRefs.work, 0.30, at: at, resetsAt: usageISO("2026-10-18T22:00:00Z"))
+        XCTAssertEqual(evaluate(r, at: usageISO("2026-10-15T21:00:00Z")).state, .unknown)
+    }
+
     func testAReadingWithNoWindowsIsUnknown() {
         let r = UsageReading(account: UsageRefs.work, windows: [], readAt: Date(), source: "t", hardRejection: false)
         XCTAssertEqual(evaluate(r, at: r.readAt).state, .unknown, "off a subscription claude reports no windows")

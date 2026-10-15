@@ -58,6 +58,10 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
     public func setSourceError(_ message: String?, account: UUID) { lock.withLock { errors[account] = message } }
     public func sourceError(account: UUID) -> String? { lock.withLock { errors[account] } }
     public func latestReading(account: UUID) -> UsageReading? { lock.withLock { meters[account] } }
+    /// Every account's latest reading, ordered by account so a saved copy is stable.
+    public var allReadings: [UsageReading] {
+        lock.withLock { meters.sorted { $0.key.uuidString < $1.key.uuidString }.map(\.value) }
+    }
     public func rejection(account: UUID) -> Rejection? { lock.withLock { rejections[account] } }
 
     public func headroom(pool id: PoolID) -> [AccountHeadroom] {
