@@ -54,7 +54,8 @@ final class AccountSwitchTests: XCTestCase {
         func sendArrowDown() {}
         func sendArrowUp() {}
         func sendTab() {}
-        func sendEscape() {}
+        var escapes = 0
+        func sendEscape() { escapes += 1 }
         func sendCharacterKey(_ character: Character) {}
         func sendControlKey(_ letter: Character) {}
         func readViewport() -> String? {
@@ -134,6 +135,8 @@ final class AccountSwitchTests: XCTestCase {
         store.accountResolver = resolver
         store.notifier = notices
         store.accountSwitchDelay = .zero
+        store.accountSwitchGrace = .zero
+        store.accountSwitchWindDownLimit = .zero
         let tab = store.newSession(in: project, agent: agent)
         store.apply(.activity(.idle), to: tab.id)
         return Rig(store: store, preferences: preferences, ledger: ledger, resolver: resolver, first: first,
@@ -305,14 +308,57 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertTrue(rig.store.rollingOver.isEmpty)
     }
 
-    func testAMidTurnTabIsRefusedAndNothingIsKilled() {
+    /// The 2026-10-15 report: `/switch-account me@…` was refused as "mid-turn" because the
+    /// request arrives while the slash command's own run has the agent busy. Accepted now, and
+    /// the run ending on its own within the grace costs no Escape and queues no continuation.
+    func testATypedSwitchWaitsOutItsOwnCommandsTurnAndInterruptsNothing() async {
         let rig = rig()
+        let composer = Composer("❯")
+        rig.store.injectorOverride = composer
+        rig.store.accountSwitchGrace = .seconds(5)
         rig.store.apply(.activity(.busy), to: rig.tab.id)
         let result = rig.store.requestAccountSwitch(rig.tab.id, target: "Second")
-        XCTAssertFalse(result.ok)
-        XCTAssertTrue(result.message.contains("mid-turn"), result.message)
-        XCTAssertTrue(rig.daemons.terminated.isEmpty)
-        XCTAssertTrue(rig.store.rollingOver.isEmpty)
+        XCTAssertTrue(result.ok, result.message)
+        rig.store.apply(.activity(.idle), to: rig.tab.id)   // the command returned
+        await settle(rig)
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+        XCTAssertEqual(composer.escapes, 0, "nothing was running but the command itself")
+        XCTAssertNil(rig.store.pendingPrompts[rig.tab.id], "nothing to continue")
+    }
+
+    /// The picker's false positive: a background subagent lifts `activity` to busy over an
+    /// idle composer. The agent is not interrupted, but the subagent dies with the process the
+    /// move retires, so the resumed agent is told to carry on.
+    func testABackgroundSubagentIsNotInterruptedButTheResumedAgentContinues() async {
+        let rig = rig()
+        let composer = Composer("❯")
+        rig.store.injectorOverride = composer
+        rig.store.applySubagentCount(rig.tab.id, 1)
+        XCTAssertEqual(rig.store.statuses[rig.tab.id]?.activity, .busy, "precondition: lifted to busy")
+        XCTAssertTrue(rig.store.requestAccountSwitch(rig.tab.id, target: "Second").ok)
+        await settle(rig)
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+        XCTAssertEqual(composer.escapes, 0, "an idle composer never takes an Escape")
+        XCTAssertEqual(rig.store.pendingPrompts[rig.tab.id]?.text, SessionStore.accountSwitchContinuePrompt)
+    }
+
+    /// A real turn is interrupted, the conversation moved, and the resumed agent told to carry
+    /// on. Past the wind-down limit the move goes ahead even if the turn never ended.
+    func testAMidTurnTabIsInterruptedMovedAndContinued() async {
+        let rig = rig()
+        let composer = Composer("❯\u{a0}typed mid-turn")
+        rig.store.injectorOverride = composer
+        rig.store.accountSwitchWindDownLimit = .milliseconds(50)
+        rig.store.apply(.activity(.busy), to: rig.tab.id)
+        let result = rig.store.requestAccountSwitch(rig.tab.id, target: "Second")
+        XCTAssertTrue(result.ok, result.message)
+        XCTAssertTrue(rig.daemons.terminated.isEmpty, "answered before anything is stopped")
+        await settle(rig)
+        XCTAssertEqual(composer.escapes, 1, "interrupted with the agent's stop key")
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+        XCTAssertEqual(rig.daemons.terminated, [rig.tab.id])
+        XCTAssertEqual(rig.store.pendingPrompts[rig.tab.id]?.text, SessionStore.accountSwitchContinuePrompt)
+        XCTAssertEqual(rig.store.pendingDrafts[rig.tab.id]?.text, "typed mid-turn", "the draft still comes along")
     }
 
     func testASwarmAgentIsRefused() {
@@ -452,24 +498,25 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertEqual(session(rig)?.accountID, rig.second.id)
     }
 
-    func testATurnStartedAfterTheAnswerCancelsTheMoveAndSaysSo() async {
+    func testATurnStartedAfterTheAnswerIsWoundDownAndTheMoveStillHappens() async {
         let rig = rig()
-        rig.store.injectorOverride = Composer("❯")
+        let composer = Composer("❯")
+        rig.store.injectorOverride = composer
         XCTAssertTrue(rig.store.requestAccountSwitch(rig.tab.id, target: "Second").ok)
         rig.store.apply(.activity(.busy), to: rig.tab.id)   // before the scheduled move looks again
         await settle(rig)
-        XCTAssertEqual(session(rig)?.accountID, rig.first.id)
-        XCTAssertTrue(rig.daemons.terminated.isEmpty)
-        XCTAssertTrue(rig.notices.posted.last?.title.contains("Did not move") ?? false)
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+        XCTAssertGreaterThanOrEqual(composer.escapes, 1)
+        XCTAssertEqual(rig.store.pendingPrompts[rig.tab.id]?.text, SessionStore.accountSwitchContinuePrompt)
     }
 
-    func testAnUnreadableComposerCancelsTheMoveRatherThanRiskTheDraft() async {
+    func testAnUnreadableComposerStillMovesAndSaysTheDraftStayedBehind() async {
         let rig = rig()   // no injector, no surface: the composer cannot be read
         XCTAssertTrue(rig.store.requestAccountSwitch(rig.tab.id, target: "Second").ok)
         await settle(rig)
-        XCTAssertEqual(session(rig)?.accountID, rig.first.id)
-        XCTAssertTrue(rig.daemons.terminated.isEmpty)
-        XCTAssertTrue(rig.notices.posted.last?.body.contains("could not read") ?? false)
+        XCTAssertEqual(session(rig)?.accountID, rig.second.id)
+        XCTAssertTrue(rig.notices.posted.contains { $0.title.contains("Unsent text not carried") })
+        XCTAssertNil(rig.store.pendingDrafts[rig.tab.id])
     }
 
     func testAFailedCopyLeavesTheLiveAgentWhereItIs() async throws {

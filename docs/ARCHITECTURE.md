@@ -1170,19 +1170,28 @@ headroom thaws in place on the spent account with a notice; a swarm agent's acco
 hand-off driver.
 
 **`/switch-account` is the same move on demand.** `rollOver` takes an origin: `.thaw` retires a
-frozen agent (`sleepController.forget`), `.requested` retires a LIVE idle one (surface torn down,
+frozen agent (`sleepController.forget`), `.requested` retires a LIVE one (surface torn down,
 `daemonControl.terminate`) and words its notification as "you asked", not "over its limit". The
 trigger is `SessionStore.requestAccountSwitch`, reached from the local control socket (below). It
 refuses, in one line and without killing anything: an unknown tab, an agent with no
 `conversationTransfer` (gemini), a swarm agent, a tab the sleep controller holds ("open it, then
 try again" — a tab that is asking cannot be asleep, so waking it first would only be reachable
-from another shell), a move already in progress (`rollingOver`), and a tab that is not idle
-(`statuses[id]?.activity == .idle`). The answer goes back first; the move starts
-`accountSwitchDelay` (0.8 s) later, because the claude that asked is the process it kills. It
-then re-checks idle, reads the composer (`textChannel.draft`) while the agent still exists — an
-unreadable composer cancels the move with a notice rather than risk the draft — and rolls over;
-the draft comes back through `pendingDrafts`, and a turn that starts while the conversation is
-being copied cancels the move (the copy is already stale). The old lease is released with the old
+from another shell), and a move already in progress (`rollingOver`). It never refuses a busy tab
+(2026-10-15): the typed `/switch-account <target>` always arrived mid-turn — the command's own run
+is the turn — and a background subagent lifts an idle tab's `activity` to busy, so the old idle
+gate refused both. The answer goes back first; the move starts `accountSwitchDelay` (0.8 s) later,
+because the claude that asked is the process it kills. `windDown` then waits up to
+`accountSwitchGrace` (3 s) for the agent to settle by itself — `agentActivity`, never the lifted
+`activity`, idle or `answerless` waiting — and otherwise sends the agent's interrupt key every 5 s
+until it settles or `accountSwitchWindDownLimit` (30 s) passes, after which the move goes ahead
+anyway. It reads the composer (`textChannel.draft`) before the first key and after; an unreadable
+composer no longer cancels the move, it moves with a notice that unsent text stayed behind. The
+draft comes back through `pendingDrafts`. A turn that starts while the conversation is being
+copied is wound down and the copy redone (up to `accountSwitchCopyAttempts`). When the move cut
+anything short — a turn it interrupted, or background subagents and shells, which die with the
+process — `rollOver` queues `accountSwitchContinuePrompt` in `pendingPrompts`, typed once the
+resumed composer is up (the draft waits for it, so the two are never submitted together) and
+dropped if the resumed agent picks its turn back up itself (`cancelSupersededPrompts`). The old lease is released with the old
 process and the new account is leased by `reacquire` only when the project's assigned hosted pool
 lists it. Naming is `AccountResolver.switchDecision` (`Agents/AccountSwitch.swift`): a target is an
 account's email, name or id, or a pool's label or id (exact, case-insensitive), among the tab's
