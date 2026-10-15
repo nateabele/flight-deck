@@ -74,6 +74,20 @@ final class PlanTableController {
                      rowStarts: starts)
     }
 
+    /// Every grid table a selection reaches, from either end or through the middle.
+    func tables(touching selection: NSRange) -> [Place] {
+        guard let storage = view.textStorage, storage.length > 0 else { return [] }
+        var starts: [Int] = []
+        let clipped = NSIntersectionRange(selection, NSRange(location: 0, length: storage.length))
+        storage.enumerateAttribute(.planTableRow, in: clipped) { value, range, _ in
+            if let ref = value as? PlanTableRowRef, ref.row == 0 { starts.append(range.location) }
+            else if value is PlanTableRowRef, let p = place(at: range.location) { starts.append(p.start) }
+        }
+        for offset in [selection.location, NSMaxRange(selection)] { if let p = place(at: offset) { starts.append(p.start) } }
+        var seen = Set<Int>()
+        return starts.filter { seen.insert($0).inserted }.compactMap { place(at: $0) }
+    }
+
     /// The table (if any) a selection touches at either end.
     func selectionTables() -> [Place] {
         let r = view.selectedRange()
@@ -488,17 +502,17 @@ final class PlanTableOverlay: NSView {
             guard let controller, let context = NSGraphicsContext.current?.cgContext else { return }
             let view = controller.view
             let selection = view.selectedRange()
-            guard let table = controller.place(at: selection.location) else { return }
             let focused = view.isFocused
             if selection.length == 0 {
-                guard focused, controller.caretOn, let rect = controller.caretRect(at: selection.location, in: table) else { return }
+                guard focused, controller.caretOn, let table = controller.place(at: selection.location),
+                      let rect = controller.caretRect(at: selection.location, in: table) else { return }
                 NSColor.textInsertionPointColor.setFill()
                 context.fill(CGRect(x: rect.minX - 0.5, y: rect.minY, width: 1, height: rect.height))
                 return
             }
-            for fill in controller.selectionFills(selection, in: table) {
-                (focused ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor).withAlphaComponent(0.45).setFill()
-                context.fill(fill)
+            (focused ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor).withAlphaComponent(0.45).setFill()
+            for table in controller.tables(touching: selection) {
+                for fill in controller.selectionFills(selection, in: table) { context.fill(fill) }
             }
         }
     }
@@ -508,8 +522,8 @@ extension PlanTableController {
     /// The cells a selection covers, or the text within one, in the view's coordinates, for the
     /// table holding its start.
     func selectionFills(_ selection: NSRange, in table: Place) -> [CGRect] {
-        guard let from = cell(at: selection.location, in: table),
-              let to = cell(at: min(NSMaxRange(selection), table.end), in: table) else { return [] }
+        let lo = max(selection.location, table.start), hi = min(NSMaxRange(selection), table.end)
+        guard hi > lo || selection.length > 0, let from = cell(at: lo, in: table), let to = cell(at: max(hi, lo), in: table) else { return [] }
         let layout = table.layout
         func origin(_ row: Int) -> CGPoint? { table.rowStarts.indices.contains(row) ? bandOrigin(lineStart: table.rowStarts[row]) : nil }
         if from.row == to.row, from.column == to.column {
@@ -526,7 +540,7 @@ extension PlanTableController {
                 if row == to.row, column > to.column { continue }
                 // A cell only touched at its very start has nothing of it selected.
                 if row == to.row, column == to.column, to.offset == 0, !afterSelection, !(from.row == to.row && from.column == to.column) { continue }
-                out.append(layout.cellRect(row: row, column: column).offsetBy(dx: o.x, dy: o.y))
+                out.append(layout.cellRect(row: row, column: column).insetBy(dx: 1, dy: 1).offsetBy(dx: o.x, dy: o.y))
             }
         }
         return out

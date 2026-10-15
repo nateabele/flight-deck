@@ -74,7 +74,7 @@ final class PlanTableInteractionTests: XCTestCase {
         table = try XCTUnwrap(f.view.tables.place(at: word))
         let cells = f.view.tables.selectionFills(f.view.selectedRange(), in: table)
         XCTAssertEqual(cells.count, 2, "the second and third cells of the row, whole")
-        XCTAssertEqual(cells[0].width, table.layout.columns[1], accuracy: 0.5)
+        XCTAssertEqual(cells[0].width, table.layout.columns[1] - 2, accuracy: 0.5)
     }
 
     func testASelectionFromOutsideThroughTheTableIsCellsToo() throws {
@@ -381,7 +381,7 @@ final class PlanTableInteractionTests: XCTestCase {
             try shoot("typing-wraps-cell") {
                 $0.view.setSelectedRange(NSRange(location: ns.range(of: "closes").location, length: 0))
                 $0.view.setSelectedRange(NSRange(location: ns.range(of: "fails closed.").location + 13, length: 0))
-                for word in [" and the request is logged with the tenant it named", " so an operator can find it"] {
+                for word in [" and the request is logged with the tenant it named", " so an operator can find it", " and rotate the key if it was missed"] {
                     $0.view.insertText(word, replacementRange: $0.view.selectedRange())
                 }
             }
