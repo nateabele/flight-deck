@@ -306,7 +306,7 @@ final class PlanTableInteractionTests: XCTestCase {
         f.view.setSelectedRange(NSRange(location: word, length: 6))
         XCTAssertTrue(f.view.writeSelection(to: pasteboard, types: f.view.writablePasteboardTypes))
         XCTAssertEqual(pasteboard.string(forType: .string), "Stored")
-        f.view.setSelectedRange(NSRange(location: word, length: offset(f, "Never shared") - word))
+        f.view.setSelectedRange(NSRange(location: word, length: offset(f, "Never shared") + 3 - word))
         XCTAssertTrue(f.view.writeSelection(to: pasteboard, types: f.view.writablePasteboardTypes))
         let rows = pasteboard.string(forType: .string)?.components(separatedBy: "\n") ?? []
         XCTAssertEqual(rows.first, "| Area | First-release decision | Acceptance boundary |", "a table starts at its header")
@@ -348,5 +348,43 @@ final class PlanTableInteractionTests: XCTestCase {
         defer { f.window.close() }
         caret(f, offset(f, "|---|---|---|") + 2)
         XCTAssertFalse(line(f).hasPrefix("|---"), "moved out of the hidden row")
+    }
+
+    // MARK: Renders
+
+    /// The editing states as pictures, for design review. Skipped unless `FD_PLAN_TABLE_RENDER_DIR`
+    /// names an output directory.
+    func testRenderEditing() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLAN_TABLE_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLAN_TABLE_RENDER_DIR to render the plan table PNGs")
+        }
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let plan = PlanTableRenderTests.fixtures[0].plan
+        for (mode, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            func shoot(_ name: String, _ text: String = plan, _ prepare: (Fixture) -> Void) throws {
+                let f = PlanTableEditorTests.editor(text, width: 820, appearance: appearance)
+                defer { f.window.close(); f.coordinator.timer?.invalidate() }
+                prepare(f)
+                f.settle()
+                try PlanTableRenderTests.write(f, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("\(name)-\(mode).png"))
+            }
+            let ns = plan as NSString
+            try shoot("caret-mid-word") { $0.view.setSelectedRange(NSRange(location: ns.range(of: "records live").location + 4, length: 0)) }
+            try shoot("selection-in-cell") { $0.view.setSelectedRange(ns.range(of: "tenant's own")) }
+            try shoot("selection-across-cells") {
+                let from = ns.range(of: "Each tenant's").location + 5
+                $0.view.setSelectedRange(NSRange(location: from, length: ns.range(of: "A query").location + 4 - from))
+            }
+            try shoot("selection-from-outside") {
+                $0.view.setSelectedRange(NSRange(location: ns.range(of: "What each").location + 5, length: ns.range(of: "Any eligible").location + 9 - ns.range(of: "What each").location - 5))
+            }
+            try shoot("typing-wraps-cell") {
+                $0.view.setSelectedRange(NSRange(location: ns.range(of: "closes").location, length: 0))
+                $0.view.setSelectedRange(NSRange(location: ns.range(of: "fails closed.").location + 13, length: 0))
+                for word in [" and the request is logged with the tenant it named", " so an operator can find it"] {
+                    $0.view.insertText(word, replacementRange: $0.view.selectedRange())
+                }
+            }
+        }
     }
 }
