@@ -1501,6 +1501,45 @@ class PlanNSTextView: NSTextView {
         return pboard.setString(text, forType: .string)
     }
 
+    // MARK: Dropped files
+
+    /// Files and folders dropped here are inserted as their paths (`DroppedPaths`), at the drop
+    /// point NSTextView already tracks: it shows the insertion caret, selects the point and hands
+    /// the pasteboard to `readSelection`. The file type leads, so a Finder drag isn't read as the
+    /// name string or an attachment; browser text and URLs carry none and keep their handling.
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
+        [.fileURL] + super.acceptableDragTypes.filter { $0 != .fileURL }
+    }
+
+    override func preferredPasteboardType(from availableTypes: [NSPasteboard.PasteboardType],
+                                          restrictedToTypesFrom allowedTypes: [NSPasteboard.PasteboardType]?) -> NSPasteboard.PasteboardType? {
+        if availableTypes.contains(.fileURL), allowedTypes?.contains(.fileURL) != false, isEditable { return .fileURL }
+        return super.preferredPasteboardType(from: availableTypes, restrictedToTypesFrom: allowedTypes)
+    }
+
+    override func dragOperation(for dragInfo: any NSDraggingInfo, type: NSPasteboard.PasteboardType) -> NSDragOperation {
+        type == .fileURL ? (isEditable ? .copy : []) : super.dragOperation(for: dragInfo, type: type)
+    }
+
+    override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard type == .fileURL else { return super.readSelection(from: pboard, type: type) }
+        return insertDroppedFiles(DroppedPaths.fileURLs(on: pboard))
+    }
+
+    /// Inserts `urls` as paths over the selection (the drop point): one undo step, through
+    /// `insertText` so a table cell takes it as a paste (`shouldChangeText` → `tables.resolve`).
+    /// Several items go one per list line when the point is on an empty line, else `, `-separated.
+    @discardableResult
+    func insertDroppedFiles(_ urls: [URL]) -> Bool {
+        guard !urls.isEmpty, isEditable else { return false }
+        let range = selectedRange()
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: min(range.location, source.length), length: 0))
+        let onEmptyLine = source.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        insertText(DroppedPaths.markdown(urls, projectPath: projectPath, onEmptyLine: onEmptyLine), replacementRange: range)
+        return true
+    }
+
     // MARK: Links
 
     /// The link at a character offset, from the Markdown parse (`MarkdownStyler.link(at:in:)`):
