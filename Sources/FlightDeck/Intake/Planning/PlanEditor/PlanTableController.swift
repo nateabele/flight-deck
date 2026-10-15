@@ -648,6 +648,7 @@ extension PlanTableController {
                     let ax = PlanTableAXCell()
                     ax.setAccessibilityRole(.cell)
                     ax.setAccessibilityLabel(cell.text.string)
+                    ax.setAccessibilityIdentifier("plan-table-cell-\(shownRow)-\(c)")
                     ax.setAccessibilityParent(rowElement)
                     ax.rows = NSRange(location: shownRow, length: 1)
                     ax.columns = NSRange(location: c, length: 1)
