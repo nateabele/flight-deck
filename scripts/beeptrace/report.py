@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Tallies a beeps.log written by libBeepTrace (FD_TRACE_BEEPS=1) by test and by call site.
 
-    report.py <beeps.log>
+    report.py <beeps.log> [run.log]
 
 A beep made in a process with XCTest names its own test case. A beep made in the app under test
-does not (no XCTest there), so it is given the test case the runner had open at that moment,
-from the CASE lines both processes stamp on the same clock. Exit status 0 either way: this is a
-report, not a gate. The last line is `BEEPS: <n>`.
+does not (no XCTest there), so it is given the test case that was running at that moment: from
+the CASE lines the tracer writes where XCTest is loaded, else, with run.log (xcodebuild's output
+from a UI run), from its suite start times and per-case durations. Both read the same clock.
+Exit status 0 either way: this is a report, not a gate. The last line is `BEEPS: <n>`.
 """
 import collections
 import re
@@ -15,8 +16,27 @@ import subprocess
 import sys
 
 
+def seconds(clock):
+    h, m, s = clock.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def cases_from_run_log(path):
+    """(start, end, name) per test case: a case starts where the previous one ended."""
+    cases, cursor = [], None
+    for line in open(path, errors="replace"):
+        m = re.match(r"Test Suite '.*' started at \S+ (\d+:\d+:\d+\.\d+)", line)
+        if m:
+            cursor = seconds(m.group(1))
+        m = re.match(r"Test Case '(.*)' (?:passed|failed|skipped) \(([\d.]+) seconds\)", line)
+        if m and cursor is not None:
+            cases.append((cursor, cursor + float(m.group(2)), m.group(1)))
+            cursor += float(m.group(2))
+    return cases
+
+
 def main():
-    cases = []  # (start, end, name), clock strings HH:MM:SS.mmm sort as text
+    cases = cases_from_run_log(sys.argv[2]) if len(sys.argv) > 2 else []
     open_cases = {}
     beeps = []  # (stamp, proc, via, test, site)
     loads = 0
@@ -32,7 +52,7 @@ def main():
             if kind == "start":
                 open_cases[(pid, name)] = t
             elif (pid, name) in open_cases:
-                cases.append((open_cases.pop((pid, name)), t, name))
+                cases.append((seconds(open_cases.pop((pid, name))), seconds(t), name))
         elif line.startswith("BEEP "):
             m = re.match(r"BEEP (\S+) pid=\d+ proc=(.*) via=(\S+) test=(.*)$", line)
             stamp, proc, via, test = m.groups()
@@ -43,12 +63,12 @@ def main():
             # The call site: the first frame above the AppKit beep plumbing.
             site = next((f for f in frames if "NSBeep" not in f and "forwardMethod" not in f), "?")
             after = frames[frames.index(site) if site in frames else 0:]
-            beeps.append((stamp, proc, via, test, " < ".join(after[:3])))
+            beeps.append((seconds(stamp), proc, via, test, " < ".join(after[:3])))
 
     tally = collections.Counter()
     for stamp, proc, via, test, site in beeps:
         if test.startswith("(no test"):
-            test = next((n for s, e, n in cases if s <= stamp <= e), test)
+            test = next((n for s, e, n in cases if s - 0.5 <= stamp <= e + 0.5), test)
         tally[(test, proc, site)] += 1
     rows = "\n".join(f"{n:5}  {test}  [{proc}]  {site}" for (test, proc, site), n in tally.most_common())
     if rows and shutil.which("xcrun"):

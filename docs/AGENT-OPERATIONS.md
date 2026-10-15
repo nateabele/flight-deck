@@ -407,8 +407,8 @@ The log comes back as `DerivedData/fd-test-shards/beeps.log` (unit) or
 `DerivedData/smoke-remote/beeps.log` (smoke), and the run ends with `scripts/beeptrace/report.py`'s
 tally, one row per test and call site, then `BEEPS: <n>`. Every traced process writes one `LOAD`
 line, so a log with no `BEEP` lines is the pass and proves the tracer was in the processes. The
-app under test has no XCTest, so its beeps are given the test case the runner had open at that
-moment (`CASE` lines on one clock). `fd_beep_count()` is exported for a test that wants the count,
+app under test has no XCTest, so its beeps are given the test case that was running at that
+moment, read from `run.log`'s suite start times and case durations. `fd_beep_count()` is exported for a test that wants the count,
 `dlsym(RTLD_DEFAULT, "fd_beep_count")`, NULL when not traced.
 
 Measured 2026-10-15: the whole unit suite (7318 cases, six shards, the serial lane, the menu-bar
