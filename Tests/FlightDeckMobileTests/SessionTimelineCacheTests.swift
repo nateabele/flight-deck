@@ -110,6 +110,53 @@ final class SessionTimelineCacheTests: XCTestCase {
         XCTAssertEqual(reopened.feed.items.map(\.id), ["90000#0"], "no hole between the copy and the live edge")
     }
 
+    /// Scrollback from a reopened copy: the older cursor survives the disk round trip, and a
+    /// prefetch asked for while the first forward page is still out is issued once it lands.
+    func testAReopenedCopyStillScrollsBack() {
+        let cache = cache()
+        let pager = CachePager()
+        let first = model(pager, cache)
+        first.open()
+        pager.answer(page([item(1040, "first"), item(1090, "second")],
+                          start: 1000, end: 1200, hasMore: true))
+        first.persist()
+
+        let again = CachePager()
+        let reopened = model(again, cache)
+        XCTAssertTrue(reopened.feed.hasOlder, "the copy must still know there is more above it")
+        reopened.open()
+        reopened.prefetchOlder()
+        again.answer(page([], start: 1200, end: 1200))
+        XCTAssertEqual(again.anchors, [.after(1200), .before(1000)])
+        again.answer(page([item(900, "older")], start: 800, end: 1000, hasMore: true))
+        XCTAssertEqual(reopened.feed.items.map(\.id), ["900#0", "1040#0", "1090#0"])
+    }
+
+    /// The same without a cache at all, so a failure above can be told from one in paging.
+    func testAFreshSessionScrollsBack() {
+        let pager = CachePager()
+        let fresh = SessionTimelineModel(sessionID: session, fleet: pager, spillDirectory: spill())
+        fresh.open()
+        pager.answer(page([item(1040, "first")], start: 1000, end: 1200, hasMore: true))
+        fresh.prefetchOlder()
+        XCTAssertEqual(pager.anchors, [.latest, .before(1000)])
+    }
+
+    /// The launch kill: a 294-item copy, drawn before the first frame, got the app killed
+    /// at every launch. A copy written larger than `cachedItems` — by an older build — comes
+    /// back cut to it, newest end kept.
+    func testAnOversizedCopyIsCutOnTheWayIn() {
+        let cache = cache()
+        var big = TimelineFeed()
+        big.merge(page((0..<300).map { item(10_000 + $0 * 10, "row \($0)") },
+                       start: 10_000, end: 13_000))
+        cache.save(CachedTimeline(source: "S", feed: big, savedAt: Date()), for: session)
+        let reopened = model(CachePager(), cache)
+        XCTAssertEqual(reopened.feed.items.count, SessionTimelineModel.cachedItems)
+        XCTAssertEqual(reopened.feed.items.last?.id, big.items.last?.id)
+        XCTAssertTrue(reopened.feed.hasOlder, "the rest is still reachable by scrolling")
+    }
+
     /// A Mac that sends no `source` cannot have its cursors checked later, so nothing is kept.
     func testNothingIsCachedWithoutASourceToken() {
         let cache = cache()

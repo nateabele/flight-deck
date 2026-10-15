@@ -176,23 +176,30 @@ exists because a phone in a pocket answers nothing and never disconnects.
 
 ### `phone.logs`
 
-The phone logs its own connection lifecycle, prompt derivation and answers through
-`FlightDeckMobile.PhoneLog` (`os.Logger`, subsystem `io.radify.flightdeck.FlightDeckMobile`, categories
-`connection` / `prompt` / `answer`), and the Mac pulls them with
-`scripts/answer-trigger.sh logs [seconds]` — behind the same `FlightDeckAnswerTrigger` gate as
-the answer drive, because pulling logs off a phone belongs behind the gate that drives a
-terminal. What comes back is appended to `~/Library/Logs/flight-deck-phone.log`, beside
-`flight-deck-answer.log` and `flight-deck-prompt.log`, with the phone's own timestamps.
+The phone logs its own connection lifecycle, prompt derivation, answers and main-thread stalls
+through `FlightDeckMobile.PhoneLog` (categories `connection` / `prompt` / `answer` / `perf`),
+and the Mac pulls them with `scripts/answer-trigger.sh logs [seconds]` — behind the same
+`FlightDeckAnswerTrigger` gate as the answer drive, because pulling logs off a phone belongs
+behind the gate that drives a terminal. What comes back is appended to
+`~/Library/Logs/flight-deck-phone.log`, beside `flight-deck-answer.log` and
+`flight-deck-prompt.log`, with the phone's own timestamps.
 
-Two properties to keep. **Nothing but structure crosses the boundary** — ids, counts, states and
-timings, never option text, transcript content or anything a person typed; these lines land in a
-file on a Mac. And **the phone streams nothing on its own**: it answers this frame and is
-otherwise silent.
+Two properties to keep. **Nothing but structure crosses the boundary** — ids, counts, states,
+timings and return addresses, never option text, transcript content or anything a person typed;
+these lines land in a file on a Mac. And **the phone streams nothing on its own**: it answers
+this frame and is otherwise silent.
 
-`OSLogStore(scope: .currentProcessIdentifier)` is the only scope an iOS app may open without an
-entitlement, so a fetch sees what the *current launch* logged and nothing before it. An empty
-answer means the app restarted, not that nothing happened. The file on the Mac is what
-accumulates across fetches.
+**The phone answers from its own journal, never from `OSLogStore`, and never on its main
+thread.** Every line goes to the unified log *and* to `PhoneJournal`, a rotating file in the
+app's `Caches` (`phone.log`, 1 MB, then `phone.1.log`); a fetch reads that file on a utility
+queue. Reading `OSLogStore(scope: .currentProcessIdentifier)` instead took 18.7 s on an iPhone
+15 Pro for a few dozen lines, past `askDeadline`'s 10 s, so every fetch timed out — and it ran on
+the main thread, so every fetch also froze the phone for as long. The journal outlives a launch,
+so a phone that was killed still answers with what led up to it.
+
+When the socket cannot get through at all — a phone whose main thread is stuck is exactly that
+phone — `scripts/phone-stalls.sh` reads the same journal over `devicectl` and symbolicates its
+stall stacks. See MOBILE-UI.md, "When the phone freezes".
 
 ## Pairing
 

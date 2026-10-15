@@ -354,8 +354,20 @@ final class SessionTimelineModel {
         self.timeout = timeout
         self.spillStore = TimelineSpillStore(session: sessionID, directory: spillDirectory)
         self.cache = cache
-        if let cached = cache?.timeline(for: sessionID) {
-            feed = cached.feed
+        let start = DispatchTime.now().uptimeNanoseconds
+        let restored = cache?.timeline(for: sessionID)
+        if cache != nil {
+            PhoneLog.perfNote("""
+                timeline cache read ms=\(PhoneLog.elapsed(since: start)) \
+                items=\(restored?.feed.items.count ?? -1)
+                """)
+        }
+        // Cut again on the way in, not only on the way out: a file an older build wrote can
+        // hold five times what `cachedItems` now allows, and drawing that is the launch kill
+        // `cachedItems` describes.
+        if let cached = restored,
+           let bounded = cached.feed.cacheable(maxItems: Self.cachedItems, maxBytes: Self.cachedBytes) {
+            feed = bounded
             source = cached.source
             isRestored = true
             rebuild()
@@ -373,20 +385,32 @@ final class SessionTimelineModel {
     /// The pending debounced save, if one is scheduled.
     @ObservationIgnored private var cacheSave: Task<Void, Never>?
 
-    /// How much of a feed is kept on disk. Enough to open on a screenful and then some, small
-    /// enough that reading it back on the main thread, before the first frame, stays cheap.
-    static let cachedItems = 300
-    static let cachedBytes = 1_000_000
+    /// How much of a feed is kept on disk: about what one `.latest` page holds, which is what
+    /// a cold open drew before there was a cache.
+    ///
+    /// **Not more, and the reason is the first frame, not the read.** Reading 294 items back
+    /// took 6–8 ms. Drawing them did not finish: the app reopens the conversation it was last
+    /// on, and a restored feed that size put every row through SwiftUI and TextKit layout before
+    /// the first frame, long enough that iOS killed the app at launch, every launch (three
+    /// SIGKILLs at 20:40 on 2026-10-14, main thread in `NSTextLayoutManager` and
+    /// `GraphHost.updatePreferences`). Older history comes back by scrolling, as it always has.
+    static let cachedItems = 60
+    static let cachedBytes = 200_000
 
     /// Write the newest end of the feed to disk now. Called on a debounce after each page that
     /// changed the items, when the model is evicted, and when the app goes to the background.
     func persist() {
         cacheSave?.cancel()
         cacheSave = nil
+        let start = DispatchTime.now().uptimeNanoseconds
         guard let cache, let source,
               let cut = feed.cacheable(maxItems: Self.cachedItems, maxBytes: Self.cachedBytes)
         else { return }
         cache.save(CachedTimeline(source: source, feed: cut, savedAt: Date()), for: sessionID)
+        let ms = PhoneLog.elapsed(since: start)
+        if ms >= 10 {
+            PhoneLog.perfNote("timeline persist ms=\(ms) items=\(cut.items.count)")
+        }
     }
 
     /// Debounced for the reason `FleetModel.scheduleFleetSave()` is: a live turn lands a page
@@ -512,10 +536,15 @@ final class SessionTimelineModel {
     /// outbox entry — never from the view.
     private func rebuild() {
         rebuildCount += 1
+        let start = DispatchTime.now().uptimeNanoseconds
         rendered = Self.rendered(
             from: feed.items,
             delivered: outbox.entries.filter { $0.state == .delivered }
         )
+        let ms = PhoneLog.elapsed(since: start)
+        if ms >= 30 {
+            PhoneLog.perfNote("rebuild ms=\(ms) items=\(self.feed.items.count)")
+        }
         prefetchTriggerID = feed.hasOlder ? Self.prefetchTrigger(rendered) : nil
         blockedPrompt = blocked(agent: statusAgent, activity: statusActivity, call: statusCall)
     }
@@ -908,10 +937,10 @@ final class SessionTimelineModel {
         }
         blockedChaseExhausted = true
         PhoneLog.prompt.notice("""
-            blocked-chase-exhausted session=\(self.sessionID.uuidString, privacy: .public) \
-            activity=\(activity ?? "-", privacy: .public) \
-            retries=\(self.promptRetries.count, privacy: .public) \
-            unansweredInFeed=\(self.hasUnansweredCallInFeed, privacy: .public)
+            blocked-chase-exhausted session=\(self.sessionID.uuidString) \
+            activity=\(activity ?? "-") \
+            retries=\(self.promptRetries.count) \
+            unansweredInFeed=\(self.hasUnansweredCallInFeed)
             """)
     }
 
@@ -1189,7 +1218,7 @@ final class SessionTimelineModel {
         guard lastNotedPrompt != line else { return }
         lastNotedPrompt = line
         PhoneLog.prompt.notice(
-            "\("prompt session=\(self.sessionID.uuidString) " + line, privacy: .public)"
+            "prompt session=\(self.sessionID.uuidString) " + line
         )
     }
 
@@ -1232,7 +1261,7 @@ final class SessionTimelineModel {
         // `notice` per fragment would split a record across lines in the file the Mac fetches.
         let sent = "sent session=\(sessionID.uuidString) call=\(call)"
             + " kind=\(Self.describe(answer))"
-        PhoneLog.answer.notice("\(sent, privacy: .public)")
+        PhoneLog.answer.notice("\(sent)")
 
         // Armed BEFORE the send, because the send can complete before it returns:
         // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
@@ -1251,7 +1280,7 @@ final class SessionTimelineModel {
             guard let self, self.claimAnswer(token) else { return }
             switch result {
             case .success:
-                PhoneLog.answer.notice("acked call=\(call, privacy: .public)")
+                PhoneLog.answer.notice("acked call=\(call)")
                 // Stays `.sent`. What retires the card is the transcript — so pull it, for the
                 // same reason `send(_:)` does: the Mac emits no frame when a Return lands.
                 self.loadNewer()
@@ -1260,7 +1289,7 @@ final class SessionTimelineModel {
                 // the Mac's own code rather than the copy shown on screen, because the code is
                 // what correlates with the Mac's side of the same second.
                 let refusal = "refused call=\(call) code=\(Self.describe(error))"
-                PhoneLog.answer.error("\(refusal, privacy: .public)")
+                PhoneLog.answer.error("\(refusal)")
                 self.answerState = .failed(call: call, Self.answerMessage(for: error))
             }
         }
@@ -1332,6 +1361,7 @@ final class SessionTimelineModel {
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self, self.claim(fetch) else { return }
             if older {
+                PhoneLog.perfNote("scrollback timed out")
                 self.olderFailure = "Your Mac didn't answer in time."
                 self.wantsOlder = false
             } else if !quiet {
@@ -1346,7 +1376,13 @@ final class SessionTimelineModel {
         fleet.timelinePage(
             .timeline(session: sessionID, anchor: anchor, limit: TimelineLimits.defaultLimit)
         ) { [weak self] result in
-            guard let self, self.claim(fetch) else { return }
+            guard let self, self.claim(fetch) else {
+                if older { PhoneLog.perfNote("scrollback page dropped: not claimed") }
+                return
+            }
+            if older, case .failure(let error) = result {
+                PhoneLog.perfNote("scrollback failed \(anchor) \(String(describing: error))")
+            }
             switch result {
             case .success(let page):
                 // **A different file, or a disk copy too far behind: start over.** Both are

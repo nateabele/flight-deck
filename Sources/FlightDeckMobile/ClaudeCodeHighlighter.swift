@@ -81,9 +81,11 @@ final class ClaudeCodeHighlightEngine: @unchecked Sendable {
 
     func prewarm() {
         DispatchQueue.global(qos: .utility).async { [self] in
+            let start = DispatchTime.now().uptimeNanoseconds
             lock.lock()
             defer { lock.unlock() }
             loadIfNeeded()
+            PhoneLog.perfNote("highlight load ms=\(PhoneLog.elapsed(since: start))")
         }
     }
 
@@ -92,9 +94,20 @@ final class ClaudeCodeHighlightEngine: @unchecked Sendable {
         let language = language?.trimmingCharacters(in: .whitespaces)
         guard let language, !language.isEmpty else { return nil }
         let key = language + "\u{0}" + code
+        let asked = DispatchTime.now().uptimeNanoseconds
         lock.lock()
         defer { lock.unlock() }
         if let hit = cache[key] { return hit }
+        let waited = PhoneLog.elapsed(since: asked)
+        defer {
+            let ms = PhoneLog.elapsed(since: asked)
+            if ms >= 30 {
+                PhoneLog.perfNote("""
+                    highlight ms=\(ms) waited=\(waited) \
+                    bytes=\(code.utf8.count) main=\(Thread.isMainThread)
+                    """)
+            }
+        }
         loadIfNeeded()
         let value: [HighlightRun]?
         if let function, let json = function.call(withArguments: [code, language]), json.isString,
