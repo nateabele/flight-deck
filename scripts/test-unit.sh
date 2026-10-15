@@ -260,3 +260,6 @@ serial_note=""
 if [ -n "$SERIAL_CLASSES" ]; then serial_note=" + serial lane"; fi
 if [ -z "${FD_SKIP_MENUBAR:-}" ]; then serial_note="$serial_note + menu-bar lane"; fi
 echo "** SHARDED UNIT RUN $([ "$rc" = 0 ] && echo PASSED || echo FAILED) ($SHARDS shards$serial_note; logs in $LOGDIR) **"
+# A failing full run must fail the script, not only print FAILED: callers (the remote runner,
+# merge gates, other scripts) read the exit status.
+exit "$rc"
