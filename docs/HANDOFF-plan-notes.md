@@ -2,9 +2,8 @@
 
 **Feature:** the notes a person leaves on a plan for the planning rounds to read: on the Mac
 (the notes rail beside the plan editor) and on the phone (the plan reader).
-**State as of 2026-10-15, `master` `18682f2e`:** notes are pinned to the plan version they were
-written on. A layout fix for the notes rail is in flight on branch `notes-pinned-collapse` and
-is not merged yet (see "Open").
+**State as of 2026-10-15:** notes are pinned to the plan version they were written on, and the
+rail's other-versions section is collapsible (see "Pinning" and "Open").
 **Audience:** agents extending this feature. Read it before touching notes. Claims here were
 checked against the code at that commit; where something is unverified it says so.
 
@@ -80,6 +79,11 @@ lost data.
 - On any other version, `PlanNotesController.pin(for:)` returns a `NotePin`, and the rail lists
   the note in a section below the lane, grouped by version, latest first, with its quote. That
   is its context without the plan.
+- That section is collapsible: a "2 notes on another version" row with the pin icon. It starts
+  collapsed while this version has notes of its own (so it never crowds the aligned lane) and open
+  when it has none (`NotesRailModel.otherVersionsExpanded`). The human's choice is kept per intake
+  for the session (`PlanNotesController.otherVersionsExpanded`). Open, it is its own scroll area
+  after the lane, never drawn over it.
 - "Show in that version" (`showInVersion`) sets a `pendingReveal`, opens that checkpoint through
   the same navigation as the round list, then scrolls to the quote under the pinned block and
   flashes it. It is used once (`PlanNotesBridge.takeReveal`).
@@ -118,6 +122,7 @@ differently here, or be gone.)"
 | A stale range snapshot overwrote newer ones after a text change | The async publish captured the ranges at schedule time | It reads them when it runs. |
 | A reveal was lost on an editor's first load | The bridge attached after the first load | It attaches before. |
 | The note type locked as soon as the note text lost focus (`ef052221`) | Blur committed the draft, and a committed card showed its kind as a static label | A type pop-up on every pending card. Blur commits only a non-empty draft. |
+| The rail's other-versions section drew over aligned cards on a short window | It sat in the rail's stack and took up to 280 pt | Collapsible, collapsed by default over a version with notes of its own (see Pinning) |
 | Notes said "Can't find this text anymore" after synthesis | The design: anchored only to the current plan | Pinning, above. |
 
 Checked against real data: the maintainer's two LarkOS intakes hold 14 consumed notes. All 14 quotes
@@ -126,11 +131,15 @@ synthesis was expected; the switch-back failure was the bug.
 
 ## Open
 
-- **Rail layout, in flight on branch `notes-pinned-collapse`:** the other-versions section
-  could cover cards in the aligned lane, cutting off a card on a short window. The fix being
-  made: the section is collapsible, collapsed by default when it would overlap, and scrolls on
-  its own when expanded. Also on that branch: checking a blank gap above the editor in one render
-  (probably a fixture artifact), and rendering the phone's pinned groups.
+- **Selection toolbar on a later version (reported, not reproduced):** the maintainer reported that after
+  synthesis the toolbar's kind buttons did nothing. A real mouse press on the toolbar's panel
+  opens a draft and sends a note anchored to the version shown, in a hosted plan section
+  (`NotesOnLaterVersionTests`, switching versions back and forth) and in the full window with
+  notes already read by synthesis and a table (`ProjectViewNotesOnLaterVersionLiveTests`), on
+  master before and after the pinning change. Suspects not ruled out: the reading-position
+  restore scrolling while the toolbar is up (each scroll closes the toolbar's panel), and the
+  real app's board panels. If it recurs, capture whether `PlanNotesController.draft` is set after
+  the press.
 - **Note creation time:** notes have no clock, so version inference uses the consuming round's
   start as the bound. Adding a `createdAt` would make inference exact for new notes.
 - **No note for removed text:** a note about a passage that was removed doesn't follow its
