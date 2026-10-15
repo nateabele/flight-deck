@@ -52,15 +52,12 @@ struct PlanTableMarks: Hashable {
         }
         guard !changes.isEmpty else { return marks }
         let source = String(utf16CodeUnits: u, count: u.count)
-        marks.inline = place(changes, source).compactMap { mark in
+        marks.inline = PlanTableEditing.marks(for: changes, in: source).compactMap { mark in
             guard mark.kind == .deleted, let column = mark.column, !mark.ghost.isEmpty else { return nil }
             return Ghost(row: mark.row, column: column, offset: mark.textRange.location, text: mark.ghost)
         }
         return marks
     }
-
-    /// Where the edit layer's changes go in the grid — `PlanTableEditing.marks`.
-    nonisolated(unsafe) static var place: ([PlanTableEditing.Change], String) -> [PlanTableEditing.CellMark] = PlanTableEditing.marks
 
     /// Whether `mark` (a removed row or removed words) is the grid's to draw: its paragraph is a
     /// grid row, or, for removed rows, the line above it is one (they go below the table).
