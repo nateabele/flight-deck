@@ -188,6 +188,37 @@ final class PlanFoldingTests: XCTestCase {
         XCTAssertEqual(f.coordinator.visibleProxy(quote), ns.range(of: "## 2. Rules"))
     }
 
+    /// The chevron and the pill are controls: the pointer over them is the arrow, and the
+    /// text's I-beam everywhere else on the line (the maintainer, 2026-10-15).
+    func testThePointerIsTheArrowOverAChevronOrPill() throws {
+        let f = editor()
+        defer { f.window.close() }
+        f.view.displayIfNeeded()
+        f.coordinator.foldGutter.display()
+        // The fixture skips `makeNSView`, which wires the pointer to the chevrons; wire it the same way.
+        f.view.onHover = { [coordinator = f.coordinator] point in coordinator.hoverFold(at: point) }
+        let top = try XCTUnwrap(f.view.caretRect(at: (f.view.string as NSString).range(of: "## 2. Rules").location + 4))
+        func move(to point: NSPoint) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved, location: f.view.convert(point, to: nil), modifierFlags: [],
+                                                          timestamp: 0, windowNumber: f.window.windowNumber, context: nil,
+                                                          eventNumber: 0, clickCount: 0, pressure: 0))
+            f.view.mouseMoved(with: event)
+        }
+        try move(to: NSPoint(x: 200, y: top.midY))
+        XCTAssertFalse(f.view.pointerOnFoldControl, "on the heading's words: text")
+        try move(to: NSPoint(x: f.coordinator.foldGutter.chevronX, y: top.midY))
+        XCTAssertTrue(f.view.pointerOnFoldControl, "on the chevron: a control")
+        XCTAssertEqual(NSCursor.current, NSCursor.arrow)
+        f.coordinator.toggleFold(f.key("## 2. Rules"))
+        f.settle()
+        f.coordinator.foldGutter.display()
+        let mark = try XCTUnwrap(f.coordinator.foldGutter.marks.first { $0.folded })
+        try move(to: NSPoint(x: f.coordinator.foldGutter.pillRect(mark).midX, y: mark.line.midY))
+        XCTAssertTrue(f.view.pointerOnFoldControl, "on the pill: a control")
+        try move(to: NSPoint(x: 300, y: 5))
+        XCTAssertFalse(f.view.pointerOnFoldControl, "back in the text")
+    }
+
     func testAChevronClickFoldsAndThePillOpens() throws {
         let f = editor()
         defer { f.window.close() }

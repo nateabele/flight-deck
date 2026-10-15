@@ -677,6 +677,7 @@ struct PlanTextView: NSViewRepresentable {
             guard let textView else { return }
             (textView.textLayoutManager?.textContentManager as? NSTextContentStorage)?.delegate = foldFilter
             textView.onFoldClick = { [weak self] point in self?.clickFold(at: point) ?? false }
+            textView.isOverFoldControl = { [weak self] point in self?.foldGutter.hit(point) != nil }
             textView.onFoldKey = { [weak self] fold in self?.foldCaretSection(fold) ?? false }
             textView.visibleProxy = { [weak self] range in self?.visibleProxy(range) ?? range }
             textView.outline = { [weak self] in self?.headings ?? [] }
@@ -1175,6 +1176,12 @@ class PlanNSTextView: NSTextView {
     /// A click at a point (view coordinates): true when it hit a fold chevron or pill and was
     /// handled, so the text doesn't also take it as a caret placement.
     var onFoldClick: ((NSPoint) -> Bool)?
+    /// Whether a point (view coordinates) is on a fold chevron or a folded section's pill: a
+    /// control, so the pointer is the arrow there, not the text's I-beam.
+    var isOverFoldControl: ((NSPoint) -> Bool)?
+    /// The pointer was last on a fold control (`isOverFoldControl`); `cursorUpdate` keeps the
+    /// arrow there, since the text's I-beam cursor rect covers the whole view.
+    private(set) var pointerOnFoldControl = false
     /// ⌥⌘← (true, fold) / ⌥⌘→ (false, open) on the caret's section; true when handled.
     var onFoldKey: ((Bool) -> Bool)?
     /// A range as far as the page shows it — inside a folded section, its heading
@@ -1661,6 +1668,7 @@ class PlanNSTextView: NSTextView {
 
     override func cursorUpdate(with event: NSEvent) {
         if hoveredLink != nil { return NSCursor.pointingHand.set() }
+        if pointerOnFoldControl { return NSCursor.arrow.set() }
         super.cursorUpdate(with: event)
     }
 
@@ -1689,10 +1697,13 @@ class PlanNSTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         let point = convert(event.locationInWindow, from: nil)
+        // After `onHover`, which shows the line's chevron, so the test sees the chevron that's drawn.
         onHover?(point)
+        pointerOnFoldControl = isOverFoldControl?(point) ?? false
         watchModifiers()
         let command = event.modifierFlags.contains(.command)
         if command || hoveredLink != nil { updateLinkHover(at: point, command: command) }
+        if pointerOnFoldControl, hoveredLink == nil { NSCursor.arrow.set() }
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -1703,6 +1714,7 @@ class PlanNSTextView: NSTextView {
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         guard event.trackingArea === hoverArea else { return }
+        pointerOnFoldControl = false
         onHover?(nil)
         stopWatchingModifiers()
     }
