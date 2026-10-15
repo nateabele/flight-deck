@@ -17,6 +17,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <mach-o/dyld.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -98,11 +99,13 @@ HOOK(AudioServicesPlaySystemSoundWithCompletion, (SystemSoundID s, void (^c)(voi
 }
 @end
 
-// XCTest is not loaded yet when this dylib's constructor runs, so the observer is added from
-// the first image callback after XCTestObservationCenter exists.
+// XCTest is not loaded yet when this dylib's constructor runs, so the observer is added from the
+// image callback for XCTestCore. The callback runs for every image any thread loads, in the app
+// under test too, so until then it does a string compare and nothing else.
 static void imageAdded(const struct mach_header *mh, intptr_t slide) {
     static BOOL registered;
-    if (registered) return;
+    Dl_info info;
+    if (registered || !dladdr(mh, &info) || !strstr(info.dli_fname, "/XCTestCore.framework/")) return;
     Class center = NSClassFromString(@"XCTestObservationCenter");
     Protocol *observation = NSProtocolFromString(@"XCTestObservation");
     if (!center || !observation) return;
@@ -115,6 +118,8 @@ static void imageAdded(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor)) static void init(void) {
     const char *path = getenv("FD_BEEP_LOG");
     gLogFD = open(path ? path : "/tmp/fd-beeps.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+    // Not inherited: the shells, git and node the app or a test spawns have no use for it.
+    unsetenv("DYLD_INSERT_LIBRARIES");
     // A LOAD line per process, so a log with no BEEP lines is proof the tracer was in them.
     put([NSString stringWithFormat:@"LOAD pid=%d proc=%@\n", getpid(), NSProcessInfo.processInfo.processName]);
     _dyld_register_func_for_add_image(imageAdded);
