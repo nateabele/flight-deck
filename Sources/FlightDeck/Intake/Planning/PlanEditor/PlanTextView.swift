@@ -429,8 +429,10 @@ struct PlanTextView: NSViewRepresentable {
         /// The block whose syntax shows: the caret's, and only while the editor has focus — an
         /// unfocused plan reads fully rendered, with no stray `##` where the caret last was.
         private func caretBlock() -> Int? {
-            guard let textView, textView.isFocused else { return nil }
-            return MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks)
+            guard let textView, textView.isFocused,
+                  let index = MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks) else { return nil }
+            // A table never shows its source: the caret in it reveals nothing.
+            return blocks[index].kind == .table ? nil : index
         }
 
         /// Focus came or went: reveal or re-hide the caret block's syntax.
@@ -879,7 +881,8 @@ struct PlanTextView: NSViewRepresentable {
                 let single = editCount == 1 ? pendingEdit : nil
                 let fresh = single.map { MarkdownStyler.blocks(textView.string, after: blocks, edited: $0.range, delta: $0.delta) }
                     ?? MarkdownStyler.blocks(textView.string)
-                let next = textView.isFocused ? MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: fresh) : nil
+                let next = textView.isFocused ? MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: fresh)
+                    .flatMap { fresh[$0].kind == .table ? nil : $0 } : nil
                 if let edit = single {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
@@ -918,7 +921,6 @@ struct PlanTextView: NSViewRepresentable {
             // text typed at a folded heading's end read as inside its old body.
             if editCount == 0, let textView { unfold(containing: textView.selectedRange()) }
             MainActor.assumeIsolated { notesBridge.selectionChanged() }
-            redrawSelectedTables()
             // Mid-edit selection changes arrive before `textDidChange` re-parses; that pass
             // restyles the caret block itself.
             guard editCount == 0, let storage = textView?.textStorage else { return }
@@ -926,24 +928,6 @@ struct PlanTextView: NSViewRepresentable {
             guard next != revealed else { return }
             style(storage, indices: [revealed, next].compactMap { $0 }, reveal: next)
             revealed = next
-        }
-
-        /// The tables the selection touches, now and a moment ago: a grid row paints the selection
-        /// itself (`EditLayerFragment`), and the text view redraws only the hidden text's sliver.
-        private var selectedTables: [Int] = []
-
-        private func redrawSelectedTables() {
-            guard let textView else { return }
-            let selection = textView.selectedRange()
-            let now = blocks.indices.filter {
-                blocks[$0].kind == .table && selection.length > 0 && NSIntersectionRange(blocks[$0].range, selection).length > 0
-            }
-            for index in Set(now + selectedTables) where blocks.indices.contains(index) {
-                for rect in textView.segmentRects(blocks[index].range) {
-                    textView.setNeedsDisplay(NSRect(x: 0, y: rect.minY, width: textView.bounds.width, height: rect.height))
-                }
-            }
-            selectedTables = now
         }
 
         private func scheduleIdleCommit() {
@@ -1394,30 +1378,112 @@ class PlanNSTextView: NSTextView {
             openLink(link)
             return
         }
-        // A click on a table drawn as a grid puts the caret in the cell's text, which turns the
-        // table into its source. AppKit would put it at the end of the row's hidden line.
-        if !event.modifierFlags.contains(.shift), let caret = tableCaret(at: point) {
-            setSelectedRange(NSRange(location: caret, length: 0))
-            window?.makeFirstResponder(self)
-            return
-        }
+        // A click on a table drawn as a grid puts the caret in the cell's text. AppKit would put
+        // it at the end of the row's hidden line.
+        if tables.mouseDown(event, at: point) { return }
+        let before = selectedRange()
         super.mouseDown(with: event)
+        tables.finishDrag(from: point, selectionBefore: before)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if tables.mouseDragged(event, at: convert(event.locationInWindow, from: nil)) { return }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if tables.mouseUp() { return }
+        super.mouseUp(with: event)
     }
 
     /// Where a click at `point` (view coordinates) lands in a table drawn as a grid: the source
     /// offset of the character under it in the cell, nil when it isn't on a grid's cells.
-    func tableCaret(at point: NSPoint) -> Int? {
-        guard let layout = textLayoutManager, let content = layout.textContentManager else { return nil }
-        let origin = textContainerOrigin
-        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
-        guard let fragment = layout.textLayoutFragment(for: local), let paragraph = (fragment.textElement as? NSTextParagraph)?.attributedString,
-              paragraph.length > 0, let ref = paragraph.attribute(.planTableRow, at: 0, effectiveRange: nil) as? PlanTableRowRef
-        else { return nil }
-        let frame = fragment.layoutFragmentFrame
-        let padding = layout.textContainer?.lineFragmentPadding ?? 0
-        guard let offset = ref.layout.sourceOffset(row: ref.row, at: CGPoint(x: local.x - frame.minX - padding, y: local.y - frame.minY - (fragment.textLineFragments.first?.typographicBounds.minY ?? 0)))
-        else { return nil }
-        return content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location) + offset
+    func tableCaret(at point: NSPoint) -> Int? { tables.hit(at: point)?.offset }
+
+    // MARK: Tables
+
+    /// Editing a table in place — see `PlanTableController`.
+    lazy var tables = PlanTableController(view: self)
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        if let replacementString, !tables.structureEditing, !hasMarkedText() {
+            switch tables.resolve(affectedCharRange, replacementString) {
+            case .allow: break
+            case .veto, .done: return false
+            }
+        }
+        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting stillSelectingFlag: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelectingFlag)
+        tables.selectionChanged(ranges)
+    }
+
+    override func moveLeft(_ sender: Any?) { if !tables.handle(#selector(NSResponder.moveLeft(_:)), extending: false) { super.moveLeft(sender) } }
+    override func moveRight(_ sender: Any?) { if !tables.handle(#selector(NSResponder.moveRight(_:)), extending: false) { super.moveRight(sender) } }
+    override func moveLeftAndModifySelection(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.moveLeft(_:)), extending: true) { super.moveLeftAndModifySelection(sender) }
+    }
+    override func moveRightAndModifySelection(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.moveRight(_:)), extending: true) { super.moveRightAndModifySelection(sender) }
+    }
+    override func moveUp(_ sender: Any?) {
+        let x = tables.caretX()
+        if !tables.handle(#selector(NSResponder.moveUp(_:)), extending: false) {
+            super.moveUp(sender)
+            tables.entered(atX: x, movingDown: false)
+        }
+    }
+    override func moveDown(_ sender: Any?) {
+        let x = tables.caretX()
+        if !tables.handle(#selector(NSResponder.moveDown(_:)), extending: false) {
+            super.moveDown(sender)
+            tables.entered(atX: x, movingDown: true)
+        }
+    }
+    override func moveUpAndModifySelection(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.moveUp(_:)), extending: true) { super.moveUpAndModifySelection(sender) }
+    }
+    override func moveDownAndModifySelection(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.moveDown(_:)), extending: true) { super.moveDownAndModifySelection(sender) }
+    }
+    override func insertTab(_ sender: Any?) { if !tables.handle(#selector(NSResponder.insertTab(_:)), extending: false) { super.insertTab(sender) } }
+    override func insertBacktab(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.insertBacktab(_:)), extending: false) { super.insertBacktab(sender) }
+    }
+    override func insertNewline(_ sender: Any?) {
+        if !tables.handle(#selector(NSResponder.insertNewline(_:)), extending: false) { super.insertNewline(sender) }
+    }
+
+    /// A cell's menu adds the structure edits — the only way a table's rows and columns change.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event)
+        guard let menu, let found = tables.hit(at: convert(event.locationInWindow, from: nil)) else { return menu }
+        let selection = selectedRange()
+        if !(selection.length > 0 && NSLocationInRange(found.offset, selection)) { setSelectedRange(NSRange(location: found.offset, length: 0)) }
+        tables.addStructureItems(to: menu, at: found)
+        return menu
+    }
+
+    /// The plan's tables for VoiceOver: rows of cells, beside the text.
+    override func accessibilityChildren() -> [Any]? {
+        (super.accessibilityChildren() ?? []) + tables.accessibilityTables()
+    }
+
+    override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        if let table = tables.place(at: range.location), let rect = tables.caretRect(at: range.location, in: table), let window {
+            actualRange?.pointee = NSRange(location: range.location, length: 0)
+            return window.convertToScreen(convert(rect, to: nil))
+        }
+        return super.firstRect(forCharacterRange: range, actualRange: actualRange)
+    }
+
+    /// A selection in one table copies as Markdown (a cell's text, or whole rows as a table).
+    override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        guard let text = tables.copyText() else { return super.writeSelection(to: pboard, types: types) }
+        pboard.declareTypes([.string], owner: nil)
+        return pboard.setString(text, forType: .string)
     }
 
     // MARK: Links
@@ -1656,6 +1722,7 @@ class PlanNSTextView: NSTextView {
     /// that one line. `firstRect(forCharacterRange:)` answers an empty rect for an empty range
     /// on TextKit 2.
     func caretRect(at location: Int) -> NSRect? {
+        if let table = tables.place(at: location), let rect = tables.caretRect(at: location, in: table) { return rect }
         guard let layout = textLayoutManager, let content = layout.textContentManager,
               let at = content.location(content.documentRange.location, offsetBy: location) else { return nil }
         let range = NSTextRange(location: at)
@@ -1674,6 +1741,7 @@ class PlanNSTextView: NSTextView {
         guard super.becomeFirstResponder() else { return false }
         isFocused = true
         onFocusChange?()
+        tables.focusChanged()
         return true
     }
 
@@ -1681,6 +1749,7 @@ class PlanNSTextView: NSTextView {
         guard super.resignFirstResponder() else { return false }
         isFocused = false
         onFocusChange?()
+        tables.focusChanged()
         return true
     }
 }

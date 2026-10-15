@@ -338,7 +338,7 @@ final class PlanTableLayout: NSObject {
     /// Row `index` with its top-left corner at `origin` (flipped coordinates). A row paints its
     /// own share of the table's frame, so rows drawn by separate fragments meet without a seam:
     /// the rounded border is the whole table's, clipped to this row.
-    func draw(row index: Int, at origin: CGPoint, in context: CGContext, theme: PlanTheme, fills: [Fill] = [], selected: Bool = false) {
+    func draw(row index: Int, at origin: CGPoint, in context: CGContext, theme: PlanTheme, fills: [Fill] = []) {
         let row = rows[index]
         guard !row.isHidden else { return }
         let band = CGRect(x: origin.x - 1, y: origin.y, width: width + 2, height: row.height)
@@ -366,10 +366,6 @@ final class PlanTableLayout: NSObject {
         context.setFillColor(EditLayer.deletedColor.withAlphaComponent(0.1).cgColor)
         for part in parts where part.removed { context.fill(CGRect(x: origin.x - 1, y: part.top, width: width + 2, height: part.height)) }
         paintFills(row: index, at: origin, fills: fills, in: context)
-        if selected {
-            context.setFillColor(NSColor.selectedTextBackgroundColor.withAlphaComponent(0.45).cgColor)
-            context.fill(body)
-        }
         context.restoreGState()
 
         context.saveGState()
