@@ -611,7 +611,7 @@ enum MarkdownStyler {
         [.font: font, .foregroundColor: theme.text]
     }
 
-    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, edits: [EditMark], _ theme: PlanTheme) {
+    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
