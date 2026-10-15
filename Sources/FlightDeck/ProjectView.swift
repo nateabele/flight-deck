@@ -222,7 +222,8 @@ struct ProjectView: View {
         return ZStack(alignment: .topLeading) {
             Group {
                 if composerExpanded {
-                    ExpandedIntakeComposer(intent: $intent, onTriage: triage, onCollapse: { composerExpanded = false })
+                    ExpandedIntakeComposer(intent: $intent, onTriage: triage, onCollapse: { composerExpanded = false },
+                                           scroll: intakeService.composerScroll(forProject: projectPath))
                 } else if let id = selectionBinding.wrappedValue, let intake = intakes.first(where: { $0.id == id }) {
                     // Keyed on the intake's id, not just present: selecting a different row
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen

@@ -483,6 +483,11 @@ final class IntakeService: ObservableObject {
     private var editRouters: [UUID: PlanEditRouter] = [:]
     /// Each intake's folded plan sections, for the session: a view state, never written to disk.
     private var planFoldStores: [UUID: PlanFoldStore] = [:]
+    /// Each intake's plan reading position and caret, and each project's expanded composer's,
+    /// for the session: view state, never written to disk (a position into a plan is only worth
+    /// keeping until the plan moves on, and relaunching is such a move).
+    private var planScrollMemories: [UUID: PlanScrollMemory] = [:]
+    private var composerScrollMemories: [String: PlanScrollMemory] = [:]
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -1526,6 +1531,24 @@ final class IntakeService: ObservableObject {
         let store = PlanFoldStore()
         planFoldStores[id] = store
         return store
+    }
+
+    /// Intake `id`'s plan reading position and caret, made on first use — so leaving the project
+    /// for an agent's tab, which rebuilds the editor, comes back to the line that was being read.
+    func planScroll(_ id: UUID) -> PlanScrollMemory {
+        if let memory = planScrollMemories[id] { return memory }
+        let memory = PlanScrollMemory()
+        planScrollMemories[id] = memory
+        return memory
+    }
+
+    /// `project`'s expanded composer's reading position and caret, as `planScroll`.
+    func composerScroll(forProject project: String) -> PlanScrollMemory {
+        let key = Self.projectKey(project)
+        if let memory = composerScrollMemories[key] { return memory }
+        let memory = PlanScrollMemory()
+        composerScrollMemories[key] = memory
+        return memory
     }
 
     func recordEditConflict(_ id: UUID, _ conflict: EditConflict) {

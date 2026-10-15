@@ -33,6 +33,8 @@ struct ComposerEditor: View {
     var style: ComposerStyle
     var focusOnAppear = false
     let identifier: String
+    /// Where the scroll position and caret are kept across this editor being made again; nil keeps none.
+    var memory: PlanScrollMemory?
 
     var body: some View {
         GeometryReader { proxy in
@@ -40,6 +42,7 @@ struct ComposerEditor: View {
                 PlanTextView(text: $text, editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {},
                              theme: style.theme, compact: style.compact, focusOnAppear: focusOnAppear, identifier: identifier)
                     .committingEachKeystroke()
+                    .remembering(memory)
                     .filling(height: proxy.size.height)
             }
         }
@@ -55,6 +58,8 @@ struct ExpandedIntakeComposer: View {
     @Binding var intent: String
     let onTriage: () -> Void
     let onCollapse: () -> Void
+    /// The editor's scroll position and caret (`IntakeService.composerScroll`); nil keeps none.
+    var scroll: PlanScrollMemory?
 
     /// `IntakeDetailView`'s document margin, and a cap on the column so a wide window reads as a
     /// centred page rather than a line of text running edge to edge.
@@ -78,7 +83,7 @@ struct ExpandedIntakeComposer: View {
             }
             .padding(.leading, Self.columnInset)
             .padding(.trailing, Self.trailingInset)
-            ComposerEditor(text: $intent, style: .expanded, identifier: "intake-intent-expanded-field")
+            ComposerEditor(text: $intent, style: .expanded, identifier: "intake-intent-expanded-field", memory: scroll)
             HStack {
                 Spacer()
                 Button("Triage", action: onTriage)
