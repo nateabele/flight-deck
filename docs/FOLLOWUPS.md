@@ -3672,10 +3672,15 @@ ARCHITECTURE.md, "Smart sleep moves the lease" and "Local control socket". What 
 - **The mod's dialog has never been drawn in a real FD tab.** `claude -p` has no surface, so only
   `claude plugin test` (terminal, desktop and mobile surfaces, by key) exercised the pane. How the
   Button rows look in Ghostty, whether Tab/arrows walk them, and whether Esc closes it are unseen.
-- **Whether a mod-answered command leaves the tab `.idle`.** The move refuses unless
-  `statuses[id].activity == .idle` when asked and again when it starts. A headless run showed no
-  `UserPromptSubmit` hook for the command, only Stop, which suggests it stays idle; an interactive
-  tab may differ, in which case every `/switch-account` would answer "mid-turn".
+- **Answered: a typed `/switch-account <target>` reads busy** (2026-10-15, reported live: "This
+  conversation is mid-turn"); the picker was refused too whenever a background subagent ran. The
+  move no longer refuses a busy tab: it waits out a 3 s grace, interrupts a turn still running,
+  moves, and types a "Keep going" continuation when it cut work short (ARCHITECTURE.md). Unseen in
+  a real tab: how long the command's own busy actually lasts (it must end inside the grace, or a
+  typed switch costs the composer an Escape and a needless continuation), and whether one Escape
+  into a real claude permission dialog ends the turn or hands it back for another call (the
+  wind-down re-sends every 5 s for this). The continuation is dropped if the resumed claude
+  flickers through busy while booting, the same risk the restart "Keep going" already takes.
 - **The mod's output text** is shown as the command's output under "flight-deck:" (headless); the
   toast after a picker choice and what the person sees as claude is killed 0.8 s later are unseen.
 - **A paired phone has no path** (local only, by design).

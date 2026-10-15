@@ -1398,9 +1398,10 @@ final class SessionStore: ObservableObject {
     /// exists (a failed copy leaves it where it is, on its own account, with a notice); only
     /// then is the old agent killed, the tab restamped and the agent resumed under the new home.
     /// The draft read before the old agent goes is pasted back once the new composer is up
-    /// (`pendingDrafts`).
+    /// (`pendingDrafts`). `continuing` queues `accountSwitchContinuePrompt` for the resumed agent:
+    /// the move cut work short, and the user asked for it to carry on, not to start over.
     private func rollOver(_ id: UUID, to account: AgentAccount, resolution: AccountResolution, draft: String,
-                          origin: RolloverOrigin = .thaw) async {
+                          origin: RolloverOrigin = .thaw, continuing: Bool = false) async {
         defer { rollingOver.remove(id) }
         // A failed move leaves the old agent running: a thawed one is woken where it sat, a
         // live one was never stopped.
@@ -1411,30 +1412,38 @@ final class SessionStore: ObservableObject {
             accountResolver?.release(resolution)
             return stayPut()
         }
-        let moved: Session
-        do {
-            moved = try await transfer.transfer(old, from: from.home, to: account.home)
-        } catch {
-            accountResolver?.release(resolution)
-            stayPut()
-            switch origin {
-            case .thaw:
-                notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
-                                 body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
-            case .requested:
-                notifier?.notify(sessionID: id, title: "Could not move to “\(account.displayName)”", subtitle: old.title,
-                                 body: "Moving this conversation failed (\(error)), so it stays on “\(from.displayName)”.")
+        var draft = draft, continuing = continuing
+        var copied: Session?
+        for attempt in 1...Self.accountSwitchCopyAttempts {
+            let settledBeforeCopy = agentSettled(id)
+            do {
+                copied = try await transfer.transfer(old, from: from.home, to: account.home)
+            } catch {
+                accountResolver?.release(resolution)
+                stayPut()
+                switch origin {
+                case .thaw:
+                    notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
+                                     body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
+                case .requested:
+                    notifier?.notify(sessionID: id, title: "Could not move to “\(account.displayName)”", subtitle: old.title,
+                                     body: "Moving this conversation failed (\(error)), so it stays on “\(from.displayName)”.")
+                }
+                return
             }
-            return
+            // A turn started while the copy ran (the user typed at the Mac): the copy is already
+            // stale. A requested move is never abandoned for it — the turn is wound down and the
+            // copy made again, and past the last attempt the move goes ahead regardless, with
+            // the resumed agent told to carry on. Only a live agent can have started one, and
+            // only a turn that STARTED during the copy is chased: one `windDown` already gave up
+            // on would only cost another wind-down limit for the same result.
+            guard origin == .requested, settledBeforeCopy, !agentSettled(id),
+                  attempt < Self.accountSwitchCopyAttempts else { break }
+            let wound = await windDown(id)
+            continuing = true
+            if let read = wound.draft { draft = read }
         }
-        // The user typed while the copy ran: the copy is already stale, and killing the agent
-        // now would drop its turn. Only a live agent can have started one.
-        if origin == .requested, statuses[id]?.activity != .idle {
-            accountResolver?.release(resolution)
-            notifier?.notify(sessionID: id, title: "Did not move to “\(account.displayName)”", subtitle: old.title,
-                             body: "This conversation started a turn before it could move, so it stays on “\(from.displayName)”. Run /switch-account again when it is idle.")
-            return
-        }
+        guard let moved = copied else { accountResolver?.release(resolution); return }
         // Closed while the copy ran: nothing to resume, and the lease is nobody's.
         guard let at = locate(id) else {
             accountResolver?.release(resolution)
@@ -1512,6 +1521,12 @@ final class SessionStore: ObservableObject {
         if !draft.isEmpty {
             pendingDrafts[id] = DeferredPrompt(text: draft, deadline: now().addingTimeInterval(Self.draftRestoreWindow))
         }
+        // Typed by `flushPendingPrompts` once the resumed composer is up, and dropped there if
+        // the resumed agent picks its turn back up on its own (`cancelSupersededPrompts`).
+        if continuing {
+            pendingPrompts[id] = DeferredPrompt(text: Self.accountSwitchContinuePrompt,
+                                                deadline: now().addingTimeInterval(Self.resumePromptWindow))
+        }
         switch origin {
         case .thaw:
             notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: updated.title,
@@ -1554,16 +1569,17 @@ final class SessionStore: ObservableObject {
         if accountIsMissing(for: session) || account(for: session) == nil {
             return "This tab has no account on file to move it from."
         }
-        if statuses[id]?.activity != .idle {
-            return "This conversation is mid-turn. Wait until it is idle, then try again."
-        }
+        // No mid-turn refusal: a busy tab is wound down first (`windDown`). The typed form,
+        // `/switch-account <target>`, always arrived "mid-turn" — the slash command's own run
+        // is what the agent was busy with — and a background subagent lifts an idle tab's
+        // `activity` to busy, so the picker was refused at an idle composer too.
         return nil
     }
 
     /// Handles `account.switch`: resolves `target`, answers, and only then schedules the move.
-    /// The answer is returned synchronously and the move starts `accountSwitchDelay` later, after
-    /// a re-check that the tab is still idle, because the claude process that asked is the one
-    /// the move kills. Nothing here ever kills anything on a refusal.
+    /// The answer is returned synchronously and the move starts `accountSwitchDelay` later,
+    /// because the claude process that asked is the one the move kills. Nothing here ever kills
+    /// anything on a refusal.
     func requestAccountSwitch(_ id: UUID, target: String) -> WireAccountSwitchResult {
         guard let session = session(for: id), let resolver = accountResolver else {
             return WireAccountSwitchResult(ok: false, message: "No such tab.")
@@ -1582,30 +1598,120 @@ final class SessionStore: ObservableObject {
                 try? await Task.sleep(for: self?.accountSwitchDelay ?? .zero)
                 await self?.beginRequestedMove(id, to: account)
             }
-            let message = "Moving this conversation to “\(account.displayName)”. It will resume there in a moment."
+            let message = "Moving this conversation to “\(account.displayName)”. Anything still running stops first and picks up again there."
             return WireAccountSwitchResult(ok: true, message: note.map { "\($0) \(message)" } ?? message,
                                            to: account.displayName)
         }
     }
 
+    /// How long a requested move lets a turn end on its own before interrupting it. Covers the
+    /// typed `/switch-account <target>`, whose own command run is the "turn" in flight when the
+    /// request lands and ends as soon as the reply does; interrupting that would cut nothing
+    /// short and cost the composer an Escape.
+    var accountSwitchGrace: Duration = .seconds(3)
+    /// How long a requested move keeps interrupting a turn that will not end before it moves
+    /// anyway. The move is never abandoned: the agent it retires is killed either way, and the
+    /// resumed one is told to carry on.
+    var accountSwitchWindDownLimit: Duration = .seconds(30)
+    /// Between interrupt keys while winding down. A turn can outlive one Escape — a denied
+    /// permission dialog hands the turn back to the model, which may start another call.
+    static let accountSwitchInterruptInterval: Duration = .seconds(5)
+    static let accountSwitchPoll: Duration = .milliseconds(100)
+    /// Copies of the conversation a requested move makes before it stops chasing a turn the
+    /// user starts during the copy.
+    static let accountSwitchCopyAttempts = 3
+    /// Typed into a moved conversation whose work the move cut short.
+    static let accountSwitchContinuePrompt =
+        "Keep going. Flight Deck just moved this conversation to another account, which interrupted your last turn "
+        + "and stopped any background tasks or subagents it had running. Restart anything that is still needed."
+
+    /// Whether the agent itself has nothing in flight a move would cut short: idle at its
+    /// composer, or "waiting" on nothing a person can answer (`answerless` — claude's status
+    /// while only a background subagent runs). Read from `agentActivity`, never `activity`,
+    /// which a running subagent lifts to busy over an idle composer. No status at all is no
+    /// agent to interrupt.
+    private func agentSettled(_ id: UUID) -> Bool {
+        guard let status = statuses[id] else { return true }
+        return status.agentActivity == .idle || (status.agentActivity == .waiting && status.answerless)
+    }
+
+    /// Work the move will stop even with the agent settled: background subagents and shells
+    /// die with the process it retires.
+    private func hasBackgroundWork(_ id: UUID) -> Bool {
+        (statuses[id]?.subagentCount ?? 0) > 0 || backgroundWorkSessions.contains(id)
+    }
+
+    /// What winding a tab down found.
+    private struct WindDown {
+        /// Something was running that the move stops, so the resumed agent should carry on.
+        var cutShort: Bool
+        /// The composer's text, or nil when it could not be read.
+        var draft: String?
+    }
+
+    /// Brings a live tab to rest for a requested move, as fast as it will go: waits out
+    /// `accountSwitchGrace` for the turn to end by itself, then sends the agent's interrupt key
+    /// every `accountSwitchInterruptInterval` until it settles or `accountSwitchWindDownLimit`
+    /// passes. Keys go straight to the surface: `injector(for:)` answers nil mid-rollover.
+    ///
+    /// The draft is read before the first interrupt as well as after, because a turn's queued
+    /// messages and the composer can change under the key; the later read wins when it holds
+    /// text. Unreadable at rest is retried for the grace period (a screen mid-redraw).
+    private func windDown(_ id: UUID) async -> WindDown {
+        let clock = ContinuousClock()
+        let reader = { [weak self] () -> TextInjecting? in self.flatMap { $0.injectorOverride ?? $0.surfaces[id] } }
+        let channel = session(for: id)?.agent.textChannel
+        func read() -> String? { reader().flatMap { channel?.draft($0) } }
+        var cutShort = hasBackgroundWork(id)
+
+        let graceEnd = clock.now + accountSwitchGrace
+        while !agentSettled(id), clock.now < graceEnd { try? await Task.sleep(for: Self.accountSwitchPoll) }
+
+        var early: String?
+        if !agentSettled(id) {
+            cutShort = true
+            early = read()
+            // At least one key, whatever the limit: a turn that is still running gets stopped,
+            // not merely outwaited.
+            let limit = clock.now + accountSwitchWindDownLimit
+            var nextKey = clock.now
+            repeat {
+                if clock.now >= nextKey, let injector = reader() {
+                    sendInterruptKey(id, to: injector)
+                    nextKey = clock.now + Self.accountSwitchInterruptInterval
+                }
+                try? await Task.sleep(for: Self.accountSwitchPoll)
+            } while !agentSettled(id) && clock.now < limit
+        }
+        cutShort = cutShort || hasBackgroundWork(id)
+
+        var late = read()
+        let retryEnd = clock.now + accountSwitchGrace
+        while late == nil, clock.now < retryEnd {
+            try? await Task.sleep(for: Self.accountSwitchPoll)
+            late = read()
+        }
+        let draft = (late?.isEmpty == false) ? late : (early ?? late)
+        return WindDown(cutShort: cutShort, draft: draft)
+    }
+
     /// The second half of `requestAccountSwitch`, once the asking process has its answer:
-    /// re-checks the tab, reads its composer while the agent can still be read, and rolls over.
+    /// winds the tab down, reads its composer while the agent can still be read, and rolls over.
+    /// Never abandons the move: a turn that will not end is killed with its agent, and the
+    /// resumed agent is told to carry on.
     private func beginRequestedMove(_ id: UUID, to account: AgentAccount) async {
+        guard session(for: id) != nil else { rollingOver.remove(id); return }
+        let wound = await windDown(id)
         guard let session = session(for: id) else { rollingOver.remove(id); return }
-        let reader = injectorOverride ?? surfaces[id]
-        let draft = reader.flatMap { session.agent.textChannel?.draft($0) }
-        guard statuses[id]?.activity == .idle, let draft else {
-            rollingOver.remove(id)
-            notifier?.notify(sessionID: id, title: "Did not move to “\(account.displayName)”", subtitle: session.title,
-                             body: draft == nil
-                                ? "Flight Deck could not read this tab’s unsent text, so it stays put rather than risk losing it."
-                                : "This conversation started a turn before it could move, so it stays put. Run /switch-account again when it is idle.")
-            return
+        if wound.draft == nil {
+            notifier?.notify(sessionID: id, title: "Unsent text not carried to “\(account.displayName)”", subtitle: session.title,
+                             body: "Flight Deck could not read this tab’s composer before moving it, so any text you had not sent stayed behind.")
         }
         // No lease on the resolution: the tail of `rollOver` takes it with `reacquire`, which
         // leases only when the project's assigned hosted pool lists the new account.
         let resolution = AccountResolution(agent: session.agent, account: account, source: .assigned)
-        await rollOver(id, to: account, resolution: resolution, draft: draft, origin: .requested)
+        await rollOver(id, to: account, resolution: resolution, draft: wound.draft ?? "", origin: .requested,
+                       continuing: wound.cutShort)
     }
 
     /// Pastes each carried draft into its resumed agent's composer, once that composer is on
@@ -1616,6 +1722,9 @@ final class SessionStore: ObservableObject {
         let t = now()
         for (id, pending) in pendingDrafts {
             guard t < pending.deadline else { pendingDrafts[id] = nil; continue }
+            // A continuation is typed first (`accountSwitchContinuePrompt`): pasted ahead of it,
+            // the draft would be submitted along with it.
+            guard pendingPrompts[id] == nil else { continue }
             guard let gate = injectionGate(id), let current = gate.channel.draft(gate.injector) else { continue }
             pendingDrafts[id] = nil
             if current.isEmpty { gate.injector.sendText(pending.text) }
@@ -10615,13 +10724,17 @@ final class SessionStore: ObservableObject {
         guard let status = statuses[id],
               status.agentActivity == .busy || (includingDialog && status.activity == .waiting),
               let injector = injector(for: id) else { return false }
-        // The agent's own stop key: Escape for claude and codex, Ctrl+C for grok, whose Escape
-        // neither cancels a turn nor answers a card (`GrokAdapter.interruptKey`).
+        sendInterruptKey(id, to: injector)
+        return true
+    }
+
+    /// The agent's own stop key: Escape for claude and codex, Ctrl+C for grok, whose Escape
+    /// neither cancels a turn nor answers a card (`GrokAdapter.interruptKey`).
+    private func sendInterruptKey(_ id: UUID, to injector: TextInjecting) {
         switch session(for: id)?.agent.interruptKey ?? .escape {
         case .escape: injector.sendEscape()
         case .controlC: injector.sendControlKey("c")
         }
-        return true
     }
 
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }
