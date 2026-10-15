@@ -330,6 +330,16 @@ final class UsageService: ObservableObject {
 
     // MARK: - One tick
 
+    /// The claude account whose home wrote a usage file. A file names its login, and that beats
+    /// the tab's stamp: on 2026-10-15 a tab moved to Default still ran a second claude on Summer
+    /// Friday (the move missed its daemon), and both wrote the tab's one file, so Summer Friday's
+    /// numbers were billed to Default. A home no account owns credits nobody.
+    private func claudeAccountRef(home: String) -> AccountRef? {
+        let key = AgentAccount.key(URL(fileURLWithPath: home, isDirectory: true))
+        return environment.accounts().first { $0.agent == .claude && AgentAccount.key($0.home) == key }
+            .map(CapacityPreferences.accountRef)
+    }
+
     private func ref(forAccount id: UUID) -> AccountRef? {
         environment.accounts().first { $0.id == id }.map(CapacityPreferences.accountRef)
     }
@@ -369,7 +379,7 @@ final class UsageService: ObservableObject {
     private func ingestUsageFiles(_ sessions: [Session]) {
         for (stem, file) in usageFiles.scan() {
             guard let tab = sessions.first(where: { $0.agent == .claude && ($0.id == stem || $0.pinnedConversationID == stem) }),
-                  let ref = accountRef(for: tab) else { continue }
+                  let ref = file.home.map(claudeAccountRef(home:)) ?? accountRef(for: tab) else { continue }
             reported.insert(tab.id)
             ingest(UsageReading(account: ref, windows: file.windows, readAt: file.readAt, source: "claude status line", hardRejection: false))
         }
