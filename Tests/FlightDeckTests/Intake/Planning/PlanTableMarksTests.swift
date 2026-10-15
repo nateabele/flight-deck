@@ -144,23 +144,21 @@ final class PlanTableMarksTests: XCTestCase {
     }
 
     func testWordsRemovedAcrossCellsGoToTheCellsTheyCameFrom() throws {
-        Self.withFakePlacement {
-            let text = "| Area | Decision |\n|---|---|\n| Users | Anyone |"
-            let u = Array(text.utf16)
-            let table = PlanTable.parse(u)!
-            let at = (text as NSString).range(of: "Users").location
-            let edits = [EditMark(kind: .deleted, range: NSRange(location: at, length: 0), hunk: 0, ghost: "Staff | Nobody", inline: true),
-                         EditMark(kind: .inserted, range: NSRange(location: at, length: 14), hunk: 0)]
-            let marks = PlanTableMarks.make(edits, block: block(text), source: u, table: table)
-            XCTAssertEqual(marks.inline.map(\.column), [0, 1])
-            XCTAssertEqual(marks.inline.map(\.text), ["Staff", "Nobody"])
-            XCTAssertEqual(marks.inline.map(\.row), [2, 2])
+        let text = "| Area | Decision |\n|---|---|\n| Users | Anyone |"
+        let u = Array(text.utf16)
+        let table = PlanTable.parse(u)!
+        let at = (text as NSString).range(of: "Users").location
+        let edits = [EditMark(kind: .deleted, range: NSRange(location: at, length: 0), hunk: 0, ghost: "Staff | Nobody", inline: true),
+                     EditMark(kind: .inserted, range: NSRange(location: at, length: 14), hunk: 0)]
+        let marks = PlanTableMarks.make(edits, block: block(text), source: u, table: table)
+        XCTAssertEqual(marks.inline.map(\.column), [0, 1])
+        XCTAssertEqual(marks.inline.map(\.text), ["Staff", "Nobody"])
+        XCTAssertEqual(marks.inline.map(\.row), [2, 2])
 
-            // Fewer pipes in the new text than in the old: it stays one ghost, pipes and all.
-            let merged = [EditMark(kind: .deleted, range: NSRange(location: at, length: 0), hunk: 0, ghost: "Staff | Nobody", inline: true),
-                          EditMark(kind: .inserted, range: NSRange(location: at, length: 5), hunk: 0)]
-            XCTAssertEqual(PlanTableMarks.make(merged, block: block(text), source: u, table: table).inline.map(\.text), ["Staff | Nobody"])
-        }
+        // Fewer pipes in the new text than in the old: it stays one ghost, pipes and all.
+        let merged = [EditMark(kind: .deleted, range: NSRange(location: at, length: 0), hunk: 0, ghost: "Staff | Nobody", inline: true),
+                      EditMark(kind: .inserted, range: NSRange(location: at, length: 5), hunk: 0)]
+        XCTAssertEqual(PlanTableMarks.make(merged, block: block(text), source: u, table: table).inline.map(\.text), ["Staff | Nobody"])
     }
 
     // MARK: A grid in every state
@@ -169,54 +167,52 @@ final class PlanTableMarksTests: XCTestCase {
     /// is still a grid row of one layout, the stored text is as typed, and the removed words and
     /// rows are in the layout, not in the hidden text.
     func testATableWithMarksIsAlwaysAGrid() throws {
-        Self.withFakePlacement {
-            let generated = """
-            # Plan
+        let generated = """
+        # Plan
 
-            | Area | Decision |
-            |---|---|
-            | Users | Any eligible employee can create an agent |
-            | Old | Removed row |
-            | Data | Stored per tenant |
+        | Area | Decision |
+        |---|---|
+        | Users | Any eligible employee can create an agent |
+        | Old | Removed row |
+        | Data | Stored per tenant |
 
-            After.
-            """
-            let states: [(String, String)] = [
-                ("a changed cell", generated.replacingOccurrences(of: "eligible employee", with: "employee")),
-                ("a removed row", generated.replacingOccurrences(of: "| Old | Removed row |\n", with: "")),
-                ("a removed last row", generated.replacingOccurrences(of: "| Data | Stored per tenant |\n", with: "")),
-                ("an inserted row", generated.replacingOccurrences(of: "| Data |", with: "| New | Fresh row |\n| Data |")),
-                ("a change across cells", generated.replacingOccurrences(of: "| Data | Stored per tenant |", with: "| Records | Kept per tenant |")),
-                ("everything", generated.replacingOccurrences(of: "| Old | Removed row |\n", with: "")
-                    .replacingOccurrences(of: "eligible employee", with: "employee")
-                    .replacingOccurrences(of: "| Data |", with: "| New | Fresh row |\n| Data |")),
-            ]
-            for (name, edited) in states {
-                let marks = EditLayer.marks(generated: generated, edited: edited).marks
-                XCTAssertFalse(marks.isEmpty, name)
-                let storage = NSTextStorage(string: edited)
-                MarkdownStyler.apply(to: storage, blocks: MarkdownStyler.blocks(edited), revealBlock: nil, edits: marks, theme: .standard)
-                EditLayer.apply(marks, to: storage, within: nil, theme: .standard)
-                XCTAssertEqual(storage.string, edited, name)
-                let ns = edited as NSString
-                var layouts: [PlanTableLayout] = []
-                var at = ns.range(of: "| Area").location
-                for row in 0..<(ns.components(separatedBy: "\n").filter { $0.hasPrefix("|") }.count) {
-                    let ref = storage.attribute(.planTableRow, at: at, effectiveRange: nil) as? PlanTableRowRef
-                    XCTAssertNotNil(ref, "\(name): row \(row) is a grid row")
-                    if let ref { layouts.append(ref.layout) }
-                    XCTAssertNil(storage.attribute(.planEditGhosts, at: at, effectiveRange: nil), "\(name): no ghost left in the hidden text")
-                    let para = storage.attribute(.paragraphStyle, at: at, effectiveRange: nil) as? NSParagraphStyle
-                    XCTAssertEqual(para?.minimumLineHeight, ref?.layout.rows[row].height, "\(name): row \(row) is held to its band")
-                    at = NSMaxRange(ns.lineRange(for: NSRange(location: at, length: 0)))
-                }
-                XCTAssertTrue(layouts.allSatisfy { $0 === layouts[0] }, name)
-                let ghosts = layouts[0].rows.reduce(0) { $0 + $1.above.count + $1.below.count + $1.cells.filter(\.hasGhost).count }
-                XCTAssertEqual(ghosts > 0, name != "an inserted row", "\(name): removed words and rows are in the grid")
-                // The next paragraph's own spacing is untouched by a table's ghost below it.
-                let after = storage.attribute(.paragraphStyle, at: ns.range(of: "After.").location, effectiveRange: nil) as? NSParagraphStyle
-                XCTAssertEqual(after?.paragraphSpacingBefore, PlanTheme.standard.paragraphStyle(for: .paragraph).paragraphSpacingBefore, name)
+        After.
+        """
+        let states: [(String, String)] = [
+            ("a changed cell", generated.replacingOccurrences(of: "eligible employee", with: "employee")),
+            ("a removed row", generated.replacingOccurrences(of: "| Old | Removed row |\n", with: "")),
+            ("a removed last row", generated.replacingOccurrences(of: "| Data | Stored per tenant |\n", with: "")),
+            ("an inserted row", generated.replacingOccurrences(of: "| Data |", with: "| New | Fresh row |\n| Data |")),
+            ("a change across cells", generated.replacingOccurrences(of: "| Data | Stored per tenant |", with: "| Records | Kept per tenant |")),
+            ("everything", generated.replacingOccurrences(of: "| Old | Removed row |\n", with: "")
+                .replacingOccurrences(of: "eligible employee", with: "employee")
+                .replacingOccurrences(of: "| Data |", with: "| New | Fresh row |\n| Data |")),
+        ]
+        for (name, edited) in states {
+            let marks = EditLayer.marks(generated: generated, edited: edited).marks
+            XCTAssertFalse(marks.isEmpty, name)
+            let storage = NSTextStorage(string: edited)
+            MarkdownStyler.apply(to: storage, blocks: MarkdownStyler.blocks(edited), revealBlock: nil, edits: marks, theme: .standard)
+            EditLayer.apply(marks, to: storage, within: nil, theme: .standard)
+            XCTAssertEqual(storage.string, edited, name)
+            let ns = edited as NSString
+            var layouts: [PlanTableLayout] = []
+            var at = ns.range(of: "| Area").location
+            for row in 0..<(ns.components(separatedBy: "\n").filter { $0.hasPrefix("|") }.count) {
+                let ref = storage.attribute(.planTableRow, at: at, effectiveRange: nil) as? PlanTableRowRef
+                XCTAssertNotNil(ref, "\(name): row \(row) is a grid row")
+                if let ref { layouts.append(ref.layout) }
+                XCTAssertNil(storage.attribute(.planEditGhosts, at: at, effectiveRange: nil), "\(name): no ghost left in the hidden text")
+                let para = storage.attribute(.paragraphStyle, at: at, effectiveRange: nil) as? NSParagraphStyle
+                XCTAssertEqual(para?.minimumLineHeight, ref?.layout.rows[row].height, "\(name): row \(row) is held to its band")
+                at = NSMaxRange(ns.lineRange(for: NSRange(location: at, length: 0)))
             }
+            XCTAssertTrue(layouts.allSatisfy { $0 === layouts[0] }, name)
+            let ghosts = layouts[0].rows.reduce(0) { $0 + $1.above.count + $1.below.count + $1.cells.filter(\.hasGhost).count }
+            XCTAssertEqual(ghosts > 0, name != "an inserted row", "\(name): removed words and rows are in the grid")
+            // The next paragraph's own spacing is untouched by a table's ghost below it.
+            let after = storage.attribute(.paragraphStyle, at: ns.range(of: "After.").location, effectiveRange: nil) as? NSParagraphStyle
+            XCTAssertEqual(after?.paragraphSpacingBefore, PlanTheme.standard.paragraphStyle(for: .paragraph).paragraphSpacingBefore, name)
         }
     }
 
@@ -251,31 +247,5 @@ final class PlanTableMarksTests: XCTestCase {
         var ghosts = 0
         storage.enumerateAttribute(.planEditGhosts, in: NSRange(location: 0, length: storage.length)) { v, _, _ in if v != nil { ghosts += 1 } }
         XCTAssertEqual(ghosts, 1)
-    }
-
-    // MARK: Placement until the model's own lands
-
-    /// A minimal stand-in for `PlanTableEditing.marks`: the cell whose pipes the offset is between,
-    /// the characters of that cell ahead of it (plain text only, so shown and source offsets agree).
-    static func withFakePlacement(_ body: () throws -> Void) rethrows {
-        let real = PlanTableMarks.place
-        PlanTableMarks.place = { changes, source in
-            let u = Array(source.utf16)
-            guard let table = PlanTable.parse(u) else { return [] }
-            return changes.compactMap { change in
-                guard let row = table.rows.indices.first(where: { $0 != PlanTable.delimiterRow && NSLocationInRange(change.range.location, NSRange(location: table.rows[$0].line.location, length: table.rows[$0].line.length + 1)) })
-                else { return nil }
-                let cells = table.rows[row].cells
-                let line = table.rows[row].line
-                let pipes = (line.location..<min(change.range.location, NSMaxRange(line))).filter { u[$0] == 124 && ($0 == 0 || u[$0 - 1] != 92) }.count
-                let column = min(max(pipes - 1, 0), cells.count - 1)
-                let cell = cells[column]
-                let shown = min(max(change.range.location - cell.range.location, 0), cell.range.length)
-                return PlanTableEditing.CellMark(kind: change.kind, row: row, column: column, textRange: NSRange(location: shown, length: 0),
-                                                 ghost: change.ghost)
-            }
-        }
-        defer { PlanTableMarks.place = real }
-        try body()
     }
 }

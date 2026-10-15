@@ -112,14 +112,12 @@ final class PlanTableRenderTests: XCTestCase {
             inserted.settle()
             try Self.write(inserted, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("edit-inserted-row-\(mode)-wide.png"))
 
-            try PlanTableMarksTests.withFakePlacement {
-                let changed = plan.replacingOccurrences(of: "fails closed", with: "is refused")
-                let edited = PlanTableEditorTests.editor(changed, generated: plan, width: 820, appearance: appearance)
-                defer { edited.window.close() }
-                edited.view.setSelectedRange(NSRange(location: 3, length: 0))
-                edited.settle()
-                try Self.write(edited, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("edit-changed-cell-\(mode)-wide.png"))
-            }
+            let changed = plan.replacingOccurrences(of: "fails closed", with: "is refused")
+            let edited = PlanTableEditorTests.editor(changed, generated: plan, width: 820, appearance: appearance)
+            defer { edited.window.close() }
+            edited.view.setSelectedRange(NSRange(location: 3, length: 0))
+            edited.settle()
+            try Self.write(edited, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("edit-changed-cell-\(mode)-wide.png"))
         }
     }
 
@@ -195,19 +193,17 @@ final class PlanTableRenderTests: XCTestCase {
                                       with: "| Archive | Moved from the old directory in one pass. | The old directory is read-only after the move. |"),
              "never read across tenants"),
         ]
-        try PlanTableMarksTests.withFakePlacement {
-            for (name, generated, edited, amber) in states {
-                for (mode, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                    let f = PlanTableEditorTests.editor(edited, generated: generated == edited ? nil : generated, width: 820, appearance: appearance)
-                    defer { f.window.close() }
-                    if let amber, let layout = f.view.textLayoutManager {
-                        let at = (edited as NSString).range(of: amber)
-                        f.coordinator.churnTint.apply([(at, [.backgroundColor: PlanTextView.Coordinator.churnColor])], to: layout)
-                    }
-                    f.view.setSelectedRange(NSRange(location: 3, length: 0))
-                    f.settle()
-                    try Self.write(f, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("marks-\(name)-\(mode).png"))
+        for (name, generated, edited, amber) in states {
+            for (mode, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                let f = PlanTableEditorTests.editor(edited, generated: generated == edited ? nil : generated, width: 820, appearance: appearance)
+                defer { f.window.close() }
+                if let amber, let layout = f.view.textLayoutManager {
+                    let at = (edited as NSString).range(of: amber)
+                    f.coordinator.churnTint.apply([(at, [.backgroundColor: PlanTextView.Coordinator.churnColor])], to: layout)
                 }
+                f.view.setSelectedRange(NSRange(location: 3, length: 0))
+                f.settle()
+                try Self.write(f, width: 820, to: URL(fileURLWithPath: dir).appendingPathComponent("marks-\(name)-\(mode).png"))
             }
         }
     }

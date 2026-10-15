@@ -567,15 +567,13 @@ final class PlanTableEditorTests: XCTestCase {
         XCTAssertTrue(inserted.isGrid(at: inserted.tableRange.location), "an added row is marked by the gutter bar, the grid stays")
         XCTAssertNotNil(inserted.storage.attribute(.planEditInserted, at: row.location, effectiveRange: nil))
 
-        PlanTableMarksTests.withFakePlacement {
-            let changed = Self.plan.replacingOccurrences(of: "Never shared", with: "Shared with nobody")
-            let f = Self.editor(changed, generated: Self.plan)
-            defer { f.window.close() }
-            XCTAssertTrue(f.isGrid(at: f.tableRange.location), "removed words are struck through in their cell: the grid stays")
-            XCTAssertTrue(f.coordinator.hunks.count >= 1)
-            let ref = f.storage.attribute(.planTableRow, at: (f.view.string as NSString).range(of: "| Data").location, effectiveRange: nil) as? PlanTableRowRef
-            XCTAssertEqual(ref?.layout.rows[3].cells[2].hasGhost, true)
-        }
+        let changed = Self.plan.replacingOccurrences(of: "Never shared", with: "Shared with nobody")
+        let f = Self.editor(changed, generated: Self.plan)
+        defer { f.window.close() }
+        XCTAssertTrue(f.isGrid(at: f.tableRange.location), "removed words are struck through in their cell: the grid stays")
+        XCTAssertTrue(f.coordinator.hunks.count >= 1)
+        let ref = f.storage.attribute(.planTableRow, at: (f.view.string as NSString).range(of: "| Data").location, effectiveRange: nil) as? PlanTableRowRef
+        XCTAssertEqual(ref?.layout.rows[3].cells[2].hasGhost, true)
     }
 
     // MARK: Cost
