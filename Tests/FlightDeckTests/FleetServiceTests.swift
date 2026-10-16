@@ -235,6 +235,42 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(store.repos.first?.sessions.count, 1, "no second tab was created")
     }
 
+    /// The reopen twin of the test above. A reopen builds a terminal too, and one built with the
+    /// display asleep came back with no terminal at all while spending the history entry that
+    /// was the only way back to it (the Publish tab, 2026-10-14). Refused instead, with the
+    /// entry kept for a reopen that can work.
+    func testAReopenFromThePhoneIsRefusedWhenTheDisplayCannotBeDrawnTo() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: true)
+        let doomed = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        store.closeSession(doomed.id)
+        XCTAssertEqual(store.recentlyClosedSessions.map(\.session.id), [doomed.id], "precondition")
+        store.display = Display(isDrawable: false)
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let refused = expectation(description: "err")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.reopenClosed(session: doomed.id))
+            }
+            if case .err(_, "terminal_unavailable", _) = frame { refused.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [refused], timeout: 10)
+        XCTAssertEqual(store.repos.first?.sessions.count, 1, "no inert tab was rebuilt")
+        XCTAssertEqual(store.recentlyClosedSessions.map(\.session.id), [doomed.id],
+                       "the history entry survives for a reopen that can work")
+    }
+
     /// A waker that fails the test the moment it is asked to do anything, for a test whose
     /// entire point is that it must never be reached.
     private final class MustNotBeCalledWaker: DisplayWaking, @unchecked Sendable {
