@@ -4452,6 +4452,23 @@ final class SessionStore: ObservableObject {
         }
         emit(.sessionAdded(wire(session), project: repos[repoIndex].id, at: insertedAt))
 
+        let orphaned = accountIsMissing(for: session)
+        // A reopen of a tab whose close is still tearing down: build its terminal only once
+        // that has finished, or the teardown kills it (see `pendingTeardowns`). Until then the
+        // tab has no surface, which every caller already treats as "not yet".
+        if let teardown = pendingTeardowns[session.id] {
+            let id = session.id
+            deferredSurfaceBuilds[id] = Task { [weak self] in
+                await teardown.task.value
+                self?.deferredSurfaceBuilds[id] = nil
+                guard let self, self.makeAttachSurface(id: id, typed: initialInput) != nil else { return }
+                self.report(self.terminalSize, to: id)
+                self.provider?.tick()
+            }
+            if !orphaned { startWatching(tabID: session.id) }
+            return session
+        }
+
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = session.transcriptDirectory
         // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
@@ -4482,7 +4499,6 @@ final class SessionStore: ObservableObject {
         // is typed into it either (`restore` passes an empty `initialInput`), so this shell
         // starts no agent — and a surface configuration can only *set* a variable, never
         // unset one, so "no variable" is the strongest refusal available here.
-        let orphaned = accountIsMissing(for: session)
         config.environmentVariables = launchEnvironment(
             for: session, adapter: adapter(for: instance(for: session)), orphaned: orphaned
         )
@@ -5648,7 +5664,9 @@ final class SessionStore: ObservableObject {
         activationOrder.removeAll { $0 == id }
         persist()
 
-        Task { [weak self] in
+        // Recorded so a reopen of this same id waits for it: see `pendingTeardowns`.
+        let token = UUID()
+        let teardown = Task { [weak self] in
             await self?.reapSession(id, process: doomed, context: "tab close")
             // After the client reap above, not folded into `reapSession` itself: that method
             // is shared with `reapAllForQuit`, which must leave every daemon running — see its
@@ -5656,6 +5674,29 @@ final class SessionStore: ObservableObject {
             // and only the client's own tree needs to detach first; the daemon (and the agent
             // still attached to it) is torn down second.
             self?.daemonControl.terminate(id)
+            if self?.pendingTeardowns[id]?.token == token { self?.pendingTeardowns[id] = nil }
+        }
+        pendingTeardowns[id] = (token, teardown)
+    }
+
+    /// Close teardowns still running, by tab id.
+    ///
+    /// **Everything that teardown touches is keyed by the tab id, and a reopen reuses it.** The
+    /// daemon's socket and pidfile are named for the id, and `reapSession` forgets the id's
+    /// process record. A tab reopened before its close finished therefore had its NEW record
+    /// forgotten and its NEW daemon (or the old one it attached to) terminated a moment later,
+    /// and came back with no terminal. `insertSession` builds a reopened tab's surface only
+    /// after the teardown here has finished, so the two never overlap.
+    private var pendingTeardowns: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
+
+    /// Reopened tabs whose terminal is waiting on a teardown above.
+    private var deferredSurfaceBuilds: [UUID: Task<Void, Never>] = [:]
+
+    /// Test seam: returns once every close teardown, and every reopened terminal waiting on
+    /// one, has finished.
+    func settleTeardownsForTesting() async {
+        while let next = pendingTeardowns.values.first?.task ?? deferredSurfaceBuilds.values.first {
+            await next.value
         }
     }
 
