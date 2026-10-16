@@ -63,18 +63,91 @@ final class ReopenClosedSessionTests: XCTestCase {
         )
     }
 
-    func testTheReopenedTabResumesRatherThanStartingAFreshConversation() {
+    func testTheReopenedTabResumesRatherThanStartingAFreshConversation() async {
         let provider = CapturingProvider()
         let store = makeStore(provider: provider)
         let session = store.newSession(in: projectA)
         store.closeSession(session.id)
 
         store.reopenLastClosed(directoryExists: { _ in true })
+        await store.settleTeardownsForTesting()
 
         XCTAssertEqual(
             provider.configs.last?.initialInput,
             ClaudeSession.resumeCommand(sessionID: session.pinnedConversationID)
         )
+    }
+
+    /// One ordered record of surface builds and daemon teardowns, shared by the two fakes below.
+    private final class Events {
+        var log: [String] = []
+    }
+
+    private final class OrderedProvider: SurfaceProvider {
+        let events: Events
+        init(_ events: Events) { self.events = events }
+        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
+            events.log.append("surface")
+            return nil
+        }
+        func tick() {}
+        var defaultFontSize: Float { 12 }
+    }
+
+    private final class OrderedDaemons: DaemonControlling {
+        let events: Events
+        init(_ events: Events) { self.events = events }
+        func isLive(_ id: UUID) -> Bool { false }
+        func isLive(socketPath: String) -> Bool { false }
+        func daemonPID(_ id: UUID) -> pid_t? { nil }
+        func daemonPID(socketPath: String) -> pid_t? { nil }
+        func terminate(_ id: UUID) { events.log.append("terminate") }
+        func terminate(socketPath: String) {}
+        func peerPID(socketPath: String) -> pid_t? { nil }
+        func terminate(pid: pid_t, socketPath: String) {}
+        func stop(_ id: UUID) {}
+        func cont(_ id: UUID) {}
+    }
+
+    /// The Publish tab, 2026-10-14: closed and reopened at once, it came back with no terminal.
+    /// A close tears its daemon down a moment later, in a task, by the tab's id; a reopen reuses
+    /// that id, so the teardown landed on the reopened tab's terminal. The reopened terminal is
+    /// built only after the teardown, and nothing tears it down afterwards.
+    func testAReopenBeforeTheCloseHasTornDownIsBuiltAfterTheTeardownAndSurvivesIt() async {
+        let events = Events()
+        let provider = OrderedProvider(events)
+        let store = SessionStore(provider: provider, persistence: nil, daemonControl: OrderedDaemons(events))
+        store.titleResolver = { _, _, done in done(nil) }
+        store.launchFailureReporter = SilentReporter()
+        let session = store.newSession(in: projectA)
+        events.log.removeAll()
+
+        store.closeSession(session.id)
+        store.reopenLastClosed(directoryExists: { _ in true })
+        XCTAssertEqual(events.log, [], "no terminal yet: the close is still tearing down")
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [session.id], "the tab is back at once")
+
+        await store.settleTeardownsForTesting()
+
+        XCTAssertEqual(events.log, ["terminate", "surface"],
+                       "the old daemon goes first, then the reopened terminal, and nothing after it")
+    }
+
+    /// The ordinary case stays synchronous: a tab whose close has long finished is rebuilt at once.
+    func testAReopenAfterTheTeardownBuildsItsTerminalAtOnce() async {
+        let events = Events()
+        let provider = OrderedProvider(events)
+        let store = SessionStore(provider: provider, persistence: nil, daemonControl: OrderedDaemons(events))
+        store.titleResolver = { _, _, done in done(nil) }
+        store.launchFailureReporter = SilentReporter()
+        let session = store.newSession(in: projectA)
+        store.closeSession(session.id)
+        await store.settleTeardownsForTesting()
+        events.log.removeAll()
+
+        store.reopenLastClosed(directoryExists: { _ in true })
+
+        XCTAssertEqual(events.log, ["surface"])
     }
 
     func testReopeningLandsTheTabBackOnItsOwnRow() {
@@ -217,6 +290,7 @@ final class ReopenClosedSessionTests: XCTestCase {
         injector.events.removeAll()
 
         store.reopenLastClosed(directoryExists: { _ in true })
+        await store.settleTeardownsForTesting()
         XCTAssertEqual(provider.configs.last?.initialInput, "",
                        "nothing may be typed at a codex tab before its thread is known to exist")
         await store.codexRestoreTask?.value
