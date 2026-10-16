@@ -96,6 +96,21 @@ final class RoundConfigEditorRenderTests: XCTestCase {
         }
     }
 
+    /// The polish stage open with three polishers taking turns, at the inspector's narrowest and
+    /// ideal widths: every row ends inside the column (`RoundConfigEditorFitTests`).
+    @MainActor
+    func testRenderPolishRotationInANarrowInspector() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
+        }
+        let (editor, _) = try RoundConfigEditorFitTests.polishEditor()
+        for width in [RoundConfigEditorFitTests.narrowest, 408] {
+            // The 16 pt the renderer pads with on each side, outside the column.
+            try render(editor, size: NSSize(width: width + 32, height: 900),
+                       to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-polish-\(Int(width)).png"))
+        }
+    }
+
     /// "Check again" under a signed-out agent's note, idle and mid-check, with a reviewer row
     /// still holding grok after a re-check found it signed out ("grok (unavailable)"). Light and
     /// dark.
@@ -125,6 +140,8 @@ final class RoundConfigEditorRenderTests: XCTestCase {
     /// and `cacheDisplay` drops layer-backed SwiftUI content.
     @MainActor
     private func render(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = .darkAqua) throws {
+        // The run on the UI-test Mac writes to the same path, where nothing has made it yet.
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let root = view.padding(16).frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: root)
