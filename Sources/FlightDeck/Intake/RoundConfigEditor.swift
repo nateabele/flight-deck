@@ -1,3 +1,4 @@
+import AppKit
 import IntakeKit
 import SwiftUI
 
@@ -299,13 +300,14 @@ struct RoundConfigEditor: View {
                     }
                 }
                 // One grid for every entry of the role, so a rotation's turns share one label column.
-                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
-                    ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
-                        agentRows(entry, rotation: row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) },
-                                  fallbackShown: Self.supportsFallback(entry))
-                    }
+                // Every control at its full width when the column has room; otherwise effort takes a
+                // row of its own and the menus give way, since a row of fixed-size controls ran past
+                // a narrow inspector and was clipped there (three polisher turns made the panel 556 pt wide
+                // in a 268 pt column).
+                ViewThatFits(in: .horizontal) {
+                    roleGrid(row, entries: entries)
+                    roleStack(row, entries: entries)
                 }
-                .font(.callout)
                 if let role = row.keyPath.rotation?.role, Self.canAddToRotation(config, role, available: available) {
                     HStack(spacing: 10) {
                         Button { config = Self.addingToRotation(config, role, available: available) } label: {
@@ -339,6 +341,17 @@ struct RoundConfigEditor: View {
         }
     }
 
+    private func roleGrid(_ row: (role: String, persona: DrafterPersona?, keyPath: SlotKeyPath),
+                          entries: [SlotKeyPath]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+            ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                agentRows(entry, rotation: row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) },
+                          fallbackShown: Self.supportsFallback(entry))
+            }
+        }
+        .font(.callout)
+    }
+
     /// One agent's rows in its role's grid, so every line of a role lines up: labels in a trailing
     /// column (Model, Account, Fallback, Account), then the "Claude > Opus 5.5" menu with its glyph,
     /// then effort where the model takes it. A rotating role's entries read "Turn 1", "Turn 2", with
@@ -348,16 +361,28 @@ struct RoundConfigEditor: View {
                            fallbackShown: Bool) -> some View {
         let site = ChoiceSite(keyPath: keyPath)
         let fallbackSite = ChoiceSite(keyPath: keyPath, isFallback: true)
-        let turn = rotation.flatMap { $0.count > 1 ? $0 : nil }
-        modelGridRow(site, label: turn.map { "Turn \($0.index + 1)" } ?? "Model", noneTitle: nil, rotation: turn)
+        let turn = Self.turn(rotation)
+        modelGridRow(site, label: Self.modelLabel(turn), noneTitle: nil, rotation: turn)
         customModelGridRow(site)
         accountGridRow(site)
         if fallbackShown {
-            modelGridRow(fallbackSite, label: "Fallback", noneTitle: "None", rotation: nil)
+            modelGridRow(fallbackSite, label: Self.fallbackLabel, noneTitle: "None", rotation: nil)
             customModelGridRow(fallbackSite)
             accountGridRow(fallbackSite)
         }
     }
+
+    /// A rotation's place, once there are two turns to tell apart.
+    private static func turn(_ rotation: (role: RotatingRole, index: Int, count: Int)?)
+        -> (role: RotatingRole, index: Int, count: Int)? {
+        rotation.flatMap { $0.count > 1 ? $0 : nil }
+    }
+
+    private static func modelLabel(_ turn: (role: RotatingRole, index: Int, count: Int)?) -> String {
+        turn.map { "Turn \($0.index + 1)" } ?? "Model"
+    }
+
+    static let fallbackLabel = "Fallback"
 
     private func gridLabel(_ text: String) -> some View {
         Text(text).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
@@ -367,16 +392,21 @@ struct RoundConfigEditor: View {
                               rotation: (role: RotatingRole, index: Int, count: Int)?) -> some View {
         GridRow(alignment: .center) {
             gridLabel(label)
-            // The glyph the main view's stacks draw for this agent, in a column of its own so the
-            // menus and the Account pickers under them start on one edge.
-            if let agent = Self.choice(at: site, in: config)?.agent {
-                AgentBadge(agent: agent, size: 16)
-            } else {
-                Color.clear.frame(width: 16, height: 16)
-            }
-            modelMenu(site, noneTitle: noneTitle)
+            agentGlyph(site)
+            modelMenu(site, noneTitle: noneTitle, compact: false)
             effortPicker(site)
             if let rotation { rotationButtons(rotation) }
+        }
+    }
+
+    /// The glyph the main view's stacks draw for this agent, in a column of its own so the menus
+    /// and the Account pickers under them start on one edge.
+    @ViewBuilder
+    private func agentGlyph(_ site: ChoiceSite) -> some View {
+        if let agent = Self.choice(at: site, in: config)?.agent {
+            AgentBadge(agent: agent, size: 16)
+        } else {
+            Color.clear.frame(width: 16, height: 16)
         }
     }
 
@@ -397,9 +427,76 @@ struct RoundConfigEditor: View {
             GridRow(alignment: .center) {
                 gridLabel(Self.accountLabel)
                 Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
-                accountControl(site, menu: menu, choice: choice).gridCellColumns(3)
+                accountControl(site, menu: menu, choice: choice, compact: false).gridCellColumns(3)
             }
         }
+    }
+
+    // MARK: - Compact: for an inspector too narrow for the grid
+
+    /// The role's agents as rows of their own, effort under its menu, with the menus and account
+    /// pickers taking what the column has and truncating past it. Not a `Grid`: a grid sized its
+    /// compressed columns well short of the column, so titles truncated beside empty space.
+    private func roleStack(_ row: (role: String, persona: DrafterPersona?, keyPath: SlotKeyPath),
+                           entries: [SlotKeyPath]) -> some View {
+        // The last turn's label is the longest a rotation shows ("Turn 10" over "Turn 9").
+        let lastTurn = row.keyPath.rotation.map { (role: $0.role, index: entries.count - 1, count: entries.count) }
+        let labelWidth = Self.labelWidth([Self.modelLabel(Self.turn(lastTurn))])
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                let site = ChoiceSite(keyPath: entry)
+                let rotation = Self.turn(row.keyPath.rotation.map { (role: $0.role, index: index, count: entries.count) })
+                compactRows(site, label: Self.modelLabel(rotation), noneTitle: nil, rotation: rotation, labelWidth: labelWidth)
+                if Self.supportsFallback(entry) {
+                    compactRows(ChoiceSite(keyPath: entry, isFallback: true), label: Self.fallbackLabel, noneTitle: "None",
+                                rotation: nil, labelWidth: labelWidth)
+                }
+            }
+        }
+        .font(.callout)
+    }
+
+    @ViewBuilder
+    private func compactRows(_ site: ChoiceSite, label: String, noneTitle: String?,
+                             rotation: (role: RotatingRole, index: Int, count: Int)?, labelWidth: CGFloat) -> some View {
+        HStack(spacing: 8) {
+            compactLabel(label, width: labelWidth)
+            agentGlyph(site)
+            modelMenu(site, noneTitle: noneTitle, compact: true)
+            if let rotation { rotationButtons(rotation) }
+        }
+        if let entry = custom, entry.site == site {
+            HStack(spacing: 8) {
+                Color.clear.frame(width: labelWidth + 8 + 16, height: 1)
+                customModelField(site)
+            }
+        }
+        if let choice = Self.choice(at: site, in: config), !Self.effortLevels(for: choice, available: available).isEmpty {
+            HStack(spacing: 8) {
+                compactLabel(Self.effortLabel, width: labelWidth)
+                Color.clear.frame(width: 16, height: 1)
+                effortPicker(site)
+            }
+        }
+        if let choice = Self.choice(at: site, in: config), let menu = accounts[choice.agent] {
+            HStack(spacing: 8) {
+                compactLabel(Self.accountLabel, width: labelWidth)
+                Color.clear.frame(width: 16, height: 1)
+                accountControl(site, menu: menu, choice: choice, compact: true)
+            }
+        }
+    }
+
+    private func compactLabel(_ text: String, width: CGFloat) -> some View {
+        Text(text).foregroundStyle(.secondary).lineLimit(1).frame(width: width, alignment: .trailing)
+    }
+
+    /// The label column's width: the widest label the rows can show, set in the callout font the
+    /// rows use.
+    private static func labelWidth(_ extra: [String]) -> CGFloat {
+        let font = NSFont.preferredFont(forTextStyle: .callout)
+        let labels = extra + [fallbackLabel, effortLabel, accountLabel]
+        return ceil(labels.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 1
     }
 
     private func rotationButtons(_ rotation: (role: RotatingRole, index: Int, count: Int)) -> some View {
@@ -451,8 +548,9 @@ struct RoundConfigEditor: View {
     /// The agent and model as one menu: a submenu per agent ("Claude" ▸ "Opus 5.5", …), closed it
     /// reads "Claude > Opus 5.5". An agent that is not usable stays in the list, disabled, with the
     /// reason detection gave. With `noneTitle`, the menu also offers no choice at all (a fallback).
-    private func modelMenu(_ site: ChoiceSite, noneTitle: String?) -> some View {
+    private func modelMenu(_ site: ChoiceSite, noneTitle: String?, compact: Bool) -> some View {
         let choice = Self.choice(at: site, in: config)
+        let title = choice.map { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) } ?? (noneTitle ?? "")
         return Menu {
             if let noneTitle {
                 Button { setFallback(site, nil) } label: { Self.checked(noneTitle, choice == nil) }
@@ -481,10 +579,16 @@ struct RoundConfigEditor: View {
                 }
             }
         } label: {
-            Text(choice.map { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) } ?? (noneTitle ?? ""))
+            Text(title).lineLimit(1)
         }
         .menuStyle(.button)
-        .fixedSize()
+        // Compact, the menu takes what the column leaves and its title truncates; the full name
+        // stays on hover.
+        .fixedSize(horizontal: !compact, vertical: true)
+        // Compact, it takes the row's slack, so the move/remove buttons after it line up down the
+        // rotation.
+        .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)
+        .help(compact ? title : "")
         .accessibilityIdentifier("rounds-model-menu")
     }
 
@@ -548,7 +652,7 @@ struct RoundConfigEditor: View {
     /// project's assignment first), else the account it resolves to as text. A role that holds its
     /// own account keeps the picker, so it can be put back. The label is the grid's.
     @ViewBuilder
-    private func accountControl(_ site: ChoiceSite, menu: AccountMenu, choice: ModelChoice) -> some View {
+    private func accountControl(_ site: ChoiceSite, menu: AccountMenu, choice: ModelChoice, compact: Bool) -> some View {
         switch Self.accountRow(menu, choice: choice) {
         case .picker:
             Picker(Self.accountLabel, selection: accountBinding(site)) {
@@ -565,7 +669,7 @@ struct RoundConfigEditor: View {
                 }
             }
             .labelsHidden()
-            .fixedSize()
+            .fixedSize(horizontal: !compact, vertical: true)
             .accessibilityIdentifier("rounds-account-picker")
         case .line(let name):
             HStack(spacing: 4) {
@@ -784,6 +888,7 @@ struct RoundConfigEditor: View {
     }
 
     static let accountLabel = "Account"
+    static let effortLabel = "Effort"
     static let otherModel = "Other…"
 
     static func accountRow(_ menu: AccountMenu, choice: ModelChoice) -> AccountRowKind {
