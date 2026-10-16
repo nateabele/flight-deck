@@ -150,6 +150,71 @@ final class ReopenClosedSessionTests: XCTestCase {
         XCTAssertEqual(events.log, ["surface"])
     }
 
+    /// Types into the shared event log, so a resume shows up in order with the builds.
+    private final class OrderedInjector: TextInjecting {
+        let events: Events
+        init(_ events: Events) { self.events = events }
+        func sendText(_ text: String) { events.log.append("typed \(text)") }
+        func sendReturn() {}
+        func sendKillLine() {}
+        func sendYank() {}
+        func sendArrowDown() {}
+        func sendArrowUp() {}
+        func sendTab() {}
+        func sendEscape() {}
+        func sendCharacterKey(_ character: Character) {}
+        func sendControlKey(_ letter: Character) {}
+        func readViewport() -> String? { nil }
+    }
+
+    /// A daemon that is live once a terminal has been built after the last teardown — what a
+    /// cold create does in production by the time anything later asks.
+    private final class CreatingDaemons: DaemonControlling {
+        let events: Events
+        init(_ events: Events) { self.events = events }
+        func isLive(_ id: UUID) -> Bool {
+            events.log.last { $0 == "surface" || $0 == "terminate" } == "surface"
+        }
+        func isLive(socketPath: String) -> Bool { false }
+        func daemonPID(_ id: UUID) -> pid_t? { nil }
+        func daemonPID(socketPath: String) -> pid_t? { nil }
+        func terminate(_ id: UUID) { events.log.append("terminate") }
+        func terminate(socketPath: String) {}
+        func peerPID(socketPath: String) -> pid_t? { nil }
+        func terminate(pid: pid_t, socketPath: String) {}
+        func stop(_ id: UUID) {}
+        func cont(_ id: UUID) {}
+    }
+
+    /// Codex's resume is typed later than the terminal is built, by `resumeRestoredCodex`. A
+    /// reopen racing its close must type it into the reopened terminal — after that terminal
+    /// exists, and even though the daemon that terminal created reads live by then.
+    func testAReopenedCodexTabRacingItsCloseTypesItsResumeIntoTheNewTerminal() async {
+        let events = Events()
+        let provider = OrderedProvider(events)
+        let store = SessionStore(provider: provider, persistence: nil, daemonControl: CreatingDaemons(events))
+        store.titleResolver = { _, _, done in done(nil) }
+        store.launchFailureReporter = SilentReporter()
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
+        store.injectorOverride = OrderedInjector(events)
+        store.injectionSettle = { $0() }
+        guard case .success(let id) = await store.createSession(agent: .codex, in: "/w/a") else {
+            return XCTFail("codex tab creation must succeed against a scripted transport")
+        }
+        await store.settleTeardownsForTesting()
+        events.log.removeAll()
+
+        store.closeSession(id)
+        store.reopenLastClosed(directoryExists: { _ in true })
+        await store.codexRestoreTask?.value
+        await store.settleTeardownsForTesting()
+
+        XCTAssertEqual(events.log, ["terminate", "surface", "typed codex resume \(createdThread)"])
+    }
+
     func testReopeningLandsTheTabBackOnItsOwnRow() {
         let store = makeStore()
         store.newSession(in: projectA)

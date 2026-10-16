@@ -2798,8 +2798,10 @@ final class SessionStore: ObservableObject {
         let typedText = override ?? adapter.launchCommand(adapter.binding(for: session), session, options)
         do {
             try daemon.ensureDirectory()
+            let live = daemonControl.isLive(session.id)
+            attachedToLiveDaemon[session.id] = live
             let plan = try LaunchPlan.decide(
-                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                sessionID: session.id, isLive: live, shell: shell,
                 resumeOrLaunch: typedText, daemon: daemon
             )
             config.command = plan.command
@@ -4477,8 +4479,10 @@ final class SessionStore: ObservableObject {
         let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
         do {
             try daemon.ensureDirectory()
+            let live = daemonControl.isLive(session.id)
+            attachedToLiveDaemon[session.id] = live
             let plan = try LaunchPlan.decide(
-                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                sessionID: session.id, isLive: live, shell: shell,
                 resumeOrLaunch: initialInput, daemon: daemon
             )
             config.command = plan.command
@@ -5075,7 +5079,13 @@ final class SessionStore: ObservableObject {
             // title refresh above is still worth doing, since that answers whether the
             // *thread* changed while Flight Deck was closed, not whether the *shell* did, but
             // typing the resume command again here would paste it into a live TUI.
-            if !daemonControl.isLive(tabID) {
+            //
+            // A reopen whose close is still tearing down has no terminal yet (see
+            // `pendingTeardowns`): wait for it, or the command goes to no surface at all.
+            if let teardown = pendingTeardowns[tabID] { await teardown.task.value }
+            if let build = deferredSurfaceBuilds[tabID] { await build.value }
+            guard self.session(for: tabID) != nil else { continue }
+            if !(attachedToLiveDaemon[tabID] ?? daemonControl.isLive(tabID)) {
                 // Codex only: if the pinned thread never wrote a rollout (it never got past
                 // the trust prompt), `codex resume <id>` would error out to a bare shell — see
                 // `CodexAdapter.coldCreateCommand`. Claude and any other adapter keep typing
@@ -5616,6 +5626,7 @@ final class SessionStore: ObservableObject {
         // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
         // rather than inheriting one from a session that is over.
         promptQueue.removeValue(forKey: id)
+        attachedToLiveDaemon.removeValue(forKey: id)
         acceptedPromptTokens.removeValue(forKey: id)
         answeredPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
@@ -5691,6 +5702,13 @@ final class SessionStore: ObservableObject {
 
     /// Reopened tabs whose terminal is waiting on a teardown above.
     private var deferredSurfaceBuilds: [UUID: Task<Void, Never>] = [:]
+
+    /// Whether each tab's terminal, when it was last built, attached to a daemon that was
+    /// already running rather than creating one. Read by `resumeRestoredCodex`, which must not
+    /// type a resume into a shell that is still running one. Asking `daemonControl.isLive` at
+    /// that point instead answers for the daemon the build itself just created, which is live
+    /// by then too.
+    private var attachedToLiveDaemon: [UUID: Bool] = [:]
 
     /// Test seam: returns once every close teardown, and every reopened terminal waiting on
     /// one, has finished.
