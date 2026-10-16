@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Make a phone on this Wi-Fi reachable to CoreDevice, by re-advertising its remote-pairing
-# Bonjour service from this Mac. Idempotent: does nothing when the device is already available.
+# Bonjour service from this Mac. Idempotent: does nothing when the running proxy already
+# advertises the phone's current records.
 #
 # Usage:
 #   scripts/phone-proxy.sh            # DEVICE defaults to Mobile3; PHONE_IP overrides discovery
@@ -24,10 +25,11 @@ available() {
   xcrun devicectl list devices 2>/dev/null | grep -E "^$DEVICE[[:space:]]" | grep -q "available (paired)"
 }
 
-if available; then
-  exit 0
-fi
-
+# NOT "already available, nothing to do": devicectl keeps listing the phone `available
+# (paired)` after it has rotated the records a running proxy advertises, and the install then
+# dies with "The peer is no longer reachable" (2026-10-16). So the phone's current records are
+# compared with the running proxy every time; "available" is only trusted when the phone can't
+# be asked at all, which is the cable case.
 # The phone's LAN address: PHONE_IP, or the phone's own host record over mDNS, which gets
 # through when the service advert does not. Not Tailscale's "direct" address: the tailnet has
 # more than one iPhone, and nothing there maps a CoreDevice name to a tailnet one.
@@ -37,6 +39,7 @@ if [ -z "$ip" ]; then
     | awk '/^ip_address:/ {print $2; exit}') || true
 fi
 if [ -z "$ip" ]; then
+  available && exit 0
   echo "phone-proxy: cannot find $DEVICE on the LAN ($DEVICE.local does not resolve)." >&2
   echo "  Asleep, off this Wi-Fi, or on cellular (Tailscale does not carry CoreDevice)?" >&2
   echo "  Wake it on this Wi-Fi, set PHONE_IP, or plug in a cable." >&2
@@ -49,6 +52,7 @@ fi
 ask() { dig +short +time=2 +tries=2 @"$ip" -p 5353 "$@" 2>/dev/null | grep -v '^;;' || true; }
 instance=$(ask "$SERVICE.local" PTR | head -1)
 if [ -z "$instance" ]; then
+  available && exit 0
   echo "phone-proxy: $DEVICE at $ip did not answer for $SERVICE (asleep, or not the phone?)." >&2
   exit 1
 fi
@@ -65,6 +69,14 @@ pairs=()
 while IFS= read -r pair; do
   pairs+=("${pair//\"/}")
 done < <(printf '%s' "$txt" | grep -oE '"[^"]*"')
+
+# Already advertising exactly these records: nothing to replace.
+auth=$(printf '%s\n' "${pairs[@]}" | grep '^authTag=' || true)
+running=$(pgrep -fl "dns-sd -P $uuid $SERVICE " || true)
+if [ -n "$running" ] && printf '%s' "$running" | grep -q -- " $ip " \
+   && printf '%s' "$running" | grep -q -- "$auth" && available; then
+  exit 0
+fi
 
 # Replace any proxy for this service: an old one names a UUID or authTag the phone has dropped.
 pkill -f "dns-sd -P .* $SERVICE " 2>/dev/null || true
