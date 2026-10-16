@@ -111,7 +111,7 @@ struct IntakeDetailView: View {
     /// The section heatmap under the board (spec §8.3): nil while closed.
     @State private var heatmap: HeatmapFocus?
     /// What the plan was last asked to show by a heatmap cell (`PlanSection.focus`): the diff it
-    /// opens scrolls the document to the section's hunk (`PageJump`).
+    /// opens scrolls the page to the section's first change (`PlanJump`).
     @State private var planFocus: PlanFocus?
     /// The tape read from disk once the intake is past shaping (`service.tapes` drops it), for
     /// the read-only final plan. Re-read with the other derived values.
@@ -177,12 +177,6 @@ struct IntakeDetailView: View {
                     .padding(.vertical, 18)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .background(DocumentScrollAnchor(scroll: documentScroll))
-                    // The plan is part of this document, so its jumps (a heatmap cell's
-                    // section) scroll this scroll view, which only this reader can reach.
-                    .environment(\.pageJump, PageJump { [reduceMotion, documentScroll] id, below in
-                        let anchor = PageJump.anchor(below: below, height: documentScroll.view?.contentView.bounds.height ?? 0)
-                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(id, anchor: anchor) }
-                    })
                 }
                 .coordinateSpace(name: Self.scrollSpace)
                 .onPreferenceChange(BarGeometryKey.self, perform: barMoved)

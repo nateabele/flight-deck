@@ -256,10 +256,23 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(ShapingModel.previousPlanCheckpoint(before: 4, in: tape, loadFile: load), 2)
         XCTAssertEqual(ShapingModel.previousPlanCheckpoint(before: 2, in: tape, loadFile: load), 1)
         XCTAssertNil(ShapingModel.previousPlanCheckpoint(before: 1, in: tape, loadFile: load))
-        XCTAssertEqual(ShapingModel.viewerText(.diff, checkpoint: 4, tape: tape, loadFile: load),
-                       PlanMetrics.unifiedDiff(from: "- a\n- B\n", to: "- a\n- B\n- c\n"))
-        XCTAssertEqual(ShapingModel.viewerText(.diff, checkpoint: 1, tape: tape, loadFile: load),
-                       "No earlier plan to compare with.")
+        let round = ShapingModel.roundDiff(checkpoint: 4, in: tape, loadFile: load)
+        XCTAssertEqual(round, ShapingModel.RoundDiff(checkpoint: 4, previous: 2, plan: "- a\n- B\n- c\n", base: "- a\n- B\n"))
+        // The first version has nothing before it: a plan and no base.
+        XCTAssertEqual(ShapingModel.roundDiff(checkpoint: 1, in: tape, loadFile: load),
+                       ShapingModel.RoundDiff(checkpoint: 1, previous: nil, plan: "- a\n- b\n", base: nil))
+        // A checkpoint without a plan has no diff.
+        XCTAssertNil(ShapingModel.roundDiff(checkpoint: 3, in: tape, loadFile: load))
+    }
+
+    /// The diff is the GENERATED plans of both rounds: a human's `plan.user.md` on either is
+    /// not part of what a round changed.
+    func testRoundDiffIgnoresTheHumansLayer() {
+        let tape = pausedAtR2()
+        let load = files(["1/drafts/0.md": "one\n", "1/plan.user.md": "mine\n", "2/plan.md": "two\n", "2/plan.user.md": "mine too\n"])
+        let round = ShapingModel.roundDiff(checkpoint: 2, in: tape, loadFile: load)
+        XCTAssertEqual(round?.plan, "two\n")
+        XCTAssertEqual(round?.base, "one\n")
     }
 
     func testViewerTextForMissingFiles() {
@@ -296,8 +309,7 @@ final class ShapingModelTests: XCTestCase {
         let tape = pausedAtR2()
         let load = files(["2/plan.md": "- a\n", "4/plan.md": "- a\n- b\n"])
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .diff, tape: tape),
-                                                  tape: tape, loadFile: load),
-                       PlanMetrics.unifiedDiff(from: "- a\n", to: "- a\n- b\n"))
+                                                  tape: tape, loadFile: load), "- a\n- b\n", "the diff is drawn over the plan, not as text")
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: 2, mode: .plan, tape: tape),
                                                   tape: tape, loadFile: load), "- a\n")
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: .empty),

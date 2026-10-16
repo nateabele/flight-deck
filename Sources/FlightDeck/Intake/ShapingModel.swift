@@ -308,9 +308,28 @@ struct ShapingModel {
         return tape.checkpoints[..<index].reversed().first { planText(checkpoint: $0.id, in: tape, loadFile: loadFile) != nil }?.id
     }
 
+    /// What Diff vs Previous shows for a checkpoint: its plan, and the plan of the nearest earlier
+    /// checkpoint that has one as the base the edit layer marks it against. Both are the
+    /// GENERATED plans (`planText`), not a human's layer: the view is what the round changed.
+    /// `base` is nil for the first version, which has nothing to compare with.
+    struct RoundDiff: Equatable {
+        var checkpoint: Int
+        var previous: Int?
+        var plan: String
+        var base: String?
+    }
+
+    /// nil when `checkpoint` has no plan (an encode or polish checkpoint carries a change set).
+    static func roundDiff(checkpoint: Int, in tape: Tape, loadFile: (Int, String) -> Data?) -> RoundDiff? {
+        guard let plan = planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) else { return nil }
+        let previous = previousPlanCheckpoint(before: checkpoint, in: tape, loadFile: loadFile)
+        return RoundDiff(checkpoint: checkpoint, previous: previous, plan: plan,
+                         base: previous.flatMap { planText(checkpoint: $0, in: tape, loadFile: loadFile) })
+    }
+
     /// What the plan viewer's text depends on — and nothing else. The view memoizes its text
     /// on this key: without it, every body evaluation (a runner heartbeat, a card hover)
-    /// re-read two files and re-ran `PlanMetrics.unifiedDiff`. `head` is in the key because a
+    /// re-read the checkpoint's files. `head` is in the key because a
     /// nil selection follows the head, and a new checkpoint landing must refresh the viewer.
     struct ViewerKey: Equatable {
         var checkpoint: Int?
@@ -329,14 +348,9 @@ struct ShapingModel {
 
     static func viewerText(_ mode: ViewerMode, checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?) -> String {
         switch mode {
-        case .plan:
+        // The diff is drawn by the plan editor over this same plan (`roundDiff`), never as text.
+        case .plan, .diff:
             return planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) ?? "No plan at this checkpoint."
-        case .diff:
-            guard let current = planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) else { return "No plan at this checkpoint." }
-            guard let base = previousPlanCheckpoint(before: checkpoint, in: tape, loadFile: loadFile),
-                  let old = planText(checkpoint: base, in: tape, loadFile: loadFile) else { return "No earlier plan to compare with." }
-            let diff = PlanMetrics.unifiedDiff(from: old, to: current)
-            return diff.isEmpty ? "No changes since the previous plan." : diff
         case .changeSet:
             guard let data = loadFile(checkpoint, "changeset.json") else { return "No change set at this checkpoint." }
             guard let set = try? ChangeSet.decode(data) else { return "The change set at this checkpoint couldn't be read." }

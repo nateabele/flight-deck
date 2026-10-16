@@ -347,7 +347,7 @@ the heatmap.
   - `ConvergenceCellModel` holds the verdict (TOO EARLY, CONVERGING ↘, PLATEAU →, DIVERGING ↗), the sparkline, discontinuities and hollow cross-check points.
   - `HeatmapModel` has one row per section with churn and one column per round ("R1", "R1 ×2" for a cross-check). Its title is "SECTION CHURN · REFINE ×N".
 - `Planning/ConvergenceViews.swift`: `ConvergenceCard`, and `ConvergenceHeatmap`, an inline disclosure inside the board.
-  - Clicking a cell selects that checkpoint and shows its Diff at that section.
+  - Clicking a cell selects that checkpoint and shows its Diff vs Previous, scrolled to that section's first change (see 3.7).
   - Esc closes the heatmap.
   - `ChurnLaneView` draws the churn lane beside the plan.
 - **Labels on master:** `ConvergenceSeries.label` gives "§N" for a numbered heading, but the
@@ -407,6 +407,12 @@ the heatmap.
   - The editor commits when editing ends, or after 2 s idle.
   - `PlanEditRouter.commit` sends `editPlan(checkpoint:markdown:)`, which carries the whole Markdown.
   - If a newer head has landed, it retargets with a merge (up to 3 tries). A conflict keeps the edit on its own checkpoint.
+- **Diff vs Previous** is this same editor, read-only (`PlanSection.swift`, `mode == .diff`), not a text diff:
+  - It shows the round's plan in the normal typography, and the edit layer draws the round's changes over it: the base is the previous plan, instead of the generated plan under the human's edits. Marks, ghosts, gutter bars and in-grid table marks are the same as for human edits, so green and red here mean "this round changed it", and the bar above the plan names the pair ("Changes in Refine 2 since Refine 1").
+  - **The base** is `ShapingModel.roundDiff`: both sides are the GENERATED plans (`planText`, never `plan.user.md`), and the previous side is the nearest earlier checkpoint that has a plan (`previousPlanCheckpoint`), so an encode or polish checkpoint is skipped. With no earlier plan there is no base, and the bar says "First version: nothing to compare". Following the head resolves to the newest checkpoint with a plan, as the Plan tab does.
+  - **The jump:** a heatmap cell passes its section as a `PlanJump` (`PlanTextView.jump`). `EditLayer.firstChange` picks the first mark inside that section, else the ghost that removed its heading, else the heading, else the first mark of the plan; `Coordinator.jump(to:)` then uses the `reveal` machinery of "Show in that version", landing a margin below the pinned block. A removed passage's ghost is drawn above its anchor line, so the page goes to the line before it. Choosing a round, or switching to the tab, jumps to the round's first change; a new head landing moves nothing.
+  - No reading-position memory, no churn lane, no editing. Folds are the plan's own store; notes are pinned as on any read-only version.
+  - The old monospaced diff text (`coloredDiff`, `diffChunks`, `PageJump`) is gone, with no fallback to raw diff text. **Change set** mode still lists its ops as plain monospaced text (`ShapingModel.describe`); it shares none of the diff code.
 - **Folding:**
   - Code: `PlanOutline.swift` (`PlanFoldKey`, which is heading text plus occurrence; `PlanFolds`; `PlanFoldStore`) and `PlanFolding.swift` (a layout-only filter and the gutter).
   - Display: a › or ⌄ chevron, and a "⋯ N lines" pill on a folded heading.
@@ -797,7 +803,7 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 - **Open bug:** at the default window size, the inspector pushes the split past the window edge.
 - **Open bug (unverified):** a chip button nested in another may lose the click.
 - **Open bug (unverified):** Esc may not reach the heatmap while the editor has focus.
-- **Gap:** the heatmap cannot line up with a scrolled tape, and a heatmap cell opens the Diff, not the editor.
+- **Gap:** the heatmap cannot line up with a scrolled tape, and a heatmap cell opens the Diff (the read-only editor), not the editable plan.
 - **Gap:** fresh eyes and dedup have no row in the Rounds timeline editor.
 - **Gap:** the live slot does not grow, and BILLED covers only the current round.
 - **Gap:** there is no UI to turn Flight Control off for a project (`ProjectHeaderRow.swift` has an inert button).

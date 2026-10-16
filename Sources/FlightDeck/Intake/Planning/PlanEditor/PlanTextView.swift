@@ -109,6 +109,9 @@ struct PlanTextView: NSViewRepresentable {
     /// The agents' plan under `text` — set, the human's edits over it draw as a layer
     /// (`EditLayer`); nil draws none.
     var generated: String?
+    /// Where to take the page once the text and its marks are laid: the first change in a
+    /// section — see `PlanJump`. Nil leaves the page where it is.
+    var jump: PlanJump?
     /// Highlight-and-annotate (spec §7.3): note highlights, the selection toolbar and the
     /// rail's line positions, all in `PlanNotesBridge`. Nil leaves the editor as a plain editor.
     var notes: PlanNotesController?
@@ -159,6 +162,13 @@ struct PlanTextView: NSViewRepresentable {
     func editLayer(generated: String?) -> PlanTextView {
         var copy = self
         copy.generated = generated
+        return copy
+    }
+
+    /// Takes the page to a change when `target` is new — see `PlanJump`.
+    func jump(_ target: PlanJump?) -> PlanTextView {
+        var copy = self
+        copy.jump = target
         return copy
     }
 
@@ -279,6 +289,7 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.receive(incoming, navigation: incomingIsNavigation)
         container.bannerVisible = coordinator.session.held != nil
         coordinator.layEditLayer(over: generated)
+        coordinator.jump(to: jump)
         container.revert.enabled = editable
         coordinator.reading = context.environment.planReading
         container.churnLane.update(churn)
@@ -329,7 +340,9 @@ struct PlanTextView: NSViewRepresentable {
         /// The edit layer: the agents' plan it was diffed against, the marks drawn, and the
         /// hunks Revert puts back — all as of the text in the view.
         private var layerBase: String?
-        private var marks: [EditMark] = []
+        /// The last `PlanJump` taken, so a view update that repeats it does not scroll again.
+        var jumped: Int?
+        var marks: [EditMark] = []
         private(set) var hunks: [PlanHunk] = []
         /// The insertion tint, as its own decoration layer (`DecorationLayer`).
         let editTint = DecorationLayer(key: "edits")
@@ -1862,28 +1875,10 @@ class PlanNSTextView: NSTextView {
 extension EnvironmentValues {
     /// How much of the top of the page (the detail pane's document) is drawn over while it
     /// scrolls — the pinned control bar and board. The editor reveals its caret below it, and
-    /// Diff vs Previous lands a section's hunk under it rather than behind it.
+    /// a jump to a change (`PlanJump`) lands under it rather than behind it.
     @Entry var pageObscuredTop: CGFloat = 0
-    /// Scrolls the page to a view by its `.id`; nil outside the detail pane.
-    @Entry var pageJump: PageJump?
     /// Where the pane shows the plan section being read (`PlanReadingPosition`); nil outside it.
     @Entry var planReading: PlanReadingPosition?
-}
-
-/// Scrolls the detail pane's document — the one scroller the plan is part of — to put a view
-/// (by its `.id`) a given distance below the page's top edge: under the pinned block, not
-/// behind it. A view inside the document can't use its own `ScrollViewReader`: a proxy only
-/// scrolls the scroll views INSIDE its reader, and the page's is outside.
-struct PageJump {
-    let scroll: (_ id: AnyHashable, _ below: CGFloat) -> Void
-
-    /// The `scrollTo` anchor that lands a point-high target `below` points under the top of a
-    /// viewport `height` tall: the anchor is a point in BOTH the target and the viewport, so a
-    /// fraction `below / height` puts the target's top there. (An id'd marker nudged up with an
-    /// alignment guide was measured to land at the top regardless.)
-    static func anchor(below: CGFloat, height: CGFloat) -> UnitPoint {
-        height > 0 ? UnitPoint(x: 0, y: min(max(below / height, 0), 1)) : .top
-    }
 }
 
 /// Review Focus 3's banner: a round landed while the human was typing, so it waits.
@@ -1917,4 +1912,12 @@ final class PlanEditorHandle {
 
     /// Every edit back to the agents' plan, as one undoable change ("Revert All Edits").
     func revertAll() { coordinator?.revertAll() }
+}
+
+/// A request to take the page to the first change in `section` (a heading line; nil for the
+/// first change of the plan). `seq` makes a repeat of the same section a new request, so a
+/// second click on a heatmap cell scrolls back there.
+struct PlanJump: Equatable {
+    var section: String?
+    var seq: Int
 }
