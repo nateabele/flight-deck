@@ -45,6 +45,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// what every test that does not ask for it gets, so no test opens onto another test's
     /// leftovers; the app passes the real one.
     @ObservationIgnored let cache: PhoneCache?
+    /// What is typed in each conversation's composer, kept as it is typed. See `DraftStore`.
+    @ObservationIgnored let drafts: DraftStore?
     /// Where the next connector resumes from: the sequence `fleet` was folded to and the epoch
     /// it was counted in, updated with every `onFleet`. `nil` means resume from nothing.
     ///
@@ -105,9 +107,13 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// it is its own observable and never reassigned.
     @ObservationIgnored private(set) var flightControl: FlightControlModel!
 
-    init(store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil) {
+    init(
+        store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil,
+        drafts: DraftStore? = nil
+    ) {
         self.store = store
         self.cache = cache
+        self.drafts = drafts
         self.mac = store.load()
         self.flightControl = FlightControlModel(fetcher: self, commander: self)
         // A cold launch resumes from the fleet cached on disk, or asks for EVERYTHING.
@@ -532,7 +538,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         if let existing = timelineModels[id] {
             model = existing
         } else {
-            model = SessionTimelineModel(sessionID: id, fleet: self, cache: cache)
+            model = SessionTimelineModel(sessionID: id, fleet: self, cache: cache, drafts: drafts)
             timelineModels[id] = model
         }
         evictIdleTimelineModels()
@@ -951,9 +957,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             MainActor.assumeIsolated {
                 // A snapshot is the whole fleet, so it is the moment a feed cached for a session
                 // the Mac no longer has can go.
-                if let self, let cache = self.cache {
+                if let self {
                     let live = Set(self.fleet.projects.flatMap(\.sessions).map(\.id))
-                    cache.pruneTimelines(keeping: live)
+                    self.cache?.pruneTimelines(keeping: live)
+                    self.drafts?.prune(keeping: live)
                 }
                 PhoneLog.connection.notice(
                     "snapshot seq=\(seq) reason=\(reason.rawValue)"
@@ -1061,6 +1068,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         resume = nil
         isShowingCache = false
         cache?.purgeAll()
+        // What was typed for the old pairing's sessions is that pairing's too.
+        drafts?.purgeAll()
     }
 
     /// One short, structural word per state — never the Mac's name, which is a user-chosen

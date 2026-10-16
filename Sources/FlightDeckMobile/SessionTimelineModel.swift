@@ -193,7 +193,17 @@ final class SessionTimelineModel {
     ///
     /// The composer still owns the *field* — its focus, its deferred repaint, its enablement.
     /// Only the string moved.
-    var draft = ""
+    ///
+    /// Saved to `drafts` on every change and restored in `init`, so a crash, a force quit, a
+    /// deploy's relaunch or an eviction from `FleetModel` no longer loses what was typed.
+    var draft = "" {
+        didSet {
+            guard draft != oldValue else { return }
+            drafts?.save(draft, for: sessionID)
+        }
+    }
+    /// Where `draft` is kept between launches; `nil` keeps nothing. See `DraftStore`.
+    @ObservationIgnored private let drafts: DraftStore?
 
     /// Bumped every time a quotation is appended, so the composer can take focus.
     ///
@@ -347,13 +357,16 @@ final class SessionTimelineModel {
         fleet: any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting,
         timeout: Duration = .seconds(15),
         spillDirectory: URL? = nil,
-        cache: PhoneCache? = nil
+        cache: PhoneCache? = nil,
+        drafts: DraftStore? = nil
     ) {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
         self.spillStore = TimelineSpillStore(session: sessionID, directory: spillDirectory)
         self.cache = cache
+        self.drafts = drafts
+        if let saved = drafts?.draft(for: sessionID) { draft = saved }
         let start = DispatchTime.now().uptimeNanoseconds
         let restored = cache?.timeline(for: sessionID)
         if cache != nil {
