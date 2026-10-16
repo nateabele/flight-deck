@@ -79,7 +79,7 @@ FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp   # ends INFRA LIVE PASS
 
 ./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
 ./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes
-./scripts/deploy-phone.sh       # builds, installs and RELAUNCHES on a real device; --release for an optimised build, --no-build to install what is already there
+./scripts/deploy-phone.sh       # builds, installs and RELAUNCHES on a real device; --release for an optimised build, --no-build to install what is already there. The ONLY way to put a build on the phone: it repairs Wi-Fi discovery first (scripts/phone-proxy.sh) and fails loudly
 
 # NOT hermetic — spawns real `codex` processes against your live ~/.codex, and one test
 # runs a real model turn that costs real tokens. Never loop it; run it only when you

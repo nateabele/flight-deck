@@ -50,12 +50,22 @@ APP="DerivedData/Build/Products/$CONFIG-iphoneos/FlightDeckMobile.app"
 # xcodebuild resolve the device BEFORE compiling, so a phone that is asleep or momentarily off
 # the network fails the build rather than the install — thirty seconds of work thrown away for
 # a step that had not started yet. The generic destination builds the same arm64 slice.
+#
+# The log goes to a file and only its verdict is printed. On failure the errors are printed and
+# the script stops: `| tail -1` used to print the build's last line, which on a failure is often
+# blank, so a failed build read as a quiet success.
 if [ "$BUILD" = 1 ]; then
   echo "==> building $CONFIG"
-  xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeckMobile \
-    -configuration "$CONFIG" -sdk iphoneos -destination 'generic/platform=iOS' \
-    -derivedDataPath DerivedData -allowProvisioningUpdates build \
-    | tail -1
+  log=$(mktemp -t deploy-phone-build)
+  if ! xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeckMobile \
+      -configuration "$CONFIG" -sdk iphoneos -destination 'generic/platform=iOS' \
+      -derivedDataPath DerivedData -allowProvisioningUpdates build >"$log" 2>&1; then
+    grep -E 'error:|BUILD FAILED|database is locked' "$log" | sort -u | head -20 >&2
+    echo "build FAILED; full log: $log" >&2
+    exit 1
+  fi
+  grep -E '\*\* BUILD' "$log" || true
+  rm -f "$log"
 fi
 
 # Checked after the build rather than before, so a missing bundle names the real cause: with
@@ -66,9 +76,22 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+# The phone must be reachable first. On this network it often is not, though it is on the
+# same Wi-Fi: the router drops its Bonjour advert and the phone rotates the records an earlier
+# proxy re-advertised. phone-proxy.sh fixes that, or says why it cannot (cellular, asleep).
+DEVICE="$DEVICE" scripts/phone-proxy.sh
+
+# An install that did not say "App installed" failed, whatever devicectl exited with: it used
+# to be filtered through `|| true`, so a failed install went on to relaunch the OLD build and
+# exit 0 — the stale-build read this script exists to prevent.
 echo "==> installing $CONFIG on $DEVICE"
-xcrun devicectl device install app --device "$DEVICE" "$APP" \
-  | grep -E 'installationURL|App installed' || true
+install_out=$(xcrun devicectl device install app --device "$DEVICE" "$APP" 2>&1) || true
+if ! printf '%s' "$install_out" | grep -q 'App installed'; then
+  printf '%s\n' "$install_out" | grep -E 'ERROR|error' | head -4 >&2
+  echo "install FAILED on $DEVICE" >&2
+  exit 1
+fi
+printf '%s\n' "$install_out" | grep -E 'installationURL|App installed' || true
 
 # `--terminate-existing` because the old process survives the install and would otherwise keep
 # running the previous bundle — the exact stale-build read this script exists to prevent.

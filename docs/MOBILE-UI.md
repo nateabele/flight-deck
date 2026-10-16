@@ -62,8 +62,15 @@ The relaunch is the point — `devicectl install` leaves the old process running
 reading a stale build's behaviour has happened here more than once. `DEVICE` defaults to
 `Mobile3`. A `State` of `unavailable` in `xcrun devicectl list devices` means CoreDevice cannot
 *find* the phone. Addressing it differently (name, UDID, ECID) will not help: the identifier is
-not the problem. Plugging in a cable always works. Over Wi-Fi, check whether discovery is the
-problem before blaming the phone.
+not the problem. Plugging in a cable always works.
+
+**Always install through `deploy-phone.sh`, never with a bare `devicectl device install`.**
+Before installing, it runs `scripts/phone-proxy.sh`, which repairs the Wi-Fi case below by
+itself: it reads the phone's current records and replaces any stale proxy, in about 3 s. It
+also fails loudly. A failed build prints its errors and a failed install exits 1, where both
+used to read as success. When the phone really can't be reached, `phone-proxy.sh` says why:
+the name doesn't resolve (asleep, off this Wi-Fi, on cellular) or the phone didn't answer.
+What follows explains what it automates.
 
 #### `unavailable` on Wi-Fi: the phone is there, its Bonjour advert is not
 
@@ -105,7 +112,9 @@ Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` wor
   and `dns-sd` reports `Name in use, please choose another`. That error is also a clue: the
   phone's *host* record does get through, and only the service advert is lost.
 - **The proxy goes stale.** It hard-codes the phone's IP, port, service UUID and `authTag`. When
-  any of them changes, the phone goes back to `unavailable`. On 2026-10-14 the IP was unchanged
+  any of them changes, the phone goes back to `unavailable`. The UUID changed on 2026-10-14,
+  twice on 2026-10-15, and twice more on 2026-10-16, so `phone-proxy.sh` re-reads the records
+  on every run instead of trusting a running proxy. On 2026-10-14 the IP was unchanged
   but the UUID and `authTag` were both new, so re-run step 2 from the PTR query rather than
   reusing the old UUID. Kill the `dns-sd -P` process and register again.
 - **The real fix is the network.** Turn off multicast filtering, IGMP snooping or client
