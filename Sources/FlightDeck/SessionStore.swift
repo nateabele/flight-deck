@@ -2972,6 +2972,12 @@ final class SessionStore: ObservableObject {
     func wakeIfAsleep(_ id: UUID) {
         guard sleepController.asleep.contains(id), !rollingOver.contains(id) else { return }
         guard let session = session(for: id) else { return sleepController.wake(id) }
+        // Both arms below build a terminal, and one built with the display asleep is inert
+        // (`DisplayState`): a phone prompt that thawed a frozen tab overnight got a surface with
+        // no attach client behind it, and every typing attempt failed against it until the tab
+        // was closed (2026-10-14). Staying frozen is the deferral: `injector(for:)` answers nil,
+        // the prompt stays queued, and the next tick asks again.
+        guard ensureTerminalCreatable() else { return }
         let frozen = frozenComposers.removeValue(forKey: id)
         switch thawPlan(for: session, frozen: frozen) {
         case .inPlace(let notice):

@@ -1322,6 +1322,13 @@ final class FleetService: ObservableObject {
             // phone nothing it cannot already see. Compare `newSession`'s stale-`accountIndex`
             // fallback, which is refused for the opposite reason: there, a silent wrong account
             // is worse than an error.
+            //
+            // The display is the one refusal, as it is for `newSession`: a reopen builds a
+            // terminal, and one built with the display asleep is inert from birth — the tab
+            // comes back with no terminal and its history entry already spent (2026-10-14).
+            guard store.ensureTerminalCreatable() else {
+                return .err(cid: cid, code: "terminal_unavailable")
+            }
             store.reopenClosedSession(id: session)
         case .setProjectCollapsed(let id, let isCollapsed):
             guard store.projectExists(id) else { return .err(cid: cid, code: "unknown_project") }

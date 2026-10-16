@@ -191,6 +191,64 @@ final class SleepLeaseRolloverTests: XCTestCase {
         XCTAssertTrue(rig.notices.posted.isEmpty, "not spent: nothing to say")
     }
 
+    // MARK: Thaw needs a drawable display
+
+    /// Asleep until the waker below succeeds, which is the real sequence compressed.
+    private final class Display: DisplayInspecting, @unchecked Sendable {
+        var isDrawable = false
+    }
+
+    private final class Waker: DisplayWaking, @unchecked Sendable {
+        let succeeds: Bool
+        let display: Display
+        private(set) var calls = 0
+        init(succeeds: Bool, display: Display) { self.succeeds = succeeds; self.display = display }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool { wake() }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool { wake() }
+        private func wake() -> Bool {
+            calls += 1
+            if succeeds { display.isDrawable = true }
+            return succeeds
+        }
+    }
+
+    /// The Publish tab, 2026-10-14: frozen overnight, thawed by a phone prompt with the display
+    /// asleep, and rebuilt as an inert surface that no prompt could ever be typed into. A display
+    /// that will not wake must leave the tab frozen — no SIGCONT, no surface — so the prompt
+    /// waits in its queue instead.
+    func testAThawWithTheDisplayAsleepAndUnwakeableLeavesTheTabFrozen() {
+        let rig = rig()
+        freeze(rig)
+        let configsBefore = rig.provider.configs.count
+        let display = Display()
+        let waker = Waker(succeeds: false, display: display)
+        rig.store.display = display
+        rig.store.displayWaker = waker
+
+        rig.store.wakeIfAsleep(rig.tab.id)
+
+        XCTAssertEqual(waker.calls, 1, "the display was asked to wake")
+        XCTAssertTrue(rig.store.sleepController.asleep.contains(rig.tab.id), "still frozen")
+        XCTAssertEqual(rig.daemons.conted, [], "the agent was not woken into a dead terminal")
+        XCTAssertEqual(rig.provider.configs.count, configsBefore, "no inert surface was built")
+    }
+
+    /// The same thaw with a display that does wake goes ahead as it always did.
+    func testAThawWithTheDisplayAsleepWakesItAndThawsInPlace() {
+        let rig = rig()
+        freeze(rig)
+        let display = Display()
+        let waker = Waker(succeeds: true, display: display)
+        rig.store.display = display
+        rig.store.displayWaker = waker
+
+        rig.store.wakeIfAsleep(rig.tab.id)
+
+        XCTAssertEqual(waker.calls, 1)
+        XCTAssertFalse(rig.store.sleepController.asleep.contains(rig.tab.id))
+        XCTAssertEqual(rig.daemons.conted, [rig.tab.id], "woken in place")
+    }
+
     // MARK: 3. Spent → rollover
 
     func testASpentAccountRollsAnIdleConversationToAnotherMemberWithItsDraft() async throws {
