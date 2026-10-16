@@ -230,15 +230,30 @@ extension PlanTextView.Coordinator {
 
     /// Takes the page to `range` (opening any fold that hides it) and flashes it when it lands:
     /// the quote a note was written on, a little below the pinned block rather than under it.
-    func reveal(_ range: NSRange) {
+    func reveal(_ range: NSRange, flash: Bool = true) {
         guard let textView else { return }
         unfold(containing: range)
-        scrolling.flash = range
+        scrolling.flash = flash ? range : nil
         beginReadingRestore(.at(range.location, within: -((textView.obscuredTop) + Self.revealMargin),
                                 in: textView.string as NSString, headings: headings))
     }
 
     private static let revealMargin: CGFloat = 48
+
+    /// Takes the page to the first change `target` names, once per request: Diff vs Previous
+    /// opening at the section a heatmap cell was clicked in. The change's line is revealed and
+    /// flashed. A removed passage has no characters of its own: its ghost is drawn ABOVE the
+    /// line it sits at, so the page goes to the line before it, unflashed, to keep the ghost
+    /// out from under the pinned block.
+    func jump(to target: PlanJump?) {
+        guard let target, target.seq != jumped, let textView else { return }
+        jumped = target.seq
+        let text = textView.string as NSString
+        guard let offset = EditLayer.firstChange(in: marks, text: textView.string, section: target.section) else { return }
+        let ghostLines = marks.contains { $0.kind == .deleted && !$0.inline && $0.range.location == offset }
+        let at = ghostLines ? max(offset - 1, 0) : min(offset, text.length)
+        reveal(text.lineRange(for: NSRange(location: at, length: 0)), flash: !ghostLines)
+    }
 
     /// The keyboard back in the editor that had it, before the page is put back: with the caret's
     /// block showing its syntax the lines are the height they were when the position was read.

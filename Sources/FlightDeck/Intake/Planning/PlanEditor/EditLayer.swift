@@ -92,6 +92,29 @@ enum EditLayer {
         return (out, hunks)
     }
 
+    /// Where Diff vs Previous opens for `section` (a heading line, as the heatmap names it): the
+    /// first mark inside that section; else the whole-line ghost that removed its heading; else
+    /// the heading itself, a section the round left alone. With no section, or none of those,
+    /// the first mark of the plan. Nil when there is nothing to show (no marks, no such section).
+    static func firstChange(in marks: [EditMark], text: String, section: String?) -> Int? {
+        let ordered = marks.sorted { $0.range.location < $1.range.location }
+        guard let section else { return ordered.first?.range.location }
+        let spans = PlanTextView.Coordinator.sectionSpans([section], in: text as NSString)
+        if let span = spans.first {
+            // A ghost at the section's first character is drawn above its heading: the section
+            // before's (or the heading's own removal), not a change inside this one.
+            let inside = ordered.first { mark in
+                let at = mark.range.location
+                return mark.kind == .deleted ? at > span.location && at < NSMaxRange(span) : at >= span.location && at < NSMaxRange(span)
+            }
+            if let inside { return inside.range.location }
+        }
+        if let removed = ordered.first(where: { mark in
+            mark.ghost.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == section }
+        }) { return removed.range.location }
+        return spans.first?.location ?? ordered.first?.range.location
+    }
+
     /// The characters each hunk covers in the edited text — its lines, or for a pure deletion
     /// the line its ghost is drawn on. Hovering there offers that hunk's Revert.
     static func spans(_ hunks: [PlanHunk], edited: String) -> [NSRange] {

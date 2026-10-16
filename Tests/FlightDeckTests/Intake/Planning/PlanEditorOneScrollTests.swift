@@ -254,7 +254,8 @@ final class PlanEditorOneScrollTests: XCTestCase {
 
     /// A heatmap cell's jump (`PlanSection.focus`) scrolls the PAGE to that section's hunk in
     /// Diff vs Previous, landing it `pageObscuredTop` below the page's top — under the pinned
-    /// block, not behind it. With the diff in a scroll view of its own, the page never moved.
+    /// block, not behind it. The diff is the plan editor itself, part of the page, so it is the
+    /// page that moves.
     @MainActor
     func testAHeatmapJumpScrollsThePageToTheSectionsHunk() throws {
         let sections = (1...40).map { "## \($0). Section \($0)\n\nBody of section \($0).\nMore of section \($0).\n" }
@@ -268,17 +269,14 @@ final class PlanEditorOneScrollTests: XCTestCase {
         let load: (Int, String) -> Data? = { id, file in file == "plan.md" ? Data((id == 1 ? old : new).utf8) : nil }
         let above: CGFloat = 3_000, covered: CGFloat = 200
         func page(_ focus: PlanFocus) -> some View {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Color.clear.frame(height: above)
-                        PlanSection(intakeID: UUID(uuid: UUID_NULL), tape: tape, loadFile: load, onSend: { _ in }).focus(focus)
-                        // Room below, so the page's end doesn't clamp where a jump can land.
-                        Color.clear.frame(height: above)
-                    }
-                    .environment(\.pageJump, PageJump { proxy.scrollTo($0, anchor: PageJump.anchor(below: $1, height: 700)) })
-                    .environment(\.pageObscuredTop, covered)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: above)
+                    PlanSection(intakeID: UUID(uuid: UUID_NULL), tape: tape, loadFile: load, onSend: { _ in }).focus(focus)
+                    // Room below, so the page's end doesn't clamp where a jump can land.
+                    Color.clear.frame(height: above)
                 }
+                .environment(\.pageObscuredTop, covered)
             }
             .frame(width: 900, height: 700)
         }
@@ -297,9 +295,8 @@ final class PlanEditorOneScrollTests: XCTestCase {
         drain(0.5)
         let thirtyFive = scroll.contentView.bounds.minY
         print("PlanSection jump: §5 at \(five), §35 at \(thirtyFive)")
-        // §5's hunk opens the diff, which starts just under the view picker: ~40 pt into the section.
-        XCTAssertEqual(five, above + 40 - covered, accuracy: 30, "§5's hunk just under the covered top")
-        XCTAssertGreaterThan(thirtyFive, five + 40, "§35's hunk is further down the page, and the page went there")
+        XCTAssertGreaterThan(five, above - covered, "the page went into the plan, to §5's change")
+        XCTAssertGreaterThan(thirtyFive, five + 1_500, "§35's change is far further down, and the page went there")
     }
 
     private static func all(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + all($0) } }

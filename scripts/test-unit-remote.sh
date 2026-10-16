@@ -158,7 +158,13 @@ REMOTE
       echo "[unit] warning: processes survived the reap on $HOST — see $LOG"
     fi
   fi
-  exit "$rc"
+  # A render run writes its PNGs on the UI-test Mac, to the same absolute path it was given here.
+for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR; do
+  [ -n "${!name:-}" ] || continue
+  mkdir -p "${!name}"
+  rsync -a -e "$RSYNC_SSH" "$HOST:${!name}/" "${!name}/" >>"$LOG" 2>&1 || true
+done
+exit "$rc"
 }
 trap cleanup EXIT
 
@@ -259,4 +265,10 @@ set -e
 # banner's "logs in DerivedData/fd-test-shards" points at something here.
 rsync -a -e "$RSYNC_SSH" "$HOST:$ROOT/DerivedData/fd-test-shards" "$HOST:$ROOT/DerivedData/fd-test-class-timings.tsv" \
   DerivedData/ >>"$LOG" 2>&1 || true
+# A render run writes its PNGs on the UI-test Mac, to the same absolute path it was given here.
+for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR; do
+  [ -n "${!name:-}" ] || continue
+  mkdir -p "${!name}"
+  rsync -a -e "$RSYNC_SSH" "$HOST:${!name}/" "${!name}/" >>"$LOG" 2>&1 || true
+done
 exit "$rc"
