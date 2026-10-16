@@ -112,9 +112,12 @@ Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` wor
   and `dns-sd` reports `Name in use, please choose another`. That error is also a clue: the
   phone's *host* record does get through, and only the service advert is lost.
 - **The proxy goes stale.** It hard-codes the phone's IP, port, service UUID and `authTag`. When
-  any of them changes, the phone goes back to `unavailable`. The UUID changed on 2026-10-14,
-  twice on 2026-10-15, and twice more on 2026-10-16, so `phone-proxy.sh` re-reads the records
-  on every run instead of trusting a running proxy. On 2026-10-14 the IP was unchanged
+  any of them changes, the phone goes back to `unavailable`, though not always visibly:
+  `devicectl` can keep listing it `available (paired)` while an install dies with "The peer is
+  no longer reachable". The UUID changes often, once within a minute (2026-10-16), so
+  `phone-proxy.sh` compares the running proxy with the phone's current records on every run.
+  It never trusts "available" on its own, and `deploy-phone.sh` refreshes and retries once if
+  an install loses its connection. On 2026-10-14 the IP was unchanged
   but the UUID and `authTag` were both new, so re-run step 2 from the PTR query rather than
   reusing the old UUID. Kill the `dns-sd -P` process and register again.
 - **The real fix is the network.** Turn off multicast filtering, IGMP snooping or client

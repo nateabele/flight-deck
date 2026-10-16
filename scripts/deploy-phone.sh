@@ -86,6 +86,14 @@ DEVICE="$DEVICE" scripts/phone-proxy.sh
 # exit 0 — the stale-build read this script exists to prevent.
 echo "==> installing $CONFIG on $DEVICE"
 install_out=$(xcrun devicectl device install app --device "$DEVICE" "$APP" 2>&1) || true
+# A connection that dies mid-install is the phone rotating its records between the proxy check
+# and the install, or briefly dropping off Wi-Fi: refresh the proxy and try once more.
+if ! printf '%s' "$install_out" | grep -q 'App installed' \
+   && printf '%s' "$install_out" | grep -qE 'no longer reachable|could not be established|unable to locate'; then
+  echo "    connection lost; refreshing discovery and retrying once"
+  DEVICE="$DEVICE" scripts/phone-proxy.sh
+  install_out=$(xcrun devicectl device install app --device "$DEVICE" "$APP" 2>&1) || true
+fi
 if ! printf '%s' "$install_out" | grep -q 'App installed'; then
   printf '%s\n' "$install_out" | grep -E 'ERROR|error' | head -4 >&2
   echo "install FAILED on $DEVICE" >&2
