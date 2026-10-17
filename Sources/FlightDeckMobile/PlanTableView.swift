@@ -39,31 +39,40 @@ struct PlanTableView: View {
     let table: PipeTable
     var serif = false
 
-    @State private var height: CGFloat = 0
+    /// The width the table may take, read off the scroll view. Only the width: the grid's height
+    /// is the scroll view's own, from `fixedSize`, and never fed back in.
+    ///
+    /// **Never measure the height and feed it back.** This was a `GeometryReader` whose
+    /// content's height went out as a preference, into `@State`, and back in as `.frame(height:)`.
+    /// In an ordinary frame SwiftUI settles that a frame later. Inside a layout forced
+    /// synchronously, it does not settle at all: pushing a conversation whose screen held a table
+    /// froze the phone until the watchdog killed it (2026-10-16, "The Plan", iOS 18.3.1, a hang
+    /// in `PlanTableGridLayout` under `KeyboardOverlapReader.HostView.didMoveToWindow`, whose
+    /// first read of `keyboardLayoutGuide` lays the whole window out mid-push). The width cannot
+    /// loop: what the table holds does not change how wide its row is.
+    @State private var width: CGFloat = 0
 
     var body: some View {
         let rows = Self.cells(source, table)
-        GeometryReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                PlanTableGridLayout(columns: table.columnCount, available: proxy.size.width) {
-                    ForEach(rows.indices, id: \.self) { r in
-                        ForEach(0..<table.columnCount, id: \.self) { c in
-                            PlanTableCell(text: rows[r][c], header: r == 0, serif: serif, alignment: table.alignments[c],
-                                          lastColumn: c == table.columnCount - 1, lastRow: r == rows.count - 1)
-                            PlanTableCell(text: Self.longestWord(rows[r][c]), header: r == 0, serif: serif, alignment: .left,
-                                          lastColumn: true, lastRow: true)
-                                .layoutValue(key: PlanTableProbeKey.self, value: true)
-                                .hidden().accessibilityHidden(true)
-                        }
+        ScrollView(.horizontal, showsIndicators: false) {
+            PlanTableGridLayout(columns: table.columnCount, available: width) {
+                ForEach(rows.indices, id: \.self) { r in
+                    ForEach(0..<table.columnCount, id: \.self) { c in
+                        PlanTableCell(text: rows[r][c], header: r == 0, serif: serif, alignment: table.alignments[c],
+                                      lastColumn: c == table.columnCount - 1, lastRow: r == rows.count - 1)
+                        PlanTableCell(text: Self.longestWord(rows[r][c]), header: r == 0, serif: serif, alignment: .left,
+                                      lastColumn: true, lastRow: true)
+                            .layoutValue(key: PlanTableProbeKey.self, value: true)
+                            .hidden().accessibilityHidden(true)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(PlanTableStyle.line, lineWidth: 0.5))
-                .background(GeometryReader { Color.clear.preference(key: PlanTableHeightKey.self, value: $0.size.height) })
             }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(PlanTableStyle.line, lineWidth: 0.5))
         }
-        .frame(height: height)
-        .onPreferenceChange(PlanTableHeightKey.self) { height = $0 }
+        // As tall as the grid: a scroll view would otherwise take every point it is offered.
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
     /// The table's cells as drawn: row by row, the delimiter row left out, short rows filled.
@@ -121,11 +130,6 @@ enum PlanTableStyle {
 /// Marks the hidden copy of a cell the layout measures for the cell's longest word.
 private struct PlanTableProbeKey: LayoutValueKey {
     static let defaultValue = false
-}
-
-private struct PlanTableHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 private struct PlanTableCell: View {
