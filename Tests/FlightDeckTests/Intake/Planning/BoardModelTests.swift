@@ -206,14 +206,47 @@ final class BoardModelTests: XCTestCase {
 
     func testFailedRoundIsRed() throws {
         var tape = pausedAfterR1(status: .failed)
-        tape.pauseDiagnosis = Diagnosis(category: .rateLimited, detail: "429 from codex", action: "Wait")
+        tape.pauseDiagnosis = Diagnosis(category: .harnessError, detail: "exit 1", action: "Retry, or change this slot.")
         let model = try board(try intake(.featurePlan), tape)
         XCTAssertEqual(model.slots.filter { $0.state == .failed }.map(\.code), ["RF2"])
         XCTAssertEqual(model.slots.first { $0.code == "RF3" }?.state, .future)
         XCTAssertEqual(model.now.value, "Refine 2")
         XCTAssertEqual(model.nowChip, "FAILED")
-        XCTAssertEqual(model.now.detail, "429 from codex")
+        XCTAssertEqual(model.now.detail, "exit 1")
         XCTAssertEqual(model.inTheAir.label, "HALTED FOR")
+    }
+
+    /// The two lines under NOW cut a long error off, so the whole of it, and what to do about
+    /// it, is the failure card's (`failure`).
+    func testFailureCarriesTheWholeErrorAndWhatToDo() throws {
+        var tape = pausedAfterR1(status: .failed)
+        let long = String(repeating: "agy refused a shell command. ", count: 8)
+        tape.pauseDiagnosis = Diagnosis(category: .invalidOutput, detail: long, action: "Retry the round.")
+        let model = try board(try intake(.featurePlan), tape)
+        XCTAssertEqual(model.failure, BoardFailure(round: "Refine 2", error: "Invalid output: " + long, whatToDo: "Retry the round."))
+        XCTAssertEqual(model.now.detail, long, "a retry is the transport's: the line keeps the error")
+        XCTAssertNil(try board(try intake(.featurePlan), pausedAfterR1()).failure, "nothing failed, no card")
+    }
+
+    /// When the way on is something other than pressing play again (signing in, waiting out a
+    /// limit), the line under NOW says that, and the error moves to the card.
+    func testAFailureThatNeedsMoreThanARetrySaysWhatToDo() throws {
+        var tape = pausedAfterR1(status: .failed)
+        tape.pauseDiagnosis = Diagnosis(category: .authExpired, detail: "401 Unauthorized", action: "Run `codex login` in a terminal")
+        let model = try board(try intake(.featurePlan), tape)
+        XCTAssertEqual(model.now.detail, "Run `codex login` in a terminal")
+        XCTAssertEqual(model.failure?.error, "Auth expired: 401 Unauthorized")
+
+        tape.pauseDiagnosis = Diagnosis(category: .rateLimited, detail: "429 from codex",
+                                        action: "Wait for the limit to reset, or switch this slot to another model.")
+        XCTAssertEqual(try board(try intake(.featurePlan), tape).now.detail,
+                       "Wait for the limit to reset, or switch this slot to another model.")
+    }
+
+    func testAFailureWithNoDiagnosisStillHasACard() throws {
+        let model = try board(try intake(.featurePlan), pausedAfterR1(status: .failed))
+        XCTAssertEqual(model.now.detail, "Round failed")
+        XCTAssertEqual(model.failure, BoardFailure(round: "Refine 2", error: "Round failed", whatToDo: nil))
     }
 
     // MARK: - Stops

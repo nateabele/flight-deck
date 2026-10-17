@@ -417,6 +417,12 @@ struct ShapingModel {
         }
     }
 
+    /// `categoryName` with its first letter raised: "Agent error".
+    static func categoryTitle(_ c: DiagnosisCategory) -> String {
+        let name = categoryName(c)
+        return name.prefix(1).uppercased() + name.dropFirst()
+    }
+
     private static func categoryName(_ c: DiagnosisCategory) -> String {
         switch c {
         case .rateLimited: "rate limited"

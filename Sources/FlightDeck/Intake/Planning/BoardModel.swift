@@ -58,6 +58,18 @@ struct TapeGroup: Equatable {
 /// One cell of the board row. `shortLabel` is the label's short form (spec §5.3), used when the
 /// label itself doesn't fit its cell — a readable word ("PAUSED", "IN AIR"), never a cryptic
 /// abbreviation, because a caption nobody can decode is worse than none.
+/// A failed round, whole, for the card under NOW: the two lines the board has room for cut a long
+/// error off mid-sentence, and say nothing of what to do about it.
+struct BoardFailure: Equatable {
+    /// "Polish 2" — the card's title.
+    var round: String
+    /// "Agent error: <the harness's own words>", in full.
+    var error: String
+    /// `Diagnosis.action`, verbatim: `FailureDiagnosis` phrases it as an instruction. Nil when the
+    /// runner recorded no diagnosis.
+    var whatToDo: String?
+}
+
 struct BoardField: Equatable {
     let label: String
     let shortLabel: String
@@ -88,6 +100,8 @@ struct BoardModel: Equatable {
     var stopSlotID: String?
     /// The head slot while the tape sits paused, stopped or idle — outlined with a pause glyph.
     var pausedAtSlotID: String?
+    /// Set while the tape sits failed: what NOW's detail line and its card show.
+    var failure: BoardFailure?
 
     /// `now` is the caller's clock (a 1 Hz timer), not `Date()`, so the live slot's duration is
     /// testable and the board re-derives only when the view asks.
@@ -155,6 +169,7 @@ struct BoardModel: Equatable {
         self.callingAt = blank
         self.stopSlotID = nil
         self.pausedAtSlotID = nil
+        self.failure = nil
 
         let head = tape.head.map { Self.name(stage: $0.stage, round: $0.round) }
         // Clarify slots come first, so marker `i` is slot `i + clarifyCount`.
@@ -172,8 +187,13 @@ struct BoardModel: Equatable {
             self.inTheAir = BoardField(label: "IN THE AIR", shortLabel: "IN AIR",
                                        value: live?.duration.map(Self.clock) ?? "—", detail: nil)
         case .failed:
+            let diagnosis = tape.pauseDiagnosis
             self.now = BoardField(label: "NOW", shortLabel: "NOW", value: next?.name ?? head ?? "—",
-                                  detail: tape.pauseDiagnosis?.detail ?? "Round failed")
+                                  detail: diagnosis.map(Self.failureLine) ?? "Round failed")
+            self.failure = BoardFailure(round: next?.name ?? head ?? "Round",
+                                        error: diagnosis.map { ShapingModel.categoryTitle($0.category) + ": " + $0.detail }
+                                            ?? "Round failed",
+                                        whatToDo: diagnosis?.action)
             self.nowChip = "FAILED"
             if let failedAt = tape.failedAt, let failed = next {
                 self.inTheAir = BoardField(label: "HALTED FOR", shortLabel: "HALTED",
@@ -262,6 +282,19 @@ struct BoardModel: Equatable {
     /// The hover card's status line, under the slot's name in flap tiles ("landed 3:02"): what
     /// the round did and for how long, in the clock's own format.
     /// A round with no honest duration says only its status — never a made-up 0:00.
+    /// NOW's line under a failed round: the error, unless getting going again takes more than
+    /// the transport's play buttons (signing in, waiting out a limit, changing an agent) — then
+    /// what to do, since that is the line the human has to act on. The error is on the card.
+    static func failureLine(_ diagnosis: Diagnosis) -> String {
+        needsMoreThanRetry(diagnosis) ? diagnosis.action : diagnosis.detail
+    }
+
+    /// `FailureDiagnosis` leads an action with "Retry" when playing the round again is the
+    /// first thing to do; anything else names a step outside the board.
+    static func needsMoreThanRetry(_ diagnosis: Diagnosis) -> Bool {
+        !diagnosis.action.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("retry")
+    }
+
     func cardDetail(for slot: TapeSlot) -> String {
         let status = Self.status(slot.state)
         return slot.duration.map { "\(status) \(Self.clock($0))" } ?? status

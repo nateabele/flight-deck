@@ -71,4 +71,50 @@ final class FlapCardRenderTests: XCTestCase {
         .padding(24)
         try PlanningRender.write(reveal, size: NSSize(width: 360, height: 620), to: out.appendingPathComponent("flapcard-reveal.png"))
     }
+
+    /// A failed round: the board with its two cut-off lines under NOW, and the card resting on
+    /// them opens — the error in full and what to do — for a retry-led failure and a sign-in one.
+    func testRenderFailureCard() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the hover card PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        var intake = Intake(projectPath: "/tmp/project", intent: "per-project font size")
+        intake.state = .shaping
+        let config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        intake.roundConfig = config
+        func cp(_ id: Int, _ stage: Stage, _ round: Int = 0, major: Bool, at seconds: TimeInterval) -> Checkpoint {
+            Checkpoint(id: id, parent: id > 1 ? id - 1 : nil, stage: stage, round: round, major: major,
+                       createdAt: t0.addingTimeInterval(seconds), startedAt: t0.addingTimeInterval(seconds - 170))
+        }
+        let denied = Diagnosis(category: .invalidOutput,
+                               detail: "agy ended its turn with no answer (denied: command): agy refused a shell command (command), "
+                                   + "which is how agy lists and searches files. Headless agy cannot ask for permission, so the turn "
+                                   + "ended with no answer.",
+                               action: "Retry the round: the agent usually takes another way. If it fails the same way again, "
+                                   + "switch this slot to another agent: agy ran a command its read-only list "
+                                   + "(~/.gemini/config/projects/flight-deck-planning.json, the agy project `flight-deck-planning`) "
+                                   + "doesn't allow.")
+        let signedOut = Diagnosis(category: .authExpired, detail: "Authentication required", action: "Run `agy` in a terminal to sign in")
+        for (diagnosis, name) in [(denied, "retry"), (signedOut, "signin")] {
+            let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 182),
+                                          cp(3, .refine, 1, major: false, at: 470)],
+                            target: .nextMajor, status: .failed, pauseDiagnosis: diagnosis,
+                            roundStartedAt: t0.addingTimeInterval(470))
+            let model = BoardModel(intake: intake, tape: tape, config: config, now: t0.addingTimeInterval(724), selected: nil, preview: nil)
+            let failure = try XCTUnwrap(model.failure)
+            let policy = FlapPolicy()
+            for (surface, text) in model.flapTexts { policy.seed(surface: surface, text: text) }
+            let pane = VStack(alignment: .leading, spacing: 16) {
+                DeparturesBoard(model: model, policy: policy, preview: .constant(nil), onSelect: { _ in }, onExtend: { _ in })
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                SplitFlapCard(full: failure.round, detail: nil, accessory: AnyView(FailureCardBody(failure: failure)),
+                              revealAt: 10).fixedSize()
+            }
+            .padding(16)
+            try PlanningRender.write(pane, size: NSSize(width: 700, height: 640),
+                                     to: out.appendingPathComponent("failure-card-\(name).png"), appearance: .darkAqua)
+        }
+    }
 }

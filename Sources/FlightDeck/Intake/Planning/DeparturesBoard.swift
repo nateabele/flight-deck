@@ -69,6 +69,8 @@ struct DeparturesBoard: View {
     /// Prefixes this board's slot ids in the intent, so another board showing the same slot id
     /// doesn't open its card too.
     @State private var hoverToken = UUID().uuidString
+    /// The failure line under NOW, as an item in the hover intent.
+    private var failureHoverKey: String { "\(hoverToken)/now-failure" }
     @FocusState private var focusedSlot: String?
     /// The slot a key moved focus to — the only focus that opens its card (see
     /// `SplitFlapText.isKeyboardFocus`).
@@ -108,9 +110,10 @@ struct DeparturesBoard: View {
                 } value: {
                     HStack(spacing: 10) {
                         // A failure's diagnosis is free text with no short form: two lines under
-                        // NOW, and the whole of it on NOW's card.
+                        // NOW, and the whole of it, with what to do, on NOW's card.
                         flap(model.now.value, code: model.now.valueCode, surface: "board.now", font: Style.nowFont,
-                             detail: model.now.shortDetail == nil ? model.now.detail : nil)
+                             detail: model.failure == nil && model.now.shortDetail == nil ? model.now.detail : nil,
+                             accessory: model.failure.map { AnyView(FailureCardBody(failure: $0)) })
                             .foregroundStyle(.white)
                         chip
                     }
@@ -177,6 +180,7 @@ struct DeparturesBoard: View {
                 .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
                 .padding(.top, 8)
             if let detail {
+                let failure = field == model.now ? model.failure : nil
                 Text(detail)
                     .font(Font(Style.detailNS))
                     .foregroundStyle(model.nowChip == "FAILED" && field.detail == model.now.detail ? Palette.red : Palette.ph2)
@@ -185,6 +189,14 @@ struct DeparturesBoard: View {
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: true)
+                    // A failure's two lines cut a long error off, and the field's fixed height
+                    // can hide the second: resting on them opens the whole error and what to do.
+                    .background(FloatingCard(isPresented: failure != nil && intent.shown == failureHoverKey,
+                                             card: failure.map { SplitFlapCard(full: $0.round, detail: nil,
+                                                                               accessory: AnyView(FailureCardBody(failure: $0))) }
+                                                 .fixedSize(),
+                                             side: .above, onDismiss: { intent.dismiss() }))
+                    .onHover { inside in if failure != nil { intent.hover(failureHoverKey, inside) } }
                     .padding(.top, 5)
             }
         }
@@ -200,9 +212,10 @@ struct DeparturesBoard: View {
     /// A board value as a split-flap label no wider than its full name, so the chip beside NOW
     /// sits against the name instead of being pushed to the cell's far edge. `detail` puts a
     /// card on the value even when its name fits — how NOW carries a diagnosis too long to show.
-    private func flap(_ full: String, code: String?, surface: String, font: NSFont, detail: String? = nil) -> some View {
+    private func flap(_ full: String, code: String?, surface: String, font: NSFont, detail: String? = nil,
+                      accessory: AnyView? = nil) -> some View {
         SplitFlapText(full: full, code: code ?? full, surface: surface, policy: policy, font: Font(font), nsFont: font,
-                      detail: detail, alwaysOffersCard: detail != nil)
+                      detail: detail, alwaysOffersCard: detail != nil || accessory != nil, accessory: accessory)
             .frame(maxWidth: LabelFit.fitWidth(full: full, measure: LabelFit.measureWith(font)))
     }
 
@@ -570,6 +583,50 @@ private enum Style {
 }
 
 /// The instrument's phosphor-on-glass palette, shared with the split-flap card.
+/// A failed round's card, under its name: the error in full, then what to do. In the case it was
+/// written in — paths, flags and `codex login` keep their meaning — where the card's own detail
+/// line would set them in capitals.
+struct FailureCardBody: View {
+    let failure: BoardFailure
+    private static let width: CGFloat = 340
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            section("ERROR", failure.error, tint: Palette.red)
+            if let whatToDo = failure.whatToDo {
+                // Ours, not the harness's: its `codex login` reads as code. The error stays plain,
+                // since a harness's own text can hold anything.
+                section("WHAT TO DO", whatToDo, tint: SplitFlapCard.phosphor, markdown: true)
+            }
+        }
+        .frame(width: Self.width, alignment: .leading)
+    }
+
+    /// `codex login` in the monospaced face. Set by hand: a parsed code span under the view's
+    /// `.font` came out in the body face with its backticks gone, so the command read as a word.
+    static func codeSpans(_ text: String) -> AttributedString {
+        guard var out = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        else { return AttributedString(text) }
+        for run in out.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            out[run.range].font = .system(size: 12, weight: .medium, design: .monospaced)
+        }
+        return out
+    }
+
+    private func section(_ heading: String, _ text: String, tint: Color, markdown: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(heading)
+                .font(Style.caption)
+                .tracking(Style.captionTracking)
+                .foregroundStyle(SplitFlapCard.phosphor.opacity(0.5))
+            Text(markdown ? Self.codeSpans(text) : AttributedString(text))
+                .font(.system(size: 12.5))
+                .foregroundStyle(tint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private enum Palette {
     static let ph = SplitFlapCard.phosphor
     static let ph2 = ph.opacity(0.66)
