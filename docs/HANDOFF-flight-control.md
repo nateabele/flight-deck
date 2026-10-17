@@ -149,7 +149,7 @@ stage. `RoundExecutor` implements each stage:
   - If the integrator claims to agree but the plan did not change, the round pauses with `invalidOutput`.
   - **Cross-check round:** the reviewer and a cross-reviewer from another family run in parallel. The cross-reviewer has no fallback and never pauses the round. Proposals are interleaved blind (`BlindOrder`), duplicates are clustered, and `crosscheck.json` is written.
 - **encode:** the encoder turns the plan into a `ChangeSet` and validates it. A failure gets one correction turn.
-- **polish, freshEyes, dedup:** each returns a whole revised change set, checked against encode's `graph.json`.
+- **polish, freshEyes, dedup:** each returns a patch (`ChangeSetPatch`) keyed by the op `index` in the numbered `work/changeset.json`. FD applies it, so an op the patch doesn't name comes through unchanged, then checks the result against encode's `graph.json` and stores the whole change set.
   - FD builds a `ShadowGraph` and runs `bv` on it itself; the agent never runs `bv`.
   - All three use the polisher rotation.
 

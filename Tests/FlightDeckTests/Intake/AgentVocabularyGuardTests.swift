@@ -81,6 +81,7 @@ final class AgentVocabularyGuardTests: XCTestCase {
             "draft": RoundSchemas.draft, "review": RoundSchemas.review, "integrate": RoundSchemas.integrate,
             "integrateClustered": RoundSchemas.integrateClustered, "changeSet": RoundSchemas.changeSet,
             "changeSet.gemini": GeminiSchema.compatible(RoundSchemas.changeSet),
+            "patch": RoundSchemas.patch, "patch.gemini": GeminiSchema.compatible(RoundSchemas.patch),
         ]
         for (name, schema) in schemas { XCTAssertFalse(schema.lowercased().contains(old), "\(name) schema: \(schema)") }
         XCTAssertTrue(Triage.schemaJSON.contains("\"singleTask\""))

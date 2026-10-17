@@ -35,6 +35,7 @@ final class RoundPromptsTests: XCTestCase {
     func testDraftSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.draft)) }
     func testReviewSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.review)) }
     func testIntegrateSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.integrate)) }
+    func testPatchSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.patch)) }
 
     func testIntegrateClusteredSchemaIsStrictAndRequiresClusters() throws {
         let schema = try parse(RoundSchemas.integrateClustered)
@@ -344,6 +345,22 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("/i/plan.md"))
         XCTAssertTrue(p.contains("/i/cs.json"))
         XCTAssertTrue(p.contains("must stay exactly what it was"))
+    }
+
+    /// The polish family hands back a patch, never the whole set retyped (`ChangeSetPatch`).
+    func testPolishFamilyPromptsAskForAPatch() {
+        let prompts = [RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 3),
+                       RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+                       RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json")]
+        for p in prompts {
+            XCTAssertTrue(p.contains("Return only your changes, as a patch against /i/cs.json"), p)
+            XCTAssertTrue(p.contains(#"{"patch": {"remove""#), p)
+            XCTAssertFalse(p.contains("complete revised change set"), p)
+            XCTAssertFalse(p.contains(#"`{"changeSet": {...}"#), p)
+        }
+        let correction = RoundPrompts.patchCorrection(problems: ["index 9 is not in the change set"], changeSetFile: "/i/cs.json")
+        XCTAssertTrue(correction.contains("- index 9 is not in the change set"))
+        XCTAssertTrue(correction.contains("complete corrected patch") && correction.contains("/i/cs.json"))
     }
 
     private let analytics = ShadowAnalytics(insights: "/i/shadow/bv-insights.json", plan: "/i/shadow/bv-plan.json",

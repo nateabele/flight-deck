@@ -374,8 +374,9 @@ public struct RoundExecutor: Sendable {
                 "graph.json": try IntakeJSON.encoder.encode(graph)]
     }
 
-    /// Polish, fresh-eyes and dedup: each hands back a whole revised change set, held to the
-    /// same validation (and single correction turn) encode is — but against the graph ENCODE
+    /// Polish, fresh-eyes and dedup: each hands back a patch to the change set (`ChangeSetPatch`),
+    /// which FD applies and holds to the same validation (and single correction turn) encode
+    /// is — but against the graph ENCODE
     /// saw, carried forward in every checkpoint since (read fresh only when no checkpoint has
     /// one). A bead that moves after encode is drift, and drift is release's job (it rechecks every `pre`); validating
     /// against a fresh graph here would instead pause polish on a `pre` the polisher was told
@@ -406,7 +407,8 @@ public struct RoundExecutor: Sendable {
         }
         let work = inputs.store.workDirectory()
         let changeSetFile = work.appendingPathComponent("changeset.json"), graphFile = work.appendingPathComponent("graph.json")
-        try old.encoded().write(to: changeSetFile, options: .atomic)
+        // Numbered: the patch names ops by the `index` this file shows on each one.
+        try ChangeSetPatch.numbered(old).write(to: changeSetFile, options: .atomic)
         try graphData.write(to: graphFile, options: .atomic)
         let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
 
@@ -426,9 +428,10 @@ public struct RoundExecutor: Sendable {
             prompt = RoundPrompts.polish(ctx, planFile: plan.path, changeSetFile: changeSetFile.path, round: planned.round,
                                          analytics: analytics)
         }
-        let (cs, run) = try await changeSetSeat(planned, "polisher", polisher, prompt: prompt,
-                                         readable: [plan.deletingLastPathComponent(), work],
-                                         graph: graph, observedAt: observedAt, inputs: inputs, &record)
+        let (cs, run) = try await patchSeat(planned, "polisher", polisher, prompt: prompt,
+                                            readable: [plan.deletingLastPathComponent(), work], base: old,
+                                            changeSetFile: changeSetFile, graph: graph, observedAt: observedAt,
+                                            inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
         publish(SeatResult(kind: .changeSet, ops: record.changeCount), run: run, inputs)
         record.edgesChanged = PlanMetrics.edgesChanged(from: old, to: cs)
@@ -528,6 +531,62 @@ public struct RoundExecutor: Sendable {
                 throw Pause(diagnosis: diagnosis)
             }
             return (second.changeSet, run: runName(planned, role) + "-correction")
+        }
+    }
+
+    /// A polish-family seat: run it, apply its patch to `base`, validate what that makes, and
+    /// on either failing resume the SAME session once with the problems listed — the rule
+    /// `changeSetSeat` follows, for a patch. The correction is a whole patch again, applied to
+    /// the same `base`.
+    private func patchSeat(_ planned: PlannedRound, _ role: String, _ choice: ModelChoice, prompt: String,
+                           readable: [URL], base: ChangeSet, changeSetFile: URL, graph: GraphSnapshot, observedAt: Date,
+                           inputs: RoundInputs, _ record: inout RoundRecord) async throws -> (ChangeSet, run: String) {
+        /// What the agent (`messages`) and the human (`userMessages`) are told is wrong.
+        struct Rejected: Error { var messages: [String]; var userMessages: [String] }
+        /// The change set the patch makes, or why it can't be taken.
+        func resolve(_ output: ChangeSetPatchOutput) -> Result<ChangeSet, Rejected> {
+            switch output.patch.apply(to: base) {
+            case .failure(let found):
+                return .failure(Rejected(messages: found.problems.map(\.message), userMessages: found.problems.map(\.userMessage)))
+            case .success(var cs):
+                cs.graphObservedAt = observedAt
+                if case .failure(let errors) = ChangeSetValidator.validate(cs, against: graph) {
+                    return .failure(Rejected(messages: errors.errors.map(\.message), userMessages: errors.errors.map(\.userMessage)))
+                }
+                return .success(cs)
+            }
+        }
+        let first = try await seat(ChangeSetPatchOutput.self, planned, role, choice, prompt: prompt, schema: RoundSchemas.patch,
+                                   cwd: inputs.project, readable: readable, inputs: inputs, &record)
+        record.note = first.summary
+        let rejected: Rejected
+        switch resolve(first) {
+        case .success(let cs): return (cs, run: runName(planned, role))
+        case .failure(let found): rejected = found
+        }
+        let slot = record.slots.count - 1
+        let correction = RoundPrompts.patchCorrection(problems: rejected.messages, changeSetFile: changeSetFile.path)
+        switch try await attempt(ChangeSetPatchOutput.self, runName(planned, role) + "-correction", choice, prompt: correction,
+                                 schema: RoundSchemas.patch, cwd: inputs.project, readable: readable,
+                                 resume: record.slots[slot].sessionID, inputs: inputs) {
+        case .failed(let diagnosis, _):
+            record.slots[slot].status = .failed
+            record.slots[slot].diagnosis = diagnosis
+            throw Pause(diagnosis: diagnosis)
+        case .ok(let second, let session):
+            record.slots[slot].sessionID = session
+            record.note = second.summary
+            switch resolve(second) {
+            case .success(let cs): return (cs, run: runName(planned, role) + "-correction")
+            case .failure(let again):
+                let diagnosis = Diagnosis(
+                    category: .invalidOutput,
+                    detail: "The round's changes failed twice: " + again.userMessages.joined(separator: "; "),
+                    action: "Retry the round, or switch this slot's model.")
+                record.slots[slot].status = .failed
+                record.slots[slot].diagnosis = diagnosis
+                throw Pause(diagnosis: diagnosis)
+            }
         }
     }
 
