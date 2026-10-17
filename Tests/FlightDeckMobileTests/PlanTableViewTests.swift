@@ -49,8 +49,8 @@ final class PlanTableViewTests: XCTestCase {
         XCTAssertEqual(String(PlanTableView.longestWord(AttributedString("one")).characters), "one")
     }
 
-    /// The grid sizes itself from its rows (a `GeometryReader` and a preference, not a fixed
-    /// height): taller for a taller table, and never a sliver or a page.
+    /// The grid sizes itself from its rows (the scroll view's own height, not a fixed one):
+    /// taller for a taller table, and never a sliver or a page.
     func testTheGridTakesTheHeightOfItsRows() {
         let line = UIFont.preferredFont(forTextStyle: .subheadline).lineHeight
         let short = height(of: RichBlockView(text: "| a | b |\n|---|---|\n| 1 | 2 |").font(.body), width: 346)
