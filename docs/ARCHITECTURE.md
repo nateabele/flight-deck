@@ -2233,7 +2233,7 @@ the runner:
 | `tape.json` | runner | status, target, checkpoints (each record lists the notes its round consumed), `roundInProgress`, `pendingNotes`, extensions, heartbeat |
 | `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; refine and synthesis also keep `changes.json` (the proposals, `[]` when there were none) and `verdicts.json` (the integrator's per-change verdicts, only when it gave them); `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
-| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator (overwritten every round — the checkpoint's copy is the durable one), `shadow/` and `bv-*.json` for polish |
+| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator (overwritten every round — the checkpoint's copy is the durable one), `shadow/` and `bv-*.json` for polish, and `changeset.json` numbered by op `index` for the patch to name |
 
 Every JSON write is atomic. A checkpoint's files are written before the tape entry that points
 at them, so a crash leaves either the whole round recorded or none of it, and a rerun reusing
@@ -2317,8 +2317,13 @@ mtime-gated (`IntakeService.triageActivity`).
 
 *Round execution* (`RoundExecutor`, no tape writes of its own — it hands back a checkpoint or a
 diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `ProposedChange`s
-and the **integrator** apply them to `work/plan.md`; encode, polish, fresh-eyes and dedup each
-return a whole change set in the triage schema. Each seat is one headless `codex exec --json` /
+and the **integrator** apply them to `work/plan.md`; encode returns a whole change set in the
+triage schema. Polish, fresh-eyes and dedup read `work/changeset.json` with every op under its
+`index` and return a `ChangeSetPatch` keyed by those indices (`replace`, `remove`, `add`, and
+`redirect` for a merged task's edges); FD applies it, validates the result, and stores the whole
+change set in the checkpoint as before. Until 2026-10-16 they retyped the whole set: ~50k output
+tokens on a 385-op plan however little changed, past Gemini's reply limit, and free to drop or
+reword ops the round never meant to touch. Each seat is one headless `codex exec --json` /
 `claude -p` turn with an explicit model and effort (resumes included), a JSON schema, and its
 own `runs/` directory. Isolation, on every seat, fresh and resumed (`HeadlessCommand`): claude
 runs with `--restricted --strict-mcp-config` (no user/project/local settings files, so no

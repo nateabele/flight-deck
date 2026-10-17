@@ -101,9 +101,8 @@ public struct ChangeVerdict: Codable, Equatable, Sendable {
     }
 }
 
-/// Encode, polish, fresh-eyes, and dedup all hand back a complete change set — never a
-/// diff, so a later round never has to reconstruct state from a chain of partial edits —
-/// plus a one-line summary of what it did.
+/// Encode's reply: the change set it wrote from the plan, plus a one-line summary. Polish,
+/// fresh eyes and dedup answer with a `ChangeSetPatchOutput` instead.
 public struct ChangeSetOutput: Codable, Sendable {
     public var changeSet: ChangeSet
     public var summary: String
@@ -115,9 +114,8 @@ public struct ChangeSetOutput: Codable, Sendable {
 
 /// Strict-mode schemas for every round's output shape, built the same way `Triage.schemaJSON`
 /// is: every object declares `additionalProperties: false` and lists every property in
-/// `required`. Only four shapes exist across all eight rounds — synthesis reuses `review`
-/// (both hand back `changes[]` + `summary`), and polish/fresh-eyes/dedup all reuse
-/// `changeSet` (all four hand back a complete change set + `summary`).
+/// `required`. Synthesis reuses `review` (both hand back `changes[]` + `summary`), and
+/// polish, fresh eyes and dedup share `patch`.
 public enum RoundSchemas {
     public static let draft = """
     {"type":"object","additionalProperties":false,"required":["plan"],
@@ -159,11 +157,25 @@ public enum RoundSchemas {
     """
 
     /// Embeds `Triage.changeSetSchemaFragment` exactly, rather than a hand-copied twin that
-    /// could drift from it — encode, polish, fresh-eyes, and dedup all hand back the same
-    /// `{graphObservedAt, ops}` shape triage does at Single-task fidelity.
+    /// could drift from it — encode hands back the same `{graphObservedAt, ops}` shape triage
+    /// does at Single-task fidelity.
     public static let changeSet = """
     {"type":"object","additionalProperties":false,"required":["changeSet","summary"],
      "properties":{"changeSet":\(Triage.changeSetSchemaFragment),"summary":{"type":"string"}}}
+    """
+
+    /// Polish, fresh eyes and dedup: a `ChangeSetPatch` and a summary. Its ops are `Triage.op`
+    /// exactly, so a revised op is held to the shape encode's are.
+    public static let patch = """
+    {"type":"object","additionalProperties":false,"required":["patch","summary"],
+     "properties":{"patch":{"type":"object","additionalProperties":false,"required":["remove","replace","add","redirect"],
+       "properties":{"remove":{"type":"array","items":{"type":"integer"}},
+                     "replace":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["index","op"],
+                                "properties":{"index":{"type":"integer"},"op":\(Triage.op)}}},
+                     "add":{"type":"array","items":\(Triage.op)},
+                     "redirect":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["from","to"],
+                                 "properties":{"from":{"type":"string"},"to":{"type":"string"}}}}}},
+      "summary":{"type":"string"}}}
     """
 }
 
@@ -539,15 +551,13 @@ public enum RoundPrompts {
         LOSE FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
         cross-check every task against the plan.\(shadowAnalyticsClause(analytics))
 
-        Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
-        their `pre` must stay exactly what it was; it is not yours to change.
+        \(patchRules(changeSetFile))
 
         \(changeSetInputs(c))
 
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
-        Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
+        \(patchReturn)
         """)
     }
 
@@ -561,15 +571,13 @@ public enum RoundPrompts {
         FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
         cross-check every task against the plan.\(shadowAnalyticsClause(analytics))
 
-        Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
-        their `pre` must stay exactly what it was; it is not yours to change.
+        \(patchRules(changeSetFile))
 
         \(changeSetInputs(c))
 
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
-        Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
+        \(patchReturn)
         """)
     }
 
@@ -579,19 +587,58 @@ public enum RoundPrompts {
         excessively overlapping. Merge into canonical tasks, keeping the richer tests and \
         dependencies of whichever duplicate had them.\(shadowAnalyticsClause(analytics))
 
-        Return the complete revised change set — not a diff — under the same rules encode \
-        followed. Existing-task ops (`editTask`, `reopen`, `followUp`) may be revised, but \
-        their `pre` must stay exactly what it was; it is not yours to change.
+        \(patchRules(changeSetFile))
 
         \(changeSetInputs(c))
 
         \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
-        Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
+        \(patchReturn)
         """)
     }
 
-    /// The single automatic retry after an encode/polish/fresh-eyes/dedup change set fails
+    /// How polish, fresh eyes and dedup hand back their work: a patch keyed by the `index` the
+    /// numbered change set gives every op (`ChangeSetPatch`), never the whole set retyped.
+    static func patchRules(_ changeSetFile: String) -> String {
+        """
+        Return only your changes, as a patch against \(changeSetFile), where every op sits \
+        under its `index`. FD applies the patch and keeps every op you don't name exactly as \
+        it is, so never repeat an op you are not changing:
+        - `replace`: `{"index": n, "op": {...}}` for each op you revise, with the whole \
+          revised op, every field, not only the ones you changed.
+        - `remove`: the `index` of each op to drop.
+        - `add`: new ops, which go after the rest.
+        - `redirect`: `{"from": "new:a", "to": "new:b"}` for each task you merge away into \
+          another. Every edge that named `from` names `to` instead; an edge that ends up \
+          pointing a task at itself, or repeating another edge, is dropped for you.
+        An `index` goes in `replace` or `remove` at most once, never in both. Leave a list \
+        empty when you have nothing for it. Existing-task ops (`editTask`, `reopen`, \
+        `followUp`) may be revised, but their `pre` must stay exactly what it was; it is not \
+        yours to change. FD keeps `graphObservedAt` as it is.
+        """
+    }
+
+    static let patchReturn = #"Return only JSON matching the provided schema: `{"patch": {"remove": [...], "replace": [...], "add": [...], "redirect": [...]}, "summary": "..."}`."#
+
+    /// The single automatic retry after a polish-family patch fails — it names an op the change
+    /// set doesn't have, or what it makes fails validation. Resumed in the same session, and the
+    /// whole patch again, still against the numbered change set: FD applies the answer to that
+    /// same base, so a patch of only the fixes would lose the rest of the round's work.
+    public static func patchCorrection(problems: [String], changeSetFile: String) -> String {
+        let list = problems.map { "- \($0)" }.joined(separator: "\n")
+        return AgentVocabulary.closing("""
+        Your patch failed validation:
+        \(list)
+
+        Return the complete corrected patch, every change you meant to make and not only the \
+        fixes, still against the numbered change set at \(changeSetFile) and under the same \
+        rules as before.
+
+        \(patchReturn)
+        """)
+    }
+
+    /// The single automatic retry after an encode change set fails
     /// validation — resumed in the same session. Not `Triage.correctionPrompt`: that one asks
     /// for a "recommendation", which a change-set seat never gave, and a model told to return
     /// something it doesn't recognise is one more way to spend the only retry on confusion.

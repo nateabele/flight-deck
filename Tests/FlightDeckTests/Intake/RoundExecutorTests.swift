@@ -403,7 +403,7 @@ final class RoundExecutorTests: XCTestCase {
     /// refinement ended — and reach its prompt in the shared steering words.
     func testPolishConsumesAnnotations() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         var tape = try polishTape()
         tape.pendingNotes = [PlanNote(note: "split the auth bead")]
@@ -625,7 +625,7 @@ final class RoundExecutorTests: XCTestCase {
     /// Polish rounds, fresh eyes and dedup walk the polishers rotation: 1...M, then M, M+1.
     func testPolishStageRunsTheRotatedPolisher() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         var cfg = config()
         cfg.polishers = [claudeB, codexA]
@@ -813,6 +813,7 @@ final class RoundExecutorTests: XCTestCase {
                              summary: "encoded"))
     }
     let newBead = ChangeOp.createBead(NewBead(tempId: "t1", title: "New", description: "d"))
+    func patchReply(_ patch: ChangeSetPatch) -> String { json(ChangeSetPatchOutput(patch: patch, summary: "polished")) }
 
     // MARK: - Seat results
 
@@ -865,7 +866,7 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(store.seatResult(run: "encode-0-encoder-correction"), SeatResult(kind: .changeSet, ops: 2))
 
         let polisher = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         let (cp, _) = try checkpoint(try await executor(polisher).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                       inputs(config(), tape: try polishTape())))
@@ -929,7 +930,7 @@ final class RoundExecutorTests: XCTestCase {
                            ops: [.editBead(id: "fd-1", set: FieldSet(title: "Renamed"), pre: existingPre, delivery: nil)])
         try seed(&tape, .encode, files: ["changeset.json": String(decoding: try cs.encoded(), as: UTF8.self), "plan.md": draftPlan])
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                         inputs(config(), tape: tape)))
@@ -945,7 +946,7 @@ final class RoundExecutorTests: XCTestCase {
     /// bead that has since moved must not pause a polisher that kept its `pre` as told.
     func testBeadChangedAfterEncodeDoesNotPausePolish() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         runner.graphList = #"{"issues":[{"id":"fd-1","title":"Existing","status":"in_progress","assignee":"someone","labels":[]}]}"#
         let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
@@ -960,12 +961,45 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(polisher.prompt.contains(work.appendingPathComponent("graph.json").path))
     }
 
+    /// A patch naming an op the change set doesn't have goes back to the same session once,
+    /// with the problem listed, and the corrected patch is applied to the same base.
+    func testABadPatchIsCorrectedOnceInTheSameSession() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "polisher" ? ok(call, "pol-1", self.patchReply(ChangeSetPatch(remove: [7])))
+                : ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.newBead])))
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                        inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        let correction = try XCTUnwrap(runner.calls("correction").first)
+        XCTAssertEqual(correction.prompt, RoundPrompts.patchCorrection(
+            problems: ["index 7 is not in the change set (its ops are numbered 0 to 0)"],
+            changeSetFile: work.appendingPathComponent("changeset.json").path))
+        XCTAssertTrue(correction.arguments.contains("pol-1"), "resumed, not a new session")
+        let cs = try ChangeSet.decode(try XCTUnwrap(files["changeset.json"]))
+        XCTAssertEqual(cs.ops.count, 2, "the base op, kept as it was, plus the added one")
+        XCTAssertEqual(store.seatResult(run: "polish-1-polisher-correction"), SeatResult(kind: .changeSet, ops: 1))
+    }
+
+    /// An op the patch doesn't name is the previous op exactly — the guarantee the whole-set
+    /// reply never had.
+    func testPolishKeepsEveryOpThePatchDoesNotName() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
+        }
+        let (_, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                       inputs(config(), tape: try polishTape())))
+        let cs = try ChangeSet.decode(try XCTUnwrap(files["changeset.json"]))
+        XCTAssertEqual(cs.ops.first, .editBead(id: "fd-1", set: FieldSet(title: "Renamed"), pre: existingPre, delivery: nil))
+        XCTAssertEqual(cs.graphObservedAt, encodeObservedAt)
+    }
+
     /// A polish round's size is its ops changed; the dependency-edge share of that is kept on
     /// its own, since "dependencies stabilizing" is the signal polish convergence leans on most.
     func testPolishRecordsEdgeChurnSeparatelyFromOpsChanged() async throws {
         let edge = ChangeOp.addEdge(from: .new("t1"), to: .existing("fd-1"), kind: .blocks)
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead, edge]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead, edge])))
         }
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                     inputs(config(), tape: try polishTape())))
@@ -985,7 +1019,7 @@ final class RoundExecutorTests: XCTestCase {
     func testPolishKeepsExistingOpPreconditionsOrFails() async throws {
         // Keeps `pre` and adds one bead: accepted, one op changed.
         let good = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.newBead])))
         }
         let (cp, files) = try checkpoint(try await executor(good).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                       inputs(config(), tape: try polishTape())))
@@ -994,12 +1028,15 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertNotNil(files["plan.md"])
         let polisher = try XCTUnwrap(good.calls("polisher").first)
         XCTAssertTrue(polisher.prompt.contains(work.appendingPathComponent("changeset.json").path))
-        XCTAssertEqual(try ChangeSet.decode(Data(contentsOf: work.appendingPathComponent("changeset.json"))).ops.count, 1,
-                       "work/changeset.json is the CURRENT change set the polisher revises")
+        let numbered = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: work.appendingPathComponent("changeset.json"))) as? [String: Any])
+        XCTAssertEqual((numbered["ops"] as? [[String: Any]])?.map { $0["index"] as? Int }, [0],
+                       "work/changeset.json is the CURRENT change set the polisher revises, each op under its index")
 
         // Rewrites the existing op's `pre`, twice: paused, never accepted.
         let bad = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: Precondition(status: "in_progress", assignee: "me")))
+            ok(call, "pol", self.patchReply(ChangeSetPatch(replace: [.init(index: 0, op: .editBead(
+                id: "fd-1", set: FieldSet(title: "Renamed"), pre: Precondition(status: "in_progress", assignee: "me"), delivery: nil))])))
         }
         let (d, _) = try paused(try await executor(bad).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                            inputs(config(), tape: try polishTape())))
@@ -1016,7 +1053,7 @@ final class RoundExecutorTests: XCTestCase {
     func testPolishBuildsShadowRunsBvItselfAndPointsThePromptAtTheFiles() async throws {
         try makeProjectBeads()
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+            ok(call, "pol", self.patchReply(ChangeSetPatch()))
         }
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                      inputs(config(), tape: try polishTape())))
@@ -1067,7 +1104,7 @@ final class RoundExecutorTests: XCTestCase {
     /// and the failure is folded into the checkpoint's note rather than pausing the round.
     func testShadowBuildFailureStillRunsPolishAndRecordsNote() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+            ok(call, "pol", self.patchReply(ChangeSetPatch()))
         }
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                      inputs(config(), tape: try polishTape())))
@@ -1085,7 +1122,7 @@ final class RoundExecutorTests: XCTestCase {
     func testBvFailureStillRunsPolishAndRecordsNote() async throws {
         try makeProjectBeads()
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+            ok(call, "pol", self.patchReply(ChangeSetPatch()))
         }
         runner.bvExitCode = 1
         runner.bvStdout = "database not found"

@@ -18,7 +18,8 @@ public enum Triage {
     /// schema stays byte-stable for `triage-schema.json`; an unknown dimension is dropped when
     /// the proposal is registered instead of rejected by the CLI.
     private static let kindProposal = #"{"type":["object","null"],"additionalProperties":false,"required":["name","description","dimensions"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"dimensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["dimension","weight"],"properties":{"dimension":{"type":"string"},"weight":{"type":"number"}}}}}}"#
-    private static let op = """
+    /// One op's schema — also every op inside a polish-family patch (`RoundSchemas.patch`).
+    static let op = """
     {"type":"object","additionalProperties":false,
      "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
      "properties":{
