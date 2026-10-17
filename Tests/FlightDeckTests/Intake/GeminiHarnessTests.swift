@@ -264,6 +264,20 @@ final class GeminiPlanningProjectTests: XCTestCase {
         }
     }
 
+    /// A command the rules don't name is auto-denied and ENDS the seat's turn (a Polish round
+    /// was lost to `grep … | sort | uniq -c`), while a denied one is an error the seat reads. So
+    /// the usual pipeline filters are each either allowed or denied, never left out.
+    func testEveryCommonPipelineFilterIsNamed() throws {
+        let (allow, deny, _) = try grants()
+        for command in ["sort", "uniq", "cut", "tr", "nl", "comm", "diff", "jq", "basename", "dirname", "realpath",
+                        "printf", "date", "which", "column", "python3", "perl", "node", "ruby"] {
+            XCTAssertTrue(allow.contains("command(\(command))") || deny.contains("command(\(command))"), command)
+        }
+        // These two write a file when given one (`sort -o`, `uniq in out`), so they are denied.
+        XCTAssertTrue(deny.contains("command(sort)"))
+        XCTAssertTrue(deny.contains("command(uniq)"))
+    }
+
     func testBytesAreStable() {
         XCTAssertEqual(GeminiPlanningProject.fileContents(), GeminiPlanningProject.fileContents())
     }
@@ -324,6 +338,9 @@ final class GeminiFailureDiagnosisTests: XCTestCase {
         XCTAssertTrue(d.detail.contains("a shell command"), d.detail)
         XCTAssertFalse(d.detail.contains("schema"), d.detail)
         XCTAssertTrue(d.action.contains("flight-deck-planning"), d.action)
+        // A command the read-only list leaves out is denied however well the file was written
+        // (`grep … | sort | uniq -c`, 2026-10-16), so the advice can't blame the file alone.
+        XCTAssertTrue(d.action.contains("another agent"), d.action)
         XCTAssertNotNil(SchemaRepair.retry(profile: GeminiProfile(), failure: d, sessionID: "C1", access: .readOnly, isRepair: false),
                         "the one resume still fires on the reworded detail")
     }

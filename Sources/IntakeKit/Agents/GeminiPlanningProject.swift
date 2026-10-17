@@ -27,14 +27,22 @@ public enum GeminiPlanningProject {
 
     /// Binaries that only read. Never one that can write by itself (`sed -i`, `find -delete`,
     /// `tee`, `awk` with redirects), and never `xargs`/`env`/`sh`, which run anything.
+    /// The filters a pipeline ends in (`rg … | cut -f1 | jq …`) are here too: a command the rules
+    /// leave out is auto-denied and ends the turn, which is how a Polish round was lost to
+    /// `grep … | sort | uniq -c` (2026-10-16).
     static let readCommands = ["cd", "echo", "pwd", "ls", "cat", "head", "tail", "wc", "stat", "file", "du", "tree", "rg", "grep",
+                               "cut", "tr", "nl", "comm", "diff", "jq", "column", "basename", "dirname", "realpath", "printf",
+                               "date", "which",
                                "git log", "git show", "git diff", "git status", "git ls-files", "git rev-parse", "git blame",
                                "br list", "br show", "br graph", "br ready"]
 
     /// Writers and runners, denied by name so a try is an error the seat reads, not a turn lost
-    /// to an auto-deny. The tool rules (`write_file`) cover agy's own editors.
+    /// to an auto-deny. The tool rules (`write_file`) cover agy's own editors. `sort` and `uniq`
+    /// are here, not with the readers: given a file to write (`sort -o`, `uniq in out`), they do.
     static let deniedCommands = ["rm", "mv", "cp", "touch", "mkdir", "rmdir", "tee", "chmod", "chown", "ln", "dd", "truncate",
                                  "sed", "awk", "find", "xargs", "sh", "bash", "zsh", "env", "curl", "wget",
+                                 "sort", "uniq", "python", "python3", "perl", "node", "ruby", "osascript", "open", "patch",
+                                 "install", "make", "kill", "pkill",
                                  "git add", "git commit", "git checkout", "git switch", "git reset", "git restore", "git clean",
                                  "git push", "git pull", "git fetch", "git merge", "git rebase", "git stash", "git apply",
                                  "git config", "git tag", "git branch", "git rm", "git mv", "git cherry-pick", "git revert",

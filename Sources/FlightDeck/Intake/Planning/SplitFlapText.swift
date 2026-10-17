@@ -30,6 +30,8 @@ struct SplitFlapText: View {
     /// Offer the card even when the full name fits: a tape slot's card carries the round's
     /// result, which the label alone never shows.
     var alwaysOffersCard = false
+    /// More under the card's detail, as `SplitFlapCard.accessory` — NOW's failure card.
+    var accessory: AnyView?
     /// False where an enclosing control owns keyboard focus (a tape slot's column), so the label
     /// isn't a second tab stop inside it.
     var isFocusable = true
@@ -48,7 +50,8 @@ struct SplitFlapText: View {
 
     init(full: String, code: String, surface: String, policy: FlapPolicy, font: Font, nsFont: NSFont,
          detail: String? = nil, showsCardInitially: Bool = false, tracking: CGFloat = 0,
-         alwaysOffersCard: Bool = false, isFocusable: Bool = true, ownsHover: Bool = true) {
+         alwaysOffersCard: Bool = false, isFocusable: Bool = true, ownsHover: Bool = true, accessory: AnyView? = nil) {
+        self.accessory = accessory
         self.full = full
         self.code = code
         self.surface = surface
@@ -95,7 +98,7 @@ struct SplitFlapText: View {
                 .background(FloatingCard(
                     isPresented: (abbreviated || alwaysOffersCard)
                         && (intent.shown == hoverID || keyboardFocused || showsCardInitially),
-                    card: SplitFlapCard(full: full, detail: detail).fixedSize(),
+                    card: SplitFlapCard(full: full, detail: detail, accessory: accessory).fixedSize(),
                     side: .above, onDismiss: { intent.dismiss() }))
                 // `.activate`: reachable by Tab under Full Keyboard Access, but never the window's
                 // initial focus or a click's focus target.

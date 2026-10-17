@@ -93,7 +93,8 @@ public struct GeminiProfile: AgentProfile {
         guard case HeadlessOutput.ParseError.isError(let message) = error, message.hasPrefix(answerlessTurnMarker) else { return nil }
         let denied = message.components(separatedBy: "(denied: ").dropFirst().first
             .map { $0.prefix { $0 != ")" }.components(separatedBy: ", ") } ?? []
-        let readsOrCommands = denied.contains { $0 == "read_file" || $0 == "command" }
+        let reads = denied.contains("read_file")
+        let commands = denied.contains("command")
         let what = denied.map { name -> String in
             switch name {
             case "read_file": return "a file read (read_file)"
@@ -103,12 +104,23 @@ public struct GeminiProfile: AgentProfile {
             }
         }
         let reason = what.isEmpty ? "a tool" : what.joined(separator: " and ")
+        let file = "~/.gemini/config/projects/\(GeminiPlanningProject.id).json"
+        // `read_file(/)` allows every read, so a refused read means the rules didn't reach agy.
+        // A refused command can also be one the read-only list leaves out — the file was fine
+        // when a Polish round was lost to `grep … | sort | uniq -c` — so a second failure is
+        // better met with another agent than with the file.
+        let action = if commands {
+            "Retry the round: the agent usually takes another way. If it fails the same way again, switch this slot to "
+                + "another agent: agy ran a command its read-only list (\(file), the agy project `\(GeminiPlanningProject.id)`) "
+                + "doesn't allow."
+        } else if reads {
+            "Retry the round. Flight Deck rewrites this agent's read permissions (the agy project `\(GeminiPlanningProject.id)`) "
+                + "before every run; if it keeps happening, \(file) could not be written or agy changed its permission rules."
+        } else {
+            "Retry the round, or switch this slot's model: it tried to change something in a read-only run."
+        }
         return ("\(message): agy refused \(reason). Headless agy cannot ask for permission, so the turn ended with no answer.",
-                readsOrCommands
-                    ? "Retry the round. Flight Deck rewrites this agent's read permissions (the agy project `\(GeminiPlanningProject.id)`) "
-                        + "before every run; if it keeps happening, ~/.gemini/config/projects/\(GeminiPlanningProject.id).json could not be "
-                        + "written or agy changed its permission rules."
-                    : "Retry the round, or switch this slot's model: it tried to change something in a read-only run.")
+                action)
     }
 
     public var headlessSignInPreflight: Bool { true }
