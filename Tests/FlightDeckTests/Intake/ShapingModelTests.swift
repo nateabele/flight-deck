@@ -279,8 +279,6 @@ final class ShapingModelTests: XCTestCase {
         let tape = pausedAtR2()
         let load = files([:])
         XCTAssertEqual(ShapingModel.viewerText(.plan, checkpoint: 3, tape: tape, loadFile: load), "No plan at this checkpoint.")
-        XCTAssertEqual(ShapingModel.viewerText(.changeSet, checkpoint: 3, tape: tape, loadFile: load),
-                       "No change set at this checkpoint.")
     }
 
     /// The viewer memoizes on this key, so it must change exactly when the text could: a new
@@ -316,31 +314,4 @@ final class ShapingModelTests: XCTestCase {
                                                   tape: .empty, loadFile: load), "No rounds yet.")
     }
 
-    func testChangeSetIsListedReadably() throws {
-        let set = ChangeSet(graphObservedAt: Date(timeIntervalSince1970: 0), ops: [
-            .createBead(NewBead(tempId: "t1", title: "Store font size per project", description: "d")),
-            .addEdge(from: .new("t1"), to: .existing("fd-12"), kind: .blocks),
-            .editBead(id: "fd-9", set: FieldSet(title: "Resolve font at surface init", priority: 1),
-                      pre: Precondition(status: "open", assignee: nil), delivery: nil),
-            .reopen(id: "fd-3", reason: "regressed", pre: Precondition(status: "closed", assignee: nil)),
-            .followUp(tempId: "t2", of: "fd-4", title: "Migrate prefs", description: "d",
-                      pre: Precondition(status: "closed", assignee: nil)),
-        ])
-        let data = try set.encoded()
-        let text = ShapingModel.viewerText(.changeSet, checkpoint: 6, tape: pausedAtR2(),
-                                           loadFile: { id, path in id == 6 && path == "changeset.json" ? data : nil })
-        XCTAssertEqual(text, """
-            1. New task new:t1 — Store font size per project
-            2. Edge new:t1 → fd-12 (blocks)
-            3. Edit fd-9 — title: Resolve font at surface init; priority: 1
-            4. Reopen fd-3 — regressed
-            5. Follow-up new:t2 on fd-4 — Migrate prefs
-            """)
-    }
-
-    func testUnreadableChangeSetSaysSo() {
-        let text = ShapingModel.viewerText(.changeSet, checkpoint: 6, tape: pausedAtR2(),
-                                           loadFile: { _, _ in Data("not json".utf8) })
-        XCTAssertEqual(text, "The change set at this checkpoint couldn't be read.")
-    }
 }

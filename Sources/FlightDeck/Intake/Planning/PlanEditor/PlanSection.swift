@@ -137,7 +137,16 @@ struct PlanSectionBody: View {
     /// Revert all acts through the editor, so it is one undoable change.
     @State private var editor = PlanEditorHandle()
     @State private var confirmingRevertAll = false
-    @State private var otherText = AttributedString()
+    /// What the Task Graph tab draws, and Task Changes: the round's tasks against the
+    /// previous round that had any.
+    @State private var taskGraph: TaskGraphModel?
+    @State private var taskChanges: TaskChangesLoaded?
+
+    struct TaskChangesLoaded: Equatable {
+        var diff: TaskGraphDiff
+        var checkpoint: Int
+        var previous: Int?
+    }
     /// What Diff vs Previous shows: the round's plan and the plan before it (`ShapingModel.roundDiff`).
     @State private var diff: ShapingModel.RoundDiff?
     /// Where the diff's page goes: a heatmap cell's section, or the first change of the round.
@@ -185,7 +194,8 @@ struct PlanSectionBody: View {
                 Picker("View", selection: $mode) {
                     Text("Plan").tag(ShapingModel.ViewerMode.plan)
                     Text("Diff vs Previous").tag(ShapingModel.ViewerMode.diff)
-                    Text("Change set").tag(ShapingModel.ViewerMode.changeSet)
+                    Text("Task Graph").tag(ShapingModel.ViewerMode.taskGraph)
+                    Text("Task Changes").tag(ShapingModel.ViewerMode.taskChanges)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -199,7 +209,8 @@ struct PlanSectionBody: View {
                 pastBar(shown.checkpoint)
             }
             if mode == .diff, message == nil, let diff { diffBar(diff) }
-            // As tall as what it shows: the plan, the diff and the change set are all part of
+            if mode == .taskChanges, message == nil, let taskChanges { taskChangesBar(taskChanges) }
+            // As tall as what it shows: the plan, the diff and the task tabs are all part of
             // the page, which does the scrolling (`PlanEditorContainer`).
             content
                 .frame(minHeight: PlanEditorContainer.minimumTextHeight, alignment: .topLeading)
@@ -364,13 +375,25 @@ struct PlanSectionBody: View {
                 .links(projectPath: hooks.projectPath)
                 .annotating(notes)
                 .onChange(of: diff.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
-        } else {
-            Text(otherText)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(8)
+        } else if mode == .taskGraph, let taskGraph {
+            TaskGraphView(model: taskGraph)
+        } else if mode == .taskChanges, let taskChanges {
+            TaskChangesView(diff: taskChanges.diff)
         }
+    }
+
+    /// "Task changes in Polish 1 since Encode" — what the colours below are against.
+    private func taskChangesBar(_ loaded: TaskChangesLoaded) -> some View {
+        func name(_ id: Int) -> String { tape.checkpoints.first { $0.id == id }.map(PlanSection.checkpointName) ?? "an earlier round" }
+        return HStack(spacing: 8) {
+            Image(systemName: "plusminus").foregroundStyle(.secondary)
+            Text(loaded.previous.map { "Task changes in \(name(loaded.checkpoint)) since \(name($0))" }
+                 ?? "\(name(loaded.checkpoint)) wrote the first task graph, so every task is new")
+                .font(.callout)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-changes-bar")
     }
 
     /// "Changes in Refine 2 since Refine 1" — what the marks below are against.
@@ -401,6 +424,29 @@ struct PlanSectionBody: View {
         .accessibilityIdentifier("plan-past-bar")
     }
 
+    /// The task tabs: the chosen round's change set, or — following the head — the newest one,
+    /// the way the plan follows the newest plan. A round before Encode has none.
+    private func loadTasks(_ mode: ShapingModel.ViewerMode, checkpoint chosen: Int) {
+        let checkpoint = selection == nil
+            ? TaskGraphModel.latestWithChangeSet(upTo: chosen, tape: tape, loadFile: loadFile) ?? chosen
+            : chosen
+        switch TaskGraphModel.load(checkpoint: checkpoint, loadFile: loadFile) {
+        case nil:
+            message = "No tasks yet: Encode turns the plan into tasks."
+        case .failure:
+            message = "The tasks at this round couldn't be read."
+        case .success(let graph):
+            if mode == .taskGraph {
+                taskGraph = graph
+            } else {
+                let previous = TaskGraphModel.previousWithChangeSet(before: checkpoint, tape: tape, loadFile: loadFile)
+                let old = previous.flatMap { try? TaskGraphModel.load(checkpoint: $0, loadFile: loadFile)?.get() }
+                taskChanges = TaskChangesLoaded(diff: TaskGraphDiff(old: old, new: graph), checkpoint: checkpoint,
+                                                previous: old == nil ? nil : previous)
+            }
+        }
+    }
+
     private func reload(_ key: ShapingModel.ViewerKey) {
         let navigated = loadedSelection.map { $0 != selection } ?? false
         loadedSelection = .some(selection)
@@ -412,7 +458,7 @@ struct PlanSectionBody: View {
         guard key.mode == .plan else {
             message = nil
             guard key.mode == .diff else {
-                otherText = AttributedString(ShapingModel.viewerText(key.mode, checkpoint: checkpoint, tape: tape, loadFile: loadFile))
+                loadTasks(key.mode, checkpoint: checkpoint)
                 return
             }
             if selection == nil, let head = PlanSection.planHead(tape: tape, loadFile: loadFile) { checkpoint = head }

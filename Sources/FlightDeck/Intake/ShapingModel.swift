@@ -79,7 +79,9 @@ struct RoundCard: Identifiable, Equatable {
 /// in sight — so each rule (which buttons light up, what the status line promises, where the
 /// diff base is) is pinned by `ShapingModelTests` rather than discovered by clicking.
 struct ShapingModel {
-    enum ViewerMode: Hashable, CaseIterable { case plan, diff, changeSet }
+    /// The plan area's tabs. The task tabs draw a checkpoint's change set as tasks
+    /// (`TaskGraphModel`, `TaskGraphDiff`), not as text.
+    enum ViewerMode: Hashable, CaseIterable { case plan, diff, taskGraph, taskChanges }
 
     let intake: Intake
     let tape: Tape
@@ -351,33 +353,9 @@ struct ShapingModel {
         // The diff is drawn by the plan editor over this same plan (`roundDiff`), never as text.
         case .plan, .diff:
             return planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) ?? "No plan at this checkpoint."
-        case .changeSet:
-            guard let data = loadFile(checkpoint, "changeset.json") else { return "No change set at this checkpoint." }
-            guard let set = try? ChangeSet.decode(data) else { return "The change set at this checkpoint couldn't be read." }
-            if set.ops.isEmpty { return "The change set is empty." }
-            return set.ops.enumerated().map { "\($0.offset + 1). " + describe($0.element) }.joined(separator: "\n")
-        }
-    }
-
-    static func describe(_ op: ChangeOp) -> String {
-        switch op {
-        case .createBead(let bead):
-            return "New task new:\(bead.tempId) — \(bead.title)"
-        case .addEdge(let from, let to, let kind):
-            return "Edge \(from.wireValue) → \(to.wireValue) (\(kind.rawValue))"
-        case .editBead(let id, let set, _, _):
-            // Title and priority are short enough to show; description/acceptance are
-            // paragraphs, so they're named only — the plan view has the full text.
-            var fields: [String] = []
-            if let title = set.title { fields.append("title: \(title)") }
-            if set.description != nil { fields.append("description") }
-            if set.acceptance != nil { fields.append("acceptance") }
-            if let priority = set.priority { fields.append("priority: \(priority)") }
-            return "Edit \(id) — " + fields.joined(separator: "; ")
-        case .reopen(let id, let reason, _):
-            return "Reopen \(id) — \(reason)"
-        case .followUp(let tempId, let of, let title, _, _):
-            return "Follow-up new:\(tempId) on \(of) — \(title)"
+        // Drawn as task cards (`TaskGraphView`, `TaskChangesView`), never as text.
+        case .taskGraph, .taskChanges:
+            return ""
         }
     }
 
