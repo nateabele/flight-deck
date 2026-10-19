@@ -137,7 +137,7 @@ struct PromptCard: View {
     }
 
     /// Whether the card carries inputs of its own — the question's "Type something" field, the
-    /// sign-in's code field — which is what earns it a minimize button and the composer's room.
+    /// sign-in's code field — which is what earns it a minimize button.
     static func hasInputs(_ open: OpenPrompt) -> Bool {
         switch open {
         case .question, .signIn: return true
@@ -145,17 +145,21 @@ struct PromptCard: View {
         }
     }
 
-    /// Whether the message box should be out of the way: while a question or a sign-in is up
-    /// and expanded.
+    /// Whether the message box should be out of the way: while a question is up, minimized or
+    /// not, and while a sign-in is up and expanded.
     ///
     /// **A question's own inputs replace it.** The card and the composer ride the keyboard as
     /// one inset, so with both showing the composer sat between the card and the keyboard (122pt
     /// of it, measured on the simulator), and two text fields on one screen asked which one this
-    /// was. A minimized card gives the composer back — that is what minimizing is for — and a
-    /// permission card never takes it, having no inputs of its own.
+    /// was. Minimizing a question gives back the conversation behind the card, not the message
+    /// box: the question is still the thing to answer. A minimized sign-in does give the box
+    /// back, and a permission card never takes it, having no inputs of its own.
     static func hidesComposer(for open: OpenPrompt?, minimized: Bool) -> Bool {
-        guard let open, hasInputs(open) else { return false }
-        return !minimized
+        switch open {
+        case .question: return true
+        case .signIn: return !minimized
+        case .permission, nil: return false
+        }
     }
 
     /// Whether the corner × is offered: on every dialog, until an answer to it is in flight.

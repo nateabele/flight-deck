@@ -22,6 +22,9 @@ enum UITestHarness {
     /// A two-question prompt card above the composer, lifted by the keyboard exactly as the
     /// conversation screen lifts them, for `PromptKeyboardUITests`.
     static let promptKeyboard = "promptKeyboard"
+    /// The real `SessionTimelineScreen`, whose session's dialog the test changes from the
+    /// toolbar, for `PromptArrivalUITests`.
+    static let promptArrival = "promptArrival"
 
     /// The harness the current launch asks for, if any. `UserDefaults` surfaces a
     /// `-Key Value` launch argument pair as a string default, which is how XCUITest hands
@@ -40,6 +43,8 @@ enum UITestHarness {
             SwarmCardHarness()
         case promptKeyboard:
             PromptKeyboardHarness()
+        case promptArrival:
+            PromptArrivalHarness()
         default:
             // An unknown harness name is a test bug, not a state to render silently.
             Text("Unknown UITestHarness: \(name)")
@@ -101,7 +106,7 @@ private struct SwarmCardHarness: View {
 /// the same keyboard modifiers. The prompt is a two-question set whose questions differ in
 /// height, because what this exists to show is the card against the keyboard as it pages.
 private struct PromptKeyboardHarness: View {
-    private final class NoFleet: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+    final class NoFleet: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
         func viewing(_ session: UUID?) {}
         func markRead(_ id: UUID) {}
         func timelinePage(_ request: FleetRequest,
@@ -170,6 +175,42 @@ private struct PromptKeyboardHarness: View {
             .ignoresSafeArea(.keyboard, edges: .bottom)
             .navigationTitle("Harness")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+/// `SessionTimelineScreen` itself, not a copy of its inset, over a session whose open dialog
+/// the toolbar replaces — the way a dialog reaches the phone, after the screen is up.
+private struct PromptArrivalHarness: View {
+    private static let id = UUID()
+    @State private var model = SessionTimelineModel(sessionID: id, fleet: PromptKeyboardHarness.NoFleet())
+    @State private var session = WireSession(id: id, title: "Harness", agent: "claude",
+                                             activity: "working", acceptsTypedAnswers: true)
+
+    private static func question(_ call: String, _ header: String) -> OpenPrompt {
+        .question(callID: call, [PromptQuestion(
+            header: header, question: "Which one, for \(header)?",
+            options: [.init(label: "This", detail: "The first."),
+                      .init(label: "That", detail: "The second.")])])
+    }
+
+    private func show(_ open: OpenPrompt?) {
+        session.activity = open == nil ? "working" : "waiting"
+        session.openPromptCall = open.map { .call($0.callID) } ?? .noPrompt
+        session.openPrompt = open.map(WireOpenPrompt.init)
+    }
+
+    var body: some View {
+        NavigationStack {
+            SessionTimelineScreen(session: session, model: model, onAbortBlocked: { _ in })
+                .toolbar {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button("Ask A") { show(Self.question("toolu_A", "First")) }
+                        Button("Ask B") { show(Self.question("toolu_B", "Second")) }
+                        Button("Permit") { show(.permission(callID: "toolu_P", tool: "Bash", summary: "ls")) }
+                        Button("Clear") { show(nil) }
+                    }
+                }
         }
     }
 }

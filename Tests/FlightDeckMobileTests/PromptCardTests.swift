@@ -63,11 +63,11 @@ final class PromptCardTests: XCTestCase {
         }
     }
 
-    /// The message box gives way to an expanded question's own inputs, and comes back when the
-    /// card is minimized; a permission card, with no inputs of its own, never takes it.
-    func testAnExpandedQuestionHidesTheComposerAndAMinimizedOneGivesItBack() {
+    /// The message box gives way to a question for as long as it is up, minimized or not; a
+    /// permission card, with no inputs of its own, never takes it.
+    func testAQuestionHidesTheComposerExpandedOrMinimized() {
         XCTAssertTrue(PromptCard.hidesComposer(for: question(), minimized: false))
-        XCTAssertFalse(PromptCard.hidesComposer(for: question(), minimized: true))
+        XCTAssertTrue(PromptCard.hidesComposer(for: question(), minimized: true))
         XCTAssertFalse(PromptCard.hidesComposer(for: permission, minimized: false))
         XCTAssertFalse(PromptCard.hidesComposer(for: nil, minimized: false))
     }
