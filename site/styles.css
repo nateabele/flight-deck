@@ -1236,3 +1236,1684 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
   width: 1.08em;
   height: 1.08em;
 }
+
+/* ==========================================================================
+   Feature illustrations — one product shot per outcome, between its heading
+   and its capability list. Each panel's rules are scoped under .fviz-NN.
+   ========================================================================== */
+
+.fviz { margin: 26px 0 4px; }
+.fviz-cap { margin: 10px 2px 0; font-size: 12.5px; color: var(--fg-tertiary); }
+
+/* ==========================================================================
+   Feature 01 — "Run a fleet, not a tab"
+   The deck window (sidebar of projects + sessions) under the ⌘K scrim, the
+   search card centred over the whole window as SearchPanel places it, and a
+   `flightdeck ls` shell showing which agent drives each session.
+   Reuses the site's .row / .glyph / .spinner classes so the sidebar is
+   pixel-identical to the hero demo.
+   ========================================================================== */
+
+.fviz-01 {
+  /* Claude Code's own dark palette (same values as .terminal in styles.css) */
+  --t-fg:     #f2f2f2;
+  --t-sub:    #949494;
+  --t-claude: #d77757;
+  --t-ok:     #4eba65;
+  --t-user:   #373737;
+  --fv-win-h: 322px;
+}
+
+.fviz-01 .fv-stage {
+  position: relative;
+  height: 398px;
+  overflow: hidden;
+  /* the window is wider than the card and cropped at the right, like a product shot */
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+          mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+}
+
+/* --- Window ------------------------------------------------------------- */
+.fviz-01 .fv-win {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc(100% + 200px);
+  height: var(--fv-win-h);
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+.fviz-01 .fv-titlebar {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  position: relative;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-01 .fv-lights { display: flex; gap: 8px; }
+.fviz-01 .fv-lights i {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-01 .fv-lights .r { background: #ff5f57; }
+.fviz-01 .fv-lights .y { background: #febc2e; }
+.fviz-01 .fv-lights .g { background: #28c840; }
+/* centred on the visible crop, not the full (cropped) window width */
+.fviz-01 .fv-wintitle {
+  position: absolute;
+  left: 0;
+  width: calc(100% - 200px);
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+}
+
+.fviz-01 .fv-split { flex: 1; min-height: 0; display: flex; }
+
+.fviz-01 .fv-side {
+  width: 236px;
+  flex: none;
+  padding: 7px 0 4px;
+  overflow: hidden;
+  background: rgba(28, 38, 58, 0.82);
+  border-right: 1px solid #0a0f1a;
+}
+.fviz-01 .fv-side .row-project:first-child { margin-top: 0; }
+
+/* The selected tab's terminal, mostly hidden behind the card */
+.fviz-01 .fv-term {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px 16px 14px;
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--t-fg);
+  overflow: hidden;
+}
+.fviz-01 .fv-term .l { display: block; white-space: pre; }
+.fviz-01 .fv-term .l.user {
+  background: var(--t-user);
+  color: #fff;
+  margin-bottom: 1.45em;
+  padding-right: 1ch;
+  align-self: stretch;
+}
+.fviz-01 .fv-term .spin { margin-top: 1.45em; }
+.fviz-01 .t-dim    { color: var(--t-sub); }
+.fviz-01 .b-ok     { color: var(--t-ok); }
+.fviz-01 .b-run    { color: var(--t-sub); }
+.fviz-01 .t-claude { color: var(--t-claude); }
+
+/* SearchOverlayRoot: Color.black.opacity(0.34) over the whole window */
+.fviz-01 .fv-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+/* --- ⌘K card ------------------------------------------------------------
+   SearchOverlayView: 680pt wide (scaled), .regularMaterial, 12pt radius,
+   field at 19pt, 46pt rows, top pinned at 18% of the window's height. */
+.fviz-01 .fv-search {
+  position: absolute;
+  z-index: 2;
+  top: calc(var(--fv-win-h) * 0.18);
+  /* centre of the full (uncropped) window */
+  left: calc((100% + 200px) / 2);
+  transform: translateX(-50%);
+  width: min(560px, calc(100% - 40px));
+  border-radius: 12px;
+  background: rgba(44, 52, 70, 0.80);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 12px 30px rgba(0, 0, 0, 0.55),
+    0 30px 70px -20px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+}
+
+.fviz-01 .fv-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+.fviz-01 .fv-mag   { width: 17px; height: 17px; color: var(--fg-secondary); flex: none; }
+.fviz-01 .fv-clear { width: 15px; height: 15px; color: var(--fg-tertiary); flex: none; margin-left: auto; }
+.fviz-01 .fv-query {
+  font-size: 19px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.fviz-01 .fv-caret {
+  display: inline-block;
+  width: 2px;
+  height: 21px;
+  margin-left: 1px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: fv01-blink 1.1s steps(2) infinite;
+}
+@keyframes fv01-blink { 50% { opacity: 0; } }
+
+/* One result: icon, heading + project + agent glyph, two-line detail, recency */
+.fviz-01 .fv-res {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  height: 46px;
+  padding: 6px 16px;
+  overflow: hidden;
+}
+.fviz-01 .fv-res.sel { background: rgba(10, 132, 255, 0.22); }
+.fviz-01 .fv-res-extra { display: none; }
+
+.fviz-01 .fv-kind {
+  width: 13px; height: 13px;
+  flex: none;
+  margin: 2px 1px 0 2px;
+  color: var(--fg-tertiary);
+}
+.fviz-01 .fv-res.sel .fv-kind { color: var(--fg); }
+
+.fviz-01 .fv-res-body { flex: 1; min-width: 0; }
+.fviz-01 .fv-res-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 17px;
+  white-space: nowrap;
+}
+.fviz-01 .fv-res-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.006em;
+}
+/* highlightedRanges → .stronglyEmphasized */
+.fviz-01 .fv-res-title b { font-weight: 800; color: #fff; }
+.fviz-01 .fv-res-proj { font-size: 11px; color: var(--fg-secondary); }
+.fviz-01 .fv-agent { width: 11px; height: 11px; flex: none; color: var(--fg-secondary); }
+
+.fviz-01 .fv-res-detail {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--fg-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* SearchSnippet: the FTS5-marked words, emphasised in place */
+.fviz-01 .fv-res-detail b { font-weight: 700; color: var(--fg); }
+
+.fviz-01 .fv-res-when {
+  flex: none;
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  padding-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- `flightdeck ls` ----------------------------------------------------- */
+.fviz-01 .fv-cli {
+  position: absolute;
+  z-index: 3;
+  right: 28px;
+  bottom: 0;
+  padding: 10px 14px 11px;
+  border-radius: 10px;
+  background: rgba(6, 10, 17, 0.94);
+  border: 1px solid var(--hairline);
+  box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.85);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--t-fg);
+}
+.fviz-01 .fv-cli .l { display: block; white-space: pre; }
+.fviz-01 .fv-cli .l:nth-child(2) { color: var(--t-sub); }
+.fviz-01 .fv-cli em { font-style: normal; color: var(--glow-cyan); }
+
+/* --- Narrower layouts ---------------------------------------------------- */
+
+/* No room for the shell beside the card: drop it */
+@media (max-width: 960px) {
+  .fviz-01 .fv-stage { height: 340px; }
+  .fviz-01 .fv-cli { display: none; }
+  .fviz-01 .fv-res-extra { display: flex; }
+}
+
+/* Phone: the sidebar alone, with the card riding up over its lower half */
+@media (max-width: 680px) {
+  .fviz-01 { --fv-win-h: auto; }
+  .fviz-01 .fv-stage {
+    height: auto;
+    overflow: visible;
+    -webkit-mask-image: none;
+            mask-image: none;
+    padding-bottom: 2px;
+  }
+  .fviz-01 .fv-win { position: relative; width: 100%; height: auto; }
+  .fviz-01 .fv-wintitle { width: 100%; font-size: 12px; }
+  .fviz-01 .fv-side { width: 100%; border-right: none; padding-bottom: 96px; }
+  .fviz-01 .fv-term { display: none; }
+  .fviz-01 .fv-search {
+    position: relative;
+    top: auto;
+    left: auto;
+    transform: none;
+    width: auto;
+    margin: -88px 10px 0;
+  }
+  .fviz-01 .fv-field { padding: 10px 13px; }
+  .fviz-01 .fv-query { font-size: 17px; }
+  .fviz-01 .fv-res { height: auto; padding: 7px 13px; gap: 9px; }
+  .fviz-01 .fv-res-detail { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .fviz-01 .fv-res-proj { overflow: hidden; text-overflow: ellipsis; }
+  .fviz-01 .fv-res-head { min-width: 0; }
+  .fviz-01 .fv-res-title { overflow: hidden; text-overflow: ellipsis; }
+  .fviz-01 .fv-res-when { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-01 .fv-caret { animation: none; }
+  .fviz-01 .spinner { animation: none; }
+}
+
+/* ==========================================================================
+   Feature 02 — "Know who needs you, without looking"
+   Left: Mac sidebar rows (SessionSidebar.swift / SessionStatusIcon.swift) with
+   their tooltips. Right: the iPhone companion's SessionTimelineScreen with a
+   PromptCard up. Every selector is scoped under .fviz-02.
+   ========================================================================== */
+
+.fviz-02 {
+  /* iOS dark system colours, as the phone draws them */
+  --ios-bg:   #000;
+  --ios-bg2:  #1c1c1e;   /* secondarySystemBackground — the card */
+  --ios-bg3:  #2c2c2e;   /* tertiarySystemBackground — option rows */
+  --ios-fg:   #fff;
+  --ios-fg2:  rgba(235, 235, 245, 0.6);
+  --ios-fg3:  rgba(235, 235, 245, 0.3);
+  --wire-y0:  155px;      /* centre of the blocked row */
+  --wire-y1:  188px;      /* the card's leading edge, on the phone */
+}
+
+.fviz-02 .fv-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(40px, 1fr) 300px;
+  align-items: start;
+  height: 380px;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--hairline-soft);
+  background:
+    radial-gradient(120% 90% at 82% 70%, rgba(255, 159, 10, 0.07), transparent 55%),
+    radial-gradient(90% 80% at 12% 10%, rgba(26, 146, 255, 0.08), transparent 60%),
+    var(--bg-inset);
+  padding: 22px 26px 0;
+  font-family: var(--font);
+}
+
+/* ---------------------------------------------------------------- Mac --- */
+
+.fviz-02 .fv-mac { display: flex; align-items: flex-start; margin-top: 52px; }
+
+.fviz-02 .fv-side {
+  width: 220px;
+  flex: none;
+  border-radius: 11px;
+  overflow: hidden;
+  /* NSVisualEffectView .sidebar material over a dark window, as the hero demo */
+  background: rgba(28, 38, 58, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 30px 60px -24px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+  padding-bottom: 8px;
+}
+
+.fviz-02 .fv-tbar {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+}
+.fviz-02 .fv-tbar i {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-02 .fv-tbar .r { background: #ff5f57; }
+.fviz-02 .fv-tbar .y { background: #febc2e; }
+.fviz-02 .fv-tbar .g { background: #28c840; }
+
+.fviz-02 .fv-list { padding: 4px 0 0; }
+
+/* Row geometry shared with the hero demo: 4px gap, 24px row, 9px inset */
+.fviz-02 .fv-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin: 1px 9px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-02 .fv-sess { padding-left: 24px; }
+.fviz-02 .fv-slot { width: 16px; flex: none; display: flex; align-items: center; }
+.fviz-02 .fv-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.fviz-02 .fv-proj {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  letter-spacing: -0.005em;
+}
+.fviz-02 .fv-collapsed { margin-top: 6px; }
+.fviz-02 .fv-chev {
+  width: 12px; height: 12px;
+  flex: none;
+  color: var(--fg-tertiary);
+  transform: rotate(90deg);
+}
+.fviz-02 .fv-collapsed .fv-chev { transform: none; }
+.fviz-02 .fv-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-02 .fv-count {
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  padding-right: 2px;
+}
+
+/* SubagentCount: caption2, monospaced digits, tinted, trailing */
+.fviz-02 .fv-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  line-height: 1;
+  padding-right: 2px;
+}
+
+/* The blocked row: an illustrative halo, not app chrome */
+.fviz-02 .fv-blocked {
+  background: rgba(255, 159, 10, 0.10);
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.30);
+  animation: fv02-halo 2.6s ease-in-out infinite;
+}
+@keyframes fv02-halo {
+  50% { box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.55), 0 0 14px rgba(255, 159, 10, 0.22); }
+}
+
+/* Glyphs: SF Symbol silhouettes at sidebar size, tints as the app's */
+.fviz-02 .fv-g { width: 11px; height: 11px; flex: none; display: block; }
+.fviz-02 .fv-g-idle   { color: #fff; opacity: 0.1; }
+.fviz-02 .fv-g-unread { color: var(--accent); }
+.fviz-02 .fv-g-wait   { color: var(--orange); }
+.fviz-02 .fv-g-bg     { color: var(--green); }
+/* PhonePresenceBadge: iphone.gen3, green, breathing */
+.fviz-02 .fv-g-phone {
+  color: var(--green);
+  width: 12px; height: 12px;
+  filter: drop-shadow(0 0 3px rgba(48, 209, 88, 0.6));
+  animation: fv02-breathe 1.6s ease-in-out infinite alternate;
+}
+@keyframes fv02-breathe {
+  from { opacity: 0.55; transform: scale(0.88); filter: drop-shadow(0 0 1px rgba(48, 209, 88, 0.25)); }
+  to   { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 4px rgba(48, 209, 88, 0.9)); }
+}
+
+/* The macOS indeterminate spinner (.mini), 8 tapered spokes */
+.fviz-02 .fv-spin {
+  --sp: 12px;
+  width: var(--sp); height: var(--sp);
+  flex: none;
+  position: relative;
+  animation: fv02-spin 0.8s steps(8) infinite;
+}
+.fviz-02 .fv-spin i {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: calc(var(--sp) * 0.1417);
+  height: calc(var(--sp) * 0.3);
+  margin: calc(var(--sp) * -0.45) 0 0 calc(var(--sp) * -0.0708);
+  border-radius: 980px;
+  background: var(--fg-secondary);
+  transform-origin: 50% calc(var(--sp) * 0.45);
+}
+.fviz-02 .fv-spin i:nth-child(1) { transform: rotate(0deg);   opacity: 0.22; }
+.fviz-02 .fv-spin i:nth-child(2) { transform: rotate(45deg);  opacity: 0.32; }
+.fviz-02 .fv-spin i:nth-child(3) { transform: rotate(90deg);  opacity: 0.42; }
+.fviz-02 .fv-spin i:nth-child(4) { transform: rotate(135deg); opacity: 0.52; }
+.fviz-02 .fv-spin i:nth-child(5) { transform: rotate(180deg); opacity: 0.62; }
+.fviz-02 .fv-spin i:nth-child(6) { transform: rotate(225deg); opacity: 0.72; }
+.fviz-02 .fv-spin i:nth-child(7) { transform: rotate(270deg); opacity: 0.82; }
+.fviz-02 .fv-spin i:nth-child(8) { transform: rotate(315deg); opacity: 0.92; }
+@keyframes fv02-spin { to { transform: rotate(360deg); } }
+
+/* Tooltip legend, one line per row, on the same 26px pitch */
+.fviz-02 .fv-legend {
+  list-style: none;
+  margin: 0;
+  /* tbar 30 + list pad 4 + project row 26 + 1px border */
+  padding: 61px 0 0;
+  width: 236px;
+  flex: none;
+}
+.fviz-02 .fv-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+  letter-spacing: -0.003em;
+}
+.fviz-02 .fv-legend li[data-k="fold"] { margin-top: 6px; }
+.fviz-02 .fv-lead {
+  width: 14px;
+  flex: none;
+  border-top: 1px dotted var(--hairline);
+}
+.fviz-02 .fv-legend .fv-hot { color: var(--orange); font-weight: 560; }
+.fviz-02 .fv-legend .fv-hot .fv-lead { border-top: 1px solid rgba(255, 159, 10, 0.55); }
+.fviz-02 .fv-legend .fv-hot::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid rgba(255, 159, 10, 0.55);
+}
+
+/* ------------------------------------------------------------ Connector --- */
+
+.fviz-02 .fv-wire {
+  display: block;
+  width: 100%;
+  margin-top: calc(var(--wire-y0) - 0.5px);
+  height: calc(var(--wire-y1) - var(--wire-y0));
+  overflow: visible;
+}
+.fviz-02 .fv-wire path { stroke-width: 1px; stroke-linecap: round; }
+.fviz-02 .fv-wire-base { stroke: rgba(255, 159, 10, 0.55); }
+.fviz-02 .fv-wire-flow {
+  stroke: #ffc46b;
+  stroke-dasharray: 3 14;
+  animation: fv02-flow 1.4s linear infinite;
+  filter: drop-shadow(0 0 2px rgba(255, 159, 10, 0.9));
+}
+@keyframes fv02-flow { to { stroke-dashoffset: -17; } }
+
+/* --------------------------------------------------------------- iPhone --- */
+
+.fviz-02 .fv-phone {
+  width: 300px;
+  height: 392px;
+  padding: 9px 9px 0;
+  border-radius: 46px 46px 0 0;
+  background: linear-gradient(180deg, #2a2d33, #16181c 40%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2.5px #0b0c0e,
+    0 30px 70px -20px rgba(0, 0, 0, 0.9),
+    0 0 60px -10px rgba(255, 159, 10, 0.10);
+  -webkit-mask-image: linear-gradient(180deg, #000 88%, transparent);
+          mask-image: linear-gradient(180deg, #000 88%, transparent);
+}
+.fviz-02 .fv-screen {
+  height: 100%;
+  border-radius: 38px 38px 0 0;
+  background: var(--ios-bg);
+  color: var(--ios-fg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font);
+}
+
+.fviz-02 .fv-status {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 24px 0 30px;
+  position: relative;
+}
+.fviz-02 .fv-time { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+.fviz-02 .fv-island {
+  position: absolute;
+  left: 50%; top: 8px;
+  width: 78px; height: 23px;
+  margin-left: -39px;
+  border-radius: 980px;
+  background: #000;
+  box-shadow: inset 0 0 0 1px #0c0c0c;
+}
+.fviz-02 .fv-sicons { display: flex; gap: 5px; align-items: center; color: #fff; }
+.fviz-02 .fv-sicons svg { height: 9px; width: auto; fill: currentColor; }
+
+.fviz-02 .fv-nav {
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.fviz-02 .fv-back {
+  position: absolute;
+  left: 12px; top: 3px;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+}
+.fviz-02 .fv-back svg { width: 13px; height: 13px; }
+.fviz-02 .fv-navtitle { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
+
+/* The foot of the conversation: the activity row SessionTimelineScreen ends on */
+.fviz-02 .fv-feed {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 0 14px 2px;
+}
+.fviz-02 .fv-waiting {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 0 4px;
+  font-size: 10px;
+  color: var(--orange);
+}
+.fviz-02 .fv-waiting svg { width: 11px; height: 11px; flex: none; }
+
+/* PromptCard + CardChrome: 12pt padding, 12pt radius, orange 50% hairline */
+.fviz-02 .fv-card {
+  flex: none;
+  margin: 0 12px 20px;
+  padding: 9.5px;
+  border-radius: 10px;
+  background: var(--ios-bg2);
+  box-shadow: inset 0 0 0 0.8px rgba(255, 159, 10, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 6.5px;
+}
+.fviz-02 .fv-chead { display: flex; align-items: center; gap: 6px; }
+.fviz-02 .fv-circ { width: 16px; height: 16px; flex: none; color: var(--ios-fg2); }
+.fviz-02 .fv-x { margin-left: auto; }
+.fviz-02 .fv-hdr {
+  font-size: 8.8px;
+  font-weight: 600;
+  color: var(--orange);
+  letter-spacing: 0.01em;
+}
+.fviz-02 .fv-q {
+  font-size: 12.3px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.008em;
+}
+.fviz-02 .fv-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5px;
+  padding: 6px 8px;
+  border-radius: 6.5px;
+  background: var(--ios-bg3);
+}
+.fviz-02 .fv-opt b { font-size: 10.2px; font-weight: 500; }
+.fviz-02 .fv-opt span { font-size: 8.8px; line-height: 1.3; color: var(--ios-fg2); }
+/* A finger about to land — illustrative only */
+.fviz-02 .fv-tap { animation: fv02-tap 3.2s ease-in-out infinite; }
+@keyframes fv02-tap {
+  0%, 62%, 100% { background: var(--ios-bg3); }
+  70%, 80%      { background: #3a3a3c; }
+}
+
+.fviz-02 .fv-typed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6.5px;
+  background: var(--ios-bg3);
+}
+.fviz-02 .fv-ph {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  font-size: 10.2px;
+  color: var(--ios-fg3);
+}
+.fviz-02 .fv-caret {
+  width: 1.5px; height: 12px;
+  margin-right: 2px;
+  border-radius: 1px;
+  background: var(--orange);
+  animation: fv02-blink 1.1s steps(1) infinite;
+}
+@keyframes fv02-blink { 50% { opacity: 0; } }
+/* arrow.up.circle.fill, secondary while the field is empty */
+.fviz-02 .fv-send { width: 16px; height: 16px; flex: none; color: var(--ios-fg2); }
+
+/* ---------------------------------------------------------- Responsive --- */
+
+/* Narrower card: the legend gives way to the wire, then goes */
+@media (max-width: 1020px) {
+  .fviz-02 .fv-legend { width: auto; padding-right: 10px; }
+  .fviz-02 .fv-legend .fv-hot::after { display: none; }
+}
+@media (max-width: 900px) {
+  .fviz-02 .fv-legend { display: none; }
+}
+
+/* Phone width: stack, drop the legend and the wire */
+@media (max-width: 680px) {
+  .fviz-02 .fv-stage {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    height: auto;
+    padding: 18px 14px 0;
+    row-gap: 18px;
+  }
+  .fviz-02 .fv-wire { display: none; }
+  .fviz-02 .fv-mac { margin-top: 0; }
+  .fviz-02 .fv-side { width: min(260px, 100%); }
+  .fviz-02 .fv-phone { width: min(290px, 100%); height: 376px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-02 .fv-spin,
+  .fviz-02 .fv-blocked,
+  .fviz-02 .fv-g-phone,
+  .fviz-02 .fv-wire-flow,
+  .fviz-02 .fv-tap,
+  .fviz-02 .fv-caret { animation: none; }
+  .fviz-02 .fv-g-phone { opacity: 1; transform: none; }
+}
+
+/* ==========================================================================
+   Feature 03 — "Close the lid without losing the fleet"
+   This Mac's deck after a relaunch, the paired hosts and what each is running,
+   and the selected session's terminal streaming `flightdeck run --on`.
+   Every selector is scoped under .fviz-03. Reuses the site's .spinner markup.
+   ========================================================================== */
+
+.fviz-03 {
+  /* Terminal palette: the same values the demo window's .terminal uses */
+  --fv3-t-fg:   #f2f2f2;
+  --fv3-t-sub:  #949494;
+  --fv3-t-ok:   #4eba65;
+  --fv3-row:    26px;
+}
+
+.fviz-03 .fv3-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 14px;
+  align-items: stretch;
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.fviz-03 .fv3-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* --- Cards: vibrancy-ish sidebar material, hairline edge ------------------ */
+.fviz-03 .fv3-card {
+  background: rgba(28, 38, 58, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.fviz-03 .fv3-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, rgba(32, 43, 64, 0.9), rgba(26, 36, 55, 0.9));
+}
+.fviz-03 .fv3-ico { width: 15px; height: 15px; color: var(--fg-secondary); flex: none; }
+.fviz-03 .fv3-head-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+.fviz-03 .fv3-head-cap {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+
+/* --- Sidebar rows: the demo window's geometry ---------------------------- */
+.fviz-03 .fv3-list { padding: 4px 0 6px; }
+
+.fviz-03 .fv3-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin: 1px 8px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-03 .fv3-proj {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  margin-top: 3px;
+}
+.fviz-03 .fv3-chev {
+  width: 12px; height: 12px;
+  flex: none;
+  color: var(--fg-tertiary);
+  transform: rotate(90deg);
+}
+.fviz-03 .fv3-collapsed .fv3-chev { transform: none; }
+.fviz-03 .fv3-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fviz-03 .fv3-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  padding-right: 3px;
+}
+.fviz-03 .fv3-slot-r { display: flex; width: 12px; justify-content: center; }
+
+.fviz-03 .fv3-sess { padding-left: 24px; }
+.fviz-03 .fv3-sel { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.fviz-03 .fv3-slot { width: 16px; flex: none; display: flex; align-items: center; }
+.fviz-03 .fv3-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-03 .fv3-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  line-height: 1;
+  padding-right: 2px;
+}
+
+.fviz-03 .fv3-dot { width: 11px; height: 11px; flex: none; display: block; }
+.fviz-03 .fv3-unread  { color: var(--accent); }
+.fviz-03 .fv3-waiting { color: var(--orange); }
+.fviz-03 .fv3-bg { width: 11px; height: 11px; flex: none; color: var(--green); margin-right: 1px; }
+.fviz-03 .spinner { --sp: 11px; }
+
+/* --- Paired Hosts: HostsSettingsTab's rows, plus each host's runs -------- */
+.fviz-03 .fv3-hostlist { list-style: none; margin: 0; padding: 2px 0; }
+.fviz-03 .fv3-host {
+  padding: 7px 12px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.fviz-03 .fv3-host:first-child { border-top: none; }
+
+.fviz-03 .fv3-hline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 0;
+}
+.fviz-03 .fv3-led {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: #8e8e93;
+}
+.fviz-03 .fv3-on {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(48, 209, 88, 0.14);
+}
+.fviz-03 .fv3-hname { color: var(--fg); }
+.fviz-03 .fv3-plat,
+.fviz-03 .fv3-cloud,
+.fviz-03 .fv3-cost,
+.fviz-03 .fv3-detail {
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+.fviz-03 .fv3-cloud { display: inline-flex; align-items: center; gap: 3px; }
+.fviz-03 .fv3-cloud svg { width: 12px; height: 12px; }
+.fviz-03 .fv3-cost { font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fviz-03 .fv3-detail { margin-left: auto; padding-left: 6px; flex: none; }
+
+.fviz-03 .fv3-run {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 5px 0 0 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  min-width: 0;
+}
+.fviz-03 .fv3-run .spinner { --sp: 10px; }
+.fviz-03 .fv3-ok { width: 11px; height: 11px; flex: none; color: var(--green); }
+.fviz-03 .fv3-rid { color: var(--glow-cyan); flex: none; }
+.fviz-03 .fv3-cmd { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fviz-03 .fv3-exit { color: var(--fg-tertiary); margin-left: auto; flex: none; }
+
+/* --- Terminal window ------------------------------------------------------ */
+.fviz-03 .fv3-term {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-inset);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    0 20px 40px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-03 .fv3-tbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 12px;
+  flex: none;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-03 .fv3-lights { display: flex; gap: 7px; }
+.fviz-03 .fv3-lights i {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+  background: #ff5f57;
+}
+.fviz-03 .fv3-lights i:nth-child(2) { background: #febc2e; }
+.fviz-03 .fv3-lights i:nth-child(3) { background: #28c840; }
+.fviz-03 .fv3-ttitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  pointer-events: none;
+}
+
+.fviz-03 .fv3-tbody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px 14px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fv3-t-fg);
+  overflow: hidden;
+  /* Long xcodebuild lines run off the right edge, as in a narrow pane */
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+          mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+}
+.fviz-03 .fv3-l { display: block; white-space: pre; min-height: 1.5em; }
+.fviz-03 .fv3-ps { color: var(--glow-cyan); }
+.fviz-03 .fv3-dim { color: var(--fv3-t-sub); }
+.fviz-03 .fv3-early { opacity: 0.55; }
+.fviz-03 .fv3-pass { color: var(--fv3-t-ok); }
+.fviz-03 .fv3-caret {
+  display: inline-block;
+  width: 1ch;
+  height: 1.15em;
+  margin-left: 1ch;
+  vertical-align: -0.2em;
+  background: var(--fv3-t-fg);
+  animation: fv3-blink 1.1s steps(2) infinite;
+}
+
+/* Streaming: the run's lines arrive one after another, then the caret blinks */
+.fviz-03 .fv3-s { animation: fv3-arrive 0.28s ease-out both; }
+.fviz-03 .s1 { animation-delay: 0.4s; }
+.fviz-03 .s2 { animation-delay: 0.9s; }
+.fviz-03 .s3 { animation-delay: 1.3s; }
+.fviz-03 .s4 { animation-delay: 2.3s; }
+.fviz-03 .s5 { animation-delay: 2.7s; }
+.fviz-03 .s6 { animation-delay: 3.6s; }
+.fviz-03 .s7 { animation-delay: 4.0s; }
+
+@keyframes fv3-arrive { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes fv3-blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-03 .fv3-s { animation: none; }
+  .fviz-03 .fv3-caret { animation: none; }
+  .fviz-03 .spinner { animation: none; }
+}
+
+/* --- Narrow ---------------------------------------------------------------- */
+@media (max-width: 860px) {
+  .fviz-03 .fv3-stage { grid-template-columns: 1fr; }
+  .fviz-03 .fv3-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .fviz-03 .fv3-tbody { min-height: 200px; }
+}
+@media (max-width: 640px) {
+  .fviz-03 .fv3-col { display: flex; }
+  .fviz-03 .fv3-cost { display: none; }
+  .fviz-03 .fv3-head-cap { display: none; }
+  .fviz-03 .fv3-early,
+  .fviz-03 .fv3-gap { display: none; }
+  .fviz-03 .fv3-tbody { min-height: 0; font-size: 10px; padding: 10px 11px; }
+  .fviz-03 .fv3-l { min-height: 1.5em; }
+}
+@media (max-width: 420px) {
+  .fviz-03 .fv3-plat { display: none; }
+}
+
+/* ==========================================================================
+   Feature panel 04 — Flight Control
+   The plan being annotated, beside the run's control bar, departures board and
+   agent rows. Colours are the app's Instrument palette (dark halves):
+   phosphor #DBE6F7 on near-black glass, blue #7CBCFF, amber #FFB340.
+   ========================================================================== */
+
+.fviz-04 {
+  --fc-ph:     #dbe6f7;
+  --fc-ph2:    rgba(219, 230, 247, 0.66);
+  --fc-ph3:    rgba(219, 230, 247, 0.40);
+  --fc-blue:   #7cbcff;
+  --fc-amber:  #ffb340;
+  --fc-acc:    var(--accent);
+  --fc-hole:   #161e30;
+  --fc-sec:    rgba(235, 240, 250, 0.58);
+  --fc-ter:    rgba(235, 240, 250, 0.34);
+  --fc-line:   rgba(255, 255, 255, 0.07);
+}
+
+.fviz-04 .fc-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.fviz-04 svg { display: block; fill: currentColor; }
+
+/* --- Window -------------------------------------------------------------- */
+.fviz-04 .fc-win {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 30px 70px -30px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+  font-family: var(--font);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.fviz-04 .fc-titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-04 .fc-lights { display: flex; gap: 7px; }
+.fviz-04 .fc-lights i {
+  width: 11px; height: 11px; border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-04 .fc-lights i:nth-child(1) { background: #ff5f57; }
+.fviz-04 .fc-lights i:nth-child(2) { background: #febc2e; }
+.fviz-04 .fc-lights i:nth-child(3) { background: #28c840; }
+.fviz-04 .fc-title {
+  position: absolute; left: 0; right: 0;
+  display: flex; justify-content: center; align-items: center; gap: 8px;
+  font-size: 12.5px; font-weight: 590; color: #b9c6dc;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.fviz-04 .fc-pill {
+  font-size: 10.5px; font-weight: 600;
+  padding: 1px 8px; border-radius: 980px;
+  color: var(--green);
+  background: rgba(48, 209, 88, 0.12);
+  border: 1px solid rgba(48, 209, 88, 0.3);
+}
+
+.fviz-04 .fc-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 484px;
+}
+
+/* --- Plan pane ----------------------------------------------------------- */
+.fviz-04 .fc-plan {
+  padding: 10px 12px 10px 12px;
+  min-width: 0;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+.fviz-04 .fc-viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fviz-04 .fc-seg {
+  display: inline-flex;
+  padding: 1px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.fviz-04 .fc-seg > * {
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: var(--fc-sec);
+  font-weight: 500;
+}
+.fviz-04 .fc-seg > * + span { border-left: 1px solid rgba(255, 255, 255, 0.08); }
+.fviz-04 .fc-seg b {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.35);
+  font-weight: 600;
+}
+.fviz-04 .fc-editchip {
+  font-size: 10.5px;
+  white-space: nowrap;
+  color: var(--green);
+  background: rgba(48, 209, 88, 0.12);
+  padding: 2px 9px;
+  border-radius: 980px;
+}
+.fviz-04 .fc-editchip i { font-style: normal; color: var(--fc-ter); }
+.fviz-04 .fc-editchip b { font-weight: 650; }
+
+/* The document: a quiet well, a churn gutter on the leading edge */
+.fviz-04 .fc-doc {
+  position: relative;
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 6px;
+  padding: 6px 12px 0 0;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.fviz-04 .fc-doc { --gut: 98px; }
+.fviz-04 .fc-sec {
+  position: relative;
+  padding-left: var(--gut);
+}
+.fviz-04 .fc-churn {
+  position: absolute;
+  left: 0; top: 7px;
+  width: 92px;
+  display: flex; justify-content: flex-end; align-items: flex-end; gap: 6px;
+  padding-right: 10px;
+  font-size: 9.5px;
+  color: var(--fc-ter);
+  white-space: nowrap;
+}
+.fviz-04 .fc-bars { display: flex; gap: 2px; align-items: flex-end; height: 13px; }
+.fviz-04 .fc-bars i {
+  width: 4px;
+  height: calc(13px * var(--h));
+  min-height: 3px;
+  border-radius: 1px;
+  background: var(--fc-sec);
+}
+.fviz-04 .fc-bars i.z { height: 1.5px; min-height: 0; background: var(--fc-ter); margin-bottom: 0; }
+.fviz-04 .fc-hot .fc-churn { color: var(--fc-amber); font-weight: 600; }
+.fviz-04 .fc-hot .fc-bars i { background: var(--fc-amber); }
+/* The hot section's rule down its length */
+.fviz-04 .fc-hot::before {
+  content: "";
+  position: absolute;
+  left: 88px; top: 24px; bottom: 6px;
+  width: 2px; border-radius: 1px;
+  background: var(--fc-amber);
+  opacity: 0.85;
+}
+
+.fviz-04 .fc-doc h5 {
+  margin: 0;
+  padding-top: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+.fviz-04 .fc-doc p {
+  margin: 4px 0 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #d5deec;
+}
+.fviz-04 .fc-doc code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fc-ph);
+  background: rgba(255, 255, 255, 0.07);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* A note's band: the one system find-highlight yellow, at 0.3 */
+.fviz-04 .fc-note {
+  color: inherit;
+  background: rgba(255, 233, 0, 0.26);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* The live selection */
+.fviz-04 .fc-sel {
+  background: rgba(10, 132, 255, 0.42);
+  color: #fff;
+  border-radius: 1px;
+}
+/* The human's own insertion: green tint and the "you" bar */
+.fviz-04 .fc-edited { position: relative; }
+.fviz-04 .fc-edited ins {
+  text-decoration: none;
+  background: rgba(48, 209, 88, 0.16);
+  color: #e4f7e8;
+  border-radius: 2px;
+}
+.fviz-04 .fc-edited::before {
+  content: "";
+  position: absolute;
+  left: -7px; top: 3px; bottom: 3px;
+  width: 3px; border-radius: 1.5px;
+  background: var(--green);
+}
+
+/* Selection toolbar: a floating panel over the selection */
+.fviz-04 .fc-selp { position: relative; margin-top: 38px !important; }
+.fviz-04 .fc-toolbar {
+  position: absolute;
+  left: calc(4px - var(--gut)); bottom: calc(100% + 6px);
+  z-index: 2;
+  display: flex; align-items: center; gap: 1px;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(43, 43, 43, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  line-height: 1;
+}
+.fviz-04 .fc-ti {
+  display: inline-flex; align-items: center; gap: 3px;
+  height: 21px;
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--fg);
+}
+.fviz-04 .fc-ti svg { width: 11px; height: 11px; color: var(--fc-sec); }
+.fviz-04 .fc-ti.fc-hover { background: rgba(255, 255, 255, 0.1); }
+.fviz-04 .fc-tsep { width: 1px; height: 15px; margin: 0 2px; background: rgba(255, 255, 255, 0.12); }
+
+.fviz-04 .fc-fade { opacity: 0.55; }
+.fviz-04 .fc-doc::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0; height: 26px;
+  border-radius: 0 0 6px 6px;
+  background: linear-gradient(180deg, rgba(21, 30, 48, 0), #151e30);
+  pointer-events: none;
+}
+
+/* --- Run pane ------------------------------------------------------------ */
+.fviz-04 .fc-run {
+  padding: 10px 10px 10px;
+  border-left: 1px solid #0a0f1a;
+  background: rgba(255, 255, 255, 0.025);
+  display: flex; flex-direction: column; gap: 8px;
+  min-width: 0;
+}
+
+/* Control bar: transport cluster + LCD */
+.fviz-04 .fc-ctrl {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 7px;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #2f2f2f, #2a2a2a);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), inset 0 -1px 0 rgba(0, 0, 0, 0.5);
+}
+.fviz-04 .fc-cluster {
+  flex: none;
+  display: flex; align-items: center;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.24);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+}
+.fviz-04 .fc-key {
+  position: relative;
+  width: 19px; height: 24px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: #ececec;
+}
+.fviz-04 .fc-key svg { width: 12px; height: 12px; }
+.fviz-04 .fc-key.fc-wide svg { width: 14px; }
+.fviz-04 .fc-default::after {
+  content: "";
+  position: absolute; bottom: 2px; left: 50%;
+  width: 4px; height: 4px; margin-left: -2px;
+  border-radius: 50%;
+  background: var(--fc-acc);
+}
+.fviz-04 .fc-csep { width: 1px; height: 17px; margin: 0 3px; background: rgba(255, 255, 255, 0.1); }
+
+.fviz-04 .fc-lcd {
+  flex: 1; min-width: 0;
+  display: flex; align-items: stretch;
+  height: 38px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #121418, #0d0f12);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 1.5px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.fviz-04 .fc-cell {
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  padding: 0 7px;
+  white-space: nowrap;
+  color: var(--fc-ph);
+}
+.fviz-04 .fc-cell + .fc-cell { border-left: 1px solid rgba(255, 255, 255, 0.05); }
+.fviz-04 .fc-cell b {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.fviz-04 .fc-cell small {
+  display: flex; align-items: center; gap: 3px;
+  font-size: 7.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(219, 230, 247, 0.45);
+  line-height: 1;
+}
+.fviz-04 .fc-conv { flex-direction: row; align-items: center; gap: 7px; }
+.fviz-04 .fc-cw { display: flex; flex-direction: column; gap: 3px; }
+.fviz-04 .fc-conv small { color: var(--fc-ph); }
+.fviz-04 .fc-conv small svg { width: 7px; height: 7px; fill: none; }
+.fviz-04 .fc-spark { width: 36px; height: 20px; overflow: visible; }
+.fviz-04 .fc-spark path { fill: none; vector-effect: non-scaling-stroke; }
+.fviz-04 .fc-spark .fl { stroke: rgba(219, 230, 247, 0.28); stroke-width: 1; stroke-dasharray: 2 2; }
+.fviz-04 .fc-spark .ln {
+  stroke: var(--fc-ph); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+  filter: drop-shadow(0 0 2px rgba(219, 230, 247, 0.45));
+}
+.fviz-04 .fc-spark .dt { stroke: rgba(219, 230, 247, 0.6); stroke-width: 1.2; stroke-linecap: round; stroke-dasharray: 1 3; }
+.fviz-04 .fc-spark .hol { fill: #0f1115; stroke: var(--fc-ph); stroke-width: 1.2; }
+.fviz-04 .fc-spark .end { fill: var(--fc-ph); filter: drop-shadow(0 0 2.5px rgba(219, 230, 247, 0.6)); }
+
+/* Departures board: glass, faint scan lines */
+.fviz-04 .fc-board {
+  border-radius: 10px;
+  background:
+    repeating-linear-gradient(180deg, rgba(219, 230, 247, 0.02) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #13161b, #0c0e11);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08), 0 0.5px 1px rgba(0, 0, 0, 0.35);
+  color: var(--fc-ph);
+  overflow: hidden;
+}
+.fviz-04 .fc-fields {
+  display: grid;
+  grid-template-columns: 1.55fr 0.9fr 1.25fr;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent);
+  border-bottom: 1px solid rgba(219, 230, 247, 0.08);
+}
+.fviz-04 .fc-f {
+  display: flex; flex-direction: column;
+  padding: 7px 12px 7px;
+  min-width: 0;
+}
+.fviz-04 .fc-f + .fc-f { border-left: 1px solid rgba(219, 230, 247, 0.07); }
+.fviz-04 .fc-lbl,
+.fviz-04 .fc-foot,
+.fviz-04 .fc-btitle {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--fc-ph3);
+  line-height: 1;
+  white-space: nowrap;
+}
+.fviz-04 .fc-val {
+  display: flex; align-items: center; gap: 7px;
+  height: 21px;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+.fviz-04 .fc-now .fc-val b { font-size: 17px; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
+.fviz-04 .fc-air .fc-val b {
+  font-family: var(--mono);
+  font-size: 19px; font-weight: 600; color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.fviz-04 .fc-stop .fc-val b { font-size: 15px; font-weight: 700; color: var(--fc-blue); }
+.fviz-04 .fc-chip {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 7.5px; font-weight: 700; letter-spacing: 0.1em;
+  color: var(--fc-ph);
+  padding: 3px 5px;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px var(--fc-ph3);
+}
+.fviz-04 .fc-det { font-size: 10px; color: var(--fc-ph2); white-space: nowrap; line-height: 1.2; }
+
+/* The tape */
+.fviz-04 .fc-tape {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  padding: 16px 12px 0;
+}
+.fviz-04 .fc-bracket {
+  position: absolute;
+  top: 6px;
+  /* RF1..RF3 are columns 3..5 of 8 */
+  left: calc(12px + (100% - 24px) * 2 / 8 + 5px);
+  width: calc((100% - 24px) * 3 / 8 - 10px);
+  height: 6px;
+  border: 1px solid rgba(219, 230, 247, 0.3);
+  border-bottom: 0;
+  margin-right: 20px;
+}
+.fviz-04 .fc-bracket { width: calc((100% - 24px) * 3 / 8 - 30px); }
+.fviz-04 .fc-btitle {
+  position: absolute; left: 4px; top: -5px;
+  padding: 0 4px;
+  font-size: 7.5px;
+  letter-spacing: 0.12em;
+  color: var(--fc-ph);
+  background: #121519;
+}
+.fviz-04 .fc-bcode { display: none; }
+.fviz-04 .fc-handle {
+  position: absolute; right: -19px; top: -6px;
+  width: 12px; height: 12px;
+  display: grid; place-items: center;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px var(--fc-ph3);
+  color: var(--fc-ph2);
+}
+.fviz-04 .fc-handle svg { width: 8px; height: 8px; }
+
+.fviz-04 .fc-slot {
+  position: relative;
+  display: flex; flex-direction: column;
+  min-width: 0;
+  padding-bottom: 14px;
+}
+.fviz-04 .fc-sl {
+  display: flex; justify-content: center; align-items: center; gap: 2px;
+  height: 14px;
+  font-family: var(--mono);
+  font-size: 9.5px; font-weight: 600;
+  color: var(--fc-ph3);
+  white-space: nowrap;
+}
+.fviz-04 .fc-sl sup { font-size: 7px; font-weight: 700; vertical-align: baseline; opacity: 0.75; }
+.fviz-04 .fc-flag { width: 7px; height: 7px; color: var(--fc-amber); margin-left: 1px; }
+.fviz-04 .fc-sb {
+  position: relative;
+  height: 20px;
+  margin: 4px var(--r) 0 var(--l);
+  border-radius: 5px;
+  display: grid; place-items: center;
+  font-family: var(--mono);
+  font-size: 9.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* quarter ticks under each slot, and its end tick */
+.fviz-04 .fc-slot::before {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 6px; height: 4px;
+  background:
+    linear-gradient(rgba(219, 230, 247, 0.12), rgba(219, 230, 247, 0.12)) 25% 0 / 1px 100% no-repeat,
+    linear-gradient(rgba(219, 230, 247, 0.12), rgba(219, 230, 247, 0.12)) 50% 0 / 1px 100% no-repeat,
+    linear-gradient(rgba(219, 230, 247, 0.12), rgba(219, 230, 247, 0.12)) 75% 0 / 1px 100% no-repeat;
+}
+.fviz-04 .fc-slot::after {
+  content: "";
+  position: absolute; right: 0; top: 40px;
+  width: 1px; height: 7px;
+  background: rgba(219, 230, 247, 0.16);
+}
+.fviz-04 .s-major::after { height: 13px; }
+.fviz-04 .s-done::after { background: rgba(219, 230, 247, 0.4); }
+/* a major checkpoint's gate rule, from the label row through the bar */
+.fviz-04 .s-major:not(.s-last) .fc-sl::after {
+  content: "";
+  position: absolute; right: 0; top: 0;
+  width: 1px; height: 38px;
+  background: rgba(219, 230, 247, 0.34);
+}
+.fviz-04 .s-future.s-major:not(.s-last) .fc-sl::after { background: rgba(219, 230, 247, 0.14); }
+
+.fviz-04 .s-done .fc-sl { color: var(--fc-ph2); }
+.fviz-04 .s-done.s-major .fc-sl { color: var(--fc-ph); }
+.fviz-04 .s-done .fc-sb {
+  background: linear-gradient(180deg, rgba(219, 230, 247, 0.2), rgba(219, 230, 247, 0.13));
+  color: var(--fc-ph);
+}
+.fviz-04 .s-done.s-major .fc-sb { background: linear-gradient(180deg, rgba(219, 230, 247, 0.28), rgba(219, 230, 247, 0.18)); }
+.fviz-04 .s-live .fc-sl { color: #fff; }
+.fviz-04 .s-live .fc-sb {
+  background: rgba(10, 132, 255, 0.13);
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.5);
+  place-items: center start;
+}
+.fviz-04 .fc-head {
+  position: relative;
+  display: block;
+  width: 18px; height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(10, 132, 255, 0.35), var(--fc-acc));
+  box-shadow: 0 0 8px rgba(10, 132, 255, 0.7);
+}
+.fviz-04 .fc-head::after {
+  content: "";
+  position: absolute; right: -6px; top: 50%;
+  width: 9px; height: 9px; margin-top: -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 2.5px var(--fc-acc), 0 0 9px 2px rgba(10, 132, 255, 0.8);
+}
+.fviz-04 .s-future .fc-sb { box-shadow: inset 0 0 0 1px rgba(219, 230, 247, 0.13); }
+.fviz-04 .s-future.s-major .fc-sl { color: var(--fc-ph2); }
+.fviz-04 .s-target .fc-sl { color: var(--fc-blue); }
+.fviz-04 .s-target .fc-sb {
+  box-shadow: inset 0 0 0 1.75px var(--fc-acc), 0 0 9px rgba(10, 132, 255, 0.45);
+}
+.fviz-04 .fc-foot {
+  display: flex; justify-content: space-between;
+  padding: 0 12px 7px;
+  font-size: 7.5px;
+}
+
+/* The round's agents */
+.fviz-04 .fc-seats { display: flex; flex-direction: column; }
+.fviz-04 .fc-sh { display: flex; align-items: center; gap: 8px; padding: 0 4px 3px; }
+.fviz-04 .fc-rchip {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 20px;
+  padding: 0 4px 0 6px;
+  border-radius: 980px;
+  background: rgba(48, 209, 88, 0.13);
+  box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.55);
+  font-size: 11px; font-weight: 600;
+}
+.fviz-04 .fc-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin: 0 1px; }
+.fviz-04 .fc-pp { width: 11px; height: 9px; color: var(--fc-sec); }
+.fviz-04 .fc-stack { display: flex; }
+.fviz-04 .fc-stack svg { width: 13px; height: 13px; }
+.fviz-04 .fc-stack svg + svg { margin-left: -2px; }
+.fviz-04 .fc-count { font-size: 10.5px; color: var(--fc-ter); font-variant-numeric: tabular-nums; }
+
+.fviz-04 .fc-seat {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 3px 6px;
+  border-radius: 7px;
+}
+.fviz-04 .fc-seat + .fc-seat { border-top: 1px solid var(--fc-line); border-top-left-radius: 0; border-top-right-radius: 0; }
+.fviz-04 .fc-g { flex: none; width: 13px; height: 13px; margin-top: 1px; }
+.fviz-04 .is-done .fc-g { color: var(--fc-sec); }
+.fviz-04 .is-run .fc-g { color: var(--fc-acc); }
+.fviz-04 .is-queued .fc-g { color: var(--fc-sec); }
+.fviz-04 .fc-sm { flex: 1; min-width: 0; }
+.fviz-04 .fc-id { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.fviz-04 .fc-role { font-size: 11.5px; font-weight: 600; color: var(--fg); }
+.fviz-04 .is-done .fc-role,
+.fviz-04 .is-queued .fc-role { font-weight: 500; color: var(--fc-sec); }
+.fviz-04 .fc-who { font-size: 10.5px; color: var(--fc-ter); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fviz-04 .fc-t { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fg); }
+.fviz-04 .is-done .fc-t { color: var(--fc-sec); }
+.fviz-04 .fc-out { font-size: 11px; color: var(--fc-sec); margin-top: 1px; }
+.fviz-04 .fc-head1 { font-size: 12px; color: var(--fg); margin-top: 1px; }
+.fviz-04 .fc-act {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10.5px; color: var(--fc-sec);
+  margin-top: 1px;
+  white-space: nowrap;
+}
+.fviz-04 .fc-act > span:first-child { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fviz-04 .fc-gauge { margin-left: auto; display: flex; align-items: center; gap: 5px; color: var(--fc-ter); font-size: 10px; font-variant-numeric: tabular-nums; }
+.fviz-04 .fc-gauge i { display: block; width: 40px; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.fviz-04 .fc-gauge b { display: block; height: 100%; background: var(--fc-sec); border-radius: 2px; }
+.fviz-04 .fc-q { font-size: 11px; color: var(--fc-ter); margin-top: 1px; }
+
+/* --- Motion: the live seat's pulse and the playhead's glow --------------- */
+@keyframes fv4-pulse { 50% { opacity: 0.35; } }
+@keyframes fv4-glow {
+  50% { box-shadow: 0 0 0 2.5px var(--fc-acc), 0 0 14px 4px rgba(10, 132, 255, 0.95); }
+}
+.fviz-04 .is-run .fc-g { animation: fv4-pulse 1.6s ease-in-out infinite; }
+.fviz-04 .fc-head::after { animation: fv4-glow 2.2s ease-in-out infinite; }
+.fviz-04 .fc-dot { animation: fv4-pulse 2.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .fviz-04 .is-run .fc-g,
+  .fviz-04 .fc-head::after,
+  .fviz-04 .fc-dot { animation: none; }
+}
+
+/* --- Narrower cards ------------------------------------------------------ */
+@media (max-width: 960px) {
+  .fviz-04 .fc-body { grid-template-columns: minmax(0, 1fr) 430px; }
+  .fviz-04 .fc-editchip { display: none; }
+  .fviz-04 .fc-doc { --gut: 64px; }
+  .fviz-04 .fc-opt { display: none; }
+  .fviz-04 .fc-churn { width: 58px; }
+  .fviz-04 .fc-cap { display: none; }
+  .fviz-04 .fc-hot::before { left: 54px; }
+  .fviz-04 .fc-cov { display: none; }
+}
+
+@media (max-width: 820px) {
+  .fviz-04 .fc-body { grid-template-columns: 1fr; }
+  .fviz-04 .fc-run { order: -1; border-left: 0; border-bottom: 1px solid #0a0f1a; }
+  .fviz-04 .fc-cov { display: flex; }
+  .fviz-04 .fc-doc { flex: none; height: 272px; }
+  .fviz-04 .fc-opt { display: inline-flex; }
+  .fviz-04 .fc-plan { padding-bottom: 0; }
+}
+
+@media (max-width: 560px) {
+  .fviz-04 .fc-titlebar { height: 28px; }
+  .fviz-04 .fc-title { left: 68px; right: 8px; justify-content: flex-start; font-size: 11.5px; }
+  .fviz-04 .fc-title { overflow: hidden; }
+  .fviz-04 .fc-pill { display: none; }
+  .fviz-04 .fc-run { padding: 10px 8px; }
+  .fviz-04 .fc-ctrl { padding: 6px; }
+  .fviz-04 .fc-cluster { display: none; }
+  .fviz-04 .fc-cov { display: none; }
+  .fviz-04 .fc-cell { padding: 0 8px; }
+  .fviz-04 .fc-fields { grid-template-columns: 1.5fr 1fr; }
+  .fviz-04 .fc-stop { display: none; }
+  .fviz-04 .fc-f { padding: 7px 9px; }
+  .fviz-04 .fc-tape { padding: 18px 8px 0; }
+  .fviz-04 .fc-bracket {
+    left: calc(8px + (100% - 16px) * 2 / 8 + 4px);
+    width: calc((100% - 16px) * 3 / 8 - 26px);
+  }
+  .fviz-04 .fc-sl { font-size: 8px; }
+  .fviz-04 .fc-sl sup { display: none; }
+  .fviz-04 .fc-sb { font-size: 8px; }
+  .fviz-04 .fc-foot { padding: 0 8px 8px; }
+  .fviz-04 .fc-who { display: none; }
+  .fviz-04 .fc-gauge { display: none; }
+  .fviz-04 .is-queued { display: none; }
+  .fviz-04 .fc-plan { padding: 10px 8px 0; }
+  .fviz-04 .fc-seg { font-size: 9.5px; }
+  .fviz-04 .fc-seg > * { padding: 2px 5px; }
+  .fviz-04 .fc-seg > :nth-child(2),
+  .fviz-04 .fc-seg > :nth-child(4) { display: none; }
+  .fviz-04 .fc-doc { --gut: 34px; }
+  .fviz-04 .fc-churn { width: 30px; padding-right: 6px; }
+  .fviz-04 .fc-hot::before { left: 26px; }
+  .fviz-04 .fc-doc { height: 352px; padding-right: 8px; }
+  .fviz-04 .fc-bfull { display: none; }
+  .fviz-04 .fc-bcode { display: inline; }
+  .fviz-04 .fc-doc p { font-size: 12px; }
+  .fviz-04 .fc-selp { margin-top: 38px !important; }
+  .fviz-04 .fc-ti { font-size: 0; gap: 0; padding: 0 6px; }
+  .fviz-04 .fc-ti svg { width: 13px; height: 13px; color: var(--fg); }
+  .fviz-04 .fc-opt { display: none; }
+}

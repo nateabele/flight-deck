@@ -11,7 +11,7 @@ through a dozen terminal windows you can't tell apart.
 ## What it does
 
 - Sessions sit under the project they belong to. Drop a folder on the sidebar to add
-  one, drag sessions between projects, collapse what you're not watching.
+  one, reorder sessions and projects by dragging, collapse what you're not watching.
 - Each session is a real PTY rendered by Ghostty, not a log view. Escape sequences,
   scrollback and input all behave the way your agent expects.
 - Every row says what its agent is doing — working, blocked on you, running a shell

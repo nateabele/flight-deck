@@ -32,14 +32,17 @@ well for a one-off publish.
 
 ## On each release
 
-**The download link names the release asset directly.** Two occurrences in
-`index.html` (hero and closing CTA) point at the GitHub release asset,
-`releases/download/vX.Y.Z/FlightDeck-vX.Y.Z-macOS-arm64.zip`. Bump the tag and
-the file name together when a new release is published. `releases/latest/download/`
-can't stand in for it, because the asset name carries the version:
+**Nothing to edit.** Both download buttons in `index.html` (hero and closing
+CTA) link `releases/latest/download/FlightDeck-macOS-arm64.zip`, which GitHub
+redirects to that file on the newest non-draft, non-prerelease release. The
+file name carries no version: `.github/workflows/stable-download.yml` runs when
+a release is published, finds its `FlightDeck-vX.Y.Z-macOS-arm64.zip` asset and
+uploads a copy under the fixed name. A release published without that asset
+fails the workflow, and the buttons 404 until the zip is attached and the
+workflow re-run. To add the copy to an existing release:
 
 ```bash
-rg -n 'releases/download' index.html
+gh workflow run stable-download.yml -f tag=vX.Y.Z
 ```
 
 The build is signed but not notarized, so the closing CTA tells visitors to
