@@ -1,0 +1,40 @@
+# Gives every release a copy of its macOS zip under a fixed name, so the site can link
+# releases/latest/download/FlightDeck-macOS-arm64.zip and never needs editing per release.
+name: Stable download asset
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to add the stable asset to (e.g. v0.3.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  stable-asset:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      STABLE: FlightDeck-macOS-arm64.zip
+    steps:
+      - name: Copy the versioned zip to the stable name
+        run: |
+          set -euo pipefail
+          # Assets can land a moment after the release is published; give them a minute.
+          for i in $(seq 1 12); do
+            asset=$(gh release view "$TAG" --json assets -q \
+              '[.assets[].name | select(test("^FlightDeck-v.*-macOS-arm64\\.zip$"))][0] // ""')
+            [ -n "$asset" ] && break
+            sleep 5
+          done
+          [ -n "$asset" ] || { echo "no FlightDeck-v*-macOS-arm64.zip asset on $TAG" >&2; exit 1; }
+          gh release download "$TAG" --pattern "$asset" --dir dl
+          cp "dl/$asset" "dl/$STABLE"
+          gh release upload "$TAG" "dl/$STABLE" --clobber
+          echo "$TAG: $asset -> $STABLE"
