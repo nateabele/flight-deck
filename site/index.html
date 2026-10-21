@@ -69,15 +69,15 @@
     </p>
 
     <div class="hero-cta">
-      <!-- The current release asset. Bump the tag and file name together on each
-           release; github.com/…/releases/latest can't serve a versioned asset name. -->
-      <a class="btn btn-primary" href="https://github.com/nateabele/flight-deck/releases/download/v0.2.0/FlightDeck-v0.2.0-macOS-arm64.zip">Download for macOS</a>
+      <!-- Always the newest release: .github/workflows/stable-download.yml gives
+           every release a copy of its zip under this fixed name. -->
+      <a class="btn btn-primary" href="https://github.com/nateabele/flight-deck/releases/latest/download/FlightDeck-macOS-arm64.zip">Download for macOS</a>
       <!-- href is the no-JS fallback; demo.js intercepts the click and reveals
            the demo outright rather than playing the launch sequence. -->
       <a class="btn btn-secondary" href="#demo">See what it does</a>
     </div>
 
-    <p class="hero-note">Apple silicon · macOS 14 Sonoma or later · Works with Claude Code and Codex</p>
+    <p class="hero-note">Apple silicon · macOS 14 Sonoma or later · Works with Claude Code, Codex, Grok, Gemini and OpenCode</p>
   </div>
 </header>
 
@@ -190,12 +190,160 @@
             </p>
           </div>
         </div>
+        <figure class="fviz fviz-01">
+          <div class="fv-stage" aria-hidden="true">
+
+            <!-- The deck window: sidebar of projects and sessions, a terminal behind the ⌘K scrim -->
+            <div class="fv-win">
+              <div class="fv-titlebar">
+                <span class="fv-lights"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+                <span class="fv-wintitle">Flight Deck - atlas-api</span>
+              </div>
+              <div class="fv-split">
+                <div class="fv-side">
+                  <!-- orchard-app -->
+                  <div class="row row-project">
+                    <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="proj-name">orchard-app</span>
+                  </div>
+                  <div class="row row-session">
+                    <span class="slot"><span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span></span>
+                    <span class="row-title">Checkout flow refactor</span>
+                    <span class="trail"><span class="subcount">2</span></span>
+                  </div>
+                  <div class="row row-session">
+                    <span class="slot"><svg class="glyph glyph-waiting" viewBox="0 0 16 16" fill="none"><mask id="fv01-qm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M6.3 6.35a1.75 1.75 0 1 1 2.35 1.63c-.52.24-.72.6-.72 1.06v.28" stroke="black" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="8" cy="11.15" r="0.8" fill="black"/></mask><circle cx="8" cy="8" r="5.6" fill="currentColor" mask="url(#fv01-qm)"/></svg></span>
+                    <span class="row-title">Snapshot test flakes</span>
+                  </div>
+
+                  <!-- ledger-sync -->
+                  <div class="row row-project">
+                    <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="proj-name">ledger-sync</span>
+                  </div>
+                  <div class="row row-session">
+                    <span class="slot"><svg class="glyph glyph-unread" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <span class="row-title">Webhook retry backoff</span>
+                  </div>
+                  <div class="row row-session">
+                    <span class="slot"><span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span></span>
+                    <svg class="glyph glyph-bg" viewBox="0 0 16 16" fill="none"><mask id="fv01-tm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M4.5 6.2 6.9 8.05 4.5 9.9" stroke="black" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M8.1 10.15h2.9" stroke="black" stroke-width="1.15" stroke-linecap="round"/></mask><rect x="1.4" y="2.9" width="13.2" height="10.2" rx="2.4" fill="currentColor" mask="url(#fv01-tm)"/></svg>
+                    <span class="row-title">Postgres 16 migration</span>
+                  </div>
+
+                  <!-- atlas-api -->
+                  <div class="row row-project">
+                    <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="proj-name">atlas-api</span>
+                  </div>
+                  <div class="row row-session">
+                    <span class="slot"><svg class="glyph glyph-idle" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <span class="row-title">Rate limiter design</span>
+                  </div>
+                  <div class="row row-session selected">
+                    <span class="slot"><span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span></span>
+                    <span class="row-title">OpenAPI client regen</span>
+                  </div>
+
+                  <!-- docs-site, collapsed -->
+                  <div class="row row-project collapsed">
+                    <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="proj-name">docs-site</span>
+                    <span class="count">3</span>
+                  </div>
+                </div>
+
+                <div class="fv-term">
+                  <span class="l user"><span class="t-dim">❯</span> regenerate the OpenAPI client and fix every call site</span>
+                  <span class="l"><span class="b-ok">⏺</span> Bash(npm run gen:client)</span>
+                  <span class="l t-dim">  ⎿  Generated 42 operations into src/client/</span>
+                  <span class="l"><span class="b-ok">⏺</span> Update(src/routes/limits.ts)</span>
+                  <span class="l t-dim">  ⎿  Updated with 6 additions and 4 removals</span>
+                  <span class="l"><span class="b-run">⏺</span> Bash(npm test -- routes)</span>
+                  <span class="l spin"><span class="t-claude">✶ Regenerating…</span> <span class="t-dim">(1m 12s · ↓ 3.4k tokens)</span></span>
+                </div>
+              </div>
+              <div class="fv-scrim"></div>
+            </div>
+
+            <!-- ⌘K: query field, then a name match and transcript hits from different agents -->
+            <div class="fv-search">
+              <div class="fv-field">
+                <svg class="fv-mag" viewBox="0 0 16 16" fill="none"><circle cx="6.8" cy="6.8" r="4.6" stroke="currentColor" stroke-width="1.6"/><path d="m10.3 10.3 3.9 3.9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+                <span class="fv-query">retry backoff<span class="fv-caret"></span></span>
+                <svg class="fv-clear" viewBox="0 0 16 16" fill="none"><mask id="fv01-xm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M5.7 5.7l4.6 4.6M10.3 5.7l-4.6 4.6" stroke="black" stroke-width="1.4" stroke-linecap="round"/></mask><circle cx="8" cy="8" r="6.6" fill="currentColor" mask="url(#fv01-xm)"/></svg>
+              </div>
+              <div class="fv-results">
+                <!-- .session: an open tab whose name matches -->
+                <div class="fv-res sel">
+                  <svg class="fv-kind" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <div class="fv-res-body">
+                    <div class="fv-res-head"><span class="fv-res-title">Webhook <b>retry backoff</b></span><span class="fv-res-proj">ledger-sync</span></div>
+                    <div class="fv-res-detail">~/src/ledger-sync</div>
+                  </div>
+                  <span class="fv-res-when">4m ago</span>
+                </div>
+                <!-- .conversation: transcript hit, Claude -->
+                <div class="fv-res">
+                  <svg class="fv-kind" viewBox="0 0 16 16" fill="none"><path d="M2.5 4h11M2.5 7h7.5M2.5 10h11M2.5 13h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  <div class="fv-res-body">
+                    <div class="fv-res-head"><span class="fv-res-title">Checkout flow refactor</span><span class="fv-res-proj">orchard-app</span>
+                      <svg class="fv-agent" viewBox="0 0 16 16" fill="none"><title>Claude</title><path d="M8 1.6C8.5 5.3 10.7 7.5 14.4 8 10.7 8.5 8.5 10.7 8 14.4 7.5 10.7 5.3 8.5 1.6 8 5.3 7.5 7.5 5.3 8 1.6Z" fill="currentColor"/></svg></div>
+                    <div class="fv-res-detail">…confirming the payment intent should <b>retry</b> idempotently with <b>backoff</b>, reusing the same idempotency key so a slow 502 never charges twice…</div>
+                  </div>
+                  <span class="fv-res-when">2d ago</span>
+                </div>
+                <!-- .conversation: transcript hit, OpenCode -->
+                <div class="fv-res">
+                  <svg class="fv-kind" viewBox="0 0 16 16" fill="none"><path d="M2.5 4h11M2.5 7h7.5M2.5 10h11M2.5 13h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  <div class="fv-res-body">
+                    <div class="fv-res-head"><span class="fv-res-title">Rate limiter design</span><span class="fv-res-proj">atlas-api</span>
+                      <svg class="fv-agent" viewBox="0 0 16 16" fill="none"><title>OpenCode</title><path d="M6.2 2.2c-1.6 0-2.1.7-2.1 2v1.6c0 1-.5 1.6-1.6 1.9v.6c1.1.3 1.6.9 1.6 1.9v1.6c0 1.3.5 2 2.1 2M9.8 2.2c1.6 0 2.1.7 2.1 2v1.6c0 1 .5 1.6 1.6 1.9v.6c-1.1.3-1.6.9-1.6 1.9v1.6c0 1.3-.5 2-2.1 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+                    <div class="fv-res-detail">…a client that gets a 429 honours <b>Retry</b>-After first; exponential <b>backoff</b> with jitter only applies when the header is missing…</div>
+                  </div>
+                  <span class="fv-res-when">5d ago</span>
+                </div>
+                <!-- .conversation: transcript hit, Codex -->
+                <div class="fv-res fv-res-extra">
+                  <svg class="fv-kind" viewBox="0 0 16 16" fill="none"><path d="M2.5 4h11M2.5 7h7.5M2.5 10h11M2.5 13h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  <div class="fv-res-body">
+                    <div class="fv-res-head"><span class="fv-res-title">Payout reconciliation job</span><span class="fv-res-proj">ledger-sync</span>
+                      <svg class="fv-agent" viewBox="0 0 16 16" fill="none"><title>Codex</title><path d="M4.6 4.8 1.6 8l3 3.2M11.4 4.8l3 3.2-3 3.2M9.3 3.4 6.7 12.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+                    <div class="fv-res-detail">…exit non-zero so the scheduler's <b>retry</b> picks it up; its <b>backoff</b> already caps at six attempts…</div>
+                  </div>
+                  <span class="fv-res-when">2w ago</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- The same fleet, from any tab's shell -->
+            <div class="fv-cli">
+              <span class="l"><span class="t-dim">$</span> flightdeck ls</span>
+              <span class="l">PROJECT      ID        TITLE                   AGENT     ACTIVITY  WAITING</span>
+              <span class="l">orchard-app  3f9c21ab  Checkout flow refactor  <em>claude</em>    busy</span>
+              <span class="l">orchard-app  b71e0d42  Snapshot test flakes    <em>grok</em>      waiting   permission prompt</span>
+              <span class="l">ledger-sync  9a04c6e1  Webhook retry backoff   <em>codex</em>     idle</span>
+              <span class="l">ledger-sync  e2d85f17  Postgres 16 migration   <em>gemini</em>    busy</span>
+              <span class="l">atlas-api    51bb3a90  Rate limiter design     <em>opencode</em>  idle</span>
+              <span class="l">atlas-api    c6a7f2d8  OpenAPI client regen    <em>claude</em>    busy</span>
+            </div>
+          </div>
+          <figcaption class="fviz-cap">One sidebar for every project and agent: Claude Code, Codex, Gemini, Grok and OpenCode side by side, with ⌘K searching all their transcripts at once.</figcaption>
+        </figure>
         <ol class="capabilities">
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Every agent in one place</h4>
               <p>Sessions nest under the project they belong to. Add a project by dropping a folder on the sidebar.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Five agents, side by side</h4>
+              <p>Open a tab on Claude Code, Codex, Grok, Gemini or OpenCode. Each is a first-class row with live status, transcript search, and a model you pick per agent and per project.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -219,7 +367,7 @@
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Find any conversation, from any agent</h4>
-              <p>⌘K searches session and project names plus the transcript history of every project in the sidebar, across Claude Code and Codex, with the matching words in context. Jump to a live session, or resume an old conversation into a new tab.</p>
+              <p>⌘K searches session and project names plus the transcript history of every project in the sidebar, across all five agents, with the matching words in context. Jump to a live session, or resume an old conversation into a new tab on its own agent.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -227,7 +375,7 @@
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Drive the fleet from a script</h4>
-              <p>A <code>flightdeck</code> command-line tool talks to the running app over a local control socket, from any tab's own shell: list sessions, send one a prompt, wait for the answer. Agents can orchestrate agents.</p>
+              <p>A <code>flightdeck</code> command-line tool talks to the running app over a local control socket, from any tab's own shell: list sessions, send one a prompt, wait for the answer, or run a command on another machine. Agents can orchestrate agents.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -235,7 +383,7 @@
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Arranged the way you think</h4>
-              <p>Drag sessions between projects and reorder projects themselves with the same gesture. Collapse the ones you're not watching.</p>
+              <p>Reorder sessions within a project and drag projects themselves into the order you want. Collapse the ones you're not watching.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -263,6 +411,129 @@
             </p>
           </div>
         </div>
+        <figure class="fviz fviz-02">
+          <div class="fv-stage" aria-hidden="true">
+
+            <!-- Mac: the session sidebar (SessionSidebar.swift / SessionStatusIcon.swift) -->
+            <div class="fv-mac">
+              <div class="fv-side">
+                <div class="fv-tbar"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+                <div class="fv-list">
+
+                  <div class="fv-row fv-proj">
+                    <svg class="fv-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv-pname">orchard-app</span>
+                  </div>
+
+                  <!-- busy + sub-agent count at the trailing edge -->
+                  <div class="fv-row fv-sess" data-k="busy">
+                    <span class="fv-slot"><span class="fv-spin"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></span>
+                    <span class="fv-title">refactor-checkout</span>
+                    <span class="fv-sub">3</span>
+                  </div>
+
+                  <!-- waiting: questionmark.circle.fill, orange; a phone has it open -->
+                  <div class="fv-row fv-sess fv-blocked" data-k="wait">
+                    <span class="fv-slot">
+                      <svg class="fv-g fv-g-wait" viewBox="0 0 16 16" fill="none"><mask id="fv02-qm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M6.3 6.35a1.75 1.75 0 1 1 2.35 1.63c-.52.24-.72.6-.72 1.06v.28" stroke="black" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="8" cy="11.15" r="0.8" fill="black"/></mask><circle cx="8" cy="8" r="5.6" fill="currentColor" mask="url(#fv02-qm)"/></svg>
+                    </span>
+                    <svg class="fv-g fv-g-phone" viewBox="0 0 16 16" fill="none"><rect x="4.4" y="1.6" width="7.2" height="12.8" rx="1.9" stroke="currentColor" stroke-width="1.35"/><rect x="6.7" y="3" width="2.6" height="0.9" rx="0.45" fill="currentColor"/></svg>
+                    <span class="fv-title">migrate-schema</span>
+                  </div>
+
+                  <!-- idle + background-command badge -->
+                  <div class="fv-row fv-sess" data-k="bg">
+                    <span class="fv-slot"><svg class="fv-g fv-g-idle" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <svg class="fv-g fv-g-bg" viewBox="0 0 16 16" fill="none"><mask id="fv02-tm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M4.5 6.2 6.9 8.05 4.5 9.9" stroke="black" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M8.1 10.15h2.9" stroke="black" stroke-width="1.15" stroke-linecap="round"/></mask><rect x="1.4" y="2.9" width="13.2" height="10.2" rx="2.4" fill="currentColor" mask="url(#fv02-tm)"/></svg>
+                    <span class="fv-title">e2e-suite</span>
+                  </div>
+
+                  <!-- idle, unread: accent dot -->
+                  <div class="fv-row fv-sess" data-k="unread">
+                    <span class="fv-slot"><svg class="fv-g fv-g-unread" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <span class="fv-title">release-notes</span>
+                  </div>
+
+                  <!-- idle, read: primary at 10% -->
+                  <div class="fv-row fv-sess" data-k="idle">
+                    <span class="fv-slot"><svg class="fv-g fv-g-idle" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <span class="fv-title">copy-tweaks</span>
+                  </div>
+
+                  <!-- collapsed project: count + the most demanding state underneath -->
+                  <div class="fv-row fv-proj fv-collapsed" data-k="fold">
+                    <svg class="fv-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv-pname">ledger-sync</span>
+                    <span class="fv-count">2</span>
+                    <span class="fv-spin"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  </div>
+
+                </div>
+              </div>
+
+              <!-- The row tooltips, verbatim from SessionStatus.tooltip(unread:backgroundWork:) -->
+              <ul class="fv-legend">
+                <li data-k="busy"><span class="fv-lead"></span>Working — 3 subagents</li>
+                <li data-k="wait" class="fv-hot"><span class="fv-lead"></span>Waiting for you</li>
+                <li data-k="bg"><span class="fv-lead"></span>Idle — background command running</li>
+                <li data-k="unread"><span class="fv-lead"></span>Finished — not yet viewed</li>
+                <li data-k="idle"><span class="fv-lead"></span>Idle</li>
+                <li data-k="fold"><span class="fv-lead"></span>2 sessions, collapsed, Working</li>
+              </ul>
+            </div>
+
+            <!-- Connector: the blocked row to the card on the phone -->
+            <svg class="fv-wire" viewBox="0 0 100 100" preserveAspectRatio="none" fill="none">
+              <path class="fv-wire-base" d="M0 0 C 55 0, 45 100, 100 100" vector-effect="non-scaling-stroke"/>
+              <path class="fv-wire-flow" d="M0 0 C 55 0, 45 100, 100 100" vector-effect="non-scaling-stroke"/>
+            </svg>
+
+            <!-- iPhone: SessionTimelineScreen with PromptCard in its bottom inset -->
+            <div class="fv-phone">
+              <div class="fv-screen">
+                <div class="fv-status">
+                  <span class="fv-time">9:41</span>
+                  <span class="fv-island"></span>
+                  <span class="fv-sicons">
+                    <svg viewBox="0 0 18 12"><rect x="0" y="8" width="3" height="4" rx="0.8"/><rect x="5" y="5.5" width="3" height="6.5" rx="0.8"/><rect x="10" y="3" width="3" height="9" rx="0.8"/><rect x="15" y="0" width="3" height="12" rx="0.8"/></svg>
+                    <svg viewBox="0 0 26 12"><rect x="0.6" y="0.6" width="22" height="10.8" rx="3.2" fill="none" stroke="currentColor" stroke-width="1.1" opacity="0.4"/><rect x="2.4" y="2.4" width="15" height="7.2" rx="1.8"/><rect x="24" y="4" width="1.6" height="4" rx="0.8" opacity="0.4"/></svg>
+                  </span>
+                </div>
+
+                <div class="fv-nav">
+                  <span class="fv-back"><svg viewBox="0 0 16 16" fill="none"><path d="M10 3.4 5.4 8 10 12.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                  <span class="fv-navtitle">migrate-schema</span>
+                </div>
+
+                <div class="fv-feed">
+                  <div class="fv-waiting">
+                    <svg viewBox="0 0 16 16" fill="none"><mask id="fv02-qm2" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><path d="M6.3 6.35a1.75 1.75 0 1 1 2.35 1.63c-.52.24-.72.6-.72 1.06v.28" stroke="black" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="8" cy="11.15" r="0.8" fill="black"/></mask><circle cx="8" cy="8" r="6.4" fill="currentColor" mask="url(#fv02-qm2)"/></svg>
+                    Waiting for you
+                  </div>
+                </div>
+
+                <!-- PromptCard: a lone single-select question (answers on the tap) -->
+                <div class="fv-card">
+                  <div class="fv-chead">
+                    <svg class="fv-circ" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="currentColor" opacity="0.28"/><path d="M6.3 8.4 10 12 13.7 8.4" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv-hdr">OLD TABLE</span>
+                    <svg class="fv-circ fv-x" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="currentColor" opacity="0.28"/><path d="M7.2 7.2 12.8 12.8M12.8 7.2 7.2 12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                  </div>
+                  <div class="fv-q">What should happen to the old orders table after the migration?</div>
+                  <div class="fv-opt"><b>Drop it now</b><span>Removed once the row counts match.</span></div>
+                  <div class="fv-opt fv-tap"><b>Keep it read-only</b><span>Renamed to orders_archive for one release.</span></div>
+                  <div class="fv-opt"><b>Leave it as is</b></div>
+                  <div class="fv-typed">
+                    <span class="fv-ph"><i class="fv-caret"></i>Type something</span>
+                    <svg class="fv-send" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="currentColor"/><path d="M10 14.2V6.2M6.6 9.4 10 6 13.4 9.4" stroke="#1c1c1e" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          <figcaption class="fviz-cap">The sidebar shows each agent's state at a glance. When one stops to ask a question, you can answer it from your phone.</figcaption>
+        </figure>
         <ol class="capabilities">
           <li>
             <span class="cap-num" aria-hidden="true"></span>
@@ -276,7 +547,7 @@
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Subagent fan-out, live</h4>
-              <p>When a session dispatches parallel subagents, the count appears next to its spinner. You can see which sessions are genuinely expensive right now.</p>
+              <p>When a session dispatches parallel subagents, the count appears next to its spinner, and the tooltip names the one waiting on you. You can see which sessions are genuinely expensive right now.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -307,8 +578,16 @@
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
+              <h4>Usage you can see coming</h4>
+              <p>Each account's rate-limit windows show as meters with soft and hard limits, fed by every tab and planning run that bills it.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
               <h4>The fleet in your pocket</h4>
-              <p>An iPhone companion pairs with your Mac over the local network — scan a QR code or type a short code — and shows the same fleet: every project, every session, with the conversation readable. Rename, mark read, or close from either side.</p>
+              <p>An iPhone companion pairs with your Mac over the local network — scan a QR code or type a short code — and shows the same fleet: every project, every session, with the conversation readable. It opens instantly on the fleet it last saw. Rename, mark read, or close from either side.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -316,7 +595,15 @@
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Answer a blocked agent from the phone</h4>
-              <p>When an agent stops to ask you something, the question appears on your phone. Pick an option, or answer in your own words, and the agent carries on.</p>
+              <p>When an agent stops to ask you something, the question or permission prompt appears on your phone, for every supported agent. Pick an option, type an answer, or dismiss it, and the agent carries on. A half-written reply survives a crash.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Subagents, menus and sign-ins too</h4>
+              <p>See a session's subagents on the phone and answer the one that is actually asking. Numbered menus and sign-in prompts that only appear on an agent's screen reach the phone as well, so a login never strands an agent.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
@@ -340,10 +627,159 @@
             <p class="lede">
               A dozen live conversations is a lot of state to lose to a restart. Flight Deck
               treats the whole fleet as durable: quit, update, reboot, and come back to the
-              same deck you left.
+              same deck you left — and borrow another machine when this one isn't enough.
             </p>
           </div>
         </div>
+        <figure class="fviz fviz-03">
+          <div class="fv3-stage" aria-hidden="true">
+
+            <!-- Left column: this Mac's deck, then the machines it can run on -->
+            <div class="fv3-col">
+
+              <!-- This Mac: the sidebar after a relaunch, every session reattached -->
+              <section class="fv3-card fv3-mac">
+                <header class="fv3-head">
+                  <svg class="fv3-ico" viewBox="0 0 16 16" fill="none">
+                    <rect x="2.6" y="3.2" width="10.8" height="7.4" rx="1.3" stroke="currentColor" stroke-width="1.3"/>
+                    <path d="M1 12.6h14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  </svg>
+                  <span class="fv3-head-title">This Mac</span>
+                  <span class="fv3-head-cap">12 sessions · 4 projects</span>
+                </header>
+
+                <div class="fv3-list">
+                  <div class="fv3-row fv3-proj">
+                    <svg class="fv3-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv3-name">orchard-app</span>
+                  </div>
+                  <div class="fv3-row fv3-sess fv3-sel">
+                    <span class="fv3-slot"><span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span></span>
+                    <span class="fv3-title">Checkout flow UI tests</span>
+                    <span class="fv3-sub">2</span>
+                  </div>
+                  <div class="fv3-row fv3-sess">
+                    <span class="fv3-slot"><svg class="fv3-dot fv3-unread" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg></span>
+                    <svg class="fv3-bg" viewBox="0 0 16 16" fill="none">
+                      <mask id="fv3-tm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+                        <rect width="16" height="16" fill="white"/>
+                        <path d="M4.5 6.2 6.9 8.05 4.5 9.9" stroke="black" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                        <path d="M8.1 10.15h2.9" stroke="black" stroke-width="1.15" stroke-linecap="round"/>
+                      </mask>
+                      <rect x="1.4" y="2.9" width="13.2" height="10.2" rx="2.4" fill="currentColor" mask="url(#fv3-tm)"/>
+                    </svg>
+                    <span class="fv3-title">Cart totals rounding</span>
+                  </div>
+                  <div class="fv3-row fv3-proj fv3-collapsed">
+                    <svg class="fv3-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv3-name">ledger-sync</span>
+                    <span class="fv3-count">4</span>
+                    <svg class="fv3-dot fv3-waiting" viewBox="0 0 16 16" fill="none">
+                      <mask id="fv3-qm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+                        <rect width="16" height="16" fill="white"/>
+                        <path d="M6.3 6.35a1.75 1.75 0 1 1 2.35 1.63c-.52.24-.72.6-.72 1.06v.28" stroke="black" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+                        <circle cx="8" cy="11.15" r="0.8" fill="black"/>
+                      </mask>
+                      <circle cx="8" cy="8" r="5.6" fill="currentColor" mask="url(#fv3-qm)"/>
+                    </svg>
+                  </div>
+                  <div class="fv3-row fv3-proj fv3-collapsed">
+                    <svg class="fv3-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv3-name">atlas-api</span>
+                    <span class="fv3-count">3</span>
+                    <span class="fv3-slot-r"><span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span></span>
+                  </div>
+                  <div class="fv3-row fv3-proj fv3-collapsed">
+                    <svg class="fv3-chev" viewBox="0 0 16 16" fill="none"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="fv3-name">docs-site</span>
+                    <span class="fv3-count">3</span>
+                    <svg class="fv3-dot fv3-unread" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" fill="currentColor"/></svg>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Paired Hosts, as Settings → Hosts lists them, each with what it is running -->
+              <section class="fv3-card fv3-hosts">
+                <header class="fv3-head">
+                  <span class="fv3-head-title">Paired Hosts</span>
+                  <span class="fv3-head-cap">flightdeck ps</span>
+                </header>
+                <ul class="fv3-hostlist">
+                  <li class="fv3-host">
+                    <div class="fv3-hline">
+                      <i class="fv3-led fv3-on"></i>
+                      <span class="fv3-hname">studio-mini</span>
+                      <span class="fv3-plat">macOS</span>
+                      <span class="fv3-detail">Connected</span>
+                    </div>
+                    <div class="fv3-run">
+                      <span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span>
+                      <span class="fv3-rid">r14</span><span class="fv3-cmd">xcodebuild test -scheme Orchard</span>
+                    </div>
+                  </li>
+                  <li class="fv3-host">
+                    <div class="fv3-hline">
+                      <i class="fv3-led fv3-on"></i>
+                      <span class="fv3-hname">build-linux</span>
+                      <span class="fv3-plat">Linux</span>
+                      <span class="fv3-detail">Connected</span>
+                    </div>
+                    <div class="fv3-run">
+                      <svg class="fv3-ok" viewBox="0 0 16 16" fill="none"><path d="M3.6 8.4 6.6 11.2 12.4 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      <span class="fv3-rid">r12</span><span class="fv3-cmd">make check</span><span class="fv3-exit">exit 0</span>
+                    </div>
+                  </li>
+                  <li class="fv3-host">
+                    <div class="fv3-hline">
+                      <i class="fv3-led fv3-on"></i>
+                      <span class="fv3-hname">cloud-runner-1</span>
+                      <span class="fv3-plat">Linux</span>
+                      <span class="fv3-cloud">
+                        <svg viewBox="0 0 16 16" fill="none"><path d="M4.6 12.4h7a2.9 2.9 0 0 0 .4-5.77A3.9 3.9 0 0 0 4.5 7.4a2.5 2.5 0 0 0 .1 5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+                        Cloud
+                      </span>
+                      <span class="fv3-cost">$0.80/h est. · ~$0.96</span>
+                      <span class="fv3-detail">Connected</span>
+                    </div>
+                    <div class="fv3-run">
+                      <span class="spinner"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span>
+                      <span class="fv3-rid">r13</span><span class="fv3-cmd">pytest -n 8 tests/integration</span>
+                    </div>
+                  </li>
+                </ul>
+              </section>
+            </div>
+
+            <!-- Right: the selected session's terminal, streaming a delegated run -->
+            <div class="fv3-term">
+              <div class="fv3-tbar">
+                <span class="fv3-lights"><i></i><i></i><i></i></span>
+                <span class="fv3-ttitle">Checkout flow UI tests</span>
+              </div>
+              <div class="fv3-tbody">
+                <span class="fv3-l fv3-early"><span class="fv3-ps">❯</span> flightdeck run --on build-linux -- make check</span>
+                <span class="fv3-l fv3-early fv3-dim">flightdeck: r12 running on build-linux</span>
+                <span class="fv3-l fv3-early">ok  &nbsp;orchard-app/pricing   1.842s</span>
+                <span class="fv3-l fv3-early">ok  &nbsp;orchard-app/cart      3.117s</span>
+                <span class="fv3-l fv3-gap"></span>
+                <span class="fv3-l fv3-early"><span class="fv3-ps">❯</span> flightdeck run --on cloud-runner-1 --detach -- pytest -n 8 tests/integration</span>
+                <span class="fv3-l fv3-early fv3-dim">flightdeck: cloud-runner-1 · m7i.4xlarge · $0.80/h est. · up 1h12m · ~$0.96 · TTL 2h48m · month ~$14.20 of $50</span>
+                <span class="fv3-l fv3-early">r13 started on cloud-runner-1</span>
+                <span class="fv3-l fv3-early">flightdeck wait r13 for its result</span>
+                <span class="fv3-l fv3-gap"></span>
+                <span class="fv3-l"><span class="fv3-ps">❯</span> flightdeck run --on studio-mini -- xcodebuild test -scheme Orchard</span>
+                <span class="fv3-l fv3-dim fv3-s s1">flightdeck: r14 running on studio-mini</span>
+                <span class="fv3-l fv3-s s2">Test Suite 'OrchardUITests' started at 2026-10-21 14:02:11.348</span>
+                <span class="fv3-l fv3-s s3">Test Case '-[OrchardUITests.CheckoutFlowTests testGuestCheckout]' started.</span>
+                <span class="fv3-l fv3-s s4">Test Case '-[OrchardUITests.CheckoutFlowTests testGuestCheckout]' <span class="fv3-pass">passed</span> (6.214 seconds).</span>
+                <span class="fv3-l fv3-s s5">Test Case '-[OrchardUITests.CheckoutFlowTests testSavedCard]' started.</span>
+                <span class="fv3-l fv3-s s6">Test Case '-[OrchardUITests.CheckoutFlowTests testSavedCard]' <span class="fv3-pass">passed</span> (4.870 seconds).</span>
+                <span class="fv3-l fv3-s s7">Test Case '-[OrchardUITests.CartTests testQuantityStepper]' started.<span class="fv3-caret"></span></span>
+              </div>
+            </div>
+          </div>
+          <figcaption class="fviz-cap">Every session lives in its own background process and comes back after a relaunch, while UI tests stream from a Mac mini and other runs go to a Linux box and a cloud machine.</figcaption>
+        </figure>
         <ol class="capabilities">
           <li>
             <span class="cap-num" aria-hidden="true"></span>
@@ -401,6 +837,30 @@
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Pair another Mac or Linux box</h4>
+              <p>Settings → Hosts pairs a second Mac with a short code, or a Linux machine with one pasted command, over the LAN or Tailscale.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Run it on another machine</h4>
+              <p><code>flightdeck run --on &lt;host&gt;</code> syncs your uncommitted work, streams the output and returns the remote exit code. Bring the changes back with <code>diff</code> and <code>apply</code>, and keep services up with their ports forwarded. Recipes and routes let agents send UI tests or heavy builds elsewhere on their own.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Cloud machines on demand</h4>
+              <p>Declare a machine and Flight Deck creates it in your own AWS or GCP account when a run needs it, with a cost line on every command and a hard time, idle and budget limit that destroys it.</p>
+            </div>
+            <span class="tag tag-building">Building</span>
+          </li>
         </ol>
       </article>
 
@@ -417,52 +877,238 @@
             </p>
           </div>
         </div>
+        <figure class="fviz fviz-04">
+          <div class="fc-win" aria-hidden="true">
+            <svg class="fc-defs" width="0" height="0" focusable="false">
+              <defs>
+                <symbol id="fv4-pause" viewBox="0 0 16 16"><rect x="3.5" y="2.5" width="3.2" height="11" rx="1"/><rect x="9.3" y="2.5" width="3.2" height="11" rx="1"/></symbol>
+                <symbol id="fv4-step" viewBox="0 0 16 16"><path d="M3 3.2v9.6c0 .6.6.9 1.1.6l7-4.8c.4-.3.4-.9 0-1.2l-7-4.8C3.6 2.3 3 2.6 3 3.2z"/><rect x="11.6" y="2.6" width="2" height="10.8" rx=".9"/></symbol>
+                <symbol id="fv4-major" viewBox="0 0 16 16"><path d="M1.2 4v8c0 .5.5.8.9.5l5-4c.3-.3.3-.7 0-1l-5-4c-.4-.3-.9 0-.9.5zM7.2 4v8c0 .5.5.8.9.5l5-4c.3-.3.3-.7 0-1l-5-4c-.4-.3-.9 0-.9.5z"/><rect x="13" y="3" width="1.8" height="10" rx=".8"/></symbol>
+                <symbol id="fv4-review" viewBox="0 0 18 16"><path d="M1 4v8c0 .5.5.8.9.5l5-4c.3-.3.3-.7 0-1l-5-4C1.5 3.2 1 3.5 1 4zM7 4v8c0 .5.5.8.9.5l5-4c.3-.3.3-.7 0-1l-5-4C7.5 3.2 7 3.5 7 4z"/><path d="M15.5 6.2l2 1.8-2 1.8-2-1.8z"/></symbol>
+                <symbol id="fv4-stop" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.8"/></symbol>
+                <symbol id="fv4-chev" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+                <symbol id="fv4-flag" viewBox="0 0 10 10"><path d="M2 1v8.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M2.4 1.4h5.8l-1.4 2.1 1.4 2.1H2.4z"/></symbol>
+                <symbol id="fv4-plus" viewBox="0 0 10 10"><path d="M5 2v6M2 5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+                <symbol id="fv4-done" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7"/><path d="M4.8 8.3l2.2 2.2 4.2-4.6" fill="none" stroke="var(--fc-hole)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+                <symbol id="fv4-run" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="3.4"/></symbol>
+                <symbol id="fv4-queued" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2.2"/></symbol>
+                <symbol id="fv4-people" viewBox="0 0 16 12"><circle cx="5.5" cy="3.2" r="2.4"/><path d="M1 11c0-2.6 2-4.3 4.5-4.3S10 8.4 10 11z"/><circle cx="11.2" cy="3.6" r="2"/><path d="M10.8 11c0-1.6-.5-2.9-1.4-3.8.6-.3 1.2-.4 1.8-.4 2.1 0 3.8 1.5 3.8 4.2z"/></symbol>
+                <symbol id="fv4-comment" viewBox="0 0 16 16"><path d="M3 2.5h10c1 0 1.6.6 1.6 1.6v6c0 1-.6 1.6-1.6 1.6H8l-3.2 2.6v-2.6H3c-1 0-1.6-.6-1.6-1.6v-6c0-1 .6-1.6 1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M4.6 5.6h6.8M4.6 8.2h4.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol>
+                <symbol id="fv4-question" viewBox="0 0 16 16"><path d="M3 2.5h10c1 0 1.6.6 1.6 1.6v6c0 1-.6 1.6-1.6 1.6H8l-3.2 2.6v-2.6H3c-1 0-1.6-.6-1.6-1.6v-6c0-1 .6-1.6 1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6.5 5.4c.2-.8.8-1.2 1.6-1.2.9 0 1.6.6 1.6 1.4 0 1.1-1.5 1.2-1.5 2.3" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><circle cx="8.2" cy="9.4" r=".7"/></symbol>
+                <symbol id="fv4-must" viewBox="0 0 16 16"><path d="M3 2.5h10c1 0 1.6.6 1.6 1.6v6c0 1-.6 1.6-1.6 1.6H8l-3.2 2.6v-2.6H3c-1 0-1.6-.6-1.6-1.6v-6c0-1 .6-1.6 1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 4.4v3.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="9.4" r=".75"/></symbol>
+                <symbol id="fv4-replace" viewBox="0 0 16 16"><path d="M5.5 3.5L2.5 6.2l3 2.7M2.8 6.2h10.4M10.5 7.4l3 2.7-3 2.7M13.2 10.1H2.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+                <symbol id="fv4-delete" viewBox="0 0 16 16"><path d="M5.6 3.4h7.6c.8 0 1.4.6 1.4 1.4v6.4c0 .8-.6 1.4-1.4 1.4H5.6L1.6 8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M7.6 6l4 4M11.6 6l-4 4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol>
+                <symbol id="fv4-hl" viewBox="0 0 16 16"><path d="M9.8 2.4l3.8 3.8-5.4 5.4-3.8-3.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M4.4 7.8L3 11.6l1.4 1.4 3.8-1.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M1.5 14.2h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+                <symbol id="fv4-claude" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#d97757"/><path d="M8 3.6v8.8M3.6 8h8.8M4.9 4.9l6.2 6.2M11.1 4.9l-6.2 6.2" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></symbol>
+                <symbol id="fv4-codex" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#000"/><circle cx="8" cy="8" r="7.75" fill="none" stroke="rgba(255,255,255,.18)" stroke-width=".5"/><path d="M4.6 5.6L7 8l-2.4 2.4M8.4 10.6h3" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+              </defs>
+            </svg>
+
+            <!-- Title bar: the intake, and its state pill -->
+            <div class="fc-titlebar">
+              <span class="fc-lights"><i></i><i></i><i></i></span>
+              <span class="fc-title">Add offline sync to orchard-app <span class="fc-pill">running · Refine 2</span></span>
+            </div>
+
+            <div class="fc-body">
+
+              <!-- ================= The plan, being annotated ================= -->
+              <section class="fc-plan">
+                <div class="fc-viewbar">
+                  <span class="fc-seg"><b>Plan</b><span>Diff vs Previous</span><span>Task Graph</span><span>Task Changes</span></span>
+                  <span class="fc-editchip">1 edit by you <i>·</i> <b>Revert all</b></span>
+                </div>
+
+                <div class="fc-doc">
+                  <div class="fc-sec">
+                    <div class="fc-churn"><span class="fc-cap">still since R1</span><span class="fc-bars"><i style="--h:.8"></i><i class="z"></i></span></div>
+                    <h5>2. Local store</h5>
+                    <p>SQLite through the existing <code>db/</code> layer; every synced table gains <code>updated_at</code> and <code>device_id</code>.</p>
+                  </div>
+
+                  <div class="fc-sec fc-hot">
+                    <div class="fc-churn"><span class="fc-cap">reopened ×1</span><span class="fc-bars"><i style="--h:1"></i><i style="--h:.55"></i></span></div>
+                    <h5>3. Sync queue</h5>
+                    <p>Offline writes land in a local outbox, one row per mutation, keyed by a per-device sequence number. <mark class="fc-note">Replay runs oldest-first when the network returns.</mark></p>
+                    <p class="fc-selp">
+                      <span class="fc-toolbar">
+                        <span class="fc-ti"><svg><use href="#fv4-comment"/></svg>Comment</span><span class="fc-ti"><svg><use href="#fv4-question"/></svg>Question</span><span class="fc-ti fc-hover"><svg><use href="#fv4-must"/></svg>Must change</span><span class="fc-ti fc-opt"><svg><use href="#fv4-replace"/></svg>Replace</span><span class="fc-ti fc-opt"><svg><use href="#fv4-delete"/></svg>Delete</span><span class="fc-tsep"></span><span class="fc-ti"><svg><use href="#fv4-hl"/></svg>Highlight</span>
+                      </span>
+                      <span class="fc-sel">Conflicts resolve last-writer-wins on the server clock</span>, except checklist items, which merge per item.
+                    </p>
+                    <p class="fc-edited"><ins>After five failed attempts a row moves to the dead-letter table.</ins></p>
+                  </div>
+
+                  <div class="fc-sec fc-fade">
+                    <div class="fc-churn"><span class="fc-cap">settling</span><span class="fc-bars"><i style="--h:.7"></i><i style="--h:.3"></i></span></div>
+                    <h5>4. Conflict UI</h5>
+                    <p>A banner on the affected record names the device that won and offers the other version.</p>
+                  </div>
+                </div>
+              </section>
+
+              <!-- ================= The run: control bar, board, agents ================= -->
+              <section class="fc-run">
+                <!-- Control bar: transport + LCD -->
+                <div class="fc-ctrl">
+                  <span class="fc-cluster">
+                    <i class="fc-key"><svg><use href="#fv4-pause"/></svg></i>
+                    <i class="fc-csep"></i>
+                    <i class="fc-key"><svg><use href="#fv4-step"/></svg></i>
+                    <i class="fc-key fc-default"><svg><use href="#fv4-major"/></svg></i>
+                    <i class="fc-key fc-wide"><svg viewBox="0 0 18 16"><use href="#fv4-review"/></svg></i>
+                    <i class="fc-csep"></i>
+                    <i class="fc-key"><svg><use href="#fv4-stop"/></svg></i>
+                  </span>
+                  <span class="fc-lcd">
+                    <span class="fc-cell">
+                      <b>REFINE 2</b><small>running · of 3</small>
+                    </span>
+                    <span class="fc-cell fc-conv">
+                      <svg class="fc-spark" viewBox="0 0 44 20" preserveAspectRatio="none">
+                        <path class="fl" d="M0 15.5H44"/>
+                        <path class="ln" d="M1.5 3 L15 7.5 L29 11"/>
+                        <path class="dt" d="M29 11 L42.5 13.4"/>
+                        <circle class="hol" cx="15" cy="7.5" r="2"/>
+                        <circle class="end" cx="42.5" cy="13.4" r="2.4"/>
+                      </svg>
+                      <span class="fc-cw"><b>CONVERGING ↘</b><small>5 changes <svg><use href="#fv4-chev"/></svg></small></span>
+                    </span>
+                    <span class="fc-cell fc-cov">
+                      <b>FEW LEFT</b><small>cross-check R1</small>
+                    </span>
+                  </span>
+                </div>
+
+                <!-- Departures board -->
+                <div class="fc-board">
+                  <div class="fc-fields">
+                    <div class="fc-f fc-now">
+                      <span class="fc-lbl">NOW</span>
+                      <span class="fc-val"><b>Refine 2</b><em class="fc-chip">ON COURSE</em></span>
+                      <span class="fc-det">Leg 4 of 8</span>
+                    </div>
+                    <div class="fc-f fc-air">
+                      <span class="fc-lbl">IN THE AIR</span>
+                      <span class="fc-val"><b class="fc-clock">3:12</b></span>
+                    </div>
+                    <div class="fc-f fc-stop">
+                      <span class="fc-lbl">STOPS AT</span>
+                      <span class="fc-val"><b>Encode</b></span>
+                      <span class="fc-det">major · next major</span>
+                    </div>
+                  </div>
+
+                  <div class="fc-tape">
+                    <div class="fc-bracket"><span class="fc-btitle"><span class="fc-bfull">REFINE 2 OF 3</span><span class="fc-bcode">RF 2 OF 3</span></span><i class="fc-handle"><svg><use href="#fv4-plus"/></svg></i></div>
+                    <div class="fc-slot s-done" style="--l:6px;--r:6px"><span class="fc-sl">DRFT</span><span class="fc-sb">6:05</span></div>
+                    <div class="fc-slot s-done s-major" style="--l:6px;--r:6px"><span class="fc-sl">SYN</span><span class="fc-sb">3:40</span></div>
+                    <div class="fc-slot s-done" style="--l:6px;--r:2px"><span class="fc-sl">RF1<sup>×2</sup><svg class="fc-flag"><use href="#fv4-flag"/></svg></span><span class="fc-sb">4:48</span></div>
+                    <div class="fc-slot s-live" style="--l:2px;--r:2px"><span class="fc-sl">RF2<sup>×2</sup></span><span class="fc-sb"><i class="fc-head"></i></span></div>
+                    <div class="fc-slot s-future" style="--l:2px;--r:6px"><span class="fc-sl">RF3</span><span class="fc-sb"></span></div>
+                    <div class="fc-slot s-future s-target s-major" style="--l:6px;--r:6px"><span class="fc-sl">ENC</span><span class="fc-sb"></span></div>
+                    <div class="fc-slot s-future" style="--l:6px;--r:6px"><span class="fc-sl">PL1</span><span class="fc-sb"></span></div>
+                    <div class="fc-slot s-future s-major s-last" style="--l:6px;--r:0px"><span class="fc-sl">REV</span><span class="fc-sb"></span></div>
+                  </div>
+                  <div class="fc-foot"><span>DEP · CLR</span><span>ARR · REV</span></div>
+                </div>
+
+                <!-- The round's agents -->
+                <div class="fc-seats">
+                  <div class="fc-sh">
+                    <span class="fc-rchip"><i class="fc-dot"></i>Refine 2<svg class="fc-pp"><use href="#fv4-people"/></svg><span class="fc-stack"><svg><use href="#fv4-claude"/></svg><svg><use href="#fv4-codex"/></svg></span></span>
+                    <span class="fc-count">1 of 3 agents done</span>
+                  </div>
+                  <div class="fc-seat is-done">
+                    <svg class="fc-g"><use href="#fv4-done"/></svg>
+                    <div class="fc-sm">
+                      <div class="fc-id"><span class="fc-role">reviewer</span><span class="fc-who">Claude &gt; Opus 5.5 · high</span><span class="fc-t">2:41</span></div>
+                      <div class="fc-out">Finished · 14 files in 4 directories</div>
+                    </div>
+                  </div>
+                  <div class="fc-seat is-run">
+                    <svg class="fc-g"><use href="#fv4-run"/></svg>
+                    <div class="fc-sm">
+                      <div class="fc-id"><span class="fc-role">cross-check agent</span><span class="fc-who">Codex &gt; GPT 6 Sol · high</span><span class="fc-t">3:12</span></div>
+                      <div class="fc-head1">Checking §3 Sync queue against the conflict rules</div>
+                      <div class="fc-act"><span>Reading src/sync/outbox.ts</span><span class="fc-gauge"><i><b style="width:30%"></b></i>118k of 400k</span></div>
+                    </div>
+                  </div>
+                  <div class="fc-seat is-queued">
+                    <svg class="fc-g"><use href="#fv4-queued"/></svg>
+                    <div class="fc-sm">
+                      <div class="fc-id"><span class="fc-role">integrator</span><span class="fc-who">Claude &gt; Sonnet 5 · medium</span></div>
+                      <div class="fc-q">Queued</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+          <figcaption class="fviz-cap">Flight Control mid-run: you mark up the plan while a second model family cross-checks Refine 2, and the board shows each round, the stop ahead, and whether the plan is settling.</figcaption>
+        </figure>
         <ol class="capabilities">
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Per-project agent configuration</h4>
-              <p>Set your agent's flags globally, then override them per project, from real controls instead of a remembered command line. Flags the app doesn't recognise are preserved verbatim rather than dropped.</p>
+              <p>Set each agent's flags and model globally, then override them per project, from real controls instead of a remembered command line. Flags the app doesn't recognise are preserved verbatim rather than dropped.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
-              <h4>One code index, shared by every session</h4>
-              <p>An incremental index of symbols, references, and call graphs — built once, served to every agent over MCP, instead of each session re-reading the same files to discover the same structure.</p>
-            </div>
-            <span class="tag tag-building">Building</span>
-          </li>
-          <li>
-            <span class="cap-num" aria-hidden="true"></span>
-            <div class="cap-body">
-              <h4>Claude Code and Codex, one adapter</h4>
-              <p>Both normalise into a single event stream, so the sidebar, the notifications, search, and the phone work the same regardless of what's driving the session.</p>
+              <h4>Accounts and pools</h4>
+              <p>Add several logins per agent, group them into pools, and assign an account or pool per agent, per project or per folder. New tabs lease from the pool with the most headroom, and <code>/switch-account</code> moves a live conversation to another login.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
           </li>
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
-              <h4>More harnesses, same contract</h4>
-              <p>opencode is being brought in behind the same adapter, so a new harness inherits everything above without a new code path.</p>
+              <h4>Five agents, one adapter</h4>
+              <p>Claude Code, Codex, Grok, Gemini and OpenCode all normalise into a single event stream, so the sidebar, the notifications, search, and the phone work the same regardless of what's driving the session.</p>
             </div>
-            <span class="tag tag-building">Building</span>
+            <span class="tag tag-shipped">Shipped</span>
           </li>
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Flight Control: plan with a fleet</h4>
-              <p>Turn a rough idea into a plan several agents have worked over in rounds, with a second reviewer family cross-checking the first. You edit and annotate the plan in place, watch a live board of who's doing what, and see how much of it is covered and when it has settled. Steer a run from your phone.</p>
+              <p>Turn a rough idea into a plan that agents from up to five families have worked over in rounds, with a second family cross-checking the first. Edit and annotate the plan in place, watch a live board of who's doing what, and see how much of it is covered and when it has settled. Steer, choose fidelity and edit rounds from your phone.</p>
             </div>
             <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Tasks routed to the right model</h4>
+              <p>Write routing rules in plain words. Flight Control compiles them, ranks models from a cited benchmark index, and sends each released task to the model that suits its kind.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Swarms that work the task list</h4>
+              <p>Launch a swarm on a project's released tasks. It fills slots, hands an agent to a fresh account when one runs low, and pauses or resumes from your phone.</p>
+            </div>
+            <span class="tag tag-building">Building</span>
           </li>
           <li>
             <span class="cap-num" aria-hidden="true"></span>
             <div class="cap-body">
               <h4>Task-scoped context, assembled per turn</h4>
               <p>Relevant index results, memory, and terminal output gathered for the prompt you just typed and injected as it goes — with a provenance view showing exactly what was added.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>One code index, shared by every session</h4>
+              <p>An incremental index of symbols, references, and call graphs — built once, served to every agent over MCP, instead of each session re-reading the same files to discover the same structure.</p>
             </div>
             <span class="tag tag-planned">Planned</span>
           </li>
@@ -523,7 +1169,7 @@
           <svg viewBox="0 0 16 16" fill="none"><path d="M3 3.6h10v9H3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.4 6.6h5.2M5.4 9.3h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </div>
         <h3>Your state, on your disk</h3>
-        <p>Sessions live in a plain JSON file in Application Support and preferences in the standard defaults domain. Nothing about your fleet is stored anywhere but your machine.</p>
+        <p>Sessions live in a plain JSON file in Application Support and preferences in the standard defaults domain. Nothing about your fleet is stored anywhere but your machines.</p>
       </div>
     </div>
   </div>
@@ -540,9 +1186,9 @@
       One window for every agent, in a robust, snappy terminal
     </p>
     <div class="reveal">
-      <!-- The current release asset. Bump the tag and file name together on each
-           release; github.com/…/releases/latest can't serve a versioned asset name. -->
-      <a class="btn btn-primary" href="https://github.com/nateabele/flight-deck/releases/download/v0.2.0/FlightDeck-v0.2.0-macOS-arm64.zip">Download for macOS</a>
+      <!-- Always the newest release: .github/workflows/stable-download.yml gives
+           every release a copy of its zip under this fixed name. -->
+      <a class="btn btn-primary" href="https://github.com/nateabele/flight-deck/releases/latest/download/FlightDeck-macOS-arm64.zip">Download for macOS</a>
     </div>
     <div class="cta-meta reveal">
       <span>Apple silicon</span><span class="dot"></span>
