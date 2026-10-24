@@ -48,3 +48,13 @@ Final focused run: 134 tests passed, including all 15 runtime attachment tests a
 the full PortForwarderTests class (the broad-run failure passed in isolation).
 Independent review found no remaining blockers in the late-subscriber and ownership
 handoff corrections.
+
+## Installed verification
+
+- Source commit: `aaf2e6e2`; macOS Release build and static swap preflight passed.
+- Canonical detached swap installed and relaunched `/Applications/Flight Deck.app`
+  at 2026-10-24 18:31:30 CDT. The previously published Linux installer digest was preserved.
+- Fresh live comparison: Execute 3 active in Codex and busy in the sidebar; Execute
+  waiting on its approval screen; Execute 2 and Execute 4 idle on both sides.
+- iOS: 685 unit tests (16 skipped), plus seven simulator UI tests, zero failures.
+  `deploy-phone.sh --release` built, installed and relaunched the handset app.
