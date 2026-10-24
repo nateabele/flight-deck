@@ -7804,6 +7804,25 @@ final class SessionStore: ObservableObject {
             case .allow, .deny:
                 return .unanswerable
             }
+            // The folder-trust screen has no numbered rows since claude 2.1.310, so `driver`'s
+            // interlock — which requires them — reads nothing on it. Its own reader carries the
+            // same two facts, the cursor and each row's words, and the same checks are made of
+            // them: before any key, and again after the arrows, before the Return.
+            if let trust = ScreenPromptReader.workspaceTrust(inViewport: viewport) {
+                guard trust.rows.indices.contains(index), trust.rows[index] == label else {
+                    recordScreenAbort(.screenRowMismatch, focused: trust.focused, viewport: viewport)
+                    return .unreadableScreen
+                }
+                return drive(
+                    from: trust.focused, to: index,
+                    confirm: {
+                        guard let landed = ScreenPromptReader.workspaceTrust(inViewport: $0) else { return false }
+                        return landed.focused == index && landed.rows[index] == label
+                            && landed.prompt.callID == call
+                    },
+                    driver: driver, injector: injector, id: id, token: token
+                )
+            }
             // The client's label against the Mac's own reading of this very screen — the same
             // check `.option` makes against a transcript, with the screen as the copy.
             guard question.options.indices.contains(index),
@@ -9852,6 +9871,12 @@ final class SessionStore: ObservableObject {
                 continue
             }
             guard let anchor = anchors[session.id], let entry = rows[anchor.pid] else {
+                // No row, and no hook either: claude writes neither until its folder-trust
+                // screen is answered, so a tab stopped there would otherwise read as nothing at
+                // all. The screen is the only witness, and it says waiting.
+                if trustScreen(for: session.id) != nil {
+                    next[session.id] = SessionStatus(activity: .waiting, waitingFor: "folder trust")
+                }
                 continue
             }
             next[session.id] = SessionStatus.tree(
@@ -9869,6 +9894,7 @@ final class SessionStore: ObservableObject {
         }
 
         commitStatuses(next, backgroundWork: nextBackgroundWork)
+        answerTrustScreensTrustedElsewhere()
 
         // Driven off this same tick, deliberately not a second timer: one poll of two
         // directories (the registry above, `PlannotatorRegistry` inside `refresh()`) is
@@ -10534,6 +10560,15 @@ final class SessionStore: ObservableObject {
         // the sake of skipping one array of ids.
         let waitingIDs = next.compactMap { id, status in status.activity == .waiting ? id : nil }
         for id in waitingIDs {
+            // A tab on claude's folder-trust screen has no transcript to probe, and no reason
+            // to sit out the debounce below: the screen is all there is, and it is unambiguous.
+            if anchors[id] == nil, let trust = trustScreen(for: id) {
+                calls[id] = trust.prompt.callID
+                offers[id] = trust.prompt
+                stuckPromptEpisodes[id] = nil
+                next[id]?.answerless = false
+                continue
+            }
             switch openPromptProbe.flatMap({ $0(id) }) {
             case .success(let callID):
                 calls[id] = callID
@@ -10605,6 +10640,74 @@ final class SessionStore: ObservableObject {
         else { return nil }
         return ScreenPromptReader.read(inViewport: viewport)
     }
+
+    /// claude's folder-trust screen, when that is what a claude tab is showing. Same rules as
+    /// `screenPrompt(for:)`: claude only, never a sleeping or rolling-over tab, and served from
+    /// the viewport cache.
+    func trustScreen(for id: UUID) -> ScreenPromptReader.WorkspaceTrust? {
+        guard let at = locate(id), repos[at.repo].sessions[at.session].agent == .claude,
+              !rollingOver.contains(id),
+              let viewport = (injectorOverride ?? surfaces[id])?.readViewport()
+        else { return nil }
+        return ScreenPromptReader.workspaceTrust(inViewport: viewport)
+    }
+
+    /// One trust screen as the automatic answer sees it: when it first appeared, and whether it
+    /// has been dealt with.
+    private struct TrustScreenSighting {
+        var call: String
+        var since: Date
+        var considered = false
+    }
+
+    /// Trust screens on screen now, by tab. `considered` is one look and at most one press per
+    /// screen, so a drive that does not take is never repeated into whatever comes up next.
+    private var trustScreenSightings: [UUID: TrustScreenSighting] = [:]
+
+    /// How long a trust screen must have been up before it is answered automatically. **A
+    /// measured need, not caution:** against a real claude 2.1.310 in a pty, a Return sent the
+    /// moment the rows were drawn was dropped — the screen stayed exactly as it was — while the
+    /// same keys two seconds later took. A drive whose arrow is dropped fails its landing check
+    /// and, being one press per screen, would not try again.
+    static let trustScreenSettle: TimeInterval = 1.5
+
+    /// Answers a tab's folder-trust screen with yes when another claude account already trusts
+    /// **exactly** that folder (`ClaudeFolderTrust`). claude then records the trust under this
+    /// account itself. Runs after `commitStatuses`, because `answerScreenPrompt` refuses a tab
+    /// that is not `waiting`.
+    private func answerTrustScreensTrustedElsewhere() {
+        let stamp = now()
+        var seen: Set<UUID> = []
+        for (id, status) in statuses where status.activity == .waiting && anchors[id] == nil {
+            guard let trust = trustScreen(for: id) else { continue }
+            seen.insert(id)
+            let call = trust.prompt.callID
+            if trustScreenSightings[id]?.call != call {
+                trustScreenSightings[id] = TrustScreenSighting(call: call, since: stamp)
+            }
+            guard let sighting = trustScreenSightings[id], !sighting.considered,
+                  stamp.timeIntervalSince(sighting.since) >= Self.trustScreenSettle,
+                  let yes = trust.rows.firstIndex(of: ScreenPromptReader.trustFolderLabel)
+            else { continue }
+            // Marked before the configs are read, not after: a folder no other account trusts
+            // is looked up once per screen rather than every tick it stays up.
+            trustScreenSightings[id]?.considered = true
+            let homes = preferences?.preferences.accounts(for: .claude).map(\.home)
+                ?? [AgentID.claude.builtInHome]
+            guard ClaudeFolderTrust.anyTrusts(trust.folder, homes: homes) else { continue }
+            let outcome = answerScreenPrompt(
+                call, with: .option(index: yes, label: ScreenPromptReader.trustFolderLabel),
+                in: id, token: UUID()
+            )
+            Self.folderTrustLogger.notice("folder trust carried from another account: \(String(describing: outcome), privacy: .public)")
+        }
+        trustScreenSightings = trustScreenSightings.filter { seen.contains($0.key) }
+    }
+
+    static let folderTrustLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "folder-trust"
+    )
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
     /// looks, so nothing found is this Mac asserting there is nothing to answer, which is the

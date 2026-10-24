@@ -35,6 +35,9 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-checkbox-submit-focused", "question-set-with-checkbox",
         "question-numbered-description", "question-preview",
         "workspace-trust",
+        // claude 2.1.310's folder-trust screen, rows unnumbered — caught by `Esc to cancel` alone,
+        // since the numbered-row rule has nothing to hold — `workspace-trust-310.captured.provenance.json`.
+        "workspace-trust-310", "workspace-trust-310-yes-focused",
         // claude 2.1.289, the "Type something" row — `typed-answers.captured.provenance.json`.
         "question-typed-focused", "question-typed-single", "question-typed-set",
         "question-typed-checkbox", "question-typed-checkbox-submit-focused",

@@ -1,0 +1,19 @@
+{
+  "files": [
+    "workspace-trust-310.captured.txt",
+    "workspace-trust-310-yes-focused.captured.txt"
+  ],
+  "isVerbatimCapturedOutput": true,
+  "claudeVersion": "2.1.310 (Claude Code)",
+  "capturedOn": "2026-10-24",
+  "method": "pyte 140x45 screen over a real `claude` TUI in a pty, CLAUDE_CONFIG_DIR set to a logged-in account that had never trusted the (empty, freshly made) working directory. Keys sent as raw bytes: nothing for the first screen; one Down arrow (ESC [ B) two seconds after the rows were drawn for the second. Return was then pressed and claude recorded projects[<folder>].hasTrustDialogAccepted = true and booted to its composer. An earlier run that sent Return the instant the rows appeared left the screen unchanged: the press was dropped.",
+  "screens": {
+    "workspace-trust-310.captured.txt": "The trust screen as 2.1.310 draws it: rows UNNUMBERED and reversed from 2.1.241 — `❯ No, exit` first and focused, `Yes, I trust this folder` under it.",
+    "workspace-trust-310-yes-focused.captured.txt": "The same screen after one Down arrow: the cursor on `Yes, I trust this folder`."
+  },
+  "sha256": {
+    "workspace-trust-310.captured.txt": "e4a4c812c734fe6389291bd669de1bfbc97ccdbc0414b9dd5b3a37c3b743d082",
+    "workspace-trust-310-yes-focused.captured.txt": "7ac6e28c59611f11e69e538808e8bd2ad7fb26bdb64bcab207e42dce3eb615c3"
+  },
+  "sanitized": "The working-directory path on the `Accessing workspace:` line was replaced with /private/tmp/dialogcap/work/trust-310 (the probe ran in a session scratch directory whose name carries local account and project names). Shorter than the original, which fit on one 140-column line either way, so no wrap changed."
+}

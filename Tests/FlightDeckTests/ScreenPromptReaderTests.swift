@@ -281,4 +281,77 @@ final class ScreenPromptReaderTests: XCTestCase {
         XCTAssertNil(ScreenPromptReader.signIn(inViewport: method))
         XCTAssertNil(ScreenPromptReader.menu(inViewport: paste))
     }
+
+    // MARK: - Folder trust (captured)
+
+    private let probeFolder = "/private/tmp/dialogcap/work/trust-310"
+
+    /// **The screen a current claude draws**, and the reason this reader is not `ChoiceDialog`:
+    /// 2.1.310's rows are unnumbered and `No, exit` comes first, under the cursor.
+    func testTheCurrentTrustScreenIsReadWithItsUnnumberedRowsInScreenOrder() throws {
+        let trust = try XCTUnwrap(ScreenPromptReader.workspaceTrust(
+            inViewport: try captured("workspace-trust-310.captured")))
+        XCTAssertEqual(trust.folder, probeFolder)
+        XCTAssertEqual(trust.rows, ["No, exit", "Yes, I trust this folder"])
+        XCTAssertEqual(trust.focused, 0)
+        guard case .question(let callID, let questions) = trust.prompt else {
+            return XCTFail("a trust screen is a question")
+        }
+        XCTAssertTrue(ScreenPromptID.isMenu(callID), "answered through the screen-menu path")
+        XCTAssertEqual(questions.first?.options.map(\.label), trust.rows)
+        XCTAssertTrue(questions.first?.question.contains(probeFolder) ?? false)
+        XCTAssertEqual(ScreenPromptReader.read(inViewport: try captured("workspace-trust-310.captured"))?.callID,
+                       callID, "read() must name it the same way, or the answer path's re-read refuses")
+        XCTAssertNil(ChoiceDialog.menu(inViewport: try captured("workspace-trust-310.captured"),
+                                       marker: ChoiceDialog.claudeMarker),
+                     "the generic reader refuses unnumbered rows — which is why this one exists")
+    }
+
+    /// The cursor moves; the dialog does not. Same id, so a phone's card survives an arrow.
+    func testMovingTheCursorKeepsTheIdentityAndMovesTheFocus() throws {
+        let before = try XCTUnwrap(ScreenPromptReader.workspaceTrust(
+            inViewport: try captured("workspace-trust-310.captured")))
+        let after = try XCTUnwrap(ScreenPromptReader.workspaceTrust(
+            inViewport: try captured("workspace-trust-310-yes-focused.captured")))
+        XCTAssertEqual(after.focused, 1)
+        XCTAssertEqual(after.prompt.callID, before.prompt.callID)
+    }
+
+    /// The older, numbered layout still reads, in its own order.
+    func testTheNumberedTrustScreenOf2_1_241StillReads() throws {
+        let trust = try XCTUnwrap(ScreenPromptReader.workspaceTrust(
+            inViewport: try captured("workspace-trust.captured")))
+        XCTAssertEqual(trust.folder, "/private/tmp/dialogcap/work/perm2")
+        XCTAssertEqual(trust.rows, ["Yes, I trust this folder", "No, exit"])
+        XCTAssertEqual(trust.focused, 0)
+    }
+
+    /// Authored from the capture: a long path wraps at the terminal's width with no space.
+    func testAWrappedFolderIsRejoined() throws {
+        let screen = try captured("workspace-trust-310.captured")
+            .replacingOccurrences(of: " /private/tmp/dialogcap/", with: " /private/tmp/dialog\n cap/")
+        XCTAssertEqual(ScreenPromptReader.workspaceTrust(inViewport: screen)?.folder, probeFolder)
+    }
+
+    /// Authored refusals. With no numbers to lean on, everything else must hold.
+    func testAnythingShortOfTheWholeScreenIsNotATrustScreen() throws {
+        let screen = try captured("workspace-trust-310.captured")
+        let noHeader = screen.replacingOccurrences(of: "Accessing workspace:", with: "Accessing:")
+        let oneRow = screen.replacingOccurrences(of: "  Yes, I trust this folder", with: "")
+        let twoCursors = screen.replacingOccurrences(of: "  Yes, I trust this folder", with: " ❯ Yes, I trust this folder")
+        let noCursor = screen.replacingOccurrences(of: " ❯ No, exit", with: "   No, exit")
+        let composerBelow = screen.replacingOccurrences(of: " Enter to confirm", with: "❯ hello")
+        let otherWords = screen.replacingOccurrences(of: "Yes, I trust this folder", with: "Yes, I trust this folder!")
+        for (name, edited) in [("noHeader", noHeader), ("oneRow", oneRow), ("twoCursors", twoCursors),
+                               ("noCursor", noCursor), ("composerBelow", composerBelow),
+                               ("otherWords", otherWords)] {
+            XCTAssertNotEqual(edited, screen, name)
+            XCTAssertNil(ScreenPromptReader.workspaceTrust(inViewport: edited), name)
+        }
+    }
+
+    func testOtherScreensAreNotTrustScreens() throws {
+        XCTAssertNil(ScreenPromptReader.workspaceTrust(inViewport: try captured("login-method.captured")))
+        XCTAssertNil(ScreenPromptReader.workspaceTrust(inViewport: try captured("idle-empty-box.captured")))
+    }
 }

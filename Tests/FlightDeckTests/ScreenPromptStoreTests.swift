@@ -58,6 +58,149 @@ final class ScreenPromptStoreTests: XCTestCase {
         return (store, spy, id, call)
     }
 
+    // MARK: - Folder trust
+
+    private let probeFolder = "/private/tmp/dialogcap/work/trust-310"
+
+    /// A store with claude accounts at `homes`, for the automatic answer, which reads them.
+    private func makeStore(homes: [URL]) -> (SessionStore, SpyInjector, UUID) {
+        let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        preferences.preferences.accounts = homes.enumerated().map {
+            AgentAccount(agent: .claude, displayName: "account \($0.offset)", home: $0.element)
+        }
+        let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
+        store.now = { [weak self] in self?.clock ?? Date() }
+        store.openPromptProbe = { _ in .failure("prompt_changed") }
+        store.answerAbortSink = { [weak self] in self?.aborts.append($0) }
+        store.promptLifecycleSink = { _ in }
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"), agent: .claude)
+        return (store, spy, session.id)
+    }
+
+    /// A claude home whose config trusts exactly `folders`.
+    private func home(trusting folders: [String]) throws -> URL {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trust-home-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        let projects = Dictionary(uniqueKeysWithValues: folders.map { ($0, ["hasTrustDialogAccepted": true]) })
+        try JSONSerialization.data(withJSONObject: ["projects": projects])
+            .write(to: home.appendingPathComponent(".claude.json"))
+        return home
+    }
+
+    /// claude writes no status file and fires no hook until its trust screen is answered, so the
+    /// registry has no row for the tab. The screen alone must make it `waiting` and offer the
+    /// card — at once, with no debounce, since there is no transcript to race.
+    func testATabOnTheTrustScreenWithNoRegistryRowIsWaitingWithACard() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+
+        XCTAssertEqual(store.status(for: id)?.activity, .waiting)
+        let call = try XCTUnwrap(store.openPromptCalls[id])
+        XCTAssertTrue(ScreenPromptID.isMenu(call), call)
+        guard case .question(_, let questions)? = store.openPromptOffers[id] else {
+            return XCTFail("expected a question offer")
+        }
+        XCTAssertEqual(questions[0].options.map(\.label), ["No, exit", "Yes, I trust this folder"])
+    }
+
+    func testATabWithNoRowAndAnOrdinaryScreenStaysWithoutAStatus() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("login-method.captured")
+        store.applyRegistry([:])
+        XCTAssertNil(store.status(for: id))
+    }
+
+    /// The phone's "Yes" is one row down on a current claude: one arrow, a re-read that finds the
+    /// cursor on it, then Return.
+    func testAnsweringYesMovesOntoTheTrustRowAndPressesIt() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        let call = try XCTUnwrap(store.openPromptCalls[id])
+        spy.events.removeAll()
+        let landed = try captured("workspace-trust-310-yes-focused.captured")
+        store.injectionSettle = { spy.viewportOverride = landed; $0() }
+
+        let outcome = store.answerScreenPrompt(
+            call, with: .option(index: 1, label: "Yes, I trust this folder"), in: id, token: UUID()
+        )
+        XCTAssertEqual(outcome, .dispatched)
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
+    }
+
+    /// The arrow did not take — the screen still shows the cursor on `No, exit` — so no Return.
+    func testAYesWhoseArrowDidNotLandIsNeverPressed() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        let call = try XCTUnwrap(store.openPromptCalls[id])
+        spy.events.removeAll()
+
+        _ = store.answerScreenPrompt(
+            call, with: .option(index: 1, label: "Yes, I trust this folder"), in: id, token: UUID()
+        )
+        XCTAssertEqual(spy.events, [.arrow(1)])
+    }
+
+    /// A label that disagrees with the screen's row is refused before any key.
+    func testALabelThatIsNotTheRowsIsRefusedBeforeAnyKey() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        let call = try XCTUnwrap(store.openPromptCalls[id])
+        spy.events.removeAll()
+
+        _ = store.answerScreenPrompt(
+            call, with: .option(index: 0, label: "Yes, I trust this folder"), in: id, token: UUID()
+        )
+        XCTAssertEqual(spy.events, [])
+    }
+
+    /// Another account trusts exactly this folder: once the screen has been up long enough to
+    /// take keys, it is answered yes — once.
+    func testAFolderTrustedExactlyElsewhereIsAnsweredYesAfterTheSettle() throws {
+        let (store, spy, id) = makeStore(homes: [try home(trusting: []), try home(trusting: [probeFolder])])
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        let landed = try captured("workspace-trust-310-yes-focused.captured")
+        store.injectionSettle = { spy.viewportOverride = landed; $0() }
+
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [], "not the instant the rows are drawn — the press would be dropped")
+        advance(SessionStore.trustScreenSettle)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
+
+        advance(1)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [.arrow(1), .ret], "one press per screen")
+    }
+
+    /// A trusted PARENT is a wider grant than the question asked, and carries nothing.
+    func testAFolderWhoseParentIsTrustedElsewhereIsLeftForAPerson() throws {
+        let parent = (probeFolder as NSString).deletingLastPathComponent
+        let (store, spy, _) = makeStore(homes: [try home(trusting: [parent])])
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        advance(SessionStore.trustScreenSettle)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [])
+    }
+
+    func testAFolderNoAccountTrustsIsLeftForAPerson() throws {
+        let (store, spy, _) = makeStore(homes: [try home(trusting: ["/somewhere/else"])])
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        advance(SessionStore.trustScreenSettle)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [])
+    }
+
     // MARK: - When it is offered
 
     /// **The ordinary one-second status/transcript race must never reach the screen.** For the

@@ -1273,6 +1273,28 @@ wire's existing free-text `AnswerSelection`, pasted with `sendText` and followed
 the sign-in is still on screen. Claude only; an unnumbered menu (the first-run theme picker) makes
 no card by design. See `docs/HANDOFF-phone-answering.md`, "Dialogs that exist only on the screen".
 
+**claude's folder-trust screen is the one exception to both rules above, because it comes before
+everything.** claude shows it in a folder its account has never trusted, before it writes a status
+file or fires a hook, so the tab has no registry row and no activity at all: nothing is `waiting`
+for the screen read to be asked of, and the tab used to look dead. `SessionStore.applyRegistry`
+therefore asks the screen of a claude tab that has no row (`trustScreen(for:)`, never waking a
+sleeping surface), and a trust screen makes it `waiting` / `"folder trust"`, offered at once with
+no debounce since there is no transcript to race. The screen has its own reader,
+`ScreenPromptReader.workspaceTrust`, because since 2.1.310 its rows are unnumbered (`❯ No, exit`
+first and focused, `Yes, I trust this folder` under it), which `ChoiceDialog` refuses by design; in
+place of numbers it requires the `Accessing workspace:` header, exactly the two labels on adjacent
+lines, one cursor, and no `❯` below them. `answerScreenPrompt` drives it with that reader's cursor
+and labels, re-reading before the Return like every other screen answer.
+
+**Folder trust is carried between claude accounts by answering, never by writing config.** When
+another claude account's `.claude.json` trusts **exactly** that folder — a trusted parent does not
+count — the Mac answers "Yes, I trust this folder" itself (`answerTrustScreensTrustedElsewhere`,
+`ClaudeFolderTrust`), and claude records the trust under the new account as a click would. Writing
+`projects[<folder>].hasTrustDialogAccepted` directly was rejected: every running `claude` on an
+account holds its config in memory and rewrites it whole, so an outside write races them. The
+answer waits `trustScreenSettle` (1.5 s) after the screen appears — against a real 2.1.310 a Return
+sent the instant the rows were drawn was dropped — and is tried once per screen.
+
 ## Tab navigation
 
 ⌘⇧[ / ⌘⇧] move the selection along `sidebarRows` — exactly what the sidebar draws, top to
