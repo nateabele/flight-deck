@@ -133,9 +133,16 @@ settling a restored tab's identity, and `resumeRestoredCodex`'s follow-up read, 
 drives) to recover a rename made while Flight Deck was closed. Both watchers start at
 end-of-file, so that's the one gap a file-only design can't close on its own.
 
-**Known limitations, stated in the code and not worked around** (spec §5): no `.waiting` for
-codex — nothing is written to the rollout when codex starts waiting on approval, so a codex
-tab reads busy through an approval prompt. No `.subagentCount` for codex — no `collab` record
+**Native dialogs (2026-10-24):** Codex 0.163+ connects Flight Deck and its TUI to the same
+managed per-account daemon. Native approval, question, permission and MCP elicitation requests
+now supply sidebar status and phone offers, answered over the protocol by native request id.
+Rejoining recovers pending requests; generation-scoped identities reject stale answers. File
+change previews and subagent ancestry are recovered before replayed offers can be answered.
+The rollout continues to supply history, errors and completion. Older Codex builds keep the
+legacy transport, and numbered local menus/trust dialogs use a screen-derived phone offer.
+Hardware-backed verification and unrecognized shapes still require the Mac.
+
+**Known limitation** (spec §5): no `.subagentCount` for codex — no `collab` record
 exists in any of 492 surveyed rollouts, so there is no ground truth to map it from.
 
 ---

@@ -6,6 +6,20 @@ import XCTest
 /// the same shape `PromptComposerTests` uses, and for the same reason.
 @MainActor
 final class PromptCardTests: XCTestCase {
+    func testNativeApprovalDoesNotGenerateAnUnofferedTextAnswer() {
+        let question = PromptQuestion(question: "Allow command?", options: [.init(label: "Allow once")], allowsOther: false)
+        XCTAssertEqual(PromptCard.selections(for: [question], picks: [0: [1]], typed: [0: "other"]), [[]])
+    }
+
+    func testNativeFreeTextOnlyQuestionCanBeAnsweredAndRetainsSecretMetadata() throws {
+        let question = PromptQuestion(question: "Token", options: [], freeTextOnly: true, isSecret: true)
+        let wire = try JSONDecoder().decode(PromptQuestion.self, from: JSONEncoder().encode(question))
+        XCTAssertTrue(wire.isSecret)
+        XCTAssertTrue(PromptCard.showsControls(for: .question(callID: "native", [wire]), state: .idle))
+        XCTAssertEqual(PromptCard.selections(for: [wire], picks: [0: [0]], typed: [0: "test-token"]),
+                       [[.typed("test-token", optionCount: 0)]])
+    }
+
     private func question(unanswerable: String? = nil) -> OpenPrompt {
         .question(callID: "toolu_A", [PromptQuestion(
             header: "Pick", question: "Which?",

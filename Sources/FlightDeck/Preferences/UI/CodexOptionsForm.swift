@@ -1,9 +1,6 @@
 import SwiftUI
 
-/// Codex's pane in the Agents tab, and — via `projectOverride` — in the Projects tab too. No
-/// flag catalog, parser, serializer or shell quoting — unlike claude, codex takes these as
-/// typed `thread/start` params over JSON-RPC, so there is no command line to build at all. A
-/// plain `Form` binding `CodexThreadOptions`'s fields is the whole of it.
+/// Codex session defaults, inherited by project overrides and applied at creation and resume.
 struct CodexOptionsForm: View {
     @ObservedObject var preferences: PreferencesStore
     /// Non-nil in the Projects tab: bind straight to that project's override instead of the
@@ -20,7 +17,7 @@ struct CodexOptionsForm: View {
     /// value codex does not accept is a silently broken setting, which is the class of bug
     /// this whole file's adapter layer keeps producing.
     static let sandboxes = ["read-only", "workspace-write", "danger-full-access"]
-    static let approvalPolicies = ["untrusted", "on-request", "never"]
+    static let approvalPolicies = ["on-request", "never"]
 
     /// Reads and writes the codex row's options within `preferences.agents`, wherever that
     /// row currently sits — the list's order is the shortcut binding, not a storage index, so
@@ -45,17 +42,26 @@ struct CodexOptionsForm: View {
     var body: some View {
         Form {
             if let header { header() }
-            Section("Model") {
+            if projectOverride == nil { AgentStartupSection(preferences: preferences) }
+            Section("Model & Effort") {
                 TextField(
-                    "codex's default",
+                    "Model",
                     text: Binding(
                         get: { options.wrappedValue.model ?? "" },
                         set: { options.wrappedValue.model = $0.isEmpty ? nil : $0 }
                     )
                 )
+                Text("Leave blank to use Codex’s configured model.")
+                    .font(.caption).foregroundStyle(.secondary)
+                choice("Reasoning effort", field: \.reasoningEffort,
+                       values: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+                TextField("Custom reasoning effort", text: string(\.reasoningEffort))
+                    .help("Supported levels depend on the selected model.")
+                choice("Reasoning summary", field: \.reasoningSummary, values: ["auto", "concise", "detailed", "none"])
+                choice("Response detail", field: \.verbosity, values: ["low", "medium", "high"])
             }
 
-            Section("Sandbox") {
+            Section("Permissions & Tools") {
                 Picker(
                     "Sandbox",
                     selection: Binding(
@@ -63,7 +69,7 @@ struct CodexOptionsForm: View {
                         set: { options.wrappedValue.sandbox = $0.isEmpty ? nil : $0 }
                     )
                 ) {
-                    Text("codex's default").tag("")
+                    Text("Codex’s default").tag("")
                     ForEach(Self.sandboxes, id: \.self) { Text($0).tag($0) }
                 }
 
@@ -74,9 +80,33 @@ struct CodexOptionsForm: View {
                         set: { options.wrappedValue.approvalPolicy = $0.isEmpty ? nil : $0 }
                     )
                 ) {
-                    Text("codex's default").tag("")
+                    Text("Codex’s default").tag("")
                     ForEach(Self.approvalPolicies, id: \.self) { Text($0).tag($0) }
+                    if let current = options.wrappedValue.approvalPolicy,
+                       !Self.approvalPolicies.contains(current) {
+                        Text("\(current) (saved setting)").tag(current)
+                    }
                 }
+                choice("Web search", field: \.webSearch, values: ["disabled", "cached", "indexed", "live"])
+                Picker("Sandbox network access", selection: Binding(
+                    get: { options.wrappedValue.networkAccess.map { $0 ? "enabled" : "disabled" } ?? "" },
+                    set: { options.wrappedValue.networkAccess = $0.isEmpty ? nil : $0 == "enabled" }
+                )) {
+                    Text("Codex’s default").tag("")
+                    Text("Enabled").tag("enabled")
+                    Text("Disabled").tag("disabled")
+                }
+                Text("Network access and additional writable directories apply to the workspace-write sandbox.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Context & Prompts") {
+                Text("Additional instructions")
+                TextEditor(text: string(\.developerInstructions))
+                    .frame(minHeight: 80)
+                    .help("Additional developer instructions for the session.")
+                TextField("Model instructions file", text: string(\.modelInstructionsFile))
+                    .help("Path to a file replacing Codex’s built-in model instructions.")
             }
 
             Section("Additional directories") {
@@ -96,8 +126,9 @@ struct CodexOptionsForm: View {
                 HStack(spacing: 6) {
                     TextField("/path/to/dir", text: $newDir)
                     Button("Add") {
-                        guard !newDir.isEmpty else { return }
-                        options.wrappedValue.addDirs.append(newDir)
+                        let dir = newDir.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !dir.isEmpty, !options.wrappedValue.addDirs.contains(dir) else { return }
+                        options.wrappedValue.addDirs.append(dir)
                         newDir = ""
                     }
                     .disabled(newDir.isEmpty)
@@ -106,4 +137,22 @@ struct CodexOptionsForm: View {
         }
         .formStyle(.grouped)
     }
+
+    private func string(_ field: WritableKeyPath<CodexThreadOptions, String?>) -> Binding<String> {
+        Binding(get: { options.wrappedValue[keyPath: field] ?? "" },
+                set: { options.wrappedValue[keyPath: field] = $0.isEmpty ? nil : $0 })
+    }
+
+    private func choice(_ label: String, field: WritableKeyPath<CodexThreadOptions, String?>,
+                        values: [String]) -> some View {
+        Picker(label, selection: string(field)) {
+            Text("Codex’s default").tag("")
+            ForEach(values, id: \.self) { Text($0).tag($0) }
+            // Keep a model-advertised value visible when it is newer than our suggestions.
+            if let current = options.wrappedValue[keyPath: field], !values.contains(current) {
+                Text(current).tag(current)
+            }
+        }
+    }
+
 }

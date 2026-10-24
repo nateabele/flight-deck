@@ -7,14 +7,19 @@ final class CodexAdapterTests: XCTestCase {
     final class ScriptedTransport: CodexTransport {
         var onLine: ((String) -> Void)?
         private(set) var methods: [String] = []
+        /// The params of the latest call to each method.
+        private(set) var params: [String: [String: Any]] = [:]
         var threadID = "01a01269-baa6-7493-8d15-8fa21bcb602b"
         var failNameSet = false
+        /// `thread/read`'s `thread` object; empty answers like an idle, unnamed thread.
+        var readThread = "{}"
 
         func send(_ line: String) {
             guard let obj = try? JSONSerialization.jsonObject(
                 with: Data(line.utf8)) as? [String: Any],
                   let method = obj["method"] as? String else { return }
             methods.append(method)
+            params[method] = obj["params"] as? [String: Any]
             guard let id = obj["id"] as? Int else { return }
             switch method {
             case "thread/start":
@@ -23,6 +28,8 @@ final class CodexAdapterTests: XCTestCase {
                 onLine?(failNameSet
                     ? #"{"id":\#(id),"error":{"code":-32000,"message":"boom"}}"#
                     : #"{"id":\#(id),"result":{}}"#)
+            case "thread/read":
+                onLine?(#"{"id":\#(id),"result":{"thread":\#(readThread)}}"#)
             default:
                 onLine?(#"{"id":\#(id),"result":{}}"#)
             }
@@ -434,6 +441,122 @@ final class CodexAdapterTests: XCTestCase {
             XCTAssertEqual(adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
                            "codex resume \(t.threadID) \(expectedFlags)\n",
                            "both set (socketFirst: \(socketFirst)) must add the flags")
+        }
+    }
+
+    // MARK: - shared daemon: permissions travel over the protocol, never the --remote line
+
+    /// `codex --remote … resume` exits at once with "Permission overrides are not supported
+    /// when resuming a remote task" for `--sandbox`, `approval_policy`, any
+    /// `sandbox_workspace_write.*` key and the control-access profile (codex 0.164.0, probed
+    /// live). `--model` and the other config keys are accepted.
+    private let permissionOptions = CodexThreadOptions(
+        model: "custom-model", sandbox: "workspace-write", approvalPolicy: "never",
+        addDirs: ["/extra"], reasoningEffort: "high", networkAccess: true
+    )
+
+    func testSharedDaemonLaunchLinesCarryNoPermissionOverrides() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        adapter.sharedSocketPath = "/tmp/codex.sock"
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        adapter.controlAccessSupported = true
+        let session = Session(title: "t", workingDirectory: "/w/a")
+        for options in [permissionOptions, CodexThreadOptions(model: "custom-model", reasoningEffort: "high")] {
+            let binding = try await adapter.prepare(for: session, options: .codex(options))
+            XCTAssertEqual(
+                adapter.launchCommand(binding, session, .codex(options)),
+                #"codex --remote 'unix:///tmp/codex.sock' resume \#(t.threadID) --model 'custom-model' --config 'model_reasoning_effort="high"'"# + "\n"
+            )
+            let fresh = Session(id: UUID(), title: "t", workingDirectory: "/w/a",
+                                pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil)
+            XCTAssertEqual(
+                adapter.coldCreateCommand(adapter.binding(for: fresh), fresh, .codex(options)),
+                #"codex --remote 'unix:///tmp/codex.sock' --model 'custom-model' --config 'model_reasoning_effort="high"'"# + "\n"
+            )
+        }
+    }
+
+    func testSharedDaemonRebindAppliesPermissionsThroughThreadResume() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        adapter.sharedSocketPath = "/tmp/codex.sock"
+        let session = Session(id: UUID(), title: "t", workingDirectory: "/w/a",
+                              pinnedConversationID: UUID(uuidString: t.threadID)!, agent: .codex,
+                              transcriptPath: "/r/\(t.threadID).jsonl")
+
+        _ = try await adapter.rebind(for: session, options: .codex(permissionOptions))
+
+        // Overrides only apply when the resume LOADS the thread, so an idle thread is
+        // released by this connection first.
+        XCTAssertEqual(t.methods, ["thread/read", "thread/unsubscribe", "thread/resume"])
+        let params = try XCTUnwrap(t.params["thread/resume"])
+        XCTAssertEqual(params["threadId"] as? String, t.threadID)
+        XCTAssertEqual(params["sandbox"] as? String, "workspace-write")
+        XCTAssertEqual(params["approvalPolicy"] as? String, "never")
+        XCTAssertEqual(params["model"] as? String, "custom-model")
+        let config = try XCTUnwrap(params["config"] as? [String: Any])
+        XCTAssertEqual(config["model_reasoning_effort"] as? String, "high")
+        let workspace = try XCTUnwrap(config["sandbox_workspace_write"] as? [String: Any])
+        XCTAssertEqual(workspace["writable_roots"] as? [String], ["/extra"])
+        XCTAssertEqual(workspace["network_access"] as? Bool, true)
+    }
+
+    /// Unsubscribing could unload a thread mid-turn and lose the approval it is waiting on.
+    func testSharedDaemonRebindNeverReleasesAThreadWithATurnInFlight() async throws {
+        for flags in [#"[]"#, #"["waitingOnApproval"]"#] {
+            let (baseAdapter, t) = makeAdapter()
+            var adapter = baseAdapter
+            adapter.sharedSocketPath = "/tmp/codex.sock"
+            t.readThread = #"{"status":{"type":"active","activeFlags":\#(flags)}}"#
+            let session = Session(id: UUID(), title: "t", workingDirectory: "/w/a",
+                                  pinnedConversationID: UUID(uuidString: t.threadID)!, agent: .codex,
+                                  transcriptPath: "/r/\(t.threadID).jsonl")
+            _ = try await adapter.rebind(for: session, options: .codex(permissionOptions))
+            XCTAssertEqual(t.methods, ["thread/read", "thread/resume"], "activeFlags \(flags)")
+        }
+    }
+
+    func testRebindWithoutSharedDaemonOnlyReadsTheThread() async throws {
+        let (adapter, t) = makeAdapter()
+        let session = Session(id: UUID(), title: "t", workingDirectory: "/w/a",
+                              pinnedConversationID: UUID(uuidString: t.threadID)!, agent: .codex,
+                              transcriptPath: "/r/\(t.threadID).jsonl")
+        _ = try await adapter.rebind(for: session, options: .codex(permissionOptions))
+        XCTAssertEqual(t.methods, ["thread/read"])
+    }
+
+    /// The `--enable network_proxy -c permissions.flightdeck…` grant becomes thread config.
+    func testSharedDaemonGrantsControlAccessThroughThreadConfig() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        adapter.sharedSocketPath = "/tmp/codex.sock"
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        adapter.controlAccessSupported = true
+        let session = Session(title: "t", workingDirectory: "/w/a")
+
+        _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        let config = try XCTUnwrap(t.params["thread/start"]?["config"] as? [String: Any])
+        XCTAssertEqual(config["default_permissions"] as? String, "flightdeck")
+        XCTAssertEqual((config["features"] as? [String: Any])?["network_proxy"] as? Bool, true)
+        let profile = try XCTUnwrap((config["permissions"] as? [String: Any])?["flightdeck"] as? [String: Any])
+        XCTAssertEqual(profile["extends"] as? String, ":workspace")
+        let network = try XCTUnwrap(profile["network"] as? [String: Any])
+        XCTAssertEqual(network["enabled"] as? Bool, true)
+        XCTAssertEqual(network["unix_sockets"] as? [String: String], ["/s/Flight Deck/control.sock": "allow"])
+    }
+
+    func testEveryLaunchPathCarriesConfiguredModelAndEffort() async throws {
+        let (adapter, _) = makeAdapter()
+        let session = Session(title: "t", workingDirectory: "/w/a")
+        let options = AgentOptions.codex(CodexThreadOptions(model: "custom-model", reasoningEffort: "high"))
+        let binding = try await adapter.prepare(for: session, options: options)
+        for command in [adapter.launchCommand(binding, session, options),
+                        adapter.resumeCommand(binding, session, options),
+                        adapter.coldCreateCommand(adapter.binding(for: session), session, options)] {
+            XCTAssertTrue(command.contains("--model 'custom-model'"))
+            XCTAssertTrue(command.contains(#"--config 'model_reasoning_effort="high"'"#))
         }
     }
 

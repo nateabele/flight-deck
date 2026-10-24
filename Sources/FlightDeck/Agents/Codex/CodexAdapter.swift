@@ -76,8 +76,8 @@ struct CodexAdapter: AgentAdapter {
     ///
     /// **What this does and does not turn on.** It makes `answerPrompt` willing to drive a
     /// codex dialog; it does not make one reachable from a phone, because
-    /// `openPrompt(inTranscriptTail:)` below is `nil` and a codex tab never reports `waiting`
-    /// in the first place. Both of those are features nobody has built, stated as `nil`
+    /// `openPromptReader` below is `nil`. Live approval screens now supply waiting status,
+    /// but prompt identity still has no transcript source. This remains stated as `nil`
     /// rather than hidden inside a name check.
     static let dialogDriver: AgentDialogDriver? = CodexDialogDriver()
 
@@ -140,25 +140,19 @@ struct CodexAdapter: AgentAdapter {
         AccountDirectory.codexIdentity(from: data)
     }
 
-    /// **`nil`, and this is the half of the answer path codex does not have.** Codex writes
-    /// nothing to its rollout when an approval prompt goes up — verified with a prompt live
-    /// on screen, recorded in `CodexEventMapper` — so there is no record to find and no call
-    /// id to compare a phone's tap against. `dialogDriver` above can drive the dialog; this
-    /// is what would tell it *which* dialog, and it does not exist yet.
-    ///
-    /// The buildable route is `thread/read`'s `activeFlags`, which
-    /// `CodexThreadStatus.activity` already maps to `.waiting` and nothing polls. That is a
-    /// feature, not a refusal — see the audit's §3.2 part 1.
+    /// Native pending requests are read directly from the account's bridge by PromptService.
+    /// They are not rollout records, so no transcript parser can supply their identity.
     static let openPromptReader: AgentOpenPromptReader? = nil
 
     static let searchCorpus: AgentSearchCorpus? = CodexSearchCorpus()
 
-    /// **`nil`.** A codex tab's turns run in the `codex resume` TUI that holds the thread's
-    /// writer lock, not through the app-server Flight Deck talks to, so no approval request
-    /// reaches Flight Deck with an id it could answer by.
-    static let promptResponder: AgentPromptResponder? = nil
+    /// Shared-daemon dialogs are answered by request id; legacy and local TUI dialogs
+    /// keep the screen driver. SessionStore chooses using the offer's identity.
+    static let promptResponder: AgentPromptResponder? = CodexPromptResponder()
 
     let rpc: CodexRPC
+    var nativeDialogs: CodexNativeDialogs?
+    var sharedSocketPath: String?
 
     /// Deadline for `read`, in seconds. `CodexRPC.request` has none of its own — only the
     /// handshake verifier produces `.timeout` — and `read` is the one call a *restored* tab
@@ -210,10 +204,7 @@ struct CodexAdapter: AgentAdapter {
     /// `thread/start` took out — see the comment at that call below for why it exists and
     /// must come after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
-        let params = threadOptions(options).asThreadStartParams(
-            cwd: session.transcriptDirectory,
-            historyMode: historyMode
-        )
+        let params = sessionParams(options, cwd: session.transcriptDirectory)
         let result = try await rpc.request("thread/start", params)
 
         guard let thread = result["thread"] as? [String: Any],
@@ -317,8 +308,10 @@ struct CodexAdapter: AgentAdapter {
         // error. So this throws rather than catches, exactly like the naming commit: a
         // caller that sees `prepare` fail here knows to retry or fall back, rather than
         // discovering the break only when the terminal reports it.
-        _ = try await rpc.request("thread/archive", ["threadId": raw])
-        _ = try await rpc.request("thread/unarchive", ["threadId": raw])
+        if sharedSocketPath == nil {
+            _ = try await rpc.request("thread/archive", ["threadId": raw])
+            _ = try await rpc.request("thread/unarchive", ["threadId": raw])
+        }
 
         return AgentBinding(
             conversationID: id,
@@ -351,7 +344,7 @@ struct CodexAdapter: AgentAdapter {
     /// otherwise opens a "Choose working directory" picker that blocks the session behind a
     /// prompt with one sane answer.
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
-        "codex resume \(binding.conversationID.uuidString.lowercased())\(controlAccessSuffix(options))\n"
+        "codex\(remoteSuffix) resume \(binding.conversationID.uuidString.lowercased())\(optionsSuffix(options))\n"
     }
 
     func resumeCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
@@ -372,14 +365,45 @@ struct CodexAdapter: AgentAdapter {
         if let url = binding.transcriptURL, rolloutExists(url) {
             return resumeCommand(binding, session, options)
         }
-        return "codex\(controlAccessSuffix(options))\n"
+        return "codex\(remoteSuffix)\(optionsSuffix(options))\n"
+    }
+
+    private var remoteSuffix: String {
+        guard let sharedSocketPath else { return "" }
+        return " --remote " + ClaudeSession.shellQuoted("unix://" + sharedSocketPath)
+    }
+
+    /// A resume launches another Codex process, so thread/start overrides alone cannot
+    /// determine the settings used by its turns. On the shared daemon the TUI refuses every
+    /// permission flag; `prepare` and `rebind` hand those to the daemon instead.
+    private func optionsSuffix(_ options: AgentOptions) -> String {
+        if sharedSocketPath != nil {
+            let args = threadOptions(options).withoutPermissions.launchArguments
+            return args.isEmpty ? "" : " " + args.joined(separator: " ")
+        }
+        let args = threadOptions(options).launchArguments
+        return (args.isEmpty ? "" : " " + args.joined(separator: " ")) + controlAccessSuffix(options)
+    }
+
+    /// `thread/start`/`thread/resume` params carrying this tab's settings, permissions
+    /// included. On the shared daemon the control-access grant rides in `config` too, since
+    /// the `--remote` TUI cannot take it as flags.
+    private func sessionParams(_ options: AgentOptions, cwd: String) -> [String: Any] {
+        let thread = threadOptions(options)
+        var params = thread.asThreadStartParams(cwd: cwd, historyMode: historyMode)
+        if sharedSocketPath != nil, controlAccessSupported {
+            let grant = CodexControlAccess.configOverrides(socket: controlSocket, options: thread)
+            if !grant.isEmpty {
+                params["config"] = (params["config"] as? [String: Any] ?? [:]).merging(grant) { current, _ in current }
+            }
+        }
+        return params
     }
 
     /// The text appended after the base `codex`/`codex resume <id>` command, granting this
     /// tab's own sandbox access to `controlSocket` (see `CodexControlAccess`). Empty — not a
-    /// lone trailing space — when there is nothing to grant, so a `controlSocket == nil` launch
-    /// line stays byte-identical to what it typed before this feature existed. Both inputs are
-    /// read here, at the moment of typing, so it does not matter whether the socket or the
+    /// lone trailing space — when there is nothing to grant. Both inputs are read here,
+    /// at the moment of typing, so it does not matter whether the socket or the
     /// version-probe result reached this adapter first — both do, from different writers.
     private func controlAccessSuffix(_ options: AgentOptions) -> String {
         guard controlAccessSupported else { return "" }
@@ -502,11 +526,32 @@ struct CodexAdapter: AgentAdapter {
     func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         let threadID = session.pinnedConversationID.uuidString.lowercased()
         let existing = AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+        let activity: SessionActivity?
         do {
-            _ = try await read(existing)
+            activity = try await read(existing).activity
         } catch CodexRPCError.remote(_, let message)
             where Self.isThreadGone(message: message, threadID: threadID) {
             return try await prepare(for: session, options: options)
+        }
+        // The `--remote` TUI about to join resumes with no overrides and inherits whatever
+        // the daemon holds — codex's own defaults (read-only, on-request) for a thread loaded
+        // any other way. Codex 0.164.0 (probed live) applies `thread/resume` overrides only
+        // when that call LOADS the thread, and a later bare resume keeps them. So when the
+        // thread is idle, drop this connection's own subscription first — the runtime's attach
+        // took one — and a thread nobody else holds unloads and reloads with the tab's
+        // settings. A thread with a turn in flight is left loaded: its pending approval must
+        // survive, and its settings cannot change mid-turn anyway. Best effort throughout: a
+        // standalone TUI still holding the writer lock refuses, and the tab must still open.
+        if sharedSocketPath != nil {
+            if activity != .busy, activity != .waiting {
+                _ = try? await rpc.request("thread/unsubscribe", ["threadId": threadID], timeoutSeconds: readTimeout)
+            }
+            var params = sessionParams(options, cwd: session.transcriptDirectory)
+            params["cwd"] = nil
+            params["historyMode"] = nil
+            params["threadId"] = threadID
+            params["excludeTurns"] = true
+            _ = try? await rpc.request("thread/resume", params, timeoutSeconds: readTimeout)
         }
         return AgentBinding(
             conversationID: session.pinnedConversationID,

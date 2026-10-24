@@ -762,6 +762,36 @@ role whose agent drops out keeps it, labelled "(unavailable)". A routed launch (
 same resolved value through `GrokLaunchOverrides`/`GeminiLaunchOverrides`, so a hand-picked and a
 routed model are one setting.
 
+Codex’s editor exposes model, reasoning effort (including custom model-advertised levels),
+reasoning summary, response detail, sandbox, approval, web search, workspace network access,
+additional writable directories, developer instructions and a model-instructions file. Empty
+controls inherit Codex’s configuration. Overrides go to both `thread/start` and the interactive
+`codex resume` command, with TOML literals shell quoted as individual arguments. Project fields
+inherit independently, including an explicit network-access denial. Claude and Codex share
+`AgentStartupSection`, editing the same app-wide auto-resume preference.
+
+Codex 0.163+ uses the managed per-account daemon's private Unix WebSocket. Flight Deck
+and the native `codex --remote unix://… resume <id>` terminal share the same live thread.
+`CodexNativeDialogs` tracks server requests independently of the rollout and forwards their
+exact decision choices, question ids, permission scopes and MCP forms/URLs to the phone.
+Responses use native request ids; offers include a connection generation so stale phone
+answers cannot match ids reused after reconnect. File approvals include their change preview,
+recovered from the loaded thread after reconnect before approval is offered. Subagent requests
+are routed to their root, recovering ancestry from thread metadata when needed.
+
+The daemon survives app restarts. An unexpected observer disconnect retries without restarting
+the terminal and rejoins each attached thread to recover pending dialogs. Native observation
+starts after the initialization handshake and includes tabs attached before it completed.
+Every five seconds, a bounded metadata read reconciles missed activity notifications; it
+joins only threads already loaded in the shared daemon, leaving standalone writer locks alone.
+Older Codex builds
+retain the standalone transport. Rollout watchers still supply transcript history, errors and
+turn completion. `CodexScreenPrompt` supplies phone menus and waiting status for local numbered
+TUI dialogs, including trust prompts. It reads existing surfaces only and revalidates the
+screen identity before answering. Hardware verification and unknown dialog shapes remain on
+the Mac rather than inventing an answer. The phone supports secret fields and explicit links;
+closed decision lists never acquire a free-text approval alternative.
+
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
 

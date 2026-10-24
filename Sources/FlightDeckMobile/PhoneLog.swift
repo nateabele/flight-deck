@@ -287,8 +287,9 @@ struct MainThreadTarget: Sendable {
     /// Return addresses, innermost first, written into `buffer`; the count written.
     /// See `MainStallWatch` for why this function must not allocate.
     func sample(into buffer: UnsafeMutablePointer<UInt>, capacity: Int) -> Int {
-        guard thread_suspend(port) == KERN_SUCCESS else { return 0 }
+        guard capacity >= 2, thread_suspend(port) == KERN_SUCCESS else { return 0 }
         defer { thread_resume(port) }
+        #if arch(arm64)
         var state = arm_thread_state64_t()
         var count = mach_msg_type_number_t(
             MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size
@@ -303,6 +304,24 @@ struct MainThreadTarget: Sendable {
         buffer[written] = Self.strip(UInt(state.__pc)); written += 1
         buffer[written] = Self.strip(UInt(state.__lr)); written += 1
         var fp = UInt(state.__fp)
+        #elseif arch(x86_64)
+        // The simulator build includes Intel Macs too. Their thread state has a PC and frame
+        // pointer, but no ARM link register; sampling must not depend on ARM-only SDK types.
+        var state = x86_thread_state64_t()
+        var count = mach_msg_type_number_t(MemoryLayout<x86_thread_state64_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &state) {
+            $0.withMemoryRebound(to: natural_t.self, capacity: Int(count)) {
+                thread_get_state(port, x86_THREAD_STATE64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        var written = 1
+        buffer[0] = UInt(state.__rip)
+        var fp = UInt(state.__rbp)
+        #else
+        return 0
+        #endif
+        #if arch(arm64) || arch(x86_64)
         while written < capacity, fp >= stackLow, fp + 16 <= stackHigh, fp % 8 == 0 {
             let record = UnsafePointer<UInt>(bitPattern: fp)!
             let next = record[0]
@@ -313,11 +332,18 @@ struct MainThreadTarget: Sendable {
             fp = next
         }
         return written
+        #endif
     }
 
     /// Drops pointer-authentication bits: system frameworks are arm64e and sign the return
     /// addresses they save. User addresses on iOS fit well inside 36 bits.
-    private static func strip(_ address: UInt) -> UInt { address & 0x0000_000F_FFFF_FFFF }
+    private static func strip(_ address: UInt) -> UInt {
+        #if arch(arm64)
+        address & 0x0000_000F_FFFF_FFFF
+        #else
+        address
+        #endif
+    }
 }
 
 /// Turns sampled addresses into something a reader — or `atos` — can resolve.

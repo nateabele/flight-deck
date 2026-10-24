@@ -111,22 +111,7 @@ struct ClaudeOptionsPane: View {
                 AnyView(
                     Group {
                         if let leading { leading() }
-                        Section("Startup") {
-                            Toggle(
-                                "Auto-resume running sessions on restart",
-                                isOn: Binding(
-                                    get: { preferences.autoResumesRunningSessions },
-                                    set: { preferences.autoResumesRunningSessions = $0 }
-                                )
-                            )
-                            .accessibilityIdentifier("prefs-auto-resume")
-                            // States the busy/shell rule in the user's terms: "running" is not
-                            // self-evident from the label, and the exclusions are the surprising
-                            // half.
-                            Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        AgentStartupSection(preferences: preferences)
                     }
                 )
             }
@@ -141,4 +126,28 @@ struct ClaudeOptionsPane: View {
     /// `lockedPrefix`'s actual flag sequence, so
     /// `ClaudeSessionTests.testPlaceholderPrefixMatchesTheRealPrefixShape` pins the shape.
     static let placeholderPrefix = "claude --session-id ⟨generated⟩ --name ⟨session title⟩"
+}
+
+/// This is an app-wide preference; every agent pane must edit the same value.
+struct AgentStartupSection: View {
+    @ObservedObject var preferences: PreferencesStore
+
+    var body: some View {
+        Section("Startup") {
+            Toggle(
+                "Auto-resume running sessions on restart",
+                isOn: Binding(
+                    get: { preferences.autoResumesRunningSessions },
+                    set: { preferences.autoResumesRunningSessions = $0 }
+                )
+            )
+            .accessibilityIdentifier("prefs-auto-resume")
+            // States the busy/shell rule in the user's terms: "running" is not
+            // self-evident from the label, and the exclusions are the surprising
+            // half.
+            Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
 }

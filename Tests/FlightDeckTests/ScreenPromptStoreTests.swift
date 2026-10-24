@@ -362,6 +362,26 @@ final class ScreenPromptStoreTests: XCTestCase {
 
     // MARK: - Answering a menu
 
+    func testCodexWaitsForDelayedCursorRepaintThenSubmitsWithoutMoreArrows() throws {
+        let (store, spy, id) = makeStore(agent: .codex)
+        let screen = "Would you like to run the following command?\nReason: Continue?\n$ git rebase master\n\n› 1. Yes\n  2. Remember\n\nPress enter to confirm or esc to cancel"
+        spy.viewportOverride = screen
+        tick(store, id)
+        let call = try XCTUnwrap(CodexScreenPrompt.read(screen)?.callID)
+        var settles = 0
+        store.injectionSettle = { work in
+            settles += 1
+            if settles == 2 {
+                spy.viewportOverride = screen.replacingOccurrences(of: "› 1. Yes\n  2. Remember", with: "  1. Yes\n› 2. Remember")
+            }
+            work()
+        }
+        spy.events.removeAll()
+        XCTAssertEqual(store.answerScreenPrompt(call, with: .option(index: 1, label: "Remember"), in: id, token: UUID()), .dispatched)
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
+        XCTAssertTrue(aborts.isEmpty)
+    }
+
     /// An offered menu on the spy's own modelled list, whose arrows really move the marker.
     private func offeredModelledMenu(
         labels: [String] = ["Pro", "Console", "3rd party"]

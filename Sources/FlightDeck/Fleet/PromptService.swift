@@ -262,6 +262,11 @@ final class PromptService {
     /// The refusal is the same string from the same property `openPrompt` would have returned,
     /// so nothing is decided differently here; only the order is.
     func pushedOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
+        if store.agent(of: session) == .codex {
+            let open = store.status(for: session)?.activity == .waiting ? store.codexOpenPrompt(for: session) : nil
+            offers[session] = open
+            return open.map { .success($0) } ?? .failure("prompt_changed")
+        }
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
               let reader = agent.openPromptReader
@@ -277,6 +282,11 @@ final class PromptService {
     /// actor on a widened read. Nil means "not known yet": the first window missed, a wider
     /// read is running off the main actor, and `onPolledSettled` fires when it lands.
     func polledOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode>? {
+        if store.agent(of: session) == .codex {
+            let open = store.status(for: session)?.activity == .waiting ? store.codexOpenPrompt(for: session) : nil
+            offers[session] = open
+            return open.map { .success($0) } ?? .failure("prompt_changed")
+        }
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
               let reader = agent.openPromptReader
@@ -605,7 +615,12 @@ final class PromptService {
     /// Every code returned here is one `answer` has always returned, in the order it has
     /// always returned them.
     func openPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
-        preflight(session).flatMap { Self.scanToEnd($0, tail: tail) }
+        if store.agent(of: session) == .codex {
+            let open = store.status(for: session)?.activity == .waiting ? store.codexOpenPrompt(for: session) : nil
+            offers[session] = open
+            return open.map { .success($0) } ?? .failure("prompt_changed")
+        }
+        return preflight(session).flatMap { Self.scanToEnd($0, tail: tail) }
     }
 
     /// Everything `openPrompt` decides before reading a byte, split out so the scheduled

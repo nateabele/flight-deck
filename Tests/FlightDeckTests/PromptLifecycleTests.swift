@@ -300,13 +300,10 @@ final class PromptLifecycleTests: XCTestCase {
         XCTAssertEqual(recorder.events, [])
     }
 
-    // MARK: - Agents this build cannot read
+    // MARK: - Native dialogs without a transcript record
 
-    /// **The derivation must not be the thing that builds an adapter.** A codex tab is refused
-    /// on the agent alone, before `PromptService.openPrompt` resolves a transcript — that
-    /// resolution memoizes a whole `CodexStack`, and a log line has no business creating one.
-    /// The read count is what proves the early return; the code is what proves it is the same
-    /// refusal a tap would get.
+    /// Checking a native offer must not read the rollout or construct a new daemon stack.
+    /// With no native/screen offer, record the missing identity rather than an unsupported agent.
     func testACodexTabIsRecordedUnnamedWithoutReadingATranscript() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.launchFailureReporter = SilentReporter()
@@ -335,10 +332,10 @@ final class PromptLifecycleTests: XCTestCase {
         store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
 
         XCTAssertEqual(recorder.events, [
-            .unnamed(code: "unsupported_agent"),
+            .unnamed(code: "prompt_changed"),
             .pushed(asserts: .open, activity: "waiting", clients: 0),
         ])
-        XCTAssertEqual(transcript.reads, 0, "no transcript may be read for an agent this build cannot name a dialog for")
+        XCTAssertEqual(transcript.reads, 0, "native dialog identity does not come from a rollout record")
     }
 
     // MARK: - Inbound answers

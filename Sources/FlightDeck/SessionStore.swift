@@ -601,6 +601,7 @@ final class SessionStore: ObservableObject {
         let rpc: CodexRPC
         var adapter: CodexAdapter
         let runtime: CodexRuntime
+        let dialogs: CodexNativeDialogs
 
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
         /// spawned in that home is the process that *writes* the index the runtime tails, so
@@ -613,11 +614,29 @@ final class SessionStore: ObservableObject {
         ) {
             transport = CodexProcessTransport(home: home)
             rpc = CodexRPC(transport: transport)
-            adapter = CodexAdapter(rpc: rpc)
+            dialogs = CodexNativeDialogs(rpc: rpc)
+            dialogs.parentLookup = { [weak rpc] thread in
+                guard let rpc, let result = try? await rpc.request("thread/read", ["threadId": thread.uuidString.lowercased()], timeoutSeconds: 3),
+                      let info = result["thread"] as? [String: Any], let parent = info["parentThreadId"] as? String else { return nil }
+                return UUID(uuidString: parent)
+            }
+            dialogs.fileChangeLookup = { [weak rpc] thread, item in
+                guard let rpc, let result = try? await rpc.request("thread/read", ["threadId": thread.uuidString.lowercased(), "includeTurns": true], timeoutSeconds: 3),
+                      let info = result["thread"] as? [String: Any], let turns = info["turns"] as? [[String: Any]] else { return nil }
+                return turns.reversed().flatMap { $0["items"] as? [[String: Any]] ?? [] }
+                    .first { $0["id"] as? String == item }?["changes"]
+            }
+            adapter = CodexAdapter(rpc: rpc, nativeDialogs: dialogs)
             runtime = CodexRuntime(
                 clock: clock, indexURL: indexURL, searchIndex: searchIndex,
                 projectPath: projectPath, workingDirectory: workingDirectory
             )
+            dialogs.onChange = { [weak runtime] thread, activity in
+                runtime?.receiveNativeStatus(thread: thread, activity: activity)
+            }
+            rpc.onServerRequest = { [weak dialogs] id, method, params in
+                dialogs?.receive(id: id, method: method, params: params)
+            }
             // The hook `CodexProcessTransport` exposes exists for exactly this. Without it a
             // mid-session app-server crash leaves every in-flight request suspended forever —
             // a tab waiting on a dead process is indistinguishable from a hung agent, which is
@@ -651,6 +670,7 @@ final class SessionStore: ObservableObject {
     /// racing the first has to *wait* for the same `initialize` to be answered, not proceed
     /// against a process that has not spoken yet.
     private var codexHandshake: [UUID?: Task<Void, Error>] = [:]
+    private var codexReconnect: [UUID?: Task<Void, Never>] = [:]
 
     /// Every codex app-server notification, with the account its server answers for. Flight
     /// Control's usage meter reads `account/rateLimits/updated` here (L3-U); with no listener
@@ -737,6 +757,11 @@ final class SessionStore: ObservableObject {
         // app wires its socket up before a user opens any codex tab) would carry a `nil` adapter
         // forever, since nothing would ever assign to `controlSocket` again to trigger `didSet`.
         stack.adapter.controlSocket = controlSocket
+        // Read the active screen without injector(for:), which would wake sleeping tabs.
+        stack.runtime.readViewport = { [weak self] tab in
+            guard let self, !self.rollingOver.contains(tab) else { return nil }
+            return (self.injectorOverride ?? self.surfaces[tab])?.readViewport()
+        }
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
         // have to happen for the same event.
@@ -751,18 +776,63 @@ final class SessionStore: ObservableObject {
         let failInFlightRequests = stack.transport.onTerminate
         stack.transport.onTerminate = { [weak self, weak stack] in
             failInFlightRequests?()
+            stack?.dialogs.disconnected()
             // Identity-checked, and against this account's entry only: a late termination
             // from a *replaced* stack must not tear down the live one that succeeded it, and
             // one login's crash must not forget another login's healthy server.
             guard let self, let stack, self.codexStacks[account] === stack else { return }
+            let reconnect = !stack.transport.wasStopped && stack.transport.sharedSocketPath != nil
+            let tabs = self.repos.flatMap(\.sessions).filter { self.instance(for: $0) == AgentInstance(agent: .codex, account: account) }
+            for tab in tabs {
+                if let attachment = self.attachments.removeValue(forKey: tab.id) {
+                    stack.runtime.detach(attachment.token)
+                }
+            }
             self.codexStacks[account] = nil
             self.codexHandshake[account] = nil
+            if reconnect, !tabs.isEmpty { self.reconnectCodex(account: account) }
         }
         stack.rpc.onNotification = { [weak self] method, params in
+            self?.codexStacks[account]?.dialogs.notify(method, params: params)
             self?.onCodexNotification?(account, method, params)
         }
         codexStacks[account] = stack
         return stack
+    }
+
+    func codexOpenPrompt(for tab: UUID) -> OpenPrompt? {
+        guard let session = session(for: tab), session.agent == .codex else { return nil }
+        let identity = instance(for: session)
+        let adapter = adapters[identity] as? CodexAdapter ?? codexStacks[identity.account]?.adapter
+        if let open = adapter?.nativeDialogs?.openPrompt(for: session.pinnedConversationID) {
+            return open
+        }
+        guard !rollingOver.contains(tab), let viewport = (injectorOverride ?? surfaces[tab])?.readViewport() else { return nil }
+        return CodexScreenPrompt.read(viewport)
+    }
+
+    /// Rejoin the existing daemon after an observer disconnect. No terminal is restarted
+    /// and no conversation is recreated; Codex replays pending requests on thread/resume.
+    private func reconnectCodex(account: UUID?) {
+        guard codexReconnect[account] == nil else { return }
+        codexReconnect[account] = Task { [weak self] in
+            defer { self?.codexReconnect[account] = nil }
+            var delay: UInt64 = 1
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: delay * 1_000_000_000) }
+                catch { return }
+                guard let self else { return }
+                let tabs = self.repos.flatMap(\.sessions).filter { self.instance(for: $0) == AgentInstance(agent: .codex, account: account) }
+                guard !tabs.isEmpty else { return }
+                do {
+                    try await self.startCodex(account: account)
+                    for tab in tabs where self.session(for: tab.id) != nil { self.startWatching(tabID: tab.id) }
+                    return
+                } catch {
+                    delay = min(delay * 2, 15)
+                }
+            }
+        }
     }
 
     /// This account's codex rate limits, asked of the app-server Flight Deck already runs for it
@@ -4181,8 +4251,20 @@ final class SessionStore: ObservableObject {
             // tabs spawns its TUI, so even the first tab starts with the skill on disk. It is
             // off-main and bounded; see `installBundledOffMainActor`.
             await CodexDelegateSkill.installBundledOffMainActor(codexHome: stack.transport.home)
-            try stack.transport.start()
+            if CodexVersionProbe.isAtLeast(version, minimum: "0.163.0") {
+                try await stack.transport.startShared()
+                stack.adapter.sharedSocketPath = stack.transport.sharedSocketPath
+            } else {
+                stack.runtime.nativeDialogs = nil
+                stack.adapter.nativeDialogs = nil
+                try stack.transport.start()
+            }
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
+            if stack.transport.sharedSocketPath != nil {
+                // Restore attached tabs only after initialize: an earlier request is dropped
+                // by the unopened transport and would leave its sidebar status idle forever.
+                stack.runtime.nativeDialogs = stack.dialogs
+            }
         }
         codexHandshake[account] = task
         do {
@@ -7456,7 +7538,7 @@ final class SessionStore: ObservableObject {
         // the ones that are not about the screen: the duplicate token, and `waiting`. An answer
         // for a prompt that is no longer pending fails on the agent's server rather than
         // landing anywhere, so the screen interlocks below have nothing left to protect.
-        if let responder = agent.promptResponder {
+        if let responder = agent.promptResponder, agent != .codex || open.callID.hasPrefix("codex-native:") {
             if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
             guard statuses[id]?.activity == .waiting else { return .notWaiting }
             guard let target = agentTarget(for: id) else { return .unknownSession }
@@ -7571,7 +7653,8 @@ final class SessionStore: ObservableObject {
             return drive(
                 from: current, to: driver.allowRow,
                 confirm: { driver.focusedRow(inViewport: $0) == driver.allowRow },
-                driver: driver, injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token,
+                settleRetries: agent == .codex ? 9 : 0
             )
 
         case .answers(let selections):
@@ -7723,7 +7806,7 @@ final class SessionStore: ObservableObject {
     ) -> AnswerDispatch {
         guard let at = locate(id) else { return .unknownSession }
         let agent = repos[at.repo].sessions[at.session].agent
-        guard agent == .claude, let driver = agent.dialogDriver else { return .unsupportedAgent }
+        guard (agent == .claude || agent == .codex), let driver = agent.dialogDriver else { return .unsupportedAgent }
         if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
         guard statuses[id]?.activity == .waiting else { return .notWaiting }
         guard let injector = injector(for: id) else {
@@ -7738,7 +7821,8 @@ final class SessionStore: ObservableObject {
             recordScreenAbort(.unreadableBeforePress)
             return .unreadableScreen
         }
-        guard let seen = ScreenPromptReader.read(inViewport: viewport), seen.callID == call else {
+        let parseScreen: (String) -> OpenPrompt? = agent == .codex ? CodexScreenPrompt.read : { ScreenPromptReader.read(inViewport: $0) }
+        guard let seen = parseScreen(viewport), seen.callID == call else {
             recordScreenAbort(.screenPromptChanged)
             return .promptChanged
         }
@@ -7777,7 +7861,7 @@ final class SessionStore: ObservableObject {
                 guard let self else { return }
                 defer { self.injecting.remove(id) }
                 guard let after = injector.readViewport(),
-                      ScreenPromptReader.read(inViewport: after)?.callID == call
+                      parseScreen(after)?.callID == call
                 else {
                     self.recordScreenAbort(.screenPromptChanged)
                     return
@@ -7844,9 +7928,10 @@ final class SessionStore: ObservableObject {
                 confirm: {
                     driver.focusedRow(inViewport: $0) == index
                         && driver.row(index, reads: label, inViewport: $0)
-                        && ScreenPromptReader.read(inViewport: $0)?.callID == call
+                        && parseScreen($0)?.callID == call
                 },
-                driver: driver, injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token,
+                settleRetries: agent == .codex ? 9 : 0
             )
 
         case .permission:
@@ -7972,7 +8057,9 @@ final class SessionStore: ObservableObject {
         // An agent that can refuse by request id does, rather than sending a blind key — it
         // rejects exactly what is pending, subagents' requests included.
         if let responder = repos[at.repo].sessions[at.session].agent.promptResponder,
-           let target = agentTarget(for: id) {
+           let target = agentTarget(for: id),
+           repos[at.repo].sessions[at.session].agent != .codex ||
+               (target.adapter as? CodexAdapter)?.nativeDialogs?.openPrompt(for: target.location.binding.conversationID) != nil {
             responder.abort(for: target)
         } else if let dismisser = driver as? AgentQuestionDismisser,
                   let screen = injector.readViewport(),
@@ -8267,7 +8354,8 @@ final class SessionStore: ObservableObject {
         driver: any AgentDialogDriver,
         injector: TextInjecting,
         id: UUID,
-        token: UUID
+        token: UUID,
+        settleRetries: Int = 0
     ) -> AnswerDispatch {
         remember(answered: token, for: id)
         injecting.insert(id)
@@ -8277,23 +8365,30 @@ final class SessionStore: ObservableObject {
             if steps > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
         }
 
-        // Claude Code repaints asynchronously — the same seam, and the same 120ms in
-        // production, that a kill waits out.
-        injectionSettle { [weak self] in
-            defer { self?.injecting.remove(id) }
+        // Codex may repaint after the first 120ms read. Wait for the verified destination
+        // without repeating arrows: another arrow could select a different permission scope.
+        func finish(after retries: Int) {
+          injectionSettle { [weak self] in
+            guard let self else { return }
             // Split for the reason `perform`'s is, and one more: `confirm` is a closure the
             // caller composed, so the only thing that can be said about its refusal here is
             // where the marker ended up — which is worth saying, because that is the number
             // the caller disagreed with.
             guard let screen = injector.readViewport() else {
-                self?.answerAbortSink(AnswerAbort(
+                self.injecting.remove(id)
+                self.answerAbortSink(AnswerAbort(
                     check: .unreadableAfterMove, step: nil, purpose: nil,
                     from: current, to: target, expected: nil, focused: nil, viewport: nil
                 ))
                 return
             }
             guard confirm(screen) else {
-                self?.answerAbortSink(AnswerAbort(
+                if retries > 0 {
+                    finish(after: retries - 1)
+                    return
+                }
+                self.injecting.remove(id)
+                self.answerAbortSink(AnswerAbort(
                     check: .landingAfterMove, step: nil, purpose: nil,
                     from: current, to: target, expected: nil,
                     focused: driver.focusedRow(inViewport: screen), viewport: screen
@@ -8301,7 +8396,10 @@ final class SessionStore: ObservableObject {
                 return
             }
             injector.sendReturn()
+            self.injecting.remove(id)
+          }
         }
+        finish(after: settleRetries)
         return .dispatched
     }
 
@@ -9859,6 +9957,7 @@ final class SessionStore: ObservableObject {
 
         var next: [UUID: SessionStatus] = [:]
         var nextBackgroundWork: Set<UUID> = []
+        var nextTrustScreenTabs: Set<UUID> = []
         for session in repos.flatMap(\.sessions) {
             // A tab on an agent that has no claude status registry behind it keeps whatever
             // its runtime last reported. This scan can neither confirm nor refute a codex
@@ -9876,6 +9975,7 @@ final class SessionStore: ObservableObject {
                 // all. The screen is the only witness, and it says waiting.
                 if trustScreen(for: session.id) != nil {
                     next[session.id] = SessionStatus(activity: .waiting, waitingFor: "folder trust")
+                    nextTrustScreenTabs.insert(session.id)
                 }
                 continue
             }
@@ -9893,6 +9993,7 @@ final class SessionStore: ObservableObject {
             }
         }
 
+        trustScreenTabs = nextTrustScreenTabs
         commitStatuses(next, backgroundWork: nextBackgroundWork)
         answerTrustScreensTrustedElsewhere()
 
@@ -9964,7 +10065,6 @@ final class SessionStore: ObservableObject {
     private func pollPlanGates() {
         guard let planGates else { return }
         Task { @MainActor [weak self] in
-        var nextTrustScreenTabs: Set<UUID> = []
             await planGates.refresh()
             self?.deliverPlanGateNotifications()
         }
@@ -9982,7 +10082,6 @@ final class SessionStore: ObservableObject {
     private var stuckPromptEpisodes: [UUID: StuckEpisode] = [:]
 
     /// How long a dialog must stay unnameable before each successive `.stuck` record, in
-                    nextTrustScreenTabs.insert(session.id)
     /// seconds of continuous unnameability.
     ///
     /// **Wall clock, because a tick count could not carry the discriminator this event exists
@@ -10000,7 +10099,6 @@ final class SessionStore: ObservableObject {
     /// episode is written seconds in, when every age is young by construction. The later rungs
     /// are the ones that say something: at 2 minutes, at 10, at half an hour, a `lastRecordAgeMs`
     /// that has grown in step with the wall clock *is* the absent-record signature, stated
-        trustScreenTabs = nextTrustScreenTabs
     /// positively and without waiting to see what does not follow.
     ///
     /// **Bounded by construction.** The ladder is finite, each rung fires at most once per
@@ -10678,6 +10776,14 @@ final class SessionStore: ObservableObject {
     /// real claude 2.1.310 in a pty, a Return sent the moment the rows were drawn was dropped —
     /// the screen stayed exactly as it was — while the same keys two seconds later took.
     static let trustScreenSettle: TimeInterval = 1.5
+    /// How far apart, and how many, automatic attempts at one screen. **More than one because one
+    /// was measured to fail:** on the first release, a tab reattached at relaunch was answered
+    /// five seconds later and its arrow had not shown on the re-read, so the landing check
+    /// refused the Return and the screen sat there. A retry is safe for the reason the first
+    /// try is: each starts from the cursor it reads at that moment, so an arrow that landed late
+    /// is not added to, and each ends on the same read-back before any Return.
+    static let trustScreenRetryInterval: TimeInterval = 3
+    static let trustScreenMaxAttempts = 3
 
     /// Answers a tab's folder-trust screen with yes when another claude account already trusts
     /// **exactly** that folder (`ClaudeFolderTrust`). claude then records the trust under this
@@ -10695,6 +10801,8 @@ final class SessionStore: ObservableObject {
             }
             guard var sighting = trustScreenSightings[id],
                   stamp.timeIntervalSince(sighting.since) >= Self.trustScreenSettle,
+                  sighting.attempts < Self.trustScreenMaxAttempts,
+                  sighting.lastAttempt.map({ stamp.timeIntervalSince($0) >= Self.trustScreenRetryInterval }) ?? true,
                   let yes = trust.rows.firstIndex(of: ScreenPromptReader.trustFolderLabel)
             else { continue }
             if sighting.trustedElsewhere == nil {
@@ -10789,14 +10897,6 @@ final class SessionStore: ObservableObject {
     /// Stored per tab, and told to the fleet. A node appearing or finishing moves no status
     /// field, so without its own emission a connected phone would hold yesterday's tree until
     /// some unrelated tick happened to carry it. Skipped when there is no status yet, like
-    /// How far apart, and how many, automatic attempts at one screen. **More than one because one
-    /// was measured to fail:** on the first release, a tab reattached at relaunch was answered
-    /// five seconds later and its arrow had not shown on the re-read, so the landing check
-    /// refused the Return and the screen sat there. A retry is safe for the reason the first
-    /// try is: each starts from the cursor it reads at that moment, so an arrow that landed late
-    /// is not added to, and each ends on the same read-back before any Return.
-    static let trustScreenRetryInterval: TimeInterval = 3
-    static let trustScreenMaxAttempts = 3
     /// `applySubagentCount`: the first `commitStatuses` emission carries the tree then.
     ///
     /// **Emitted only when the WIRE form moves.** `SubagentNode.modified` is part of tree
@@ -10814,8 +10914,6 @@ final class SessionStore: ObservableObject {
             hasBackgroundWork: backgroundWorkSessions.contains(id),
             openPromptCall: openPromptIdentity(of: id),
             answerless: status.answerless,
-                  sighting.attempts < Self.trustScreenMaxAttempts,
-                  sighting.lastAttempt.map({ stamp.timeIntervalSince($0) >= Self.trustScreenRetryInterval }) ?? true,
             subagents: wireSubagents(of: id),
             openPromptAgent: openPromptAgents[id],
             openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)

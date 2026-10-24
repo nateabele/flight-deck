@@ -46,19 +46,28 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
     /// call carrying two questions shows them in sequence so answering the first would leave
     /// the second up with the reader believing they were done.
     public var unanswerable: String?
+    public var allowsOther: Bool
+    public var freeTextOnly: Bool
+    public var isSecret: Bool
+    public var url: String?
 
     public init(
         header: String? = nil, question: String, options: [Option],
-        multiSelect: Bool = false, unanswerable: String? = nil
+        multiSelect: Bool = false, unanswerable: String? = nil,
+        allowsOther: Bool = true, freeTextOnly: Bool = false, isSecret: Bool = false, url: String? = nil
     ) {
         self.multiSelect = multiSelect
         self.header = header
         self.question = question
         self.options = options
         self.unanswerable = unanswerable
+        self.allowsOther = allowsOther
+        self.freeTextOnly = freeTextOnly
+        self.isSecret = isSecret
+        self.url = url
     }
 
-    public var isAnswerable: Bool { unanswerable == nil && !options.isEmpty }
+    public var isAnswerable: Bool { unanswerable == nil && (!options.isEmpty || freeTextOnly) }
 
     /// Kept for a Mac that still sends it and for the tests that pin the wording; nothing in
     /// this build produces it any more. A multiSelect question is answerable from the phone.

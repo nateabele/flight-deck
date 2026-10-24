@@ -334,34 +334,15 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertEqual(spy.events, [.escape], "the retry is answered, not carried out twice")
     }
 
-    /// **A codex tab is told the true reason, and `prompt_changed` is not it.**
-    ///
-    /// This line used to answer `prompt_changed` for every non-claude tab, which the phone
-    /// renders as *"Your Mac has moved on from this."* — a sentence about a dialog that
-    /// moved, offered for a tab whose dialog did not move and never could be answered. It
-    /// reads as transient, so it invites a retry that can never succeed. `unsupported_agent`
-    /// is the code `SessionStore.answerPrompt` already defines for exactly this and the phone
-    /// already has copy for, and routing it here is what lets that copy ever appear.
-    ///
-    /// **The refusal moved, and the code did not.** It was `dialogDriver` alone; codex now
-    /// has one, so what refuses here is `AgentAdapter.openPromptReader` — this file's own
-    /// half. Driving a dialog needs a screen grammar, and codex has one; knowing WHICH dialog
-    /// is up needs a transcript grammar, and codex writes nothing to its rollout when an
-    /// approval goes up, so there is no call id for a phone's tap to be checked against.
-    /// Both are asked of the same adapter, not re-decided here.
-    ///
-    /// The tail is deliberately claude-shaped records rather than nothing: that distinguishes
-    /// "the file was never read" from "it was read and held no call", and a service that
-    /// pointed the claude mapper at a codex transcript would find a call in this fixture. So
-    /// a service that dropped this guard would fall through and answer `prompt_changed` from
-    /// the *next* one, which is what the old assertion could not tell apart.
-    func testACodexTabIsRefusedAsUnsupportedRatherThanAsChanged() async throws {
+    /// Codex now has native and screen offers. Claude-shaped transcript text is still
+    /// insufficient evidence of a Codex dialog, and must never cause a terminal keystroke.
+    func testCodexCannotAnswerAClaudeTranscriptCallWithoutANativeOffer() async throws {
         let (service, _, spy, id) = try await makeCodexService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
         service.tail = { _, _ in (lines, false) }
         XCTAssertEqual(
             code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
-            "unsupported_agent"
+            "prompt_changed"
         )
         XCTAssertTrue(
             spy.events.isEmpty,
@@ -370,21 +351,26 @@ final class PromptServiceTests: XCTestCase {
         )
     }
 
-    /// **The case that actually pins this file's guard, and the one above does not.**
-    ///
-    /// A coverage gap found by mutation: deleting the capability guard from `PromptService`
-    /// entirely leaves the whole 1687-test suite green, because the tab in the test above has
-    /// a real `.file(.codex, url)` source, so a service without the guard falls through to
-    /// `SessionStore.answerPrompt` — which has a capability guard of its own and answers
-    /// `unsupported_agent` anyway. That test was measuring the store's refusal forwarded
-    /// through this file, not this file's.
-    ///
-    /// A codex **sign-in tab** is the shape that tells them apart, and it is the shape this
-    /// guard's own comment names: `openSignInSession` mints a tab with no `transcriptPath`,
-    /// so `timelineSource` answers `.noTranscript`, so a service without the guard never
-    /// reaches the store at all — it falls to `prompt_changed`, the sentence about a dialog
-    /// that moved, for a tab that never had one.
-    func testACodexSignInTabIsRefusedAsUnsupportedRatherThanAsChanged() {
+    func testNativeCodexOfferReachesThePhoneAndAnswersWithoutTerminalKeys() async throws {
+        let (service, store, spy, id) = try await makeCodexService(activity: .waiting)
+        let transport = ScriptedCodexTransport()
+        let rpc = CodexRPC(transport: transport)
+        let dialogs = CodexNativeDialogs(rpc: rpc)
+        store.overrideAdapter(CodexAdapter(rpc: rpc, nativeDialogs: dialogs, rolloutExists: { _ in true }), for: .codex, account: nil)
+        let thread = try XCTUnwrap(store.repos.flatMap(\.sessions).first { $0.id == id }?.pinnedConversationID)
+        dialogs.receive(id: "native-approval", method: "item/commandExecution/requestApproval", params: [
+            "threadId": thread.uuidString, "command": "git status", "availableDecisions": ["accept", "cancel"]])
+        let open = try service.pushedOpenPrompt(inSession: id).get()
+        XCTAssertEqual(service.offeredOpenPrompt(inSession: id), open)
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: open.callID,
+            answer: .option(index: 0, label: "Allow once"), token: UUID())))
+        XCTAssertTrue(spy.events.isEmpty, "native answers must not type into the terminal")
+        dialogs.notify("serverRequest/resolved", params: ["threadId": thread.uuidString, "requestId": "native-approval"])
+        XCTAssertEqual(code(service.answer(session: id, agent: nil, call: open.callID, answer: .deny, token: UUID())), "prompt_changed")
+    }
+
+    /// A sign-in tab has no rollout. Only a current native or screen offer may be answered.
+    func testCodexSignInWithoutAScreenOfferDoesNotType() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
@@ -421,7 +407,7 @@ final class PromptServiceTests: XCTestCase {
 
         XCTAssertEqual(
             code(service.answer(session: session.id, agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
-            "unsupported_agent"
+            "prompt_changed"
         )
         XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")
     }

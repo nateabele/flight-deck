@@ -340,6 +340,7 @@ struct PromptCard: View {
             let options = questions[question].options
             return picks[question, default: []].sorted().compactMap { pick in
                 guard options.indices.contains(pick) else {
+                    guard questions[question].allowsOther || questions[question].freeTextOnly else { return nil }
                     return typedAnswer(typed[question] ?? "")
                         .map { AnswerSelection.typed($0, optionCount: options.count) }
                 }
@@ -644,6 +645,13 @@ struct PromptCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let link = question.url, let url = URL(string: link),
+               url.scheme == "https", url.user == nil, url.password == nil,
+               let host = url.host, host != "localhost", host != "127.0.0.1", host != "::1" {
+                Link(destination: url) { Label("Open requested page", systemImage: "safari") }
+                    .buttonStyle(.bordered)
+            }
+
             ForEach(Array(question.options.enumerated()), id: \.offset) { option, choice in
                 Button {
                     if immediate {
@@ -702,8 +710,10 @@ struct PromptCard: View {
                 // Never on a menu the Mac read off its screen: those have no "Type something" row,
                 // and the Mac would refuse the answer.
                 if acceptsTypedAnswers, !ScreenPromptID.isMenu(call) {
-                    typedRow(question: question, index: index, call: call,
-                             immediate: immediate, enabled: enabled)
+                    if question.allowsOther || question.freeTextOnly {
+                        typedRow(question: question, index: index, call: call,
+                                 immediate: immediate, enabled: enabled)
+                    }
                 }
                 if !immediate {
                     navigation(call: call, questions: questions, index: index,
@@ -829,7 +839,7 @@ extension PromptCard {
             model.answerSet([[.typed(words, optionCount: row)]], to: call)
         }
         HStack(spacing: 8) {
-            TextField("Type something", text: Binding(
+            let input = Binding(
                 get: { text },
                 set: { new in
                     adopt(call)
@@ -843,7 +853,11 @@ extension PromptCard {
                     }
                     picks[index] = chosen
                 }
-            ))
+            )
+            Group {
+                if question.isSecret { SecureField("Type something", text: input) }
+                else { TextField("Type something", text: input) }
+            }
             .font(.footnote)
             .focused($typingFocused)
             .accessibilityIdentifier("prompt-typed-field")

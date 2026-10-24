@@ -31,8 +31,8 @@ enum CodexEventMapper {
     ///
     /// - **`.waiting`.** Codex writes nothing when it starts waiting on approval — verified
     ///   with an approval prompt live on screen, where the rollout's last record was a
-    ///   `custom_tool_call` with no output and no `task_complete`. A codex tab therefore
-    ///   reads busy through a prompt; `.waiting` is not derivable from this file.
+    ///   `custom_tool_call` with no output and no `task_complete`. `.waiting` is not derivable from this file; `CodexRuntime` supplements
+    ///   turn events with live approval-dialog observations.
     /// - **`.subagentCount`.** No `collab` record exists in any of 492 surveyed rollouts, so
     ///   there is no ground truth to map it from. Deliberately never emitted for codex.
     static func events(inRolloutLine line: String) -> [AgentEvent] {

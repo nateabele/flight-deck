@@ -257,13 +257,17 @@ final class CodexProcessTransportTests: XCTestCase {
     func testVerifyHandshakeSendsNonEmptyClientInfoParams() async throws {
         let t = StubTransport()
         var sent: [String: Any] = [:]
+        var initialized = false
         t.onSend = { line in
-            sent = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] ?? [:]
+            let message = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] ?? [:]
+            if message["method"] as? String == "initialized" { initialized = true; return }
+            sent = message
             t.reply(#"{"id":1,"result":{"userAgent":"flight-deck"}}"#)
         }
         let rpc = CodexRPC(transport: t)
 
         try await CodexProcessTransport.verifyHandshake(rpc, timeoutSeconds: 5)
+        XCTAssertTrue(initialized, "the shared daemon must receive the completed-handshake notification")
 
         let params = try XCTUnwrap(sent["params"] as? [String: Any], "params must not be omitted")
         let clientInfo = try XCTUnwrap(params["clientInfo"] as? [String: Any])

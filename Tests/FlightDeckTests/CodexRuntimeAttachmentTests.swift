@@ -37,6 +37,153 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
     private let turn = #"{"type":"event_msg","payload":{"type":"task_started"}}"# + "\n"
 
+    func testJoiningAnAlreadyBusyThreadReceivesItsCurrentStatus() {
+        let runtime = CodexRuntime(indexURL: index)
+        let id = UUID()
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        let first = runtime.attach(binding, for: UUID()) { _ in }
+        runtime.receiveNativeStatus(thread: id, activity: .busy)
+        var seen: [AgentEvent] = []
+        let second = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        runtime.receiveNativeStatus(thread: id, activity: .busy)
+        XCTAssertEqual(seen.last, .activity(.busy))
+        runtime.detach(first)
+        runtime.detach(second)
+    }
+
+    private final class StatusTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        var methods: [String] = []
+        var status: [String: Any] = ["type": "active", "activeFlags": []]
+        func send(_ line: String) {
+            let request = try! JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any]
+            methods.append(request["method"] as! String)
+            let reply: [String: Any] = ["id": request["id"]!, "result": ["thread": ["status": status]]]
+            onLine?(String(decoding: try! JSONSerialization.data(withJSONObject: reply), as: UTF8.self))
+        }
+    }
+
+    func testConnectingAfterTabsAttachRecoversWorkingStatusAndMissedNotifications() async throws {
+        let runtime = CodexRuntime(indexURL: index)
+        let transport = StatusTransport()
+        let dialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        dialogs.onChange = { [weak runtime] in runtime?.receiveNativeStatus(thread: $0, activity: $1) }
+        var stamp = Date()
+        runtime.now = { stamp }
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: nil), for: UUID()) { seen.append($0) }
+        XCTAssertTrue(transport.methods.isEmpty)
+        runtime.nativeDialogs = dialogs
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(seen.last, .activity(.busy), "tabs attached before initialize must rejoin once ready")
+        transport.status = ["type": "idle"]
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(seen.last, .activity(.idle), "metadata reconciles a transition whose notification was missed")
+        XCTAssertEqual(transport.methods.filter { $0 == "thread/resume" }.count, 1)
+        runtime.detach(token)
+        let reads = transport.methods.count
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(transport.methods.count, reads)
+    }
+
+    func testStatusReconciliationDoesNotLoadAStandaloneConversation() async throws {
+        let runtime = CodexRuntime(indexURL: index)
+        let transport = StatusTransport()
+        transport.status = ["type": "notLoaded"]
+        let dialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        runtime.nativeDialogs = dialogs
+        let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: nil), for: UUID()) { _ in }
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(transport.methods, ["thread/read"], "observing an old TUI must not acquire its writer lock")
+        runtime.detach(token)
+    }
+
+    func testUnloadedDaemonThreadReturnsAuthorityToLiveRollout() async throws {
+        let runtime = CodexRuntime(indexURL: index)
+        let transport = StatusTransport()
+        transport.status = ["type": "idle"]
+        let dialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        dialogs.onChange = { [weak runtime] in runtime?.receiveNativeStatus(thread: $0, activity: $1) }
+        var stamp = Date()
+        runtime.now = { stamp }
+        runtime.nativeDialogs = dialogs
+        let url = try rollout(named: "unloaded.jsonl")
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: url), for: UUID()) { seen.append($0) }
+        runtime.drainForTesting()
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(seen.last, .activity(.idle))
+        try append(turn, to: url)
+        runtime.drainForTesting()
+        transport.status = ["type": "notLoaded"]
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(seen.last, .activity(.busy), "the standalone turn must no longer be hidden by stale native idle")
+        runtime.detach(token)
+    }
+
+    func testApprovalDialogOverridesWorkingAndRestoresTurnState() throws {
+        let runtime = CodexRuntime(indexURL: index)
+        let tab = UUID(), id = UUID()
+        let url = try rollout(named: "approval.jsonl")
+        var viewport: String? = "Working"
+        runtime.readViewport = { requested in requested == tab ? viewport : nil }
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: tab) { seen.append($0) }
+        runtime.drainForTesting()
+        try append(turn, to: url)
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.last, .activity(.busy))
+        viewport = "Would you like to run the following command?\n› 1. Yes, proceed (y)\n  2. No (esc)\n\nPress enter to confirm or esc to cancel"
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.last, .activity(.waiting))
+        let count = seen.count
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.count, count, "a standing prompt is one transition")
+        viewport = nil
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.last, .activity(.waiting), "an unreadable surface cannot prove dismissal")
+        viewport = "Working"
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.last, .activity(.busy))
+        runtime.detach(token)
+        viewport = "› 1. Yes\n  2. No\n\nPress enter to confirm or esc to cancel"
+        let detachedCount = seen.count
+        runtime.drainForTesting()
+        XCTAssertEqual(seen.count, detachedCount)
+    }
+
+    func testSharedClockObservesCapturedApprovalAndStopsAfterDetach() throws {
+        let clock = WatchClock(appIsActive: { false })
+        let runtime = CodexRuntime(clock: clock, indexURL: index)
+        let tab = UUID()
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Codex/approval-command.captured.txt")
+        var viewport = try String(contentsOf: fixture, encoding: .utf8)
+        var reads = 0
+        runtime.readViewport = { requested in
+            XCTAssertEqual(requested, tab)
+            reads += 1
+            return viewport
+        }
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: nil), for: tab) { seen.append($0) }
+        clock.fire()
+        XCTAssertEqual(seen.last, .activity(.waiting))
+        viewport = "› Write a numbered list\n  1. One\n  2. Two"
+        clock.fire()
+        XCTAssertEqual(seen.last, .activity(.idle), "ordinary numbered output is not an approval dialog")
+        runtime.detach(token)
+        let detachedReads = reads
+        clock.fire()
+        XCTAssertEqual(reads, detachedReads)
+    }
+
     func testTurnsAndRenamesBothReachTheAttachedTab() throws {
         let id = UUID()
         let url = try rollout(named: "a.jsonl")

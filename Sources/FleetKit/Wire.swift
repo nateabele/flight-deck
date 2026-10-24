@@ -231,7 +231,7 @@ public struct WireOpenPrompt: Codable, Equatable, Sendable {
 /// transcript's.
 extension PromptQuestion: Codable {
     enum CodingKeys: String, CodingKey {
-        case header, question, options, multiSelect, unanswerable
+        case header, question, options, multiSelect, unanswerable, allowsOther, freeTextOnly, isSecret, url
     }
 
     public init(from decoder: any Decoder) throws {
@@ -241,7 +241,11 @@ extension PromptQuestion: Codable {
             question: try c.decode(String.self, forKey: .question),
             options: try c.decode([Option].self, forKey: .options),
             multiSelect: try c.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false,
-            unanswerable: try c.decodeIfPresent(String.self, forKey: .unanswerable)
+            unanswerable: try c.decodeIfPresent(String.self, forKey: .unanswerable),
+            allowsOther: try c.decodeIfPresent(Bool.self, forKey: .allowsOther) ?? true,
+            freeTextOnly: try c.decodeIfPresent(Bool.self, forKey: .freeTextOnly) ?? false,
+            isSecret: try c.decodeIfPresent(Bool.self, forKey: .isSecret) ?? false,
+            url: try c.decodeIfPresent(String.self, forKey: .url)
         )
     }
 
@@ -252,6 +256,10 @@ extension PromptQuestion: Codable {
         try c.encode(options, forKey: .options)
         try c.encode(multiSelect, forKey: .multiSelect)
         try c.encodeIfPresent(unanswerable, forKey: .unanswerable)
+        if !allowsOther { try c.encode(false, forKey: .allowsOther) }
+        if freeTextOnly { try c.encode(true, forKey: .freeTextOnly) }
+        if isSecret { try c.encode(true, forKey: .isSecret) }
+        try c.encodeIfPresent(url, forKey: .url)
     }
 }
 

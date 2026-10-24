@@ -1,7 +1,7 @@
 import Foundation
 
-/// The subset of codex's `thread/start` params Flight Deck exposes. Typed, not stringly:
-/// codex takes these over JSON-RPC, so there is no command line to build or quote.
+/// Session defaults shared by thread creation and the interactive resume command.
+/// Both paths must carry overrides: the TUI loads its own configuration on resume.
 struct CodexThreadOptions: Codable, Equatable, Sendable {
     var model: String?
     var sandbox: String?
@@ -11,13 +11,28 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
     /// key, never a param of ours; nil sends nothing, so `config.toml` keeps deciding.
     var reasoningEffort: String?
 
+    var reasoningSummary: String?
+    var verbosity: String?
+    var webSearch: String?
+    var networkAccess: Bool?
+    var developerInstructions: String?
+    var modelInstructionsFile: String?
+
     init(model: String? = nil, sandbox: String? = nil, approvalPolicy: String? = nil, addDirs: [String] = [],
-         reasoningEffort: String? = nil) {
+         reasoningEffort: String? = nil, reasoningSummary: String? = nil,
+         verbosity: String? = nil, webSearch: String? = nil, networkAccess: Bool? = nil,
+         developerInstructions: String? = nil, modelInstructionsFile: String? = nil) {
         self.model = model
         self.sandbox = sandbox
         self.approvalPolicy = approvalPolicy
         self.addDirs = addDirs
         self.reasoningEffort = reasoningEffort
+        self.reasoningSummary = reasoningSummary
+        self.verbosity = verbosity
+        self.webSearch = webSearch
+        self.networkAccess = networkAccess
+        self.developerInstructions = developerInstructions
+        self.modelInstructionsFile = modelInstructionsFile
     }
 
     /// Typed params, not a command line. Omitted keys mean "codex's own default" — sending
@@ -41,19 +56,65 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
         if let sandbox { params["sandbox"] = sandbox }
         if let approvalPolicy { params["approvalPolicy"] = approvalPolicy }
         if let historyMode { params["historyMode"] = historyMode }
-        var config: [String: Any] = [:]
-        if !addDirs.isEmpty {
-            params["addDirs"] = addDirs
-            // `sandbox_workspace_write.writable_roots` is codex's own config key — see
-            // `SandboxWorkspaceWrite` in the generated schema. Only sent when there is
-            // something to say: an empty override is still an override, and would replace
-            // whatever the user's `config.toml` set.
-            config["sandbox_workspace_write"] = ["writable_roots": addDirs]
-        }
-        if let reasoningEffort { config["model_reasoning_effort"] = reasoningEffort }
+        if !addDirs.isEmpty { params["addDirs"] = addDirs }
+        let config = configOverrides
         if !config.isEmpty { params["config"] = config }
         return params
     }
+
+    var configOverrides: [String: Any] {
+        var config: [String: Any] = [:]
+        var workspace: [String: Any] = [:]
+        if !addDirs.isEmpty { workspace["writable_roots"] = addDirs }
+        if let networkAccess { workspace["network_access"] = networkAccess }
+        if !workspace.isEmpty { config["sandbox_workspace_write"] = workspace }
+        if let reasoningEffort { config["model_reasoning_effort"] = reasoningEffort }
+        if let reasoningSummary { config["model_reasoning_summary"] = reasoningSummary }
+        if let verbosity { config["model_verbosity"] = verbosity }
+        if let webSearch { config["web_search"] = webSearch }
+        if let developerInstructions { config["developer_instructions"] = developerInstructions }
+        if let modelInstructionsFile { config["model_instructions_file"] = modelInstructionsFile }
+        return config
+    }
+
+    /// Each value is encoded as a TOML-compatible JSON literal, then shell quoted as one
+    /// argument. Prompt text must never become shell syntax or an unquoted TOML value.
+    var launchArguments: [String] {
+        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }
+        func literal(_ value: Any) -> String {
+            let data = try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        }
+        var args: [String] = []
+        if let model { args += ["--model", quote(model)] }
+        if let sandbox { args += ["--sandbox", quote(sandbox)] }
+        if let approvalPolicy { args += ["--config", quote("approval_policy=" + literal(approvalPolicy))] }
+        // Dotted keys preserve other workspace settings from the account's config.toml.
+        for key in configOverrides.keys.sorted() {
+            let value = configOverrides[key]!
+            if let nested = value as? [String: Any] {
+                for child in nested.keys.sorted() {
+                    args += ["--config", quote(key + "." + child + "=" + literal(nested[child]!))]
+                }
+            } else {
+                args += ["--config", quote(key + "=" + literal(value))]
+            }
+        }
+        return args
+    }
+
+    /// These options minus everything codex counts as a permission override: the sandbox,
+    /// the approval policy and the `sandbox_workspace_write` keys. `codex --remote … resume`
+    /// refuses to start with any of them; the daemon receives them over `thread/resume`.
+    var withoutPermissions: CodexThreadOptions {
+        var copy = self
+        copy.sandbox = nil
+        copy.approvalPolicy = nil
+        copy.addDirs = []
+        copy.networkAccess = nil
+        return copy
+    }
+
 }
 
 extension CodexThreadOptions {
@@ -67,7 +128,13 @@ extension CodexThreadOptions {
             sandbox: project.sandbox ?? global.sandbox,
             approvalPolicy: project.approvalPolicy ?? global.approvalPolicy,
             addDirs: project.addDirs.isEmpty ? global.addDirs : project.addDirs,
-            reasoningEffort: project.reasoningEffort ?? global.reasoningEffort
+            reasoningEffort: project.reasoningEffort ?? global.reasoningEffort,
+            reasoningSummary: project.reasoningSummary ?? global.reasoningSummary,
+            verbosity: project.verbosity ?? global.verbosity,
+            webSearch: project.webSearch ?? global.webSearch,
+            networkAccess: project.networkAccess ?? global.networkAccess,
+            developerInstructions: project.developerInstructions ?? global.developerInstructions,
+            modelInstructionsFile: project.modelInstructionsFile ?? global.modelInstructionsFile
         )
     }
 }

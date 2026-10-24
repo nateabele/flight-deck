@@ -100,6 +100,22 @@ enum CodexControlAccess {
         return arguments
     }
 
+    /// The same grant as `launchArguments`, as `thread/start`/`thread/resume` config. A TUI
+    /// joining the shared daemon (`codex --remote`) refuses every permission flag, so in that
+    /// mode the grant reaches codex through the protocol instead. Accepted by codex 0.164.0's
+    /// daemon, which reports the profile back as a network-enabled workspace-write sandbox.
+    static func configOverrides(socket: URL?, options: CodexThreadOptions) -> [String: Any] {
+        guard let socket, options.sandbox == nil else { return [:] }
+        return [
+            "features": ["network_proxy": true],
+            "default_permissions": profileName,
+            "permissions": [profileName: [
+                "extends": ":workspace",
+                "network": ["enabled": true, "unix_sockets": [socket.path: "allow"]],
+            ]],
+        ]
+    }
+
     /// The shell-quoted form of `launchArguments`, for the text Flight Deck types at a pty
     /// (`launchCommand`/`resumeCommand`/`coldCreateCommand`'s fresh branch) rather than passes to
     /// `Process`. Only the `-c` *values* need quoting — `--enable` and `network_proxy` contain no

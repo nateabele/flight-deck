@@ -1,21 +1,59 @@
 import Foundation
 import IntakeKit
 
-/// Codex's observation half: everything is read from the files codex writes.
+/// Codex's observation half: rollout events, names, and live approval-dialog status.
 ///
-/// It does not use the app-server at all, and that is the whole point. Codex's notifications
-/// are scoped to the connection that made the change, and Flight Deck runs turns in a
-/// `codex resume` TUI — a different process, so a different connection. The app-server that
-/// created a thread is never told what the user does in it. Files have no such rule.
+/// Modern shared-daemon connections supply authoritative status and pending requests.
+/// Rollout watchers remain responsible for history, errors and turn completion, and for
+/// legacy standalone TUIs that cannot rejoin the daemon. Local menus use the live screen.
 ///
 /// The shape mirrors `ClaudeRuntime`: one watcher per tab over a per-conversation file, plus
 /// one shared watcher — one per codex account, not one for the whole app — over that
 /// account's `session_index.jsonl`, fanned out by conversation id.
 @MainActor
 final class CodexRuntime: AgentRuntime {
-    private struct Source {
-        let subscribers: SubscriberList
-        let watcher: CodexRolloutWatcher?
+    /// Reads only existing surfaces; observing a prompt must not wake a sleeping terminal.
+    var readViewport: (UUID) -> String? = { _ in nil }
+    var nativeDialogs: CodexNativeDialogs? {
+        didSet {
+            guard nativeDialogs !== oldValue else { return }
+            for (id, source) in sources {
+                source.nativeRequest?.cancel()
+                source.nativeRequest = nil
+                source.nativeSubscribed = false
+                source.nativeStatus = false
+                source.nextNativeRefresh = .distantPast
+                oldValue?.unobserve(id)
+                nativeDialogs?.observe(id)
+                refreshNativeStatus(id, source: source)
+            }
+        }
+    }
+    var now: () -> Date = Date.init
+    @MainActor
+    private final class Source {
+        let subscribers = SubscriberList()
+        var watcher: CodexRolloutWatcher?
+        var tabs: Set<UUID> = []
+        var turnActivity: SessionActivity?
+        var rolloutActivity: SessionActivity?
+        var waitingOnScreen = false
+        var nativeStatus = false
+        var nativeSubscribed = false
+        var nativeRequest: Task<Void, Never>?
+        var nativeRequestID: UUID?
+        var nextNativeRefresh = Date.distantPast
+
+        func receive(_ event: AgentEvent) {
+            if case .activity(let activity) = event {
+                rolloutActivity = activity
+                guard !nativeStatus else { return }
+                turnActivity = activity
+                subscribers.emit(.activity(waitingOnScreen ? .waiting : activity))
+            } else {
+                subscribers.emit(event)
+            }
+        }
     }
 
     private var sources: [UUID: Source] = [:]
@@ -70,17 +108,30 @@ final class CodexRuntime: AgentRuntime {
             // file, and a later `retarget` of the second tab (SessionStore.retarget) cannot
             // repoint it while the first tab stays attached. Tracked follow-up, not fixed here.
             existing.subscribers.add(token, onEvent)
+            existing.tabs.insert(tab)
+            // Native reconciliation suppresses unchanged statuses. A joining tab needs the
+            // existing value now rather than waiting for the conversation's next transition.
+            if existing.waitingOnScreen {
+                onEvent(.activity(.waiting))
+            } else if let activity = existing.turnActivity {
+                onEvent(.activity(activity))
+            }
             return token
         }
 
-        let subscribers = SubscriberList()
+        let source = Source()
+        nativeDialogs?.observe(id)
+        source.tabs.insert(tab)
+        let subscribers = source.subscribers
         subscribers.add(token, onEvent)
 
         var watcher: CodexRolloutWatcher?
         if let url = binding.transcriptURL {
             watcher = CodexRolloutWatcher(
                 url: url, conversationID: id, clock: clock,
-                onEvent: { subscribers.emit($0) },
+                onEvent: { [weak source] event in
+                    source?.receive(event)
+                },
                 // `onMessages` is passed unconditionally, never `nil` — see `ClaudeRuntime
                 // .attach`'s own comment on this exact point. Deciding at attach time whether
                 // to omit this closure would need to know now whether `searchIndex()` will
@@ -121,12 +172,70 @@ final class CodexRuntime: AgentRuntime {
             )
             watcher?.start()
         }
-        sources[id] = Source(subscribers: subscribers, watcher: watcher)
+        source.watcher = watcher
+        sources[id] = source
+        clock?.add(source) { [weak self, weak source] in
+            guard let self, let source else { return }
+            self.refreshPromptStatus(source)
+            self.refreshNativeStatus(id, source: source)
+        }
 
         // Registered once per thread, not once per tab: a tab still has a name even with no
         // rollout to tail, and the list below is what fans that name out to every subscriber.
         nameWatcher().register(id) { subscribers.emit(.title($0)) }
+        refreshNativeStatus(id, source: source)
         return token
+    }
+
+    private func refreshNativeStatus(_ id: UUID, source: Source) {
+        guard let dialogs = nativeDialogs, source.nativeRequest == nil,
+              now() >= source.nextNativeRefresh else { return }
+        source.nextNativeRefresh = now().addingTimeInterval(5)
+        // A dropped subscription must not leave a working tab idle forever. Read metadata
+        // as a backstop; unlike resume, read never loads a standalone TUI's writer-locked
+        // conversation. Only join threads already loaded by this shared daemon.
+        let requestID = UUID()
+        source.nativeRequestID = requestID
+        source.nativeRequest = Task { [weak self, weak source] in
+            defer {
+                if source?.nativeRequestID == requestID { source?.nativeRequest = nil }
+            }
+            do {
+                let raw = id.uuidString.lowercased()
+                let result = try await dialogs.rpc.request("thread/read", ["threadId": raw, "includeTurns": false], timeoutSeconds: 3)
+                guard !Task.isCancelled, let self, let source, self.sources[id] === source,
+                      self.nativeDialogs === dialogs,
+                      let thread = result["thread"] as? [String: Any],
+                      let status = thread["status"] as? [String: Any] else { return }
+                if status["type"] as? String == "notLoaded" {
+                    // The daemon no longer owns this conversation. Keep consuming rollout
+                    // activity while native is authoritative so a standalone takeover can
+                    // immediately recover its current turn instead of retaining native idle.
+                    source.nativeSubscribed = false
+                    if source.nativeStatus {
+                        source.nativeStatus = false
+                        if let activity = source.rolloutActivity {
+                            source.turnActivity = activity
+                            source.subscribers.emit(.activity(source.waitingOnScreen ? .waiting : activity))
+                        }
+                    }
+                    return
+                }
+                guard CodexThreadStatus.activity(from: status) != nil else { return }
+                dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
+                if !source.nativeSubscribed {
+                    let joined = try await dialogs.rpc.request("thread/resume", ["threadId": raw, "excludeTurns": true], timeoutSeconds: 3)
+                    guard !Task.isCancelled, self.sources[id] === source, self.nativeDialogs === dialogs else { return }
+                    source.nativeSubscribed = true
+                    if let thread = joined["thread"] as? [String: Any], let status = thread["status"] as? [String: Any] {
+                        dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
+                    }
+                }
+            } catch {
+                // Keep the rollout/screen source on a legacy writer or transient disconnect;
+                // the next clock reconciliation retries without restarting its terminal.
+            }
+        }
     }
 
     /// Drops one subscriber, and the watcher — plus the shared name watcher's registration —
@@ -140,10 +249,14 @@ final class CodexRuntime: AgentRuntime {
         let id = token.conversationID
         guard let source = sources[id] else { return }
         source.subscribers.remove(token)
+        source.tabs.remove(token.tab)
         guard source.subscribers.isEmpty else { return }
 
         source.watcher?.stop()
+        source.nativeRequest?.cancel()
+        clock?.remove(source)
         sources[id] = nil
+        nativeDialogs?.unobserve(id)
         names?.unregister(id)
         if names?.isEmpty == true {
             names?.stop()
@@ -163,5 +276,27 @@ final class CodexRuntime: AgentRuntime {
     func drainForTesting() {
         for source in sources.values { source.watcher?.drain() }
         names?.drain()
+        for (id, source) in sources {
+            refreshPromptStatus(source)
+            refreshNativeStatus(id, source: source)
+        }
+    }
+
+    private func refreshPromptStatus(_ source: Source) {
+        let viewports = source.tabs.compactMap { readViewport($0) }
+        // A missing or torn-down surface is no evidence that the person answered.
+        guard !viewports.isEmpty else { return }
+        let waiting = viewports.contains { CodexScreenPrompt.read($0) != nil }
+        guard waiting != source.waitingOnScreen else { return }
+        source.waitingOnScreen = waiting
+        source.subscribers.emit(.activity(waiting ? .waiting : source.turnActivity ?? .idle))
+    }
+
+    func receiveNativeStatus(thread: UUID, activity: SessionActivity) {
+        guard let source = sources[thread] else { return }
+        if source.nativeStatus, source.turnActivity == activity { return }
+        source.nativeStatus = true
+        source.turnActivity = activity
+        source.subscribers.emit(.activity(source.waitingOnScreen ? .waiting : activity))
     }
 }

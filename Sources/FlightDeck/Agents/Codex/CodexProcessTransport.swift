@@ -316,6 +316,9 @@ final class CodexProcessTransport: CodexTransport {
     private let stdout = Pipe()
     private var reassembler = LineReassembler()
     private var hasTerminated = false
+    private var sharedConnection: CodexSharedConnection?
+    private(set) var sharedSocketPath: String?
+    private(set) var wasStopped = false
 
     init(executable: String = "codex", home: URL? = nil) {
         self.executable = executable
@@ -382,6 +385,25 @@ final class CodexProcessTransport: CodexTransport {
         }
     }
 
+    func startShared() async throws {
+        let executable = self.executable
+        let home = self.home ?? AgentID.codex.builtInHome
+        let environment = spawnEnvironment ?? [:]
+        let path = try await Task.detached(priority: .userInitiated) {
+            try CodexDaemonEndpoint.start(executable: executable, environment: environment, home: home)
+        }.value
+        let connection = try await Task.detached(priority: .userInitiated) { [weak self] in
+            try CodexSharedConnection(path: path, onMessage: { [weak self] line in
+                Task { @MainActor in self?.onLine?(line) }
+            }, onClose: { [weak self] in
+                Task { @MainActor in self?.terminate() }
+            })
+        }.value
+        sharedSocketPath = path
+        sharedConnection = connection
+        connection.start()
+    }
+
     /// Drops the line unless an app-server is running to read it.
     ///
     /// **Load-bearing, and it once froze the whole app.** `Pipe` keeps both ends open in this
@@ -393,6 +415,10 @@ final class CodexProcessTransport: CodexTransport {
     /// Dropping costs nothing: the request resolves by timeout or `transportClosed()` exactly as
     /// it did before, since no reply was ever coming.
     func send(_ line: String) {
+        if let sharedConnection, !hasTerminated {
+            sharedConnection.send(line.trimmingCharacters(in: .newlines))
+            return
+        }
         guard process.isRunning, !hasTerminated, let data = line.data(using: .utf8) else { return }
         try? stdin.fileHandleForWriting.write(contentsOf: data)
     }
@@ -401,6 +427,8 @@ final class CodexProcessTransport: CodexTransport {
     /// Routes through `terminate()` so an explicit stop leaves the object in exactly the
     /// state a crash would — same handlers torn down, same `onTerminate` firing exactly once.
     func stop() {
+        wasStopped = true
+        sharedConnection?.stop()
         if process.isRunning { process.terminate() }
         terminate()
     }
@@ -431,6 +459,7 @@ final class CodexProcessTransport: CodexTransport {
     /// exit, and by the time `deinit` runs there is no owner left to notify — its only job is
     /// making sure the real OS subprocess doesn't outlive the Swift object that owns it.
     deinit {
+        sharedConnection?.stop()
         stdout.fileHandleForReading.readabilityHandler = nil
         process.terminationHandler = nil
         if process.isRunning { process.terminate() }
@@ -498,5 +527,6 @@ extension CodexProcessTransport {
             defer { group.cancelAll() }
             try await group.next()
         }
+        rpc.notify("initialized")
     }
 }

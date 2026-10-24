@@ -30,6 +30,13 @@ final class CodexRPC {
     /// meter reads `account/rateLimits/updated` (L3-U). Nil drops them, which is what every
     /// other caller has always relied on.
     var onNotification: (@MainActor (String, [String: Any]) -> Void)?
+    var onServerRequest: (@MainActor (Any, String, [String: Any]) -> Void)?
+
+    func respond(to id: Any, result: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["id": id, "result": result]),
+              let line = String(data: data, encoding: .utf8) else { return }
+        transport.send(line + "\n")
+    }
 
     /// Test-only observability: how many requests are still awaiting a reply. Exists so a
     /// cancellation test can assert `request`'s `onCancel` actually removed its entry from
@@ -98,6 +105,18 @@ final class CodexRPC {
         }
     }
 
+    func request(_ method: String, _ params: [String: Any], timeoutSeconds: Double) async throws -> [String: Any] {
+        try await withThrowingTaskGroup(of: [String: Any].self) { group in
+            group.addTask { try await self.request(method, params) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                throw CodexRPCError.timeout
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? [:]
+        }
+    }
+
     /// Resumes and removes one pending request. Shared by `request`'s cancellation path;
     /// `transportClosed()` keeps its own loop since it must fail every entry at once.
     private func failPending(_ id: Int, with error: Error) {
@@ -133,6 +152,14 @@ final class CodexRPC {
               let obj = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) as? [String: Any]
         else { return }   // codex emits non-JSON banners; they are not errors
 
+        // Requests in opposite directions have independent id namespaces. A server request
+        // can reuse an id while our own request is pending; it must never consume its reply.
+        if let method = obj["method"] as? String {
+            let params = obj["params"] as? [String: Any] ?? [:]
+            if let id = obj["id"] { onServerRequest?(id, method, params) }
+            else { onNotification?(method, params) }
+            return
+        }
         if let id = obj["id"] as? Int, let continuation = pending.removeValue(forKey: id) {
             if let error = obj["error"] as? [String: Any] {
                 continuation.resume(throwing: CodexRPCError.remote(
@@ -145,12 +172,5 @@ final class CodexRPC {
             return
         }
 
-        // Anything left without an `id` is a notification. Codex sends these regardless of
-        // whether anyone is listening; `CodexRuntime` deliberately does not (they describe only
-        // this connection's turns, not what the user does in a `codex resume` TUI). A message
-        // with both `id` and `method` is a server *request* — not ours to answer here.
-        if obj["id"] == nil, let method = obj["method"] as? String {
-            onNotification?(method, obj["params"] as? [String: Any] ?? [:])
-        }
     }
 }
