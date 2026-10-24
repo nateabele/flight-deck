@@ -1,5 +1,11 @@
 # Flight Deck — Session Handoff
 
+> **Native cross-tab peer messaging (2026-10-23 UTC).** The bundled native helper,
+> app-owned inbox routing, and `flightdeck peer list|send|receive|mcp` connect agent
+> tabs through Claude's native protocol. No model/runtime runs in the helper.
+> See [PEER-MESSAGING.md](PEER-MESSAGING.md) for permissions, lifecycle, measurements,
+> and verification.
+
 **Date:** 2026-08-11 · **Branch:** `master` · **Tip:** `4684bf1` · **Status:** Multi-Session Foundation **and** Session Name Sync both merged to `master`; unit + smoke gates GREEN (66 unit tests, 4 UITests).
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.

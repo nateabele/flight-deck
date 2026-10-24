@@ -16,6 +16,7 @@ let usageLines = [
     "flightdeck tail [--session S] [--since SEQ] [--no-snapshot]",
     "flightdeck wait S --for idle|busy|waiting|gone [--timeout D]",
     "flightdeck send S \"text\" [--wait [--timeout D]]",
+    "flightdeck peer list|send|receive|mcp   native cross-agent tab messaging (peer --help)",
     "flightdeck new P [--agent A [--account N]]",
     "flightdeck close S",
     "flightdeck reopen S",
@@ -70,6 +71,10 @@ func writeStderr(_ line: String) {
 }
 
 let env = ProcessInfo.processInfo.environment
+
+if CommandLine.arguments.dropFirst().first == "peer" {
+    PeerToolEntry.run(Array(CommandLine.arguments.dropFirst(2)), environment: env)
+}
 
 let invocation: CLIInvocation
 do {

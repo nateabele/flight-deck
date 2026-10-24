@@ -623,6 +623,7 @@ final class CLIRunner {
         replies[cid] = { frame in
             // No `default`: a new reply case must be given an output before this compiles.
             switch frame {
+            case .peer(_, let json): self.out(json)
             case .err(_, let code, let message): return self.fail(code, message)
             case .page(_, let page): self.out(CLIOutput.json(page))
             case .newSessionOptions(_, let options): self.out(CLIOutput.json(options))

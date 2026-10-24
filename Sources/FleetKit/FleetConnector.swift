@@ -670,6 +670,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// that assumes a frame always follows `hello`: against an older Mac, none does.
     private func apply(_ frame: ServerFrame) {
         switch frame {
+        case .peer:
+            // Peer replies are local-CLI-only, never a phone's fleet state or resume cursor.
+            return
         case .snapshot(let seq, let snapshot, let reason, let epoch):
             fleet = snapshot
             // Unconditionally, nil included: a Mac that stopped sending one (a downgrade) must

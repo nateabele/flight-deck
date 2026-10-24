@@ -1099,7 +1099,7 @@ public extension ServerFrame {
         switch self {
         case .delegateStarted, .delegateNotice, .delegateOutput, .infraProgress:
             return true
-        case .snapshot, .event, .caughtUp, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
+        case .peer, .snapshot, .event, .caughtUp, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
              .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
              .recipeCheck, .hostDisk, .infraMachine, .infraList, .infraDoctor, .infraDone,

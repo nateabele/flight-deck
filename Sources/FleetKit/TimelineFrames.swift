@@ -160,6 +160,7 @@ public struct TimelinePage: Codable, Equatable, Sendable {
 /// right contract for `markRead` and a wrong one for a page, whose whole point is the data it
 /// carries back. Two verbs, two reply shapes.
 public enum FleetRequest: Codable, Equatable, Sendable {
+    case peer(WirePeerRequest)
     /// `limit` counts source **records**, not items — one record can carry several. Clamped
     /// to `TimelineLimits.maxLimit` by the reader rather than refused here.
     case timeline(session: UUID, anchor: TimelineAnchor, limit: Int, agent: String? = nil)
@@ -242,12 +243,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     case accountSwitch(session: UUID, target: String)
 
     enum CodingKeys: String, CodingKey {
-        case op, session, anchor, cursor, limit, project
+        case op, session, anchor, cursor, limit, project, peer
         case query, conversationID, projectPath
         case intake, ifNot, checkpoint, changes, name, agent, target
     }
 
     private enum Op: String, Codable {
+        case peer = "peer.request"
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
         case recentlyClosed = "session.recentlyClosed"
@@ -266,6 +268,9 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case .peer(let request):
+            try c.encode(Op.peer, forKey: .op)
+            try c.encode(request, forKey: .peer)
         case .timeline(let session, let anchor, let limit, let agent):
             try c.encode(Op.timeline, forKey: .op)
             try c.encode(session, forKey: .session)
@@ -339,6 +344,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             return
         }
         switch known {
+        case .peer:
+            self = .peer(try c.decode(WirePeerRequest.self, forKey: .peer))
         case .timeline:
             let name = try c.decode(String.self, forKey: .anchor)
             let cursor = try c.decodeIfPresent(Int.self, forKey: .cursor)

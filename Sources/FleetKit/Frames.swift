@@ -783,6 +783,9 @@ public enum ClientFrame: Codable, Equatable, Sendable {
 
 /// Mac → client. Northbound frames are sequenced; replies to commands are correlated.
 public enum ServerFrame: Codable, Equatable, Sendable {
+    /// A private, unsequenced CLI result. JSON stays a string here so the public fleet wire
+    /// does not acquire Claude's internal envelope schema or its versioning obligations.
+    case peer(cid: Int, json: String)
     /// `epoch` names the run of the Mac that counted `seq` — see `ClientFrame.hello`'s
     /// `epoch`, which is this value coming back. Optional and omitted when nil, so a Mac built
     /// before it and every test fixture keep their bytes; an older phone's keyed decode never
@@ -911,7 +914,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case infraDone(cid: Int)
 
     enum CodingKeys: String, CodingKey {
-        case t, seq, fleet, reason, epoch, cid, code, message, page, options, endpoints
+        case t, seq, fleet, reason, epoch, cid, code, message, page, options, endpoints, peerJSON
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
         case line, machine, machines, orphans, unreadable, checks, choices, switched
@@ -919,7 +922,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
-        case snapshot, caughtUp, ack, err, page, options, endpoints, conversations, hits, session
+        case peer, snapshot, caughtUp, ack, err, page, options, endpoints, conversations, hits, session
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
@@ -930,6 +933,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case .peer(let cid, let json):
+            try c.encode(Tag.peer, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(json, forKey: .peerJSON)
         case .snapshot(let seq, let fleet, let reason, let epoch):
             try c.encode(Tag.snapshot, forKey: .t)
             try c.encode(seq, forKey: .seq)
@@ -1083,6 +1090,8 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         // and none of these are, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
+            case .peer:
+                self = .peer(cid: try c.decode(Int.self, forKey: .cid), json: try c.decode(String.self, forKey: .peerJSON))
             case .snapshot:
                 self = .snapshot(seq: try c.decode(Int.self, forKey: .seq),
                                  fleet: try c.decode(FleetSnapshot.self, forKey: .fleet),
@@ -1217,6 +1226,7 @@ public extension ServerFrame {
     /// reply case cannot compile until someone decides whether it is correlated.
     var correlationID: Int? {
         switch self {
+        case .peer(let cid, _): return cid
         case .snapshot, .event, .caughtUp: return nil
         case .ack(let cid), .err(let cid, _, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),

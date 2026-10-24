@@ -76,6 +76,7 @@ targets:
     productName: Flight Deck
     sources:
       - Sources/FlightDeck
+      - Sources/PeerKit
       # `fd-abduco` (scripts/build-fd-abduco.sh → vendor/fd-abduco-artifacts/fd-abduco) is a
       # plain Mach-O helper binary, not a framework — there is nothing to link. It rides into
       # the bundle via a real Copy Files build phase (destination: resources, not `resources:`
@@ -135,6 +136,11 @@ targets:
       # is the Copy Files phase for that location, as distinct from `frameworks` or
       # `resources`.
       - target: FlightDeckCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: PeerHelper
         embed: true
         codeSign: true
         copy:
@@ -383,6 +389,21 @@ targets:
   # case) unable to land in Products/Debug at all, so `@testable import FlightDeck` in
   # FlightDeckTests fails with "unable to resolve module dependency: 'FlightDeck'" on any clean
   # build. The earlier target rename fixed only the intermediates collision, not this one.
+  PeerHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/PeerKit
+      - Sources/PeerTool
+    settings:
+      base:
+        PRODUCT_NAME: flightdeck-peer
+        PRODUCT_MODULE_NAME: PeerHelper
+        SKIP_INSTALL: "YES"
+        DEVELOPMENT_TEAM: ZM74LQ6QWG
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+
   FlightDeckCLI:
     type: tool
     platform: macOS

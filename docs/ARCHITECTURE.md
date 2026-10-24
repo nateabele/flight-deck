@@ -1,5 +1,29 @@
 # Flight Deck — Architecture (as built)
 
+## Native peer messaging
+
+`Sources/PeerKit` implements bounded NDJSON framing, private native registries,
+verified Unix-socket sender identities, permission holds, durable inbox cursors,
+and native receipt/idle controls. It is compiled into both the app and the small
+`PeerHelper` executable (`Sources/PeerTool`, bundled as `flightdeck-peer`).
+
+`Sources/FlightDeck/Peers` owns per-tab helpers, event-driven status updates,
+operator approval sheets, discovery, and delivery through `SessionStore`'s existing
+text adapters. It observes typed/expired prompt events only after their parent
+fleet batch is queued, preventing a nested delivery from broadcasting newer
+sequence numbers ahead of older ones. A queued message remains durable until typed.
+
+`WirePeerRequest` and an unsequenced `ServerFrame.peer` carry local CLI/MCP requests
+over the existing authenticated control socket; callers cannot supply another
+tab's identity. `Sources/FlightDeckCLI/PeerCLI.swift` parses the CLI surface and
+`Sources/FlightDeckTool/PeerToolEntry.swift` provides its real transport and optional
+MCP stdio facade. Peer responses are not fleet state and never move resume cursors.
+
+Claude's own native inbox remains authoritative. Non-Claude tabs publish genuine
+PID-backed native peer endpoints, allowing native ListAgents/SendMessage to reach
+them without modifying Claude. See [PEER-MESSAGING.md](PEER-MESSAGING.md) for the
+operator contract, current compatibility evidence, footprint, and test commands.
+
 This describes the code **as it exists today**. For the intended full design and the reasoning,
 see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md); for what is still
 unbuilt, see the last section here.

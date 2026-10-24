@@ -192,6 +192,7 @@ remote "$ROOT" <<<'mkdir -p "$1"'
 # and travel as real directories below; local.env holds the host and is not needed there.
 ship --delete \
   --exclude '/.git' --exclude '/.claude' --exclude '/.superpowers' --exclude '/DerivedData' \
+  --exclude '/Packages/*/.build' \
   --exclude '/FlightDeck.xcodeproj' --exclude '/vendor/*-artifacts' --exclude '/scripts/local.env' \
   --exclude '.DS_Store' \
   ./ "$HOST:$ROOT/"

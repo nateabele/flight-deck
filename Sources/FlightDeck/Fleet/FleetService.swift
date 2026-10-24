@@ -106,6 +106,8 @@ final class FleetService: ObservableObject {
     /// Answers `infra.*` (cloud infra hosts). Set by the app once it builds the service
     /// (Task 18); nil answers `infra_unavailable`, for `delegation`'s reason.
     var infra: InfraService?
+    /// Injectable for hermetic loopback tests; the production instance is built in startLocal.
+    var peerMessaging: PeerMessagingService?
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -427,6 +429,9 @@ final class FleetService: ObservableObject {
         let queue = Self.socketQueue
         replicator.onEvents = { [weak self] batch in
             guard let self else { return }
+            // A delivery can synchronously emit promptTyped. Defer it until this batch has
+            // been queued to the sockets or a nested newer sequence overtakes its parent.
+            DispatchQueue.main.async { [weak self] in self?.peerMessaging?.observe(batch) }
             // A closed tab takes its services down with it (§6.2): nothing should keep a port
             // forwarded for a session that no longer exists.
             for entry in batch {
@@ -624,6 +629,17 @@ final class FleetService: ObservableObject {
             }
         }
         switch request {
+        case .peer(let request):
+            guard client.isLocal, let service = peerMessaging else {
+                return reply(.err(cid: cid, code: "peer_unavailable", message: "Peer messaging requires the local Flight Deck control socket."))
+            }
+            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            Task { @MainActor in
+                do {
+                    let json = try await service.request(request, caller: caller)
+                    reply(.peer(cid: cid, json: json))
+                } catch { reply(.err(cid: cid, code: "peer_failed", message: String(describing: error))) }
+            }
         case .timeline(let session, let anchor, let limit, let agent):
             // A `Task` rather than a synchronous answer, because reading a page is file
             // I/O: `TimelineService` hands the parse to a detached task and resumes here
@@ -898,7 +914,16 @@ final class FleetService: ObservableObject {
 
     /// The local control socket (`flightdeck`). Independent of pairing: a Mac nobody has paired
     /// with still has a CLI. See `FleetSocketServer.startLocal` for why it is its own instance.
-    func startLocal(at url: URL) async throws { try await localServer.startLocal(path: url.path) }
+    func startLocal(at url: URL) async throws {
+        try await localServer.startLocal(path: url.path)
+        // A real app bundle only. Tests' xctest bundle has no helper and cannot accidentally
+        // publish fake sessions into the user's native Claude registries.
+        if peerMessaging == nil, let executable = PeerMessagingService.bundledHelper() {
+            peerMessaging = PeerMessagingService(store: store, preferences: preferences,
+                executable: executable, stateDirectory: url.deletingLastPathComponent().appendingPathComponent("peers"))
+            peerMessaging?.synchronize()
+        }
+    }
 
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
     /// rather than polling for it — the polling version blocked its caller for up to five

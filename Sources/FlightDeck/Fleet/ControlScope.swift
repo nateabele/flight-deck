@@ -122,6 +122,11 @@ enum ControlScope {
     /// reads and is always allowed.
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
         switch request {
+        case .peer(let peer):
+            if caller == .invalid { return false }
+            if peer.operation == "list" || peer.operation == "receive" { return true }
+            // Messaging another tab is a cross-tab write, not a read disguised as a request.
+            return level == .full || caller == .human
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
              .intakeDetail, .intakePlan:
             return true
