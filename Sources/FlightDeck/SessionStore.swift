@@ -9964,6 +9964,7 @@ final class SessionStore: ObservableObject {
     private func pollPlanGates() {
         guard let planGates else { return }
         Task { @MainActor [weak self] in
+        var nextTrustScreenTabs: Set<UUID> = []
             await planGates.refresh()
             self?.deliverPlanGateNotifications()
         }
@@ -9981,6 +9982,7 @@ final class SessionStore: ObservableObject {
     private var stuckPromptEpisodes: [UUID: StuckEpisode] = [:]
 
     /// How long a dialog must stay unnameable before each successive `.stuck` record, in
+                    nextTrustScreenTabs.insert(session.id)
     /// seconds of continuous unnameability.
     ///
     /// **Wall clock, because a tick count could not carry the discriminator this event exists
@@ -9998,6 +10000,7 @@ final class SessionStore: ObservableObject {
     /// episode is written seconds in, when every age is young by construction. The later rungs
     /// are the ones that say something: at 2 minutes, at 10, at half an hour, a `lastRecordAgeMs`
     /// that has grown in step with the wall clock *is* the absent-record signature, stated
+        trustScreenTabs = nextTrustScreenTabs
     /// positively and without waiting to see what does not follow.
     ///
     /// **Bounded by construction.** The ladder is finite, each rung fires at most once per
@@ -10562,7 +10565,7 @@ final class SessionStore: ObservableObject {
         for id in waitingIDs {
             // A tab on claude's folder-trust screen has no transcript to probe, and no reason
             // to sit out the debounce below: the screen is all there is, and it is unambiguous.
-            if anchors[id] == nil, let trust = trustScreen(for: id) {
+            if trustScreenTabs.contains(id), let trust = trustScreen(for: id) {
                 calls[id] = trust.prompt.callID
                 offers[id] = trust.prompt
                 stuckPromptEpisodes[id] = nil
@@ -10652,23 +10655,28 @@ final class SessionStore: ObservableObject {
         return ScreenPromptReader.workspaceTrust(inViewport: viewport)
     }
 
-    /// One trust screen as the automatic answer sees it: when it first appeared, and whether it
-    /// has been dealt with.
+    /// Claude tabs the last registry tick found with no row and a folder-trust screen up — the
+    /// tabs whose `waiting` came from the screen rather than from claude, and the only ones the
+    /// trust card and the automatic answer are asked about.
+    private var trustScreenTabs: Set<UUID> = []
+
+    /// One trust screen as the automatic answer sees it.
     private struct TrustScreenSighting {
         var call: String
         var since: Date
-        var considered = false
+        /// Whether another account trusts this exact folder; nil until looked up, which happens
+        /// once per screen rather than every tick it stays up.
+        var trustedElsewhere: Bool?
+        var attempts = 0
+        var lastAttempt: Date?
     }
 
-    /// Trust screens on screen now, by tab. `considered` is one look and at most one press per
-    /// screen, so a drive that does not take is never repeated into whatever comes up next.
+    /// Trust screens on screen now, by tab.
     private var trustScreenSightings: [UUID: TrustScreenSighting] = [:]
 
-    /// How long a trust screen must have been up before it is answered automatically. **A
-    /// measured need, not caution:** against a real claude 2.1.310 in a pty, a Return sent the
-    /// moment the rows were drawn was dropped — the screen stayed exactly as it was — while the
-    /// same keys two seconds later took. A drive whose arrow is dropped fails its landing check
-    /// and, being one press per screen, would not try again.
+    /// How long a trust screen must have been up before it is answered automatically. Against a
+    /// real claude 2.1.310 in a pty, a Return sent the moment the rows were drawn was dropped —
+    /// the screen stayed exactly as it was — while the same keys two seconds later took.
     static let trustScreenSettle: TimeInterval = 1.5
 
     /// Answers a tab's folder-trust screen with yes when another claude account already trusts
@@ -10678,28 +10686,34 @@ final class SessionStore: ObservableObject {
     private func answerTrustScreensTrustedElsewhere() {
         let stamp = now()
         var seen: Set<UUID> = []
-        for (id, status) in statuses where status.activity == .waiting && anchors[id] == nil {
+        for id in trustScreenTabs where statuses[id]?.activity == .waiting {
             guard let trust = trustScreen(for: id) else { continue }
             seen.insert(id)
             let call = trust.prompt.callID
             if trustScreenSightings[id]?.call != call {
                 trustScreenSightings[id] = TrustScreenSighting(call: call, since: stamp)
             }
-            guard let sighting = trustScreenSightings[id], !sighting.considered,
+            guard var sighting = trustScreenSightings[id],
                   stamp.timeIntervalSince(sighting.since) >= Self.trustScreenSettle,
                   let yes = trust.rows.firstIndex(of: ScreenPromptReader.trustFolderLabel)
             else { continue }
-            // Marked before the configs are read, not after: a folder no other account trusts
-            // is looked up once per screen rather than every tick it stays up.
-            trustScreenSightings[id]?.considered = true
-            let homes = preferences?.preferences.accounts(for: .claude).map(\.home)
-                ?? [AgentID.claude.builtInHome]
-            guard ClaudeFolderTrust.anyTrusts(trust.folder, homes: homes) else { continue }
+            if sighting.trustedElsewhere == nil {
+                let homes = preferences?.preferences.accounts(for: .claude).map(\.home)
+                    ?? [AgentID.claude.builtInHome]
+                sighting.trustedElsewhere = ClaudeFolderTrust.anyTrusts(trust.folder, homes: homes)
+            }
+            guard sighting.trustedElsewhere == true else {
+                trustScreenSightings[id] = sighting
+                continue
+            }
+            sighting.attempts += 1
+            sighting.lastAttempt = stamp
+            trustScreenSightings[id] = sighting
             let outcome = answerScreenPrompt(
                 call, with: .option(index: yes, label: ScreenPromptReader.trustFolderLabel),
                 in: id, token: UUID()
             )
-            Self.folderTrustLogger.notice("folder trust carried from another account: \(String(describing: outcome), privacy: .public)")
+            Self.folderTrustLogger.notice("folder trust carried from another account, attempt \(sighting.attempts, privacy: .public): \(String(describing: outcome), privacy: .public)")
         }
         trustScreenSightings = trustScreenSightings.filter { seen.contains($0.key) }
     }
@@ -10775,6 +10789,14 @@ final class SessionStore: ObservableObject {
     /// Stored per tab, and told to the fleet. A node appearing or finishing moves no status
     /// field, so without its own emission a connected phone would hold yesterday's tree until
     /// some unrelated tick happened to carry it. Skipped when there is no status yet, like
+    /// How far apart, and how many, automatic attempts at one screen. **More than one because one
+    /// was measured to fail:** on the first release, a tab reattached at relaunch was answered
+    /// five seconds later and its arrow had not shown on the re-read, so the landing check
+    /// refused the Return and the screen sat there. A retry is safe for the reason the first
+    /// try is: each starts from the cursor it reads at that moment, so an arrow that landed late
+    /// is not added to, and each ends on the same read-back before any Return.
+    static let trustScreenRetryInterval: TimeInterval = 3
+    static let trustScreenMaxAttempts = 3
     /// `applySubagentCount`: the first `commitStatuses` emission carries the tree then.
     ///
     /// **Emitted only when the WIRE form moves.** `SubagentNode.modified` is part of tree
@@ -10792,6 +10814,8 @@ final class SessionStore: ObservableObject {
             hasBackgroundWork: backgroundWorkSessions.contains(id),
             openPromptCall: openPromptIdentity(of: id),
             answerless: status.answerless,
+                  sighting.attempts < Self.trustScreenMaxAttempts,
+                  sighting.lastAttempt.map({ stamp.timeIntervalSince($0) >= Self.trustScreenRetryInterval }) ?? true,
             subagents: wireSubagents(of: id),
             openPromptAgent: openPromptAgents[id],
             openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)

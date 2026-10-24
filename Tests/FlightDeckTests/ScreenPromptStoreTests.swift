@@ -163,9 +163,9 @@ final class ScreenPromptStoreTests: XCTestCase {
     }
 
     /// Another account trusts exactly this folder: once the screen has been up long enough to
-    /// take keys, it is answered yes — once.
+    /// take keys, it is answered yes.
     func testAFolderTrustedExactlyElsewhereIsAnsweredYesAfterTheSettle() throws {
-        let (store, spy, id) = makeStore(homes: [try home(trusting: []), try home(trusting: [probeFolder])])
+        let (store, spy, _) = makeStore(homes: [try home(trusting: []), try home(trusting: [probeFolder])])
         spy.viewportOverride = try captured("workspace-trust-310.captured")
         let landed = try captured("workspace-trust-310-yes-focused.captured")
         store.injectionSettle = { spy.viewportOverride = landed; $0() }
@@ -178,7 +178,37 @@ final class ScreenPromptStoreTests: XCTestCase {
 
         advance(1)
         store.applyRegistry([:])
-        XCTAssertEqual(spy.events, [.arrow(1), .ret], "one press per screen")
+        XCTAssertEqual(spy.events, [.arrow(1), .ret], "nothing more inside the retry interval")
+    }
+
+    /// **What the first release did live**: the arrow had not shown on the re-read, so no Return —
+    /// and the screen sat there. It had landed late; the next attempt reads the cursor already on
+    /// `Yes`, sends no arrow, and presses.
+    func testAnArrowThatLandsLateIsFinishedByTheNextAttemptWithoutAnotherArrow() throws {
+        let (store, spy, _) = makeStore(homes: [try home(trusting: [probeFolder])])
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        advance(SessionStore.trustScreenSettle)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [.arrow(1)], "the landing check refuses the Return")
+
+        spy.viewportOverride = try captured("workspace-trust-310-yes-focused.captured")
+        advance(SessionStore.trustScreenRetryInterval)
+        store.applyRegistry([:])
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
+    }
+
+    /// An arrow that never lands is tried a bounded number of times, then left for a person.
+    func testAScreenThatNeverTakesTheArrowIsLeftAfterTheLastAttempt() throws {
+        let (store, spy, _) = makeStore(homes: [try home(trusting: [probeFolder])])
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        advance(SessionStore.trustScreenSettle)
+        for _ in 0..<(SessionStore.trustScreenMaxAttempts + 2) {
+            store.applyRegistry([:])
+            advance(SessionStore.trustScreenRetryInterval)
+        }
+        XCTAssertEqual(spy.events, Array(repeating: .arrow(1), count: SessionStore.trustScreenMaxAttempts))
     }
 
     /// A trusted PARENT is a wider grant than the question asked, and carries nothing.

@@ -1293,7 +1293,10 @@ count — the Mac answers "Yes, I trust this folder" itself (`answerTrustScreens
 `projects[<folder>].hasTrustDialogAccepted` directly was rejected: every running `claude` on an
 account holds its config in memory and rewrites it whole, so an outside write races them. The
 answer waits `trustScreenSettle` (1.5 s) after the screen appears — against a real 2.1.310 a Return
-sent the instant the rows were drawn was dropped — and is tried once per screen.
+sent the instant the rows were drawn was dropped — and is tried up to three times, 3 s apart, each
+from the cursor it reads then and each ending on the same read-back before any Return. More than
+once because once failed live: a tab reattached at relaunch had not repainted its arrow by the
+re-read, so the Return was refused and the screen sat there.
 
 ## Tab navigation
 
