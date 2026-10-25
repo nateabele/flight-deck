@@ -179,6 +179,7 @@ extension MeterFormatter {
         case "five_hour": return "5h"
         case "seven_day": return "wk"
         case "seven_day_opus": return "Opus wk"
+        case "seven_day_sonnet": return "Sonnet wk"
         case "credits", "credits_balance": return "credit"
         default: break
         }
@@ -223,7 +224,14 @@ extension MeterFormatter {
             return fresh ? line : line + " · held from last reading"
         }
 
-        struct Projected { let window: UsageWindow; let fraction: Double? }
+        struct Projected {
+            let window: UsageWindow
+            let fraction: Double?
+            func zeroedByReset(now: Date) -> Bool {
+                guard let resetsAt = window.resetsAt, let fraction else { return false }
+                return resetsAt <= now && fraction == 0 && window.utilization != 0
+            }
+        }
         let projected = (reading?.windows ?? []).map { w in
             Projected(window: w, fraction: reading.flatMap { HeadroomPolicy.effectiveUtilization(of: w, readAt: $0.readAt, now: now) })
         }
@@ -232,7 +240,8 @@ extension MeterFormatter {
             let label = windowLabel(p.window.name)
             guard let fraction = p.fraction else { return "\(label) \(percent(p.window.utilization)) · no reset time" }
             guard let resetsAt = p.window.resetsAt else { return "\(label) \(percent(fraction)) · no reset time" }
-            if resetsAt <= now { return "\(label) 0% · reset" }
+            if p.zeroedByReset(now: now) { return "\(label) 0% · reset" }
+            if resetsAt <= now { return "\(label) \(percent(fraction))" }
             return "\(label) \(percent(fraction)) · resets \(clock(resetsAt, "EEE MMM d, h:mm a"))"
         }
         if let reading {
@@ -262,8 +271,11 @@ extension MeterFormatter {
         let first = usable.first { $0.window.name == "five_hour" } ?? usable.sorted { $0.window.name < $1.window.name }[0]
         let second = usable.filter { $0.window.name != first.window.name }.max { $0.fraction < $1.fraction }
         let rows = [first, second].compactMap { $0 }.map { u -> AccountUsageLine in
+            // "reset" only when the reset is what zeroed the number; a fresh window whose reset
+            // predates its reading keeps its value, and routing counts it, so the row must too.
             let resetText: String
-            if let resetsAt = u.window.resetsAt { resetText = resetsAt <= now ? "reset" : resetColumn(resetsAt) }
+            if let resetsAt = u.window.resetsAt, resetsAt > now { resetText = resetColumn(resetsAt) }
+            else if u.window.resetsAt != nil, u.window.utilization != 0, u.fraction == 0 { resetText = "reset" }
             else { resetText = "" }
             return AccountUsageLine(label: windowLabel(u.window.name), fraction: u.fraction, state: state(u.fraction),
                                     percentText: percent(u.fraction), resetText: resetText)

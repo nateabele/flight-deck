@@ -36,6 +36,7 @@ final class AccountUsageFormatterTests: XCTestCase {
         XCTAssertEqual(MeterFormatter.windowLabel("five_hour"), "5h")
         XCTAssertEqual(MeterFormatter.windowLabel("seven_day"), "wk")
         XCTAssertEqual(MeterFormatter.windowLabel("seven_day_opus"), "Opus wk")
+        XCTAssertEqual(MeterFormatter.windowLabel("seven_day_sonnet"), "Sonnet wk")
         XCTAssertEqual(MeterFormatter.windowLabel("60m"), "1h")
         XCTAssertEqual(MeterFormatter.windowLabel("90m"), "90m")
         XCTAssertEqual(MeterFormatter.windowLabel("codex_other:five_hour"), "5h")
@@ -66,6 +67,16 @@ final class AccountUsageFormatterTests: XCTestCase {
         XCTAssertEqual(rows[1].label, "wk")
         XCTAssertEqual(rows[1].percentText, "40%")
         XCTAssertTrue(m.tooltip.contains("held from last reading"), m.tooltip)
+    }
+
+    func testFreshWindowResetBeforeReadAtKeepsItsNumberNotReset() {
+        let readAt = now.addingTimeInterval(-60)
+        let l = ledger(reading: reading([UsageWindow(name: "five_hour", utilization: 0.62, resetsAt: readAt.addingTimeInterval(-30))], at: readAt))
+        let m = model(l)
+        let row = lines(m)[0]
+        XCTAssertEqual(row.percentText, "62%")
+        XCTAssertNotEqual(row.resetText, "reset")
+        XCTAssertFalse(m.tooltip.contains("0% · reset"), m.tooltip)
     }
 
     func testNoReadingSaysNoUsageYet() {
