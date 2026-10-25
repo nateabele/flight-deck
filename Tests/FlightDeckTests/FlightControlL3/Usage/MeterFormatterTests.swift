@@ -45,7 +45,7 @@ final class MeterFormatterTests: XCTestCase {
         let h = AccountHeadroom(account: UsageRefs.spare, worstUtilization: nil, state: .unknown, resetsAt: nil)
         XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: nil, error: nil, now: now).detail, "no reading")
         let stale = UsageRefs.reading(UsageRefs.spare, 0.5, at: now.addingTimeInterval(-3600))
-        XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: stale, error: nil, now: now).detail, "reading is stale")
+        XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: stale, error: nil, now: now).detail, "No current reading")
         XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: nil, error: "Codex app-server: transportClosed", now: now).detail,
                        "Codex app-server: transportClosed", "a source error is the more useful sentence")
         let m = MeterFormatter.account(h, pool: pool, reading: nil, error: nil, now: now)

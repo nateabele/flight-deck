@@ -82,7 +82,7 @@ enum MeterFormatter {
         // that the provider, not our arithmetic, closed the account.
         if let rejection, now < rejection.expiry {
             let realUtilization = reading.flatMap { r in
-                r.worstWindow.map { window in
+                r.worstWindow.flatMap { window in
                     HeadroomPolicy.effectiveUtilization(of: window, readAt: r.readAt, now: now)
                 }
             }
@@ -100,7 +100,7 @@ enum MeterFormatter {
 
         let detail: String?
         if let error { detail = error }
-        else if h.state == .unknown { detail = reading == nil ? "no reading" : "reading is stale" }
+        else if h.state == .unknown { detail = reading == nil ? "no reading" : "No current reading" }
         else { detail = nil }
         return AccountMeterModel(
             id: "\(pool.id.rawValue)|\(h.account.id?.uuidString ?? "slot")",

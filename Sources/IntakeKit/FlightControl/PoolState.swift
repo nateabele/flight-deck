@@ -99,13 +99,20 @@ public enum HeadroomPolicy {
     public static let freshness: TimeInterval = 30 * 60
     public static let rejectionBackoff: TimeInterval = 15 * 60
 
-    /// A window whose reset time has passed since it was read is empty now: the vendor rolled it
-    /// over and the idle tab that reported it will not say so. A reset time at or before the
-    /// reading's own `readAt` is a disagreement between the vendor's clock and ours — the window
-    /// cannot have reset *after* a reading that already saw it past — so the number stands.
-    public static func effectiveUtilization(of window: UsageWindow, readAt: Date, now: Date) -> Double {
-        guard let resets = window.resetsAt, resets <= now, resets > readAt else { return window.utilization }
-        return 0
+    /// What a window reads now. A fresh reading stands as measured, except that a window whose
+    /// reset time has passed since it was read is empty: the vendor rolled it over and the idle
+    /// tab that reported it will not say so. A stale reading holds each window's last value until
+    /// that window resets, then reads 0 (decision 2026-10-25, the maintainer) — usage never falls inside a
+    /// window, and a meter that blanks to "unknown" after thirty idle minutes tells the user
+    /// nothing. A stale window with no reset time has no end to hold until, so it is dropped (nil).
+    /// A reset time at or before the reading's own `readAt` is a disagreement between the vendor's
+    /// clock and ours — or a status line replaying old limits under a new `readAt`
+    /// (`CapacityLedger.merged`) — so a fresh number stands and a stale one is past its reset.
+    public static func effectiveUtilization(of window: UsageWindow, readAt: Date, now: Date) -> Double? {
+        let fresh = max(0, now.timeIntervalSince(readAt)) <= freshness
+        guard let resets = window.resetsAt else { return fresh ? window.utilization : nil }
+        if resets > now { return window.utilization }
+        return resets > readAt || !fresh ? 0 : window.utilization
     }
 
     /// Age is clamped at zero: a reading stamped slightly in the future is simply new.
@@ -120,17 +127,16 @@ public enum HeadroomPolicy {
         }
         let unknown = AccountHeadroom(account: account, worstUtilization: nil, state: .unknown, resetsAt: nil)
         guard let reading else { return unknown }
-        let fresh = isFresh(reading, now: now)
-        // A stale reading still bounds usage from BELOW until each window resets — usage never
-        // falls inside a window — so it can say "over a limit" but never "has room". Only its
-        // windows with a reset still ahead count. Without this an account maxed days ago (Radify,
-        // 2026-10-15: weekly gone in two days, so nothing has run on it or reported since) aged
-        // into `unknown`, which `LeasePolicy` leases right after any under-soft member.
-        let windows = fresh ? reading.windows : reading.windows.filter { ($0.resetsAt ?? .distantPast) > now }
-        let scored = windows.map { ($0, effectiveUtilization(of: $0, readAt: reading.readAt, now: now)) }
+        // Every window that still projects counts, fresh or stale (see `effectiveUtilization`).
+        // Radify, 2026-10-15: weekly maxed in two days, nothing ran on it since, and its reading
+        // aged into `unknown`, which `LeasePolicy` leases right after any under-soft member. A
+        // stale reading now holds until its window resets, so that account stays over until then.
+        let scored = reading.windows.compactMap { window in
+            effectiveUtilization(of: window, readAt: reading.readAt, now: now).map { (window, $0) }
+        }
         guard let worst = scored.max(by: { $0.1 < $1.1 }) else { return unknown }
         let state: HeadroomState = worst.1 >= hard ? .overHard : worst.1 >= soft ? .overSoft : .underSoft
-        if !fresh, state == .underSoft { return unknown }
-        return AccountHeadroom(account: account, worstUtilization: worst.1, state: state, resetsAt: worst.0.resetsAt)
+        return AccountHeadroom(account: account, worstUtilization: worst.1, state: state,
+                               resetsAt: worst.0.resetsAt.flatMap { $0 > now ? $0 : nil })
     }
 }
