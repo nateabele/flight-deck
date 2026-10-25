@@ -542,4 +542,90 @@ final class CodexTextChannelTests: XCTestCase {
         func sendCharacterKey(_ character: Character) {}
         func sendControlKey(_ letter: Character) {}
     }
+
+    // MARK: - Shared daemon delivery
+
+    /// Answers `thread/read` with `status` and records every request it is sent.
+    private final class DaemonTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        var status: String
+        private(set) var requests: [(method: String, params: [String: Any])] = []
+        init(status: String) { self.status = status }
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            requests.append((method, obj["params"] as? [String: Any] ?? [:]))
+            switch method {
+            case "thread/read":
+                onLine?(#"{"id":\#(id),"result":{"thread":{"status":{"type":"\#(status)"}}}}"#)
+            default:
+                onLine?(#"{"id":\#(id),"result":{"turn":{"id":"t1","status":"inProgress"}}}"#)
+            }
+        }
+    }
+
+    private func daemonTarget(_ transport: DaemonTransport, thread: UUID) -> AgentTarget {
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: transport))
+        adapter.sharedSocketPath = "/tmp/codex-daemon/socket"
+        return AgentTarget(adapter: adapter, location: AgentLocation(
+            workingDirectory: "/w",
+            binding: AgentBinding(conversationID: thread, transcriptURL: URL(fileURLWithPath: "/r/x.jsonl"))
+        ))
+    }
+
+    /// The 2026-10-24 screen: codex is up (its marker is drawn) but no one-row composer with
+    /// its footer beneath can be read, which refused every keystroke delivery for two hours.
+    private let unreadableComposer = "• Working (3s • esc to interrupt)\n\n› a draft that\n  wraps onto a second row\n"
+
+    func testADaemonAttachedTabIsSentATurnAndTypesNothing() async throws {
+        let transport = DaemonTransport(status: "active")
+        let thread = UUID()
+        let spy = SpyInjector()
+        spy.viewportOverride = unreadableComposer
+        let finished = expectation(description: "finished")
+        var sent: Bool?
+        let started = channel.submit(
+            "From Design: read NEXT.md", into: TargetedInjector(base: spy, target: daemonTarget(transport, thread: thread)),
+            settle: { $0() }, stillWanted: { true }, onFinished: { sent = $0; finished.fulfill() }
+        )
+        XCTAssertTrue(started)
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(sent, true)
+        XCTAssertEqual(spy.events, [], "the composer and any draft in it are never touched")
+        XCTAssertEqual(transport.requests.map(\.method), ["thread/read", "turn/start"])
+        let start = try XCTUnwrap(transport.requests.last?.params)
+        XCTAssertEqual(start["threadId"] as? String, thread.uuidString.lowercased())
+        let input = start["input"] as? [[String: Any]]
+        XCTAssertEqual(input?.first?["text"] as? String, "From Design: read NEXT.md")
+    }
+
+    /// A thread the daemon has not loaded has its TUI attached elsewhere; a turn started here
+    /// would be a second writer. The keystroke path decides instead, and refuses this screen.
+    func testANotLoadedThreadFallsBackToTyping() async {
+        let transport = DaemonTransport(status: "notLoaded")
+        let spy = SpyInjector()
+        spy.viewportOverride = unreadableComposer
+        let finished = expectation(description: "finished")
+        var sent: Bool?
+        _ = channel.submit(
+            "hi", into: TargetedInjector(base: spy, target: daemonTarget(transport, thread: UUID())),
+            settle: { $0() }, stillWanted: { true }, onFinished: { sent = $0; finished.fulfill() }
+        )
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(sent, false)
+        XCTAssertEqual(transport.requests.map(\.method), ["thread/read"])
+        XCTAssertEqual(spy.events, [])
+    }
+
+    /// No `›` anywhere means codex has exited; nothing is requested of the daemon.
+    func testAnExitedCodexIsNotSentATurn() {
+        let transport = DaemonTransport(status: "idle")
+        let spy = SpyInjector()
+        spy.viewportOverride = "me@mac ~/w % "
+        XCTAssertFalse(channel.submit(
+            "hi", into: TargetedInjector(base: spy, target: daemonTarget(transport, thread: UUID())),
+            settle: { $0() }, stillWanted: { true }, onFinished: { _ in }
+        ))
+        XCTAssertTrue(transport.requests.isEmpty)
+    }
 }
