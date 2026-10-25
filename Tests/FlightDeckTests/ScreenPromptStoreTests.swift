@@ -198,6 +198,29 @@ final class ScreenPromptStoreTests: XCTestCase {
         XCTAssertEqual(spy.events, [.arrow(1), .ret])
     }
 
+    /// The arrow repaints after the first re-read but within the drive's settle retries: one
+    /// arrow, then Return, inside a single attempt and with no abort filed.
+    func testAnArrowThatRepaintsAfterTheFirstReadIsPressedWithinOneAttempt() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try captured("workspace-trust-310.captured")
+        store.applyRegistry([:])
+        let call = try XCTUnwrap(store.openPromptCalls[id])
+        spy.events.removeAll()
+        let landed = try captured("workspace-trust-310-yes-focused.captured")
+        var settles = 0
+        store.injectionSettle = { work in
+            settles += 1
+            if settles == 3 { spy.viewportOverride = landed }
+            work()
+        }
+
+        XCTAssertEqual(store.answerScreenPrompt(
+            call, with: .option(index: 1, label: "Yes, I trust this folder"), in: id, token: UUID()
+        ), .dispatched)
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
+        XCTAssertTrue(aborts.isEmpty)
+    }
+
     /// An arrow that never lands is tried a bounded number of times, then left for a person.
     func testAScreenThatNeverTakesTheArrowIsLeftAfterTheLastAttempt() throws {
         let (store, spy, _) = makeStore(homes: [try home(trusting: [probeFolder])])

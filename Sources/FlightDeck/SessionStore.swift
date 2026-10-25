@@ -7904,7 +7904,11 @@ final class SessionStore: ObservableObject {
                         return landed.focused == index && landed.rows[index] == label
                             && landed.prompt.callID == call
                     },
-                    driver: driver, injector: injector, id: id, token: token
+                    driver: driver, injector: injector, id: id, token: token,
+                    // Re-read for up to ~1 s for the arrow to show, sending nothing more. Both
+                    // live misses so far (17:37:50 and 18:31:57 in flight-deck-answer.log) were a
+                    // freshly reattached tab whose arrow had not repainted by the first read.
+                    settleRetries: 9
                 )
             }
             // The client's label against the Mac's own reading of this very screen — the same
