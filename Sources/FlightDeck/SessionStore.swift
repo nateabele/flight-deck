@@ -8799,6 +8799,19 @@ final class SessionStore: ObservableObject {
         return AgentTarget(adapter: adapter, location: adapter.location(for: session))
     }
 
+    /// The codex tab pinned to `thread`, when `tab` is a codex tab on the same account and that
+    /// account's tabs share codex's daemon — the only arrangement in which `tab`'s token can
+    /// have been presented by a command another tab's thread ran. Nil otherwise, which keeps
+    /// the token's own tab. See `ControlCallerHello`.
+    func codexTab(sharingDaemonWith tab: UUID, thread: UUID) -> UUID? {
+        guard let presenter = session(for: tab), presenter.agent == .codex else { return nil }
+        let account = instance(for: presenter).account
+        guard codexStacks[account]?.adapter.sharedSocketPath != nil else { return nil }
+        return repos.flatMap(\.sessions).first {
+            $0.agent == .codex && $0.pinnedConversationID == thread && instance(for: $0).account == account
+        }?.id
+    }
+
     /// **The tab's reported readiness, re-checked against the process at the instant of
     /// injection rather than as of the last poll.**
     ///

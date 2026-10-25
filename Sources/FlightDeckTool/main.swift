@@ -159,7 +159,7 @@ let context = CLIContext(
     socketPath: socketPath
 )
 
-let transport = LocalFleetTransport(path: socketPath, caller: env["FLIGHT_DECK_CALLER"])
+let transport = LocalFleetTransport(path: socketPath, caller: ControlCallerHello.compose(environment: env))
 
 let runner = CLIRunner(
     invocation: invocation,

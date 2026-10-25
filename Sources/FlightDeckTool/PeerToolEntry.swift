@@ -24,7 +24,7 @@ enum PeerToolEntry {
                                completion: @escaping (Result<String, Error>) -> Void) {
         let state = environment["FLIGHT_DECK_STATE_DIR"] ?? NSHomeDirectory() + "/Library/Application Support/Flight Deck"
         let path = environment["FLIGHT_DECK_CONTROL_SOCKET"] ?? state + "/control.sock"
-        let client = FleetClient(localCaller: environment["FLIGHT_DECK_CALLER"])
+        let client = FleetClient(localCaller: ControlCallerHello.compose(environment: environment))
         var done = false, cid: Int?
         func finish(_ result: Result<String, Error>) {
             guard !done else { return }; done = true

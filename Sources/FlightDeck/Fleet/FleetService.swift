@@ -593,6 +593,17 @@ final class FleetService: ObservableObject {
         }
     }
 
+    /// Who a local client is, from its `hello`'s caller. A verified codex tab's token is narrowed
+    /// to the codex tab whose thread actually ran the command — see `ControlCallerHello` for why
+    /// a shared codex daemon makes every codex tab present the same token.
+    private func controlCaller(_ client: FleetAttachment) -> ControlCaller {
+        let hello = ControlCallerHello.split(client.caller)
+        let caller = ControlScope.caller(token: hello.token, secret: controlSecret)
+        guard case .session(let tab) = caller, let thread = hello.codexThread,
+              let owner = store.codexTab(sharingDaemonWith: tab, thread: thread) else { return caller }
+        return .session(owner)
+    }
+
     private func handleCommand(
         _ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
         _ reply: @escaping (ServerFrame) -> Void
@@ -601,7 +612,7 @@ final class FleetService: ObservableObject {
         // agent proves only which tab it runs in. No token is `.human`, never scoped; a forged
         // or stale one is `.invalid` and fails closed — see `ControlScope.caller`.
         if client.isLocal {
-            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            let caller = controlCaller(client)
             guard ControlScope.permits(command, level: scopeLevel(), caller: caller) else {
                 return reply(.err(cid: cid, code: "out_of_scope"))
             }
@@ -623,7 +634,7 @@ final class FleetService: ObservableObject {
     ) {
         // The same guard `handleCommand` opens with, for the same reason.
         if client.isLocal {
-            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            let caller = controlCaller(client)
             guard ControlScope.permits(request, level: scopeLevel(), caller: caller) else {
                 return reply(.err(cid: cid, code: "out_of_scope"))
             }
@@ -633,7 +644,7 @@ final class FleetService: ObservableObject {
             guard client.isLocal, let service = peerMessaging else {
                 return reply(.err(cid: cid, code: "peer_unavailable", message: "Peer messaging requires the local Flight Deck control socket."))
             }
-            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            let caller = controlCaller(client)
             Task { @MainActor in
                 do {
                     let json = try await service.request(request, caller: caller)
@@ -838,7 +849,7 @@ final class FleetService: ObservableObject {
             }
             // Taken on the socket queue, inside `onRequest` where it is valid (see
             // `wireHandlers()`): it stops the request's producers once its reader is gone.
-            delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
+            delegation.handle(delegate, caller: controlCaller(client),
                               cid: cid, cancellation: cancellation,
                               reply: reply)
         case .infra(let request):
