@@ -41,6 +41,10 @@ final class AccountUsageFormatterTests: XCTestCase {
         XCTAssertEqual(MeterFormatter.windowLabel("90m"), "90m")
         XCTAssertEqual(MeterFormatter.windowLabel("codex_other:five_hour"), "5h")
         XCTAssertEqual(MeterFormatter.windowLabel("credits_balance"), "credit")
+        XCTAssertEqual(MeterFormatter.windowLabel("gemini-5h"), "5h")
+        XCTAssertEqual(MeterFormatter.windowLabel("gemini-weekly"), "wk")
+        XCTAssertEqual(MeterFormatter.windowLabel("rejected"), "Refused")
+        XCTAssertEqual(MeterFormatter.windowLabel("retry-after"), "Retry")
     }
 
     func testFreshTwoWindows() {
@@ -102,10 +106,31 @@ final class AccountUsageFormatterTests: XCTestCase {
         XCTAssertEqual(model(l).body, .message("No current reading"))
     }
 
-    func testActiveRejectionShowsRefused() {
-        let l = ledger(reading: reading([UsageWindow(name: "five_hour", utilization: 1, resetsAt: usageISO("2026-10-04T15:40:00Z"))],
-                                        rejection: true))
+    func testNoFiveHourFallsBackToFirstByName() {
+        let reset = usageISO("2026-10-08T09:00:00Z")
+        let l = ledger(reading: reading([
+            UsageWindow(name: "gemini-weekly", utilization: 0.3, resetsAt: reset),
+            UsageWindow(name: "gemini-5h", utilization: 0.1, resetsAt: reset),
+        ]))
         let rows = lines(model(l))
+        XCTAssertEqual(rows.map(\.label), ["5h", "wk"])
+        XCTAssertEqual(rows.map(\.percentText), ["10%", "30%"])
+    }
+
+    func testRejectionWithNoReadingSaysRefusedInTheTooltip() {
+        let l = ledger(reading: reading([], rejection: true))
+        let m = model(l)
+        XCTAssertEqual(lines(m)[0].percentText, "Refused")
+        XCTAssertTrue(m.tooltip.hasPrefix("Refused by the provider · claude status line · until "), m.tooltip)
+    }
+
+    func testActiveRejectionShowsRefused() {
+        let l = ledger(reading: reading([UsageWindow(name: "five_hour", utilization: 0.5, resetsAt: usageISO("2026-10-04T15:40:00Z"))]))
+        l.ingest(reading([UsageWindow(name: "five_hour", utilization: 1, resetsAt: usageISO("2026-10-04T15:40:00Z"))], rejection: true))
+        let m = model(l)
+        XCTAssertTrue(m.tooltip.hasPrefix("Refused by the provider · claude status line · until Sun Oct 4, 3:40 PM"), m.tooltip)
+        XCTAssertTrue(m.tooltip.contains("5h 50%"), m.tooltip)
+        let rows = lines(m)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].percentText, "Refused")
         XCTAssertEqual(rows[0].state, .overHard)

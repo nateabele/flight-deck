@@ -181,7 +181,17 @@ extension MeterFormatter {
         case "seven_day_opus": return "Opus wk"
         case "seven_day_sonnet": return "Sonnet wk"
         case "credits", "credits_balance": return "credit"
+        case "weekly": return "wk"
+        case "rejected": return "Refused"
+        case "retry-after": return "Retry"
         default: break
+        }
+        // Gemini names its windows "gemini-5h" and "gemini-weekly"; without the vendor prefix
+        // they would both fall to the same six characters and read as one window.
+        if let dash = name.firstIndex(of: "-"), dash > name.startIndex,
+           name[..<dash].allSatisfy({ $0 >= "a" && $0 <= "z" }) {
+            let rest = String(name[name.index(after: dash)...])
+            if !rest.isEmpty { return windowLabel(rest) }
         }
         if name.hasSuffix("m"), let minutes = Int(name.dropLast()), minutes > 0 {
             return minutes % 60 == 0 ? "\(minutes / 60)h" : "\(minutes)m"
@@ -199,7 +209,7 @@ extension MeterFormatter {
     static func accountUsage(account id: UUID, ledger: CapacityLedger, now: Date,
                              timeZone: TimeZone = .current, locale: Locale = .current) -> AccountUsageRowModel {
         // The strictest threshold anyone set, as `rowMeter` does.
-        let pools = ledger.allPools.filter { $0.accounts.contains(id) }
+        let pools = ledger.allPools.filter { $0.kind == .hosted && $0.accounts.contains(id) }
         let soft = pools.map(\.softThreshold).min() ?? CapacityPool.defaultSoftThreshold
         let hard = pools.map(\.hardThreshold).min() ?? CapacityPool.defaultHardThreshold
         func state(_ fraction: Double) -> HeadroomState {
@@ -236,13 +246,16 @@ extension MeterFormatter {
             Projected(window: w, fraction: reading.flatMap { HeadroomPolicy.effectiveUtilization(of: w, readAt: $0.readAt, now: now) })
         }
 
-        var tooltipLines = projected.map { p -> String in
+        var tooltipLines: [String] = projected.map { p -> String in
             let label = windowLabel(p.window.name)
             guard let fraction = p.fraction else { return "\(label) \(percent(p.window.utilization)) · no reset time" }
             guard let resetsAt = p.window.resetsAt else { return "\(label) \(percent(fraction)) · no reset time" }
             if p.zeroedByReset(now: now) { return "\(label) 0% · reset" }
             if resetsAt <= now { return "\(label) \(percent(fraction))" }
             return "\(label) \(percent(fraction)) · resets \(clock(resetsAt, "EEE MMM d, h:mm a"))"
+        }
+        if let rejection {
+            tooltipLines.insert("\(refusedDetail) · \(rejection.source) · until \(clock(rejection.expiry, "EEE MMM d, h:mm a"))", at: 0)
         }
         if let reading {
             tooltipLines.append(sourceLine(reading.source, readAt: reading.readAt, fresh: HeadroomPolicy.isFresh(reading, now: now)))
@@ -290,6 +303,8 @@ struct AccountUsageCluster: View {
     let model: AccountUsageRowModel
     let accountName: String
 
+    static let width: CGFloat = 198
+
     var body: some View {
         VStack(spacing: 0) {
             switch model.body {
@@ -298,13 +313,13 @@ struct AccountUsageCluster: View {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         HStack(spacing: 4) {
                             Text(line.label).foregroundStyle(.secondary).lineLimit(1)
-                                .frame(width: 44, alignment: .trailing)
+                                .frame(width: 52, alignment: .trailing)
                             MeterTrack(fraction: line.fraction, soft: model.soft, hard: model.hard, state: line.state)
                                 .frame(width: 40, height: 4)
                             Text(line.percentText).monospacedDigit().lineLimit(1)
-                                .frame(width: 34, alignment: .trailing)
+                                .frame(width: 40, alignment: .trailing)
                             Text(line.resetText).foregroundStyle(.secondary).lineLimit(1)
-                                .frame(width: 56, alignment: .leading)
+                                .frame(width: 54, alignment: .leading)
                         }
                     }
                 }
@@ -314,7 +329,9 @@ struct AccountUsageCluster: View {
             }
         }
         .font(.caption)
-        .frame(width: 190)
+        // 52 + 40 + 40 + 54 of columns plus 3 x 4 of spacing: the fixed copy ("Sonnet wk", "Refused",
+        // "Wed 12 PM") measures wider at .caption than a guessed width would hold.
+        .frame(width: Self.width)
         .help(model.tooltip)
         // As `AccountMeterBar`: an AXGroup carries no AXValue, a Text carries its string as `value`,
         // so the name and the reading travel as one Text, which VoiceOver also speaks.

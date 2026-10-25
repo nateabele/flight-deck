@@ -49,7 +49,8 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
             // evidence that anything lifted.
             if let rejection = rejections[id], reading.readAt > rejection.at, !reading.windows.isEmpty {
                 let t = now()
-                let worst = reading.windows.map { HeadroomPolicy.effectiveUtilization(of: $0, readAt: reading.readAt, now: t) ?? 0 }.max() ?? 0
+                // A window with no reset time keeps its raw number, so lifting sees what it always saw.
+                let worst = reading.windows.map { HeadroomPolicy.effectiveUtilization(of: $0, readAt: reading.readAt, now: t) ?? $0.utilization }.max() ?? 0
                 if worst < strictestHard(for: id) { rejections[id] = nil }
             }
         }

@@ -306,6 +306,8 @@ struct AccountsSettingsTab: View {
     /// Every row's leading icon sits in one column this wide, so account, pool and member text
     /// all start on a shared edge (members one column further in).
     static let iconColumn: CGFloat = 26
+    /// The "Default" capsule's width at .caption plus its padding, with a little to spare.
+    static let defaultSlot: CGFloat = 54
     static let iconSpacing: CGFloat = 10
 
     /// The "Default" tag, on whichever row is in effect: an account or a pool.
@@ -364,9 +366,13 @@ struct AccountsSettingsTab: View {
             }
             Spacer(minLength: 8)
             AccountUsageCluster(model: usageModel, accountName: account.displayName)
-            if isDefault {
-                defaultCapsule(help: "Projects that haven't chosen an account use this one")
+            // The slot is reserved on every row so the usage clusters line up down the list.
+            ZStack(alignment: .trailing) {
+                if isDefault {
+                    defaultCapsule(help: "Projects that haven't chosen an account use this one")
+                }
             }
+            .frame(width: Self.defaultSlot, alignment: .trailing)
             Menu {
                 accountActions(account, pool: pool, group: group)
             } label: {

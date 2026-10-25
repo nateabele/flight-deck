@@ -141,6 +141,11 @@ final class CapacityUITests: XCTestCase {
             let spare = prefs.descendants(matching: .any)["account-row-Spare"]
             XCTAssertEqual(row.frame.height, spare.frame.height, accuracy: 0.5, "a row with two usage lines is no taller than one with a message")
             XCTAssertTrue(row.frame.contains(work.frame), "the cluster sits inside its row")
+            XCTAssertTrue((work.value as? String ?? "").contains("31%"), "value=\(String(describing: work.value))")
+            let spareUsage = prefs.descendants(matching: .any)["account-usage-Spare"]
+            XCTAssertTrue(spareUsage.exists)
+            XCTAssertTrue((spareUsage.value as? String ?? "").contains("No usage yet"), "value=\(String(describing: spareUsage.value))")
+            XCTAssertEqual(work.frame.minX, spareUsage.frame.minX, accuracy: 0.5, "usage clusters line up across rows")
             shoot(prefs, "accounts-usage")
         }
     }

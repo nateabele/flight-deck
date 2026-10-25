@@ -256,8 +256,8 @@ final class UsageService: ObservableObject {
     /// so without this the ledger forgot an account the moment its last tab closed — and at
     /// every relaunch. An account that is maxed is exactly the one nobody opens tabs on: Radify
     /// (2026-10-15) spent its weekly window in two days, went quiet, read "unknown", and the
-    /// pool would lease it again. A reading kept here still counts after it goes stale, for the
-    /// windows whose reset is ahead (`HeadroomPolicy.evaluate`).
+    /// pool would lease it again. A reading kept here still counts after it goes stale: each
+    /// window holds its number until its reset passes, then reads zero (`HeadroomPolicy.effectiveUtilization`).
     func saveReadings() {
         guard readingsChanged, let url = environment.ledgerFile,
               let data = try? JSONEncoder().encode(ledger.allReadings) else { return }
