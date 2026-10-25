@@ -816,6 +816,14 @@ screen identity before answering. Hardware verification and unknown dialog shape
 the Mac rather than inventing an answer. The phone supports secret fields and explicit links;
 closed decision lists never acquire a free-text approval alternative.
 
+`CodexSubagentCounts` maintains spawned ancestry and active descendants from native thread
+and collaboration-item notifications. The native status poll also pages through
+`thread/list(ancestorThreadId, sourceKinds: [subAgent])`, without loading children or reading
+their histories. A full snapshot reconciles missed events; a failed or partial query keeps
+the last count, and newer live events win over an older snapshot. `AgentEvent.subagentCount`
+feeds the existing sidebar, background-work and phone wire behavior. Joining tabs replay
+the current count, and Codex's shared summary uses the same singular/plural text as Claude.
+
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
 

@@ -234,6 +234,13 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         XCTAssertNil(SubagentCount.badge(status: nil, tree: tree()))
     }
 
+    func testCountOnlyRuntimeKeepsItsBadgeWhileWaiting() {
+        let empty = SubagentTree(nodes: [])
+        XCTAssertEqual(SubagentCount.badge(status: SessionStatus(activity: .waiting, subagentCount: 2), tree: empty), 2,
+                       "Codex has an active count but no per-worker outline; its approval must not hide the count")
+        XCTAssertNil(SubagentCount.badge(status: SessionStatus(activity: .waiting), tree: empty))
+    }
+
     func testANewTreeIsPublishedToTheSidebar() {
         let (store, session) = make()
         var published = 0

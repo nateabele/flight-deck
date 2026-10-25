@@ -794,6 +794,7 @@ final class SessionStore: ObservableObject {
         }
         stack.rpc.onNotification = { [weak self] method, params in
             self?.codexStacks[account]?.dialogs.notify(method, params: params)
+            self?.codexStacks[account]?.runtime.receiveNativeNotification(method, params: params)
             self?.onCodexNotification?(account, method, params)
         }
         codexStacks[account] = stack

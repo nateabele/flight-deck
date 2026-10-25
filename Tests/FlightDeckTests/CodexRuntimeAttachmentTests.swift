@@ -55,12 +55,125 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         var onLine: ((String) -> Void)?
         var methods: [String] = []
         var status: [String: Any] = ["type": "active", "activeFlags": []]
+        var pages: [[[String: Any]]] = [[]]
+        var requests: [[String: Any]] = []
+        var failLists = false
+        var failListPage: Int?
+        var holdNextRead = false
+        var heldReply: [String: Any]?
         func send(_ line: String) {
             let request = try! JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any]
+            requests.append(request)
             methods.append(request["method"] as! String)
-            let reply: [String: Any] = ["id": request["id"]!, "result": ["thread": ["status": status]]]
+            var reply: [String: Any] = ["id": request["id"]!, "result": ["thread": ["status": status]]]
+            if request["method"] as? String == "thread/list" {
+                let params = request["params"] as? [String: Any] ?? [:]
+                let page = Int(params["cursor"] as? String ?? "0") ?? 0
+                reply["result"] = ["data": pages[page], "nextCursor": page + 1 < pages.count ? String(page + 1) as Any : NSNull()]
+                if failLists || failListPage == page { reply = ["id": request["id"]!, "error": ["code": -1, "message": "temporarily unavailable"]] }
+            }
+            if request["method"] as? String == "thread/read", holdNextRead {
+                holdNextRead = false
+                heldReply = reply
+                return
+            }
             onLine?(String(decoding: try! JSONSerialization.data(withJSONObject: reply), as: UTF8.self))
         }
+        func releaseRead() {
+            guard let reply = heldReply else { return }
+            heldReply = nil
+            onLine?(String(decoding: try! JSONSerialization.data(withJSONObject: reply), as: UTF8.self))
+        }
+    }
+
+    func testDescendantSnapshotsRecoverCountsAcrossPagesAndReplayToJoiningTabs() async throws {
+        let runtime = CodexRuntime(indexURL: index)
+        let transport = StatusTransport(), root = UUID(), child = UUID()
+        transport.pages = [[
+            ["id": child.uuidString, "parentThreadId": root.uuidString, "status": ["type": "active"]],
+            ["id": UUID().uuidString, "parentThreadId": root.uuidString, "status": ["type": "idle"]]
+        ], [["id": UUID().uuidString, "parentThreadId": child.uuidString, "status": ["type": "active", "activeFlags": ["waitingOnApproval"]]]]]
+        let dialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        var stamp = Date()
+        runtime.now = { stamp }
+        var seen: [AgentEvent] = [], joined: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: root, transcriptURL: nil)
+        let first = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        runtime.nativeDialogs = dialogs
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(seen.contains(.subagentCount(2)))
+        XCTAssertEqual(transport.methods.filter { $0 == "thread/list" }.count, 2)
+        let lists = transport.requests.filter { $0["method"] as? String == "thread/list" }
+        if let params = lists.first?["params"] as? [String: Any] {
+            XCTAssertEqual(params["ancestorThreadId"] as? String, root.uuidString.lowercased())
+            XCTAssertEqual(params["sourceKinds"] as? [String], ["subAgent"])
+            XCTAssertEqual(params["modelProviders"] as? [String], [], "include workers running through other model providers")
+        }
+        let second = runtime.attach(binding, for: UUID()) { joined.append($0) }
+        XCTAssertTrue(joined.contains(.subagentCount(2)))
+        transport.failListPage = 1
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertFalse(seen.contains(.subagentCount(0)), "a failed snapshot is not zero workers")
+        transport.failListPage = nil
+        transport.pages = [[]]
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(seen.last, .subagentCount(0))
+        runtime.detach(first)
+        runtime.detach(second)
+        let requests = transport.methods.count
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(transport.methods.count, requests)
+    }
+
+    func testNativeChildEventsUpdateOnlyTheirParentAndSurviveParentTurnCompletion() {
+        let runtime = CodexRuntime(indexURL: index)
+        let transport = StatusTransport()
+        runtime.nativeDialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        let root = UUID(), child = UUID(), other = UUID()
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: root, transcriptURL: nil), for: UUID()) { seen.append($0) }
+        let started: [String: Any] = ["thread": ["id": child.uuidString, "parentThreadId": root.uuidString,
+            "status": ["type": "active", "activeFlags": ["waitingOnApproval"]]]]
+        runtime.receiveNativeNotification("thread/started", params: started)
+        XCTAssertEqual(seen.last, .subagentCount(1))
+        let events = seen.count
+        runtime.receiveNativeNotification("thread/started", params: started)
+        runtime.receiveNativeNotification("turn/completed", params: ["threadId": root.uuidString])
+        runtime.receiveNativeNotification("thread/started", params: ["thread": ["id": UUID().uuidString,
+            "parentThreadId": other.uuidString, "status": ["type": "active"]]])
+        XCTAssertEqual(seen.count, events, "duplicates, other sessions and the parent's own completion do not change its worker count")
+        runtime.receiveNativeNotification("turn/completed", params: ["threadId": child.uuidString])
+        XCTAssertEqual(seen.last, .subagentCount(0))
+        runtime.detach(token)
+    }
+
+    func testUnloadedParentReadDoesNotClearNewerActiveChildren() async {
+        let runtime = CodexRuntime(indexURL: index), transport = StatusTransport()
+        let root = UUID(), child = UUID()
+        runtime.nativeDialogs = CodexNativeDialogs(rpc: CodexRPC(transport: transport))
+        var stamp = Date()
+        runtime.now = { stamp }
+        var seen: [AgentEvent] = []
+        let token = runtime.attach(AgentBinding(conversationID: root, transcriptURL: nil), for: UUID()) { seen.append($0) }
+        for _ in 0..<100 { await Task.yield() }
+        transport.status = ["type": "notLoaded"]
+        transport.holdNextRead = true
+        stamp.addTimeInterval(6)
+        runtime.drainForTesting()
+        for _ in 0..<100 { await Task.yield() }
+        let info: [String: Any] = ["id": child.uuidString, "parentThreadId": root.uuidString, "status": ["type": "active"]]
+        runtime.receiveNativeNotification("thread/started", params: ["thread": info])
+        transport.pages = [[info]]
+        transport.releaseRead()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(seen.last, .subagentCount(1), "an unloaded parent is not evidence that its children stopped")
+        runtime.detach(token)
     }
 
     func testConnectingAfterTabsAttachRecoversWorkingStatusAndMissedNotifications() async throws {
@@ -75,7 +188,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         XCTAssertTrue(transport.methods.isEmpty)
         runtime.nativeDialogs = dialogs
         for _ in 0..<50 { await Task.yield() }
-        XCTAssertEqual(seen.last, .activity(.busy), "tabs attached before initialize must rejoin once ready")
+        XCTAssertEqual(seen.last(where: { if case .activity = $0 { return true }; return false }), .activity(.busy), "tabs attached before initialize must rejoin once ready")
         transport.status = ["type": "idle"]
         stamp.addTimeInterval(6)
         runtime.drainForTesting()
@@ -98,7 +211,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         runtime.nativeDialogs = dialogs
         let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: nil), for: UUID()) { _ in }
         for _ in 0..<50 { await Task.yield() }
-        XCTAssertEqual(transport.methods, ["thread/read"], "observing an old TUI must not acquire its writer lock")
+        XCTAssertEqual(transport.methods, ["thread/read", "thread/list"], "observing an old TUI reads metadata without resuming it or acquiring its writer lock")
         runtime.detach(token)
     }
 
@@ -116,7 +229,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let token = runtime.attach(AgentBinding(conversationID: UUID(), transcriptURL: url), for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
         for _ in 0..<50 { await Task.yield() }
-        XCTAssertEqual(seen.last, .activity(.idle))
+        XCTAssertEqual(seen.last(where: { if case .activity = $0 { return true }; return false }), .activity(.idle))
         try append(turn, to: url)
         runtime.drainForTesting()
         transport.status = ["type": "notLoaded"]

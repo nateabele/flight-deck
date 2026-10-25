@@ -17,12 +17,17 @@ final class CodexRuntime: AgentRuntime {
     var nativeDialogs: CodexNativeDialogs? {
         didSet {
             guard nativeDialogs !== oldValue else { return }
+            subagentCounts = CodexSubagentCounts()
             for (id, source) in sources {
                 source.nativeRequest?.cancel()
                 source.nativeRequest = nil
                 source.nativeSubscribed = false
                 source.nativeStatus = false
                 source.nextNativeRefresh = .distantPast
+                if let count = source.subagentCount, count != 0 {
+                    source.subagentCount = 0
+                    source.subscribers.emit(.subagentCount(0))
+                }
                 oldValue?.unobserve(id)
                 nativeDialogs?.observe(id)
                 refreshNativeStatus(id, source: source)
@@ -43,6 +48,7 @@ final class CodexRuntime: AgentRuntime {
         var nativeRequest: Task<Void, Never>?
         var nativeRequestID: UUID?
         var nextNativeRefresh = Date.distantPast
+        var subagentCount: Int?
 
         func receive(_ event: AgentEvent) {
             if case .activity(let activity) = event {
@@ -57,6 +63,7 @@ final class CodexRuntime: AgentRuntime {
     }
 
     private var sources: [UUID: Source] = [:]
+    private var subagentCounts = CodexSubagentCounts()
     private let clock: WatchClock?
     private let indexURL: URL
     /// Where a conversation's text goes for ⌘K search. A closure rather than a stored
@@ -116,6 +123,7 @@ final class CodexRuntime: AgentRuntime {
             } else if let activity = existing.turnActivity {
                 onEvent(.activity(activity))
             }
+            if let count = existing.subagentCount { onEvent(.subagentCount(count)) }
             return token
         }
 
@@ -201,6 +209,7 @@ final class CodexRuntime: AgentRuntime {
                 if source?.nativeRequestID == requestID { source?.nativeRequest = nil }
             }
             do {
+                guard !Task.isCancelled, source != nil else { return }
                 let raw = id.uuidString.lowercased()
                 let result = try await dialogs.rpc.request("thread/read", ["threadId": raw, "includeTurns": false], timeoutSeconds: 3)
                 guard !Task.isCancelled, let self, let source, self.sources[id] === source,
@@ -219,22 +228,65 @@ final class CodexRuntime: AgentRuntime {
                             source.subscribers.emit(.activity(source.waitingOnScreen ? .waiting : activity))
                         }
                     }
-                    return
-                }
-                guard CodexThreadStatus.activity(from: status) != nil else { return }
-                dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
-                if !source.nativeSubscribed {
-                    let joined = try await dialogs.rpc.request("thread/resume", ["threadId": raw, "excludeTurns": true], timeoutSeconds: 3)
-                    guard !Task.isCancelled, self.sources[id] === source, self.nativeDialogs === dialogs else { return }
-                    source.nativeSubscribed = true
-                    if let thread = joined["thread"] as? [String: Any], let status = thread["status"] as? [String: Any] {
-                        dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
+                    // An unloaded parent says nothing about children still running. Read
+                    // their metadata below without resuming the parent or acquiring its lock.
+                } else {
+                    guard CodexThreadStatus.activity(from: status) != nil else { return }
+                    dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
+                    if !source.nativeSubscribed {
+                        let joined = try await dialogs.rpc.request("thread/resume", ["threadId": raw, "excludeTurns": true], timeoutSeconds: 3)
+                        guard !Task.isCancelled, self.sources[id] === source, self.nativeDialogs === dialogs else { return }
+                        source.nativeSubscribed = true
+                        if let thread = joined["thread"] as? [String: Any], let status = thread["status"] as? [String: Any] {
+                            dialogs.notify("thread/status/changed", params: ["threadId": raw, "status": status])
+                        }
                     }
+                }
+                let cutoff = self.subagentCounts.revision
+                var descendants: [[String: Any]] = []
+                var cursor: String?
+                var cursors: Set<String> = []
+                for page in 0..<20 {
+                    var params: [String: Any] = ["ancestorThreadId": raw, "sourceKinds": ["subAgent"], "modelProviders": [String](),
+                                                 "limit": 100, "useStateDbOnly": true]
+                    if let cursor { params["cursor"] = cursor }
+                    let response = try await dialogs.rpc.request("thread/list", params, timeoutSeconds: 3)
+                    guard !Task.isCancelled, self.sources[id] === source, self.nativeDialogs === dialogs else { return }
+                    guard let threads = response["data"] as? [[String: Any]] else {
+                        throw CodexRPCError.malformed("thread/list returned no descendant data")
+                    }
+                    descendants.append(contentsOf: threads)
+                    guard let next = response["nextCursor"] as? String else {
+                        self.subagentCounts.reconcile(root: id, threads: descendants, through: cutoff)
+                        self.publishSubagentCounts(knownRoot: id)
+                        return
+                    }
+                    // Never publish a truncated count as a complete snapshot, nor loop on a
+                    // repeated cursor. Live notifications keep the last known count current.
+                    guard page < 19, cursors.insert(next).inserted else {
+                        throw CodexRPCError.malformed("Codex descendant pagination did not complete")
+                    }
+                    cursor = next
                 }
             } catch {
                 // Keep the rollout/screen source on a legacy writer or transient disconnect;
                 // the next clock reconciliation retries without restarting its terminal.
             }
+        }
+    }
+
+    func receiveNativeNotification(_ method: String, params: [String: Any]) {
+        guard nativeDialogs != nil, subagentCounts.receive(method, params: params) else { return }
+        publishSubagentCounts()
+    }
+
+    private func publishSubagentCounts(knownRoot: UUID? = nil) {
+        for (id, source) in sources {
+            let count = subagentCounts.count(for: id)
+            guard source.subagentCount != nil || count > 0 || id == knownRoot,
+                  source.subagentCount != count else { continue }
+            source.subagentCount = count
+            source.subscribers.emit(.subagentCount(count))
         }
     }
 

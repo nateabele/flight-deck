@@ -129,9 +129,14 @@ struct SubagentCount: View {
     /// reads `waiting`, and a busy-only rule hid the count (and its popover) exactly when the
     /// user needed to see which agent was asking. A blocked agent is a live one, so the count
     /// never reads 0 then.
+    /// Count-only providers have no outline to attribute the wait to, so their positive count
+    /// stays visible while waiting too.
     static func badge(status: SessionStatus?, tree: SubagentTree) -> Int? {
         guard let status else { return nil }
-        if status.activity == .busy, status.subagentCount > 0 { return status.subagentCount }
+        if status.subagentCount > 0,
+           status.activity == .busy || (status.activity == .waiting && tree.nodes.isEmpty) {
+            return status.subagentCount
+        }
         let blocked = tree.nodes.contains {
             if case .blocked = $0.state { return true } else { return false }
         }
@@ -140,16 +145,24 @@ struct SubagentCount: View {
 
     var body: some View {
         if let status, let count = Self.badge(status: status, tree: tree) {
-            Button { showing.toggle() } label: {
-                Text("\(count)")
-                    .font(.caption2)
-                    .monospacedDigit()
-                    .foregroundStyle(.tint)
+            let label = Text("\(count)")
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.tint)
+            if tree.nodes.isEmpty {
+                // Codex supplies a live count without a per-worker outline. Keep that count
+                // visible during approvals, but do not offer a button opening an empty panel.
+                label
+                    .help(status.tooltip)
+                    .accessibilityLabel("\(count) subagent\(count == 1 ? "" : "s")")
+                    .accessibilityHidden(status.activity == .busy)
+            } else {
+                Button { showing.toggle() } label: { label }
+                    .buttonStyle(.plain)
+                    .help(status.tooltip)
+                    .accessibilityHidden(true)
+                    .popover(isPresented: $showing) { outline }
             }
-            .buttonStyle(.plain)
-            .help(status.tooltip)
-            .accessibilityHidden(true)
-            .popover(isPresented: $showing) { outline }
         }
     }
 

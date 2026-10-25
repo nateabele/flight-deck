@@ -142,8 +142,12 @@ The rollout continues to supply history, errors and completion. Older Codex buil
 legacy transport, and numbered local menus/trust dialogs use a screen-derived phone offer.
 Hardware-backed verification and unrecognized shapes still require the Mac.
 
-**Known limitation** (spec §5): no `.subagentCount` for codex — no `collab` record
-exists in any of 492 surveyed rollouts, so there is no ground truth to map it from.
+**Sub-agent counts (2026-10-25):** `CodexSubagentCounts` folds native thread ancestry and
+collaboration states. The runtime reconciles complete descendant metadata snapshots on its
+five-second native status cadence, recovering counts after restore and reconnect. Running
+and approval-blocked descendants count; idle, finished and closed workers do not. Counts
+reuse the existing sidebar/fleet field and the phone's singular/plural summary. Standalone
+legacy terminals without native metadata still cannot report a count from rollout history.
 
 ---
 
