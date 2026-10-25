@@ -16,6 +16,7 @@ import SwiftUI
 struct AccountsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    @ObservedObject var usage: UsageService
 
     @State private var collapsed: Set<PoolID> = []
     /// The pool whose settings popover is open: a pool id, or an agent's `<agent>-default`.
@@ -33,9 +34,10 @@ struct AccountsSettingsTab: View {
     @State private var dropTargetGroupEnd: AgentID?
     @State private var dropError: String?
 
-    init(preferences: PreferencesStore, sessions: SessionStore, popover: PoolID? = nil) {
+    init(preferences: PreferencesStore, sessions: SessionStore, popover: PoolID? = nil, usage: UsageService = .shared) {
         self.preferences = preferences
         self.sessions = sessions
+        self.usage = usage
         _popover = State(initialValue: popover)
     }
 
@@ -337,6 +339,8 @@ struct AccountsSettingsTab: View {
 
     private func accountRow(_ account: AgentAccount, pool: PoolID?, group: AccountsPaneModel.Group) -> some View {
         let isDefault = account.id == group.defaultAccountID
+        let _ = usage.revision
+        let usageModel = MeterFormatter.accountUsage(account: account.id, ledger: usage.ledger, now: Date())
         return HStack(spacing: Self.iconSpacing) {
             Image(systemName: account.cachedIdentity == nil ? "person.crop.circle.badge.questionmark" : "person.crop.circle.fill")
                 .font(.title2)
@@ -359,6 +363,7 @@ struct AccountsSettingsTab: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            AccountUsageCluster(model: usageModel, accountName: account.displayName)
             if isDefault {
                 defaultCapsule(help: "Projects that haven't chosen an account use this one")
             }

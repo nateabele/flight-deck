@@ -284,6 +284,46 @@ extension MeterFormatter {
     }
 }
 
+/// An account's usage windows in its Accounts row. Fixed width and at most two caption lines, so
+/// the row keeps its height and the pane its width.
+struct AccountUsageCluster: View {
+    let model: AccountUsageRowModel
+    let accountName: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            switch model.body {
+            case .lines(let lines):
+                VStack(spacing: 2) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        HStack(spacing: 4) {
+                            Text(line.label).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(width: 44, alignment: .trailing)
+                            MeterTrack(fraction: line.fraction, soft: model.soft, hard: model.hard, state: line.state)
+                                .frame(width: 40, height: 4)
+                            Text(line.percentText).monospacedDigit().lineLimit(1)
+                                .frame(width: 34, alignment: .trailing)
+                            Text(line.resetText).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(width: 56, alignment: .leading)
+                        }
+                    }
+                }
+            case .message(let message):
+                Text(message).foregroundStyle(.secondary).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .font(.caption)
+        .frame(width: 190)
+        .help(model.tooltip)
+        // As `AccountMeterBar`: an AXGroup carries no AXValue, a Text carries its string as `value`,
+        // so the name and the reading travel as one Text, which VoiceOver also speaks.
+        .accessibilityRepresentation {
+            Text("\(accountName) usage: \(model.tooltip)").accessibilityIdentifier("account-usage-\(accountName)")
+        }
+    }
+}
+
 /// The bar itself: fill by state, ticks at soft and hard.
 struct MeterTrack: View {
     let fraction: Double?
