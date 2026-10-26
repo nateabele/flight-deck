@@ -140,6 +140,9 @@ struct FlightDeckApp: App {
         // `GhosttyApp`'s one-time init calls it again right before `ghostty_init`, where it
         // then finds nothing to change — that call is the guarantee, this one the wider margin.
         LaunchLocale.prepareProcessEnvironment()
+        // Same moment, same reason: drop what an agent's `open` left in the environment, which
+        // every tab would otherwise inherit (`NO_COLOR` among it — see `LaunchEnvironment`).
+        LaunchEnvironment.scrubProcessEnvironment()
 
         // Constructed eagerly, unlike the store: this only reads `UserDefaults`, and both
         // the Settings scene and the store below need the *same* instance.
