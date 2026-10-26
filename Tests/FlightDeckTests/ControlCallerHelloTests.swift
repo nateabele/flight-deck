@@ -18,6 +18,13 @@ final class ControlCallerHelloTests: XCTestCase {
         XCTAssertEqual(split.codexThread, thread)
     }
 
+    /// A daemon Flight Deck started itself has no tab token; the thread still names the tab.
+    func testAThreadWithoutATokenIsStillSent() {
+        let split = ControlCallerHello.split(ControlCallerHello.compose(environment: ["CODEX_THREAD_ID": thread.uuidString]))
+        XCTAssertNil(split.token)
+        XCTAssertEqual(split.codexThread, thread)
+    }
+
     /// A thread id that is not a UUID is dropped rather than sent: the token alone is the safe
     /// answer, never a caller the app cannot verify.
     func testAMalformedThreadIsIgnored() {

@@ -593,14 +593,21 @@ final class FleetService: ObservableObject {
         }
     }
 
-    /// Who a local client is, from its `hello`'s caller. A verified codex tab's token is narrowed
-    /// to the codex tab whose thread actually ran the command — see `ControlCallerHello` for why
-    /// a shared codex daemon makes every codex tab present the same token.
+    /// Who a local client is, from its `hello`'s caller. A command a codex thread ran is
+    /// attributed to that thread's tab — see `ControlCallerHello` for why a shared codex daemon
+    /// makes every codex tab present the same token, or a closed tab's — and
+    /// `SessionStore.codexTab(sharingDaemonWith:thread:)` for which callers may be narrowed.
     private func controlCaller(_ client: FleetAttachment) -> ControlCaller {
         let hello = ControlCallerHello.split(client.caller)
         let caller = ControlScope.caller(token: hello.token, secret: controlSecret)
-        guard case .session(let tab) = caller, let thread = hello.codexThread,
-              let owner = store.codexTab(sharingDaemonWith: tab, thread: thread) else { return caller }
+        guard let thread = hello.codexThread else { return caller }
+        let presenter: UUID?
+        switch caller {
+        case .session(let tab): presenter = tab
+        case .human: presenter = nil
+        case .invalid: return caller
+        }
+        guard let owner = store.codexTab(sharingDaemonWith: presenter, thread: thread) else { return caller }
         return .session(owner)
     }
 

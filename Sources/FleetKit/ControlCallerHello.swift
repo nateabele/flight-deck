@@ -18,14 +18,17 @@ import Foundation
 public enum ControlCallerHello {
     static let threadMarker = "#codex-thread="
 
+    /// The thread rides along even with no token: a daemon Flight Deck itself started carries no
+    /// tab's token, and its commands would otherwise present nothing at all.
     public static func compose(environment: [String: String]) -> String? {
-        guard let token = environment["FLIGHT_DECK_CALLER"], !token.isEmpty else { return nil }
+        let token = environment["FLIGHT_DECK_CALLER"].flatMap { $0.isEmpty ? nil : $0 }
         guard let thread = environment["CODEX_THREAD_ID"].flatMap(UUID.init(uuidString:)) else { return token }
-        return token + threadMarker + thread.uuidString.lowercased()
+        return (token ?? "") + threadMarker + thread.uuidString.lowercased()
     }
 
     public static func split(_ caller: String?) -> (token: String?, codexThread: UUID?) {
         guard let caller, let range = caller.range(of: threadMarker) else { return (caller, nil) }
-        return (String(caller[..<range.lowerBound]), UUID(uuidString: String(caller[range.upperBound...])))
+        let token = String(caller[..<range.lowerBound])
+        return (token.isEmpty ? nil : token, UUID(uuidString: String(caller[range.upperBound...])))
     }
 }

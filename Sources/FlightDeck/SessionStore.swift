@@ -8817,17 +8817,33 @@ final class SessionStore: ObservableObject {
                               rollout: target.location.binding.transcriptURL)
     }
 
-    /// The codex tab pinned to `thread`, when `tab` is a codex tab on the same account and that
-    /// account's tabs share codex's daemon — the only arrangement in which `tab`'s token can
-    /// have been presented by a command another tab's thread ran. Nil otherwise, which keeps
-    /// the token's own tab. See `ControlCallerHello`.
-    func codexTab(sharingDaemonWith tab: UUID, thread: UUID) -> UUID? {
-        guard let presenter = session(for: tab), presenter.agent == .codex else { return nil }
-        let account = instance(for: presenter).account
-        guard codexStacks[account]?.adapter.sharedSocketPath != nil else { return nil }
-        return repos.flatMap(\.sessions).first {
-            $0.agent == .codex && $0.pinnedConversationID == thread && instance(for: $0).account == account
-        }?.id
+    /// The codex tab pinned to `thread`, on an account whose tabs share codex's daemon, for a
+    /// command whose caller token was `tab`'s — or no token at all (`tab` nil). See
+    /// `ControlCallerHello` for why a shared daemon's commands present whichever token started it.
+    ///
+    /// - A live codex `tab` narrows only within its own account, as before.
+    /// - A `tab` that is gone is the common case, not an edge one: the daemon outlives the tab
+    ///   that happened to start it, and on 2026-10-26 closing that one tab ("Codex") left every
+    ///   other codex tab's `flightdeck peer send` attributed to a tab that no longer existed.
+    /// - No token is a human shell, which is unscoped, so naming the tab can only narrow it.
+    /// - A live non-codex `tab` is never re-attributed: a thread id is not a credential, and it
+    ///   must not let one tab act as another.
+    func codexTab(sharingDaemonWith tab: UUID?, thread: UUID) -> UUID? {
+        // Only a live codex presenter pins the account; a gone or absent one leaves it open.
+        var pinned = false
+        var account: UUID?
+        if let tab, let presenter = session(for: tab) {
+            guard presenter.agent == .codex else { return nil }
+            pinned = true
+            account = instance(for: presenter).account
+        }
+        for session in repos.flatMap(\.sessions)
+        where session.agent == .codex && session.pinnedConversationID == thread {
+            let owner = instance(for: session).account
+            if pinned, owner != account { continue }
+            if codexStacks[owner]?.adapter.sharedSocketPath != nil { return session.id }
+        }
+        return nil
     }
 
     /// **The tab's reported readiness, re-checked against the process at the instant of
