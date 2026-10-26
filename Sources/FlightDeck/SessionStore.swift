@@ -8628,7 +8628,7 @@ final class SessionStore: ObservableObject {
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
-        guard let gate = injectionGate(id) else { return false }
+        guard let gate = injectionGate(id, offScreen: true) else { return false }
 
         // Marked before the channel is asked, and cleared again if it refuses: released in the
         // wrapped `onFinished` below, not tied to any one `settle` call —
@@ -8728,13 +8728,26 @@ final class SessionStore: ObservableObject {
     /// but no `textChannel` is refused here — correct, since nothing could then say whether its
     /// composer was on screen.
     private func injectionGate(
-        _ id: UUID
+        _ id: UUID, offScreen: Bool = false
     ) -> (channel: AgentTextChannel, injector: TextInjecting)? {
         guard let channel = session(for: id)?.agent.textChannel,
-              let injector = injector(for: id)
+              let surface = injector(for: id)
         else { return nil }
+        // Handed over ADDRESSED. The screen-driven channels never look past the
+        // `TextInjecting` they receive, and this still is one; a channel that delivers over its
+        // agent's own API needs to know which conversation and which account's server — see
+        // `TargetedInjector`.
+        let injector: TextInjecting = agentTarget(for: id).map { TargetedInjector(base: surface, target: $0) } ?? surface
+        let readiness = injectableReadiness(for: id)
+        // A prompt (`offScreen`, which only `inject` passes) that the channel delivers through
+        // its agent's own server types nothing, so the screen is not asked. A rename still
+        // types, and keeps every screen rule below. See `AgentTextChannel.deliversOffScreen`.
+        if offScreen, readiness != .absent, channel.deliversOffScreen(injector) {
+            guard !injecting.contains(id) else { return nil }
+            return (channel, injector)
+        }
 
-        switch injectableReadiness(for: id) {
+        switch readiness {
         case .absent:
             return nil
         case .live:
@@ -8767,12 +8780,7 @@ final class SessionStore: ObservableObject {
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.
         guard !injecting.contains(id) else { return nil }
-        // Handed over ADDRESSED. The screen-driven channels never look past the
-        // `TextInjecting` they receive, and this still is one; a channel that delivers over its
-        // agent's own API needs to know which conversation and which account's server — see
-        // `TargetedInjector`.
-        guard let target = agentTarget(for: id) else { return (channel, injector) }
-        return (channel, TargetedInjector(base: injector, target: target))
+        return (channel, injector)
     }
 
     /// The tab's agent and where it is working, as `AgentTarget`. Nil for a tab the store no

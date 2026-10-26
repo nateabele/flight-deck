@@ -617,15 +617,29 @@ final class CodexTextChannelTests: XCTestCase {
         XCTAssertEqual(spy.events, [])
     }
 
-    /// No `›` anywhere means codex has exited; nothing is requested of the daemon.
-    func testAnExitedCodexIsNotSentATurn() {
+    /// Only a daemon-attached tab skips the screen; a bare terminal keeps the keystroke rules.
+    func testOnlyADaemonAttachedTabDeliversOffScreen() {
+        let spy = SpyInjector()
+        XCTAssertTrue(channel.deliversOffScreen(
+            TargetedInjector(base: spy, target: daemonTarget(DaemonTransport(status: "idle"), thread: UUID()))
+        ))
+        XCTAssertFalse(channel.deliversOffScreen(spy))
+    }
+
+    /// 2026-10-25: Execute 4's screen, as Flight Deck's copy of it read, had no usable composer
+    /// for six hours. Nothing about the screen may stop the request.
+    func testAScreenWithNoComposerAtAllStillGetsTheTurn() async {
         let transport = DaemonTransport(status: "idle")
         let spy = SpyInjector()
-        spy.viewportOverride = "me@mac ~/w % "
-        XCTAssertFalse(channel.submit(
+        spy.viewportOverride = "  └ (no output)\n"
+        let finished = expectation(description: "finished")
+        var sent: Bool?
+        XCTAssertTrue(channel.submit(
             "hi", into: TargetedInjector(base: spy, target: daemonTarget(transport, thread: UUID())),
-            settle: { $0() }, stillWanted: { true }, onFinished: { _ in }
+            settle: { $0() }, stillWanted: { true }, onFinished: { sent = $0; finished.fulfill() }
         ))
-        XCTAssertTrue(transport.requests.isEmpty)
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(sent, true)
+        XCTAssertEqual(transport.requests.map(\.method), ["thread/read", "turn/start"])
     }
 }

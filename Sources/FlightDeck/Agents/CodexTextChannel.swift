@@ -173,14 +173,23 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         stillWanted: @escaping @MainActor () -> Bool,
         onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
-        if let target = (injector as? TargetedInjector)?.target,
-           let adapter = target.adapter as? CodexAdapter, adapter.sharedSocketPath != nil {
-            return submitThroughDaemon(text, adapter: adapter, thread: target.location.binding.conversationID,
+        if let (adapter, thread) = daemon(injector) {
+            return submitThroughDaemon(text, adapter: adapter, thread: thread,
                                        into: injector, settle: settle, stillWanted: stillWanted,
                                        onFinished: onFinished)
         }
         return typeIntoComposer(text, into: injector, settle: settle, stillWanted: stillWanted,
                                 onFinished: onFinished)
+    }
+
+    func deliversOffScreen(_ injector: TextInjecting) -> Bool { daemon(injector) != nil }
+
+    /// The account's shared daemon and this tab's thread, when the tab's TUI is attached to one.
+    @MainActor
+    private func daemon(_ injector: TextInjecting) -> (CodexAdapter, UUID)? {
+        guard let target = (injector as? TargetedInjector)?.target,
+              let adapter = target.adapter as? CodexAdapter, adapter.sharedSocketPath != nil else { return nil }
+        return (adapter, target.location.binding.conversationID)
     }
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "codex")
@@ -201,9 +210,12 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// (an older launch, or `codex` typed by hand at the tab's shell), so a turn started here
     /// would run a second writer behind the user's back. That case keeps the keystroke path.
     ///
-    /// Requires codex's `›` marker somewhere on screen first. A codex that has exited removes it
-    /// (see `SessionStore.injectableReadiness`), and that is the only liveness evidence a codex
-    /// tab has; a request would otherwise start a turn nobody is watching.
+    /// **Nothing here reads the screen**, and that is the point. The first version still required
+    /// codex's `›` marker on screen as a liveness check; on 2026-10-25 Execute 4 sat idle from
+    /// 14:48 to 20:50 with a screen Flight Deck's copy of could not read, and every send was
+    /// refused at that check or the gate's, until a resize made codex repaint. Liveness is the
+    /// daemon's to say: a thread whose TUI has gone is not loaded there, which the `notLoaded`
+    /// branch already handles.
     private func submitThroughDaemon(
         _ text: String,
         adapter: CodexAdapter,
@@ -213,9 +225,6 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         stillWanted: @escaping @MainActor () -> Bool,
         onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
-        guard let viewport = injector.readViewport(),
-              viewport.components(separatedBy: "\n").contains(where: { $0.first == InputBar.codexMarker })
-        else { return false }
         let rpc = adapter.rpc
         let threadID = thread.uuidString.lowercased()
         settle {
