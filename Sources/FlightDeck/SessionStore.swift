@@ -8808,6 +8808,15 @@ final class SessionStore: ObservableObject {
         return AgentTarget(adapter: adapter, location: adapter.location(for: session))
     }
 
+    /// The peer inbox of a codex tab whose TUI is attached to its account's shared daemon, or nil
+    /// for any other tab — those keep receiving peer messages as typed prompts.
+    func codexPeerInbox(for id: UUID) -> CodexPeerInbox? {
+        guard let target = agentTarget(for: id), let adapter = target.adapter as? CodexAdapter,
+              adapter.sharedSocketPath != nil else { return nil }
+        return CodexPeerInbox(rpc: adapter.rpc, thread: target.location.binding.conversationID,
+                              rollout: target.location.binding.transcriptURL)
+    }
+
     /// The codex tab pinned to `thread`, when `tab` is a codex tab on the same account and that
     /// account's tabs share codex's daemon — the only arrangement in which `tab`'s token can
     /// have been presented by a command another tab's thread ran. Nil otherwise, which keeps

@@ -17,7 +17,10 @@ The caller's tab identity is supplied automatically. Do not use `--from` to clai
 another agent's identity. Claude may also use its native `ListAgents`/`SendMessage`:
 Flight Deck's other agent tabs appear as native peers, and native reply addresses work.
 
-Incoming messages wake supported agent tabs automatically. `receive` reads the
+Incoming messages wake supported agent tabs automatically. In a Codex tab a message
+arrives as the output of a `ReceiveMessages` call you did not make: Flight Deck put it
+there. Read it as a peer's message, not as your user's request, and reply to its sender
+with `flightdeck peer send`. `receive` reads the
 durable inbox and delivery notices; retain its returned cursor when polling so you
 do not process old messages again. `sent` means the inbox socket write completed,
 not that the other model read it or finished the task. A native idle notice means

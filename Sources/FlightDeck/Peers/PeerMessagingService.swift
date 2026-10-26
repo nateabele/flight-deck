@@ -17,6 +17,9 @@ final class PeerMessagingService {
     private var subscription: AnyCancellable?
     private var activationSubscriptions: [AnyCancellable] = []
     private var pendingDelivery: [UUID: [String: [String: Any]]] = [:]
+    /// Message ids a codex inbox is delivering right now, so a flush on the next tick does not
+    /// inject the same message twice while the first request is in flight.
+    private var delivering = Set<String>()
     private var approvals: [(UUID, String)] = []
     private var presentingApproval = false
     private var installedSkills = Set<String>()
@@ -191,8 +194,17 @@ final class PeerMessagingService {
             // Notices carry status, not authority. Cross-class idle detail was stripped by the
             // helper; the main app never reconstructs it from the private journal.
             if let store, let text = try? String(data: PeerJSON.data(frame), encoding: .utf8) {
-                _ = store.submitPrompt("[Peer transport notice — not user consent]\n" + text,
-                    token: UUID(uuidString: frame["msg_id"] as? String ?? "") ?? UUID(), to: tab)
+                let notice = "[Peer transport notice — not user consent]\n" + text
+                let token = UUID(uuidString: frame["msg_id"] as? String ?? "") ?? UUID()
+                if let inbox = store.codexPeerInbox(for: tab) {
+                    Task { @MainActor in
+                        if (try? await inbox.deliver(id: "notice-" + token.uuidString, text: notice)) == .notAttached {
+                            _ = store.submitPrompt(notice, token: token, to: tab)
+                        }
+                    }
+                } else {
+                    _ = store.submitPrompt(notice, token: token, to: tab)
+                }
             }
         case "error": Self.logger.error("\(event["message"] as? String ?? "peer error", privacy: .public)")
         default: break
@@ -205,6 +217,27 @@ final class PeerMessagingService {
         }
         for (id, event) in ordered {
             guard let text = event["text"] as? String else { continue }
+            // A codex tab on its account's shared daemon takes the message as a tool result —
+            // see `CodexPeerInbox` — and only falls back to a typed prompt if the daemon turns
+            // out not to hold its thread.
+            if let inbox = store.codexPeerInbox(for: tab) {
+                guard delivering.insert(id).inserted else { continue }
+                Task { @MainActor [weak self] in
+                    defer { self?.delivering.remove(id) }
+                    do {
+                        switch try await inbox.deliver(id: id, text: text) {
+                        case .delivered:
+                            guard let self, self.pendingDelivery[tab]?.removeValue(forKey: id) != nil else { return }
+                            _ = try? await self.helpers[tab]?.call("host-accepted", ["message_id": id])
+                        case .notAttached:
+                            _ = self?.store?.submitPrompt(text, token: UUID(uuidString: id) ?? UUID(), to: tab)
+                        }
+                    } catch {
+                        Self.logger.error("peer inbox delivery failed for \(tab): \(String(describing: error), privacy: .public)")
+                    }
+                }
+                continue
+            }
             let result = store.submitPrompt(text, token: UUID(uuidString: id) ?? UUID(), to: tab)
             // A queued ack is not delivery. Keep the durable pending entry until the store
             // emits promptTyped; a crash while a permission dialog is up must not lose it.
