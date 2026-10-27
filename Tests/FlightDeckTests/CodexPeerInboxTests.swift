@@ -108,6 +108,36 @@ final class CodexPeerInboxTests: XCTestCase {
         XCTAssertEqual(transport.requests.filter { $0.method == "turn/start" }.count, 0)
     }
 
+    /// 2026-10-27 04:11 UTC, Execute 2: the wake turn opened with an automatic compaction that
+    /// dropped the just-injected assignment, then the model answered "standing by". The message
+    /// goes in once more, under a new call id, and the thread is woken again; and only once.
+    func testAMessageCompactedAwayBeforeTheModelReadItIsDeliveredOnceMore() async throws {
+        let transport = DaemonTransport(["idle"])
+        let url = rollout!
+        let call = CodexPeerInbox.callID(for: "ABC-7")
+        let reply = line(["type": "message", "role": "assistant", "content": []])
+        var injections = 0
+        transport.onInject = {
+            injections += 1
+            let output = self.line(["type": "function_call_output", "call_id": injections == 1 ? call : call + "-r1", "output": "hi"])
+            let compacted = #"{"type":"compacted","payload":{}}"#
+            let handle = try! FileHandle(forWritingTo: url)
+            try! handle.seekToEnd()
+            handle.write(Data((injections == 1 ? [output, compacted, reply] : [output, reply]).joined(separator: "\n").appending("\n").utf8))
+            try! handle.close()
+        }
+        _ = try await inbox(transport).deliver(id: "ABC-7", text: "hi")
+        for _ in 0..<300 where transport.requests.filter({ $0.method == "turn/start" }).count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let injected = transport.requests.filter { $0.method == "thread/inject_items" }
+        XCTAssertEqual(injected.count, 2)
+        let second = (injected.last?.params["items"] as? [[String: Any]])?.first?["call_id"] as? String
+        XCTAssertEqual(second, call + "-r1")
+        XCTAssertEqual(transport.requests.filter { $0.method == "turn/start" }.count, 2)
+    }
+
     func testAnsweredMeansModelOutputAfterTheInjectedResult() {
         let call = CodexPeerInbox.callID(for: "ABC-5")
         let injected = line(["type": "function_call_output", "call_id": call, "output": "hi"])

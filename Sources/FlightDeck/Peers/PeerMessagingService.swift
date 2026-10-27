@@ -285,9 +285,9 @@ final class PeerMessagingService {
         if event["from"] as? String == address { return .refused }
         let name = Self.attribute("from-name", in: text) ?? "the sender"
         let note = """
-            [Relayed by Flight Deck: \(name) is a Claude session on another account, so it can only \
-            reach this tab through Flight Deck. Reply with flightdeck peer send "\(name)" '...', \
-            not SendMessage.]
+            [Relayed by Flight Deck: \(name) replied to this tab's Flight Deck relay, the address \
+            this tab's flightdeck peer send messages carry. Reply with flightdeck peer send \
+            "\(name)" '...'; a SendMessage to the relay address would only come back to this tab.]
             """
         do {
             _ = try await helper.call("send", ["to": address, "message": text + "\n\n" + note,

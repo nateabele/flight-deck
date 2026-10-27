@@ -51,12 +51,9 @@ struct CodexPeerInbox {
         // from a fixed tail a long turn can scroll past.
         let offset = Self.size(of: rollout)
         if !Self.recorded(call, in: rollout) { try await inject(call, text: text, threadID: threadID) }
-        if status == "idle" {
-            try await wake(threadID)
-        } else {
-            let watcher = self
-            Task { @MainActor in await watcher.wakeIfUnseen(call, threadID: threadID, from: offset) }
-        }
+        if status == "idle" { try await wake(threadID) }
+        let watcher = self
+        Task { @MainActor in await watcher.followUp(call, text: text, threadID: threadID, from: offset, attempt: 0) }
         return .delivered
     }
 
@@ -85,23 +82,46 @@ struct CodexPeerInbox {
         _ = try await rpc.request("turn/start", ["threadId": threadID, "input": [] as [Any]], timeoutSeconds: 10)
     }
 
-    /// A busy turn can end before its next model call, leaving the message unread. Once the
-    /// thread is idle, anything the model produced after the injected output means it was
-    /// read; otherwise one empty turn reads it.
+    /// Whether the turn that should have read the message did, once it is over.
     ///
-    /// **Never re-injects.** It used to, whenever the injection was not in the rollout's last
-    /// megabyte — and on 2026-10-26 Execute 4 stayed busy for half an hour after two messages
-    /// arrived, scrolled both out of that window, and was handed both again when it went idle.
-    /// It acted on them a second time, after later instructions. A message codex queued but
-    /// never wrote is written when the next turn starts, so the wake alone delivers it; a
-    /// repeated instruction is worse than a late one.
-    private func wakeIfUnseen(_ call: String, threadID: String, from offset: UInt64) async {
+    /// - **Unread** — a busy turn ended before its next model call: one empty turn reads it.
+    /// - **Compacted away** — codex compacted the context after the message went in and before
+    ///   the model answered, and the summary dropped it. On 2026-10-27 at 04:11 UTC Execute 2 was
+    ///   woken for a new assignment from The Plan; the wake turn opened with an automatic
+    ///   compaction, and Execute 2 replied "Standing by for the next assignment". Model output
+    ///   after a compaction is not evidence the message was read, so it is put back once, under
+    ///   a new call id, and the thread woken again. Only after a compaction: a message the model
+    ///   did read is never handed over twice (see the 2026-10-26 duplicates in `deliver`'s history).
+    ///
+    /// Reads the rollout from where it stood before the injection, never a fixed tail a long turn
+    /// can scroll past.
+    private func followUp(_ call: String, text: String, threadID: String, from offset: UInt64, attempt: Int) async {
         do {
+            // A wake's turn can still read idle for a moment: wait for it to begin, briefly.
+            var polls = 0
+            while polls < 20, try await status(threadID) == "idle",
+                  !Self.lines(of: rollout, from: offset).contains(where: { $0.contains("\"task_started\"") }) {
+                polls += 1
+                try await Task.sleep(for: pollInterval)
+            }
             while let status = try await status(threadID), status != "idle" {
                 try await Task.sleep(for: pollInterval)
             }
-            guard !Self.answered(call, lines: Self.lines(of: rollout, from: offset)) else { return }
-            try await wake(threadID)
+            switch Self.reading(of: call, lines: Self.lines(of: rollout, from: offset)) {
+            case .read:
+                return
+            case .unread:
+                try await wake(threadID)
+            case .compactedAway:
+                guard attempt == 0 else {
+                    Self.logger.error("peer message \(call, privacy: .public) compacted away twice in \(threadID, privacy: .public)")
+                    return
+                }
+                let again = call + "-r1", next = Self.size(of: rollout)
+                try await inject(again, text: text, threadID: threadID)
+                try await wake(threadID)
+                await followUp(again, text: text, threadID: threadID, from: next, attempt: 1)
+            }
         } catch {
             Self.logger.error("peer follow-up failed for \(threadID, privacy: .public): \(String(describing: error), privacy: .public)")
         }
@@ -142,20 +162,27 @@ struct CodexPeerInbox {
         tail(of: url).contains { $0.contains("\"function_call_output\"") && $0.contains(call) }
     }
 
-    static func answered(_ call: String, lines: [String]) -> Bool {
+    enum Reading: Equatable { case read, unread, compactedAway }
+
+    static func answered(_ call: String, lines: [String]) -> Bool { reading(of: call, lines: lines) == .read }
+
+    /// What became of the injected output in `lines`: the model answered after it, a compaction
+    /// came first, or neither yet.
+    static func reading(of call: String, lines: [String]) -> Reading {
         guard let at = lines.lastIndex(where: { $0.contains("\"function_call_output\"") && $0.contains(call) })
-        else { return false }
-        return lines[(at + 1)...].contains { line in
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  object["type"] as? String == "response_item",
-                  let payload = object["payload"] as? [String: Any] else { return false }
+        else { return .unread }
+        for line in lines[(at + 1)...] {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if object["type"] as? String == "compacted" { return .compactedAway }
+            guard object["type"] as? String == "response_item", let payload = object["payload"] as? [String: Any] else { continue }
             switch payload["type"] as? String {
-            case "message": return payload["role"] as? String == "assistant"
+            case "message" where payload["role"] as? String == "assistant": return .read
             // Another peer message injected after this one is not the model reading it.
-            case "function_call": return payload["name"] as? String != "ReceiveMessages"
-            case "reasoning", "custom_tool_call", "local_shell_call": return true
-            default: return false
+            case "function_call" where payload["name"] as? String != "ReceiveMessages": return .read
+            case "reasoning", "custom_tool_call", "local_shell_call": return .read
+            default: continue
             }
         }
+        return .unread
     }
 }
