@@ -74,4 +74,14 @@ final class PeerMessagingTests: XCTestCase {
         try PeerMessagingSkill.install(source: source, home: home)
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
+
+    /// A relayed message names its real sender from the wrapper the sender's helper wrote.
+    @MainActor
+    func testTheRelayReadsTheSendersName() {
+        let text = #"<cross-session-message from="uds:/tmp/cc-socks/7850.sock" hop-chain="bd6a" from-name="The Plan" from-mode="bypass">"#
+            + "\nhi\n</cross-session-message>"
+        XCTAssertEqual(PeerMessagingService.attribute("from-name", in: text), "The Plan")
+        XCTAssertEqual(PeerMessagingService.attribute("from", in: text), "uds:/tmp/cc-socks/7850.sock")
+        XCTAssertNil(PeerMessagingService.attribute("from-name", in: "plain text"))
+    }
 }

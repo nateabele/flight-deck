@@ -217,6 +217,26 @@ final class PeerMessagingService {
         }
         for (id, event) in ordered {
             guard let text = event["text"] as? String else { continue }
+            // A Claude tab's relay exists only because the tab sent through the CLI, and what
+            // comes back to it is from a Claude on another account that cannot reach this tab's
+            // native inbox. It goes into that inbox from the relay, never typed as the user.
+            if tabs.first(where: { $0.id == tab })?.agent == .claude {
+                guard delivering.insert(id).inserted else { continue }
+                Task { @MainActor [weak self] in
+                    defer { self?.delivering.remove(id) }
+                    guard let self else { return }
+                    let outcome = await self.relayToNativeClaude(tab: tab, event: event, text: text)
+                    switch outcome {
+                    case .delivered, .refused:
+                        guard self.pendingDelivery[tab]?.removeValue(forKey: id) != nil else { return }
+                        let method = outcome == .delivered ? "host-accepted" : "host-failed"
+                        _ = try? await self.helpers[tab]?.call(method, ["message_id": id])
+                    case .noNativeInbox:
+                        _ = self.store?.submitPrompt(text, token: UUID(uuidString: id) ?? UUID(), to: tab)
+                    }
+                }
+                continue
+            }
             // A codex tab on its account's shared daemon takes the message as a tool result —
             // see `CodexPeerInbox` — and only falls back to a typed prompt if the daemon turns
             // out not to hold its thread.
@@ -246,6 +266,46 @@ final class PeerMessagingService {
             }
         }
     }
+    enum RelayOutcome: Equatable { case delivered, refused, noNativeInbox }
+
+    /// Hands a message that reached a Claude tab's relay to that tab's own native inbox, sent
+    /// by the relay as itself. It cannot be sent as the original peer: receivers check that a
+    /// frame's sender address belongs to the connecting process (see `PeerSocket`). So the
+    /// original `<cross-session-message>` travels inside, with who sent it and how to answer.
+    ///
+    /// A message whose sender is this tab's own native endpoint is refused rather than handed
+    /// back: that is the tab answering its relay with `SendMessage`, and delivering it would
+    /// echo the tab's own words to it.
+    private func relayToNativeClaude(tab: UUID, event: [String: Any], text: String) async -> RelayOutcome {
+        guard let helper = helpers[tab], let session = tabs.first(where: { $0.id == tab }),
+              let peers = try? await listing(),
+              let native = peers.first(where: { ($0["tabId"] as? String) == tab.uuidString.lowercased() }),
+              let address = native["address"] as? String, address != helper.address
+        else { return .noNativeInbox }
+        if event["from"] as? String == address { return .refused }
+        let name = Self.attribute("from-name", in: text) ?? "the sender"
+        let note = """
+            [Relayed by Flight Deck: \(name) is a Claude session on another account, so it can only \
+            reach this tab through Flight Deck. Reply with flightdeck peer send "\(name)" '...', \
+            not SendMessage.]
+            """
+        do {
+            _ = try await helper.call("send", ["to": address, "message": text + "\n\n" + note,
+                                               "session_id": session.pinnedConversationID.uuidString.lowercased()])
+            return .delivered
+        } catch {
+            Self.logger.error("relay to native inbox failed for \(tab): \(String(describing: error), privacy: .public)")
+            return .noNativeInbox
+        }
+    }
+
+    /// The value of `name="…"` in a `<cross-session-message>` opening tag.
+    static func attribute(_ name: String, in text: String) -> String? {
+        guard let start = text.range(of: name + "=\""),
+              let end = text[start.upperBound...].firstIndex(of: "\"") else { return nil }
+        return String(text[start.upperBound..<end])
+    }
+
     private func showApproval() {
         guard !presentingApproval, !approvals.isEmpty, let window = NSApp.mainWindow else { return }
         let (tab, id) = approvals[0]
