@@ -377,6 +377,13 @@ final class DelegationServiceTests: XCTestCase {
                        "mini's screen is locked — unlock it, then rerun")
         XCTAssertEqual(DelegationService.hostLine(code: "tree_mismatch", message: "x", host: "mini"),
                        "mini: sync rejected: tree hash mismatch — rerun; if it repeats, flightdeck host prune mini")
+        // Only an op the host does not know says to update it; a refusal says why.
+        XCTAssertEqual(DelegationService.hostLine(code: "not_implemented", message: "x", host: "mini"),
+                       "mini does not support this yet — update Flight Deck on mini")
+        XCTAssertEqual(DelegationService.hostLine(code: "unsupported", message: "unknown request", host: "mini"),
+                       "mini does not support this yet — update Flight Deck on mini")
+        XCTAssertEqual(DelegationService.hostLine(code: "unsupported", message: "subdirectory web is missing", host: "mini"),
+                       "mini refused the run: subdirectory web is missing")
     }
 
     func testLongRecipeDetaches() async throws {

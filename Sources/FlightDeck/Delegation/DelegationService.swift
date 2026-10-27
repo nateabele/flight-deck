@@ -1270,7 +1270,14 @@ final class DelegationService {
         case "result_expired": return "the result expired on \(host) — rerun to get the changes again"
         case "unsafe_path": return "\(host) sent back a result with an unsafe path, so nothing was applied — check the run's changes on \(host)"
         case "git_too_old": return "\(host)'s git is older than 2.40 — update git on \(host), then rerun"
-        case "unsupported", "not_implemented": return "\(host) does not support this yet — update Flight Deck on \(host)"
+        // Only an op the host does not know is an outdated host. `unsupported` is also what a
+        // current host answers for a repo or run it refuses (an unborn HEAD, a tracked artifact,
+        // a missing subdirectory, a revoked pairing), and on 2026-10-27 telling The Plan to
+        // update an already-current jeeves hid which of those it was.
+        case "not_implemented": return "\(host) does not support this yet — update Flight Deck on \(host)"
+        case "unsupported" where message.isEmpty || message == "unknown request":
+            return "\(host) does not support this yet — update Flight Deck on \(host)"
+        case "unsupported": return "\(host) refused the run: \(message)"
         default: return "\(host): \(message)"
         }
     }
