@@ -9,11 +9,14 @@ final class CodexPeerInboxTests: XCTestCase {
         var onLine: ((String) -> Void)?
         var statuses: [String]
         private(set) var requests: [(method: String, params: [String: Any])] = []
+        /// Runs when codex would write the injection, so a test can play out the rollout.
+        var onInject: (() -> Void)?
         init(_ statuses: [String]) { self.statuses = statuses }
         func send(_ line: String) {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
             requests.append((method, obj["params"] as? [String: Any] ?? [:]))
+            if method == "thread/inject_items" { onInject?() }
             if method == "thread/read" {
                 let status = statuses.count > 1 ? statuses.removeFirst() : statuses[0]
                 onLine?(#"{"id":\#(id),"result":{"thread":{"status":{"type":"\#(status)"}}}}"#)
@@ -82,6 +85,27 @@ final class CodexPeerInboxTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(transport.requests.filter { $0.method == "turn/start" }.count, 1)
+    }
+
+    /// 2026-10-26, Execute 4: a turn that read the message and then wrote more than a megabyte
+    /// before going idle must not be handed the message again, nor woken for it.
+    func testALongTurnThatReadItIsNeitherReinjectedNorWoken() async throws {
+        let transport = DaemonTransport(["active", "active", "idle"])
+        let call = CodexPeerInbox.callID(for: "ABC-6")
+        let url = rollout!
+        let output = line(["type": "function_call_output", "call_id": call, "output": "hi"])
+        let reply = line(["type": "message", "role": "assistant", "content": [["type": "output_text", "text": String(repeating: "x", count: 4096)]]])
+        transport.onInject = {
+            let handle = try! FileHandle(forWritingTo: url)
+            try! handle.seekToEnd()
+            handle.write(Data((output + "\n" + String(repeating: reply + "\n", count: 400)).utf8))
+            try! handle.close()
+        }
+        _ = try await inbox(transport).deliver(id: "ABC-6", text: "hi")
+        for _ in 0..<50 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertGreaterThan(CodexPeerInbox.size(of: url), 1 << 20, "the injection is outside the old 1 MB window")
+        XCTAssertEqual(transport.requests.filter { $0.method == "thread/inject_items" }.count, 1)
+        XCTAssertEqual(transport.requests.filter { $0.method == "turn/start" }.count, 0)
     }
 
     func testAnsweredMeansModelOutputAfterTheInjectedResult() {

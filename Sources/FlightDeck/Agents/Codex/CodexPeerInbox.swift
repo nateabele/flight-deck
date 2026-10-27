@@ -47,12 +47,15 @@ struct CodexPeerInbox {
         let threadID = thread.uuidString.lowercased()
         guard let status = try await status(threadID) else { return .notAttached }
         let call = Self.callID(for: id)
+        // Where this message's lines will start, so the follow-up reads from here rather than
+        // from a fixed tail a long turn can scroll past.
+        let offset = Self.size(of: rollout)
         if !Self.recorded(call, in: rollout) { try await inject(call, text: text, threadID: threadID) }
         if status == "idle" {
             try await wake(threadID)
         } else {
             let watcher = self
-            Task { @MainActor in await watcher.wakeIfUnseen(call, text: text, threadID: threadID) }
+            Task { @MainActor in await watcher.wakeIfUnseen(call, threadID: threadID, from: offset) }
         }
         return .delivered
     }
@@ -84,14 +87,20 @@ struct CodexPeerInbox {
 
     /// A busy turn can end before its next model call, leaving the message unread. Once the
     /// thread is idle, anything the model produced after the injected output means it was
-    /// read; otherwise one empty turn reads it, re-injecting first if codex dropped the queue.
-    private func wakeIfUnseen(_ call: String, text: String, threadID: String) async {
+    /// read; otherwise one empty turn reads it.
+    ///
+    /// **Never re-injects.** It used to, whenever the injection was not in the rollout's last
+    /// megabyte — and on 2026-10-26 Execute 4 stayed busy for half an hour after two messages
+    /// arrived, scrolled both out of that window, and was handed both again when it went idle.
+    /// It acted on them a second time, after later instructions. A message codex queued but
+    /// never wrote is written when the next turn starts, so the wake alone delivers it; a
+    /// repeated instruction is worse than a late one.
+    private func wakeIfUnseen(_ call: String, threadID: String, from offset: UInt64) async {
         do {
             while let status = try await status(threadID), status != "idle" {
                 try await Task.sleep(for: pollInterval)
             }
-            guard !Self.answered(call, in: rollout) else { return }
-            if !Self.recorded(call, in: rollout) { try await inject(call, text: text, threadID: threadID) }
+            guard !Self.answered(call, lines: Self.lines(of: rollout, from: offset)) else { return }
             try await wake(threadID)
         } catch {
             Self.logger.error("peer follow-up failed for \(threadID, privacy: .public): \(String(describing: error), privacy: .public)")
@@ -111,12 +120,26 @@ struct CodexPeerInbox {
         return String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
     }
 
-    static func recorded(_ call: String, in url: URL?) -> Bool {
-        tail(of: url).contains { $0.contains("\"function_call_output\"") && $0.contains(call) }
+    static func size(of url: URL?) -> UInt64 {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else { return 0 }
+        defer { try? handle.close() }
+        return (try? handle.seekToEnd()) ?? 0
     }
 
-    static func answered(_ call: String, in url: URL?) -> Bool {
-        answered(call, lines: tail(of: url))
+    /// Every line written since `offset`. A line cut in half by the offset is dropped by
+    /// `answered`, which reads only whole JSON records.
+    static func lines(of url: URL?, from offset: UInt64) -> [String] {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        try? handle.seek(toOffset: offset)
+        return String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self).components(separatedBy: "\n")
+    }
+
+    /// Whether the injection is already in the rollout — `deliver`'s guard against a retry
+    /// after a crash, which only ever follows the injection closely. Not used to decide anything
+    /// about an injection a long turn may have scrolled past; see `wakeIfUnseen`.
+    static func recorded(_ call: String, in url: URL?) -> Bool {
+        tail(of: url).contains { $0.contains("\"function_call_output\"") && $0.contains(call) }
     }
 
     static func answered(_ call: String, lines: [String]) -> Bool {
