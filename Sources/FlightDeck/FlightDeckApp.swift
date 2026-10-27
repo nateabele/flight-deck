@@ -418,7 +418,11 @@ struct FlightDeckApp: App {
                 .appendingPathComponent("intakes", isDirectory: true),
             delegationHooks: delegation,
             flywheelTools: flywheelTools,
-            swarmsRoot: swarmsRoot
+            swarmsRoot: swarmsRoot,
+            // The same values `makeFleetService` hands the store, here as well so the tabs this
+            // initializer relaunches carry them. Never under a reset, which binds no socket.
+            controlSocket: resetState || !ControlEnvironment.isEnabled() ? nil : ControlEnvironment.socketURL(),
+            controlSecret: resetState || !ControlEnvironment.isEnabled() ? nil : ControlEnvironment.secret()
         )
 
         // After `restore()` (inside the initializer above), which is what records the claude

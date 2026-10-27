@@ -47,6 +47,28 @@ enum PeerRegistry {
         guard process.terminationStatus == 0, !value.isEmpty else { throw PeerFailure.invalid("peer process exited") }
         return value
     }
+    /// Every process's start time, from ONE `ps`, in `processStart`'s exact format. A registry
+    /// scan used to spawn `ps` once per record: with ~100 records across eight account homes
+    /// that took 5-15 s on a loaded machine (measured 2026-10-26), long enough that a
+    /// `flightdeck peer send`, which lists before it sends, ran past the CLI's 15 s limit.
+    /// This call takes ~40 ms.
+    static func processStarts() -> [Int32: String] {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-A", "-o", "pid=,lstart="]
+        process.environment = ["TZ": "UTC", "LC_ALL": "C", "PATH": "/usr/bin:/bin"]
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [:] }
+        let bytes = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        var starts: [Int32: String] = [:]
+        for line in String(decoding: bytes, as: UTF8.self).split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " "), let pid = Int32(trimmed[..<space]) else { continue }
+            starts[pid] = trimmed[space...].trimmingCharacters(in: .whitespaces)
+        }
+        return starts
+    }
     static func atomic(_ object: Any, at path: String) throws {
         let data = try PeerJSON.data(object)
         try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
@@ -83,6 +105,7 @@ enum PeerRegistry {
     }
     static func sessions(configs: [String]) -> [[String: Any]] {
         var result: [String: [String: Any]] = [:]
+        let starts = processStarts()
         for root in configs {
             for file in (try? FileManager.default.contentsOfDirectory(atPath: root + "/sessions")) ?? [] {
                 guard file.hasSuffix(".json"), let pid = Int32(file.dropLast(5)) else { continue }
@@ -91,7 +114,7 @@ enum PeerRegistry {
                 guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
                       let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), var item = PeerJSON.object(bytes),
                       (item["pid"] as? NSNumber)?.int32Value == pid, item["peerProtocol"] as? Int == 1,
-                      item["procStart"] as? String == (try? processStart(pid)),
+                      let start = starts[pid], item["procStart"] as? String == start,
                       item["pidDomain"] as? String == nil || item["pidDomain"] as? String == "darwin",
                       let socket = item["messagingSocketPath"] as? String, (try? self.socket(socket)) != nil else { continue }
                 item["address"] = "uds:" + socket

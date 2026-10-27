@@ -3341,7 +3341,9 @@ final class SessionStore: ObservableObject {
         intakesRoot: URL? = nil,
         delegationHooks: DelegationSessionHooks? = nil,
         flywheelTools: FlywheelToolPaths = .system,
-        swarmsRoot: URL? = nil
+        swarmsRoot: URL? = nil,
+        controlSocket: URL? = nil,
+        controlSecret: Data? = nil
     ) {
         self.init(
             provider: ghostty,
@@ -3364,6 +3366,13 @@ final class SessionStore: ObservableObject {
         // while the display is asleep, reintroducing the original bug. Removing this line
         // silently disables the guard for every session this store ever creates.
         display = DisplayState()
+        // Before anything below can launch a tab, for the same reason as `display`: every
+        // restored tab whose terminal is gone is relaunched inside this initializer, and a tab
+        // launched before these are set carries no `FLIGHT_DECK_CALLER`. Assigned afterwards (as
+        // `FlightDeckApp` used to), 49 tabs relaunched at 13:08 and 13:42 on 2026-10-26 came up
+        // with no identity, and every `flightdeck` call from them was anonymous.
+        self.controlSocket = controlSocket
+        self.controlSecret = controlSecret
         // Beside `display` and load-bearing in the same way: the default waker is inert, so
         // without this line every sleeping display is a refusal again and no test notices.
         // `DisplayWakerTests` covers the waker; `testTheRealWakerIsWiredIn` covers this line.
