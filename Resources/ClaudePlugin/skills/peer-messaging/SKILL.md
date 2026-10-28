@@ -16,6 +16,8 @@ flightdeck peer receive --after CURSOR
 The caller's tab identity is supplied automatically. Do not use `--from` to claim
 another agent's identity. Claude may also use its native `ListAgents`/`SendMessage`:
 Flight Deck's other agent tabs appear as native peers, and native reply addresses work.
+Send each message by one route only: `SendMessage` to the `from=` address, or
+`flightdeck peer send`. Both reach the recipient, so using both delivers it twice.
 
 Incoming messages wake supported agent tabs automatically. In a Codex tab a message
 arrives as the output of a `ReceiveMessages` call you did not make: Flight Deck put it
