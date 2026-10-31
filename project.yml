@@ -77,6 +77,9 @@ targets:
     sources:
       - Sources/FlightDeck
       - Sources/PeerKit
+      # Compiled into the app and the CLI as a plain folder, not a framework: it is a few files
+      # of pure logic, and the CLI's `provider check` must hash and resolve exactly as the app does.
+      - Sources/ProviderKit
       # `fd-abduco` (scripts/build-fd-abduco.sh → vendor/fd-abduco-artifacts/fd-abduco) is a
       # plain Mach-O helper binary, not a framework — there is nothing to link. It rides into
       # the bundle via a real Copy Files build phase (destination: resources, not `resources:`
@@ -410,6 +413,7 @@ targets:
     sources:
       - Sources/FlightDeckTool
       - Sources/FlightDeckCLI
+      - Sources/ProviderKit
     dependencies:
       - target: FleetKit
         embed: false
