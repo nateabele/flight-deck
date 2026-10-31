@@ -225,9 +225,9 @@ public struct VisualRef: Codable, Hashable, Sendable {
 }
 
 /// `checkpoints/<n>/visuals.json`: the block state of every visual as the checkpoint saw it. A JSON
-/// object keyed by visual id (not Swift's default array of pairs for a non-string key). IntakeRunner,
-/// the only writer of checkpoints, writes it when it records one; the file is absent for a
-/// checkpoint made before visuals.
+/// object keyed by visual id (not Swift's default array of pairs for a non-string key). Written by
+/// IntakeRunner (the single writer of `checkpoints/`), from the block states ThreadRunner keeps in
+/// `visuals/`, when it records a checkpoint; the file is absent for a checkpoint made before visuals.
 public struct CheckpointBlockStates: Codable, Equatable, Sendable {
     public var states: [VisualID: BlockState]
     public init(states: [VisualID: BlockState] = [:]) { self.states = states }

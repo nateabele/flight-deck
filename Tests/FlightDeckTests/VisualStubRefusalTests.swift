@@ -76,25 +76,42 @@ final class VisualStubRefusalTests: XCTestCase {
         let svc = await makeService()
         XCTAssertEqual(IntakeService.visualsUnavailable, "visuals_unavailable")
         XCTAssertFalse(svc.visualsAvailable)
-        XCTAssertNil(svc.visualReader(i.id))
-        let refused = await svc.phoneVisualFetch(i.id, visualID: "pairing-handshake", revision: 1, part: "snapshot",
-                                                offset: 0, limit: 1024)
-        XCTAssertEqual(refused, .failure(VisualRefusal(code: "visuals_unavailable")))
         // And the phone is never told it may ask.
         let detail = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
         XCTAssertNil(detail.visuals)
     }
 
-    /// The store hook V1 reads through: nil with no `visuals/` folder, the disk store once there is one.
-    func testTheVisualReaderIsTheDiskStoreOnlyWhereVisualsExist() async throws {
+    /// The store hook V1 reads through is always a disk store, so the editor's hooks never go
+    /// stale (`DocumentPlan.==` ignores them): it serves nothing until `visuals/` exists, then
+    /// the same value sees it.
+    func testTheVisualReaderIsLazyAndSeesAFolderThatAppearsLater() async throws {
         let i = try shapingIntake()
         let svc = await makeService()
-        XCTAssertNil(svc.visualReader(i.id))
-        try FileManager.default.createDirectory(
-            at: TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id)).visualsRoot, withIntermediateDirectories: true)
-        XCTAssertTrue(svc.visualReader(i.id) is DiskVisualStore)
-        XCTAssertNil(svc.visualReader(UUID()), "an intake the service does not know")
-        XCTAssertNil(PlanEditHooks().visuals, "the editor gets a store only when the detail view hands one in")
+        let reader = try XCTUnwrap(svc.visualReader(i.id) as? DiskVisualStore)
+        let id = try XCTUnwrap(VisualID(rawValue: "flow"))
+        XCTAssertTrue(reader.visuals().isEmpty)
+        XCTAssertNil(reader.blockState(id))
+
+        let tape = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id))
+        let rev = tape.revisionDirectory(id, r: 1)
+        try FileManager.default.createDirectory(at: rev, withIntermediateDirectories: true)
+        let manifest = VisualManifest(provider: "p", providerVersion: "1", kind: "k", title: "T", entry: "a.txt", madeOnCheckpoint: 1,
+                                      madeBy: .you, files: [VisualFileEntry(path: "a.txt", size: 0, sha256: "")])
+        try IntakeJSON.encoder.encode(manifest).write(to: rev.appendingPathComponent("manifest.json"))
+        try Data("hi".utf8).write(to: rev.appendingPathComponent("a.txt"))
+        XCTAssertEqual(reader.read(id, r: 1, name: "a.txt", offset: 0, limit: 10)?.data, Data("hi".utf8))
+        XCTAssertNil(PlanEditHooks().visuals, "the hook defaults to nil for renders and tests")
+    }
+
+    /// The fetch's worker runs off the main thread, and today refuses `visuals_unavailable`.
+    func testTheFetchWorkerRunsOffTheMainThreadAndRefuses() async {
+        nonisolated(unsafe) var ranOnMain: Bool?
+        let result = await VisualFetch.serve(EmptyVisualStore(), visualID: "flow", revision: 1, part: "snapshot",
+                                             offset: 0, limit: 10, probe: { ranOnMain = Thread.isMainThread })
+        XCTAssertEqual(ranOnMain, false)
+        XCTAssertEqual(result, .failure(VisualRefusal(code: "visuals_unavailable")))
+        let none = await VisualFetch.serve(nil, visualID: "flow", revision: 1, part: "snapshot", offset: 0, limit: 10)
+        XCTAssertEqual(none, .failure(VisualRefusal(code: "visuals_unavailable")))
     }
 
     /// The real `FleetService` arm over a real socket answers the request with the stub's code,

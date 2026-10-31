@@ -113,7 +113,7 @@ final class VisualModelCodingTests: XCTestCase {
         XCTAssertNil(store.blockState(id, checkpoint: 1))
         XCTAssertTrue(store.revisions(id).isEmpty)
         XCTAssertNil(store.revision(id, r: 1))
-        XCTAssertNil(store.file(id, r: 1, name: "manifest.json"))
+        XCTAssertNil(store.read(id, r: 1, name: "manifest.json", offset: 0, limit: 10))
     }
 
     // MARK: - Lowercase only (R-I5)

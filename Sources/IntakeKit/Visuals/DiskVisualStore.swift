@@ -1,21 +1,26 @@
 import Foundation
 
 /// Reads an intake's `visuals/` folder from disk. V1's renderer and V3's phone fetch both read
-/// through this, so confinement lives here once.
+/// through this, so confinement lives here once. A missing `visuals/` folder is fine: the store
+/// serves nothing until the folder exists, so it can be handed out before any visual does.
 ///
-/// **`file(_:r:name:)` serves only what the manifest lists, and only a plain file inside the
-/// revision.** Every refusal below returns nil, never throws, so a caller has one thing to check:
+/// **`read(_:r:name:offset:limit:)` serves only what the manifest lists, and only a plain file
+/// inside the revision.** Every refusal returns nil, never throws, so a caller has one thing to
+/// check:
 /// - a name the manifest's `files` does not list (so `manifest.json`, `pins.json` and anything a
 ///   stray process dropped in the folder are never served);
 /// - a name that is empty, absolute, has a `.` or `..` or empty component, or contains a NUL;
-/// - any symlink on the way, the revision folder and the file itself included (each step is
-///   `openat(O_NOFOLLOW)`, so a link swapped in after the check still fails);
+/// - any symlink on the way, the revision folder and the file itself included. They are refused,
+///   not resolved: each step is `openat(O_NOFOLLOW)`, so a link swapped in after a check still fails;
 /// - anything that is not a regular file, by `fstat` on the opened descriptor. A FIFO would
-///   otherwise block a reader forever; it is opened `O_NONBLOCK` so the check itself cannot.
+///   otherwise block a reader forever; it is opened `O_NONBLOCK` so the check itself cannot;
+/// - a file with another hard link (`st_nlink > 1`), which could be the same inode as a file
+///   outside the folder;
+/// - a file over `VisualStoreLimits.maxFileBytes`, or whose size differs from the manifest entry's
+///   when that is recorded (> 0).
 ///
-/// The returned URL names the path, not the descriptor, so a file replaced between this call and
-/// the caller's read is not caught. Revisions never change once final (§7), and the only writer
-/// is ThreadRunner, so that window is not an attack surface this store closes.
+/// The bytes come from `pread` on that same checked descriptor and the size from its `fstat`, so
+/// nothing is reopened by path afterwards. The store hands out no URLs.
 public struct DiskVisualStore: VisualStoreReading, Sendable {
     public let intakeDirectory: URL
     public init(intakeDirectory: URL) { self.intakeDirectory = intakeDirectory }
@@ -49,14 +54,28 @@ public struct DiskVisualStore: VisualStoreReading, Sendable {
         return VisualRevision(id: id, r: r, manifest: manifest)
     }
 
-    public func file(_ id: VisualID, r: Int, name: String) -> URL? {
-        guard r >= 0, let revision = revision(id, r: r),
-              revision.manifest.files.contains(where: { $0.path == name }),
-              let parts = Self.components(of: name) else { return nil }
-        let path = ["visuals", id.rawValue, "r\(r)"] + parts
-        guard let fd = openConfined(path, regularFile: true) else { return nil }
-        close(fd)
-        return path.reduce(intakeDirectory) { $0.appendingPathComponent($1) }
+    public func read(_ id: VisualID, r: Int, name: String, offset: Int64, limit: Int) -> VisualFileSlice? {
+        guard r >= 0, offset >= 0, limit >= 0, let revision = revision(id, r: r),
+              let entry = revision.manifest.files.first(where: { $0.path == name }),
+              let parts = Self.components(of: name),
+              let fd = openConfined(["visuals", id.rawValue, "r\(r)"] + parts) else { return nil }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_nlink == 1,
+              st.st_size <= off_t(VisualStoreLimits.maxFileBytes),
+              entry.size <= 0 || entry.size == Int64(st.st_size) else { return nil }
+        let size = Int64(st.st_size)
+        guard offset <= size else { return nil }
+        let want = Int(min(Int64(limit), size - offset))
+        var data = Data(count: want)
+        var got = 0
+        while got < want {
+            let n = data.withUnsafeMutableBytes { pread(fd, $0.baseAddress! + got, want - got, off_t(offset) + off_t(got)) }
+            if n < 0 { return nil }
+            if n == 0 { break }
+            got += n
+        }
+        return VisualFileSlice(data: Data(data.prefix(got)), size: size)
     }
 
     // MARK: - Confined opening
@@ -77,29 +96,26 @@ public struct DiskVisualStore: VisualStoreReading, Sendable {
     }
 
     /// Opens `intakeDirectory/<parts>` one component at a time with `O_NOFOLLOW`, so no component
-    /// may be a symlink. The last one must be a regular file when `regularFile`, and a directory
-    /// otherwise. The caller closes the descriptor.
-    private func openConfined(_ parts: [String], regularFile: Bool) -> Int32? {
+    /// may be a symlink; every component but the last must be a directory. The caller `fstat`s the
+    /// last one (regular file, links, size) and closes the descriptor.
+    private func openConfined(_ parts: [String]) -> Int32? {
         var dir = open(intakeDirectory.path, O_RDONLY | O_DIRECTORY)
         guard dir >= 0 else { return nil }
         for (i, part) in parts.enumerated() {
             let last = i == parts.count - 1
-            let flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | ((last && regularFile) ? 0 : O_DIRECTORY)
+            let flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | (last ? 0 : O_DIRECTORY)
             let next = openat(dir, part, flags)
             close(dir)
             guard next >= 0 else { return nil }
             dir = next
         }
-        var st = stat()
-        guard fstat(dir, &st) == 0, (regularFile ? (st.st_mode & S_IFMT) == S_IFREG : (st.st_mode & S_IFMT) == S_IFDIR) else {
-            close(dir)
-            return nil
-        }
         return dir
     }
 
     private func read<T: Decodable>(_ type: T.Type, _ parts: [String]) -> T? {
-        guard let fd = openConfined(parts, regularFile: true) else { return nil }
+        guard let fd = openConfined(parts) else { return nil }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { close(fd); return nil }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         guard let data = try? handle.read(upToCount: Self.maxJSON + 1), data.count <= Self.maxJSON else { return nil }
         return try? IntakeJSON.decoder.decode(type, from: data)

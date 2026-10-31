@@ -37,4 +37,9 @@ final class VisualFenceInfoCrossCheckTests: XCTestCase {
             XCTAssertEqual(VisualFenceInfo.isValidID(id), VisualID.isValid(id), id)
         }
     }
+
+    /// IntakeKit's per-file cap is a copy of the wire's whole-revision cap.
+    func testTheStoreCapMatchesTheWireCap() {
+        XCTAssertEqual(VisualStoreLimits.maxFileBytes, VisualLimits.maxBytes)
+    }
 }

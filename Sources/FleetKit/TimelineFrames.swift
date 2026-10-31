@@ -223,7 +223,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// it answers with data on its `cid` and writes nothing — `intakePlan`'s shape. Sent only
     /// when the detail has `threads == true`.
     case intakeThreadGet(id: UUID, threadID: UUID, since: Int?)
-    /// A byte range of one visual revision's snapshot or bundle (`intake.visual.fetch`), answered
+    /// A byte range of one visual revision's snapshot or listed file (`intake.visual.fetch`), answered
     /// with `WireFileChunk` as `fileRead` is. A request, not a `FleetCommand`: it answers with
     /// bytes on its `cid` and writes nothing. Not a `fileRead` either, which is scoped to a tab
     /// session and a path; this is scoped to an intake and a visual. `part` is a

@@ -736,9 +736,10 @@ final class FleetService: ObservableObject {
             // nothing enters `FleetSnapshot`. Replies `fileChunk`, as `fileRead` does. A `Task`
             // for `fileRead`'s reason: reading and hashing up to `VisualLimits.maxBytes` must
             // not block the main actor, and `reply` lands back here on `queue`.
+            let reader = store.intakeService.visualReader(id)
             Task { @MainActor in
-                switch await self.store.intakeService.phoneVisualFetch(
-                    id, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit
+                switch await VisualFetch.serve(
+                    reader, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit
                 ) {
                 case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
                 case .failure(let refusal):

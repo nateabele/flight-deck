@@ -24,10 +24,14 @@ final class DiskVisualStoreTests: XCTestCase {
     private var store: DiskVisualStore { DiskVisualStore(intakeDirectory: root) }
     private var rev: URL { tape.revisionDirectory(id, r: 1) }
 
-    private func manifest(files: [String]) -> VisualManifest {
+    private func read(_ name: String, r: Int = 1, offset: Int64 = 0, limit: Int = 1 << 20) -> VisualFileSlice? {
+        store.read(id, r: r, name: name, offset: offset, limit: limit)
+    }
+
+    private func manifest(files: [String], sizes: [String: Int64] = [:]) -> VisualManifest {
         VisualManifest(provider: "mermaid", providerVersion: "1", kind: "diagram", title: "T", entry: "diagram.mmd",
                        madeOnCheckpoint: 1, madeBy: .you, primary: true,
-                       files: files.map { VisualFileEntry(path: $0, size: 0, sha256: "") })
+                       files: files.map { VisualFileEntry(path: $0, size: sizes[$0] ?? 0, sha256: "") })
     }
 
     private func write(_ name: String, _ text: String = "x", in dir: URL? = nil) throws {
@@ -36,10 +40,10 @@ final class DiskVisualStoreTests: XCTestCase {
         try Data(text.utf8).write(to: url)
     }
 
-    private func install(files: [String], r: Int = 1) throws {
+    private func install(files: [String], r: Int = 1, sizes: [String: Int64] = [:]) throws {
         let dir = tape.revisionDirectory(id, r: r)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try IntakeJSON.encoder.encode(manifest(files: files)).write(to: dir.appendingPathComponent("manifest.json"))
+        try IntakeJSON.encoder.encode(manifest(files: files, sizes: sizes)).write(to: dir.appendingPathComponent("manifest.json"))
     }
 
     // MARK: - Reading
@@ -86,24 +90,24 @@ final class DiskVisualStoreTests: XCTestCase {
 
     // MARK: - Confinement
 
-    func testAListedRegularFileIsServed() throws {
+    func testAListedRegularFileIsRead() throws {
         try install(files: ["diagram.mmd", "export/index.html"])
         try write("diagram.mmd"); try write("export/index.html")
-        XCTAssertEqual(store.file(id, r: 1, name: "diagram.mmd")?.lastPathComponent, "diagram.mmd")
-        XCTAssertEqual(store.file(id, r: 1, name: "export/index.html")?.lastPathComponent, "index.html")
+        XCTAssertEqual(read("diagram.mmd"), VisualFileSlice(data: Data("x".utf8), size: 1))
+        XCTAssertEqual(read("export/index.html")?.data, Data("x".utf8))
     }
 
     func testAFileTheManifestDoesNotListIsNeverServed() throws {
         try install(files: ["diagram.mmd"])
         try write("diagram.mmd"); try write("secret.txt"); try write("pins.json")
-        XCTAssertNil(store.file(id, r: 1, name: "secret.txt"))
-        XCTAssertNil(store.file(id, r: 1, name: "manifest.json"))
-        XCTAssertNil(store.file(id, r: 1, name: "pins.json"))
+        XCTAssertNil(read("secret.txt"))
+        XCTAssertNil(read("manifest.json"))
+        XCTAssertNil(read("pins.json"))
     }
 
     func testAListedFileThatIsMissingIsNil() throws {
         try install(files: ["diagram.mmd"])
-        XCTAssertNil(store.file(id, r: 1, name: "diagram.mmd"))
+        XCTAssertNil(read("diagram.mmd"))
     }
 
     func testDotDotAndAbsolutePathsAreRefusedEvenWhenListed() throws {
@@ -111,7 +115,7 @@ final class DiskVisualStoreTests: XCTestCase {
         try install(files: sneaky + ["diagram.mmd"])
         try write("diagram.mmd")
         try write("x", in: tape.revisionDirectory(id, r: 2))
-        for name in sneaky { XCTAssertNil(store.file(id, r: 1, name: name), name) }
+        for name in sneaky { XCTAssertNil(read(name), name) }
     }
 
     func testASymlinkPointingOutIsRefusedEvenWhenListed() throws {
@@ -119,7 +123,7 @@ final class DiskVisualStoreTests: XCTestCase {
         try Data("secret".utf8).write(to: outside.appendingPathComponent("target.txt"))
         try FileManager.default.createSymbolicLink(at: rev.appendingPathComponent("leak.txt"),
                                                    withDestinationURL: outside.appendingPathComponent("target.txt"))
-        XCTAssertNil(store.file(id, r: 1, name: "leak.txt"))
+        XCTAssertNil(read("leak.txt"))
     }
 
     func testASymlinkInsideTheRevisionIsRefusedToo() throws {
@@ -127,26 +131,26 @@ final class DiskVisualStoreTests: XCTestCase {
         try write("real.txt")
         try FileManager.default.createSymbolicLink(at: rev.appendingPathComponent("alias.txt"),
                                                    withDestinationURL: rev.appendingPathComponent("real.txt"))
-        XCTAssertNil(store.file(id, r: 1, name: "alias.txt"))
+        XCTAssertNil(read("alias.txt"))
     }
 
     func testAListedFileUnderASymlinkedDirectoryIsRefused() throws {
         try install(files: ["export/index.html"])
         try Data("secret".utf8).write(to: outside.appendingPathComponent("index.html"))
         try FileManager.default.createSymbolicLink(at: rev.appendingPathComponent("export"), withDestinationURL: outside)
-        XCTAssertNil(store.file(id, r: 1, name: "export/index.html"))
+        XCTAssertNil(read("export/index.html"))
     }
 
     func testAFifoIsRefusedAndDoesNotBlock() throws {
         try install(files: ["pipe"])
         XCTAssertEqual(mkfifo(rev.appendingPathComponent("pipe").path, 0o600), 0)
-        XCTAssertNil(store.file(id, r: 1, name: "pipe"))
+        XCTAssertNil(read("pipe"))
     }
 
     func testADirectoryNamedInTheManifestIsRefused() throws {
         try install(files: ["export"])
         try FileManager.default.createDirectory(at: rev.appendingPathComponent("export"), withIntermediateDirectories: true)
-        XCTAssertNil(store.file(id, r: 1, name: "export"))
+        XCTAssertNil(read("export"))
     }
 
     func testASymlinkedRevisionFolderIsRefused() throws {
@@ -154,7 +158,68 @@ final class DiskVisualStoreTests: XCTestCase {
         try write("a.txt")
         let linked = tape.revisionDirectory(id, r: 2)
         try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: rev)
-        XCTAssertNil(store.file(id, r: 2, name: "a.txt"))
+        XCTAssertNil(read("a.txt", r: 2))
         XCTAssertNil(store.revision(id, r: 2))
+    }
+
+    // MARK: - Bytes, not paths
+
+    func testASliceCarriesTheFilesSizeFromTheSameDescriptor() throws {
+        try install(files: ["a.bin"])
+        try write("a.bin", "0123456789")
+        XCTAssertEqual(read("a.bin", offset: 0, limit: 4), VisualFileSlice(data: Data("0123".utf8), size: 10))
+        XCTAssertEqual(read("a.bin", offset: 4, limit: 4), VisualFileSlice(data: Data("4567".utf8), size: 10))
+        XCTAssertEqual(read("a.bin", offset: 8, limit: 100), VisualFileSlice(data: Data("89".utf8), size: 10), "short at the end")
+    }
+
+    func testAnOffsetAtOrPastTheEndIsAnEmptySliceNotARefusalOfTheFile() throws {
+        try install(files: ["a.bin"])
+        try write("a.bin", "0123456789")
+        XCTAssertEqual(read("a.bin", offset: 10, limit: 4), VisualFileSlice(data: Data(), size: 10), "the end: the phone learns it is done")
+        XCTAssertNil(read("a.bin", offset: 11, limit: 4), "past the end is a bad request")
+        XCTAssertNil(read("a.bin", offset: Int64.max, limit: 4))
+    }
+
+    func testANegativeOffsetOrLimitIsRefused() throws {
+        try install(files: ["a.bin"])
+        try write("a.bin", "0123456789")
+        XCTAssertNil(read("a.bin", offset: -1, limit: 4))
+        XCTAssertNil(read("a.bin", offset: 0, limit: -1))
+        XCTAssertEqual(read("a.bin", offset: 0, limit: 0)?.data, Data(), "a zero limit is a size probe")
+    }
+
+    func testAHardLinkIsRefused() throws {
+        try install(files: ["a.txt", "linked.txt"])
+        try write("a.txt")
+        try FileManager.default.linkItem(at: rev.appendingPathComponent("a.txt"), to: rev.appendingPathComponent("linked.txt"))
+        XCTAssertNil(read("linked.txt"))
+        XCTAssertNil(read("a.txt"), "both names of a shared inode are refused")
+    }
+
+    func testASizeThatDisagreesWithTheManifestIsRefused() throws {
+        try install(files: ["a.txt", "b.txt", "c.txt"], sizes: ["a.txt": 5, "b.txt": 99, "c.txt": 0])
+        try write("a.txt", "12345"); try write("b.txt", "12345"); try write("c.txt", "12345")
+        XCTAssertNotNil(read("a.txt"), "matches")
+        XCTAssertNil(read("b.txt"), "differs")
+        XCTAssertNotNil(read("c.txt"), "a listed size of 0 means not recorded")
+    }
+
+    func testAFileOverTheLimitIsRefused() throws {
+        try install(files: ["big.bin"])
+        let fd = open(rev.appendingPathComponent("big.bin").path, O_CREAT | O_WRONLY, 0o600)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(ftruncate(fd, off_t(VisualStoreLimits.maxFileBytes + 1)), 0)   // sparse: no real disk
+        close(fd)
+        XCTAssertNil(read("big.bin"))
+        XCTAssertEqual(ftruncate(open(rev.appendingPathComponent("big.bin").path, O_WRONLY), off_t(VisualStoreLimits.maxFileBytes)), 0)
+        XCTAssertEqual(read("big.bin", limit: 1)?.size, Int64(VisualStoreLimits.maxFileBytes), "exactly the limit is allowed")
+    }
+
+    func testAMissingVisualsFolderIsToleratedAndServesNothingUntilItAppears() throws {
+        XCTAssertNil(read("a.txt"))
+        XCTAssertTrue(store.visuals().isEmpty)
+        try install(files: ["a.txt"])
+        try write("a.txt")
+        XCTAssertNotNil(read("a.txt"), "the same store value sees the folder once it exists")
     }
 }
