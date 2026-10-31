@@ -1,0 +1,131 @@
+<h2>How should a visual block show its alternate representations?</h2>
+<p class="subtitle">Actual scale: each option is a plan column as wide as it would be in the Mac window, with the visual block between two paragraphs. The same pairing handshake has three representations: Sequence ★ (the primary), Components, and Data flow. Scroll through A, B and C, then click the one you want.</p>
+
+<style>
+  .opt { border: 2px solid #8883; border-radius: 12px; margin: 28px 0; padding: 0; cursor: pointer; overflow: hidden }
+  .opt.selected { border-color: #4a7dff; box-shadow: 0 0 0 3px #4a7dff33 }
+  .opt-label { padding: 10px 18px; font: 600 15px -apple-system, system-ui; border-bottom: 1px solid #8883; display:flex; gap:12px; align-items:baseline }
+  .opt-label .why { font-weight: 400; opacity: .7; font-size: 13px }
+  .plan { font: 15px/1.6 -apple-system, system-ui; padding: 18px 40px 22px; max-width: 900px; margin: 0 auto }
+  .plan h4 { font-size: 19px; margin: 4px 0 8px }
+  .plan p { margin: 10px 0; opacity: .85 }
+  .vb { border: 1px solid #8885; border-radius: 10px; margin: 18px 0; overflow: hidden; background: #8880 }
+  .vb-head { display:flex; align-items:center; gap:10px; padding:9px 14px; border-bottom:1px solid #8884; font-size:13px; background:#8881 }
+  .vb-head .title { font-weight:600; font-size:14px }
+  .spacer { flex:1 }
+  .tab { padding:3px 10px; border-radius:6px; opacity:.6 }
+  .tab.on { background:#4a7dff22; color:#4a7dff; opacity:1; font-weight:600 }
+  .star { color:#e0a800 }
+  .chip { font-size:12px; padding:2px 9px; border:1px solid #8886; border-radius:12px; opacity:.85 }
+  .chip.btn { background:#4a7dff18; border-color:#4a7dff66; color:#4a7dff }
+  .vb-body { padding:16px; display:flex; justify-content:center }
+  .thumbs { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; padding:12px 14px; border-top:1px solid #8884; background:#8881 }
+  .thumb { border:1px solid #8885; border-radius:8px; padding:6px; font-size:12px; text-align:center; background: var(--bg-primary, #fff0) }
+  .thumb.on { border:2px solid #4a7dff }
+  .thumb svg { width:100%; height:64px; display:block; margin-bottom:4px }
+  .thumb.add { display:flex; align-items:center; justify-content:center; opacity:.6; border-style:dashed }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:14px }
+  .pane { border:1px solid #8885; border-radius:8px; overflow:hidden }
+  .pane .ph { font-size:13px; padding:7px 12px; border-bottom:1px solid #8884; display:flex; gap:8px; align-items:center; background:#8881 }
+  .pane svg { width:100%; display:block; padding: 8px }
+  svg text { font: 13px -apple-system, system-ui; fill: currentColor }
+  svg .small { font-size: 11.5px; opacity:.8 }
+  svg .ln { stroke: currentColor; stroke-opacity:.55; fill:none; stroke-width:1.4 }
+  svg .bx { stroke: currentColor; stroke-opacity:.55; fill: #4a7dff10; stroke-width:1.4 }
+  svg .ll { stroke: currentColor; stroke-opacity:.35; stroke-dasharray: 4 4 }
+</style>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" fill-opacity=".6"/></marker>
+    <!-- full sequence diagram -->
+    <symbol id="seq" viewBox="0 0 720 300">
+      <rect class="bx" x="40" y="10" width="140" height="36" rx="6"/><text x="110" y="33" text-anchor="middle">Phone</text>
+      <rect class="bx" x="290" y="10" width="140" height="36" rx="6"/><text x="360" y="33" text-anchor="middle">Mac · Flight Deck</text>
+      <rect class="bx" x="540" y="10" width="140" height="36" rx="6"/><text x="610" y="33" text-anchor="middle">hostd</text>
+      <line class="ll" x1="110" y1="46" x2="110" y2="295"/><line class="ll" x1="360" y1="46" x2="360" y2="295"/><line class="ll" x1="610" y1="46" x2="610" y2="295"/>
+      <line class="ln" x1="110" y1="85" x2="358" y2="85" marker-end="url(#arr)"/><text x="234" y="77" text-anchor="middle">SPAKE2 message A (code typed or scanned)</text>
+      <line class="ln" x1="360" y1="130" x2="112" y2="130" marker-end="url(#arr)"/><text x="234" y="122" text-anchor="middle">SPAKE2 message B</text>
+      <line class="ln" x1="360" y1="175" x2="608" y2="175" marker-end="url(#arr)"/><text x="484" y="167" text-anchor="middle">register controller key</text>
+      <line class="ln" x1="610" y1="220" x2="362" y2="220" marker-end="url(#arr)"/><text x="484" y="212" text-anchor="middle">ok · controllers.json (0600)</text>
+      <line class="ln" x1="360" y1="265" x2="112" y2="265" marker-end="url(#arr)"/><text x="234" y="257" text-anchor="middle">session token → Keychain</text>
+    </symbol>
+    <symbol id="comp" viewBox="0 0 720 300">
+      <rect class="bx" x="30" y="40" width="180" height="90" rx="8"/><text x="120" y="70" text-anchor="middle">FlightDeckMobile</text><text class="small" x="120" y="92" text-anchor="middle">PairingScreen</text><text class="small" x="120" y="110" text-anchor="middle">Keychain store</text>
+      <rect class="bx" x="270" y="40" width="180" height="90" rx="8"/><text x="360" y="70" text-anchor="middle">FleetKit</text><text class="small" x="360" y="92" text-anchor="middle">PairingPayload · SPAKE2</text><text class="small" x="360" y="110" text-anchor="middle">socket halves</text>
+      <rect class="bx" x="510" y="40" width="180" height="90" rx="8"/><text x="600" y="70" text-anchor="middle">HostKit</text><text class="small" x="600" y="92" text-anchor="middle">PairingWindow</text><text class="small" x="600" y="110" text-anchor="middle">ControllerStore</text>
+      <rect class="bx" x="270" y="190" width="180" height="70" rx="8"/><text x="360" y="222" text-anchor="middle">BoringSSL</text><text class="small" x="360" y="242" text-anchor="middle">SPAKE2 primitive</text>
+      <line class="ln" x1="210" y1="85" x2="268" y2="85" marker-end="url(#arr)"/><line class="ln" x1="450" y1="85" x2="508" y2="85" marker-end="url(#arr)"/><line class="ln" x1="360" y1="130" x2="360" y2="188" marker-end="url(#arr)"/>
+    </symbol>
+    <symbol id="flow" viewBox="0 0 720 300">
+      <ellipse class="bx" cx="90" cy="150" rx="70" ry="34"/><text x="90" y="155" text-anchor="middle">pairing code</text>
+      <rect class="bx" x="210" y="120" width="130" height="60" rx="8"/><text x="275" y="155" text-anchor="middle">SPAKE2 exchange</text>
+      <rect class="bx" x="400" y="60" width="130" height="60" rx="8"/><text x="465" y="95" text-anchor="middle">controller key</text>
+      <rect class="bx" x="400" y="180" width="130" height="60" rx="8"/><text x="465" y="215" text-anchor="middle">session token</text>
+      <rect class="bx" x="590" y="60" width="110" height="60" rx="8"/><text x="645" y="88" text-anchor="middle">controllers</text><text class="small" x="645" y="106" text-anchor="middle">.json (host)</text>
+      <rect class="bx" x="590" y="180" width="110" height="60" rx="8"/><text x="645" y="215" text-anchor="middle">Keychain</text>
+      <line class="ln" x1="160" y1="150" x2="208" y2="150" marker-end="url(#arr)"/><line class="ln" x1="340" y1="140" x2="398" y2="95" marker-end="url(#arr)"/><line class="ln" x1="340" y1="160" x2="398" y2="210" marker-end="url(#arr)"/><line class="ln" x1="530" y1="90" x2="588" y2="90" marker-end="url(#arr)"/><line class="ln" x1="530" y1="210" x2="588" y2="210" marker-end="url(#arr)"/>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- ============ A ============ -->
+<div class="opt" data-choice="tabs" onclick="toggleSelect(this)">
+  <div class="opt-label">A · Tabs <span class="why">One view at a time. You flip tabs to compare.</span></div>
+  <div class="plan">
+    <h4>3. Pairing</h4>
+    <p>The phone pairs with the Mac over SPAKE2 using a short code, so no secret ever crosses the network. Once paired, the phone keeps a session token in its Keychain, and the host records the controller's key.</p>
+    <div class="vb">
+      <div class="vb-head">
+        <span class="title">Pairing handshake</span>
+        <span class="tab on"><span class="star">★</span> Sequence</span><span class="tab">Components</span><span class="tab">Data flow</span>
+        <span class="spacer"></span><span class="chip">2 notes</span><span class="chip btn">Ask</span>
+      </div>
+      <div class="vb-body"><svg width="720" height="300"><use href="#seq"/></svg></div>
+    </div>
+    <p>If the exchange fails, for example from a mistyped code, the phone shows the code entry again and the host's pairing window stays open until it times out.</p>
+  </div>
+</div>
+
+<!-- ============ B ============ -->
+<div class="opt" data-choice="filmstrip" onclick="toggleSelect(this)">
+  <div class="opt-label">B · Primary + filmstrip <span class="why">The selected view is large, with live thumbnails underneath. ＋ asks the thread for another view.</span></div>
+  <div class="plan">
+    <h4>3. Pairing</h4>
+    <p>The phone pairs with the Mac over SPAKE2 using a short code, so no secret ever crosses the network. Once paired, the phone keeps a session token in its Keychain, and the host records the controller's key.</p>
+    <div class="vb">
+      <div class="vb-head">
+        <span class="title">Pairing handshake</span><span class="chip"><span class="star">★</span> Sequence</span>
+        <span class="spacer"></span><span class="chip">Compare</span><span class="chip">2 notes</span><span class="chip btn">Ask</span>
+      </div>
+      <div class="vb-body"><svg width="720" height="300"><use href="#seq"/></svg></div>
+      <div class="thumbs">
+        <div class="thumb on"><svg viewBox="0 0 720 300"><use href="#seq"/></svg>Sequence ★</div>
+        <div class="thumb"><svg viewBox="0 0 720 300"><use href="#comp"/></svg>Components</div>
+        <div class="thumb"><svg viewBox="0 0 720 300"><use href="#flow"/></svg>Data flow</div>
+        <div class="thumb add">＋ Another view…</div>
+      </div>
+    </div>
+    <p>If the exchange fails, for example from a mistyped code, the phone shows the code entry again and the host's pairing window stays open until it times out.</p>
+  </div>
+</div>
+
+<!-- ============ C ============ -->
+<div class="opt" data-choice="compare" onclick="toggleSelect(this)">
+  <div class="opt-label">C · Compare mode (shown open) <span class="why">Normally reads as one visual. Compare splits it two-up to pick a primary, then collapses back.</span></div>
+  <div class="plan">
+    <h4>3. Pairing</h4>
+    <p>The phone pairs with the Mac over SPAKE2 using a short code, so no secret ever crosses the network. Once paired, the phone keeps a session token in its Keychain, and the host records the controller's key.</p>
+    <div class="vb">
+      <div class="vb-head">
+        <span class="title">Pairing handshake</span><span class="chip">Comparing 2 of 3 ▾</span>
+        <span class="spacer"></span><span class="chip btn">Done</span>
+      </div>
+      <div class="two">
+        <div class="pane"><div class="ph"><span class="star">★</span> Sequence <span class="spacer"></span></div><svg viewBox="0 0 720 300"><use href="#seq"/></svg></div>
+        <div class="pane"><div class="ph">Components <span class="spacer"></span><span class="chip">Make primary</span></div><svg viewBox="0 0 720 300"><use href="#comp"/></svg></div>
+      </div>
+    </div>
+    <p>If the exchange fails, for example from a mistyped code, the phone shows the code entry again and the host's pairing window stays open until it times out.</p>
+  </div>
+</div>

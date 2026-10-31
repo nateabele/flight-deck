@@ -1,0 +1,116 @@
+<h2>Design §3: Visual blocks</h2>
+<p class="subtitle">Three renders at real scale. <b>①</b> is a comp block in the plan, with its states, sizes, pins and filmstrip. <b>②</b> is the same block in comp edit mode. <b>③</b> is the visual-cost toggle among the triage questions.</p>
+
+<style>
+  .frame { border:1px solid #8886; border-radius:12px; padding:22px 40px; margin:16px 0 30px; font:15px/1.6 -apple-system,system-ui }
+  .frame h4 { font-size:16px; margin:2px 0 6px } .frame p { margin:8px 0; opacity:.88 }
+  .lbl { font:700 12px system-ui; letter-spacing:.06em; text-transform:uppercase; opacity:.55; margin:22px 0 4px }
+  .vb { border:1px solid #8885; border-radius:10px; overflow:hidden; margin:14px 0 }
+  .vh { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid #8884; background:#8881; font-size:12.5px; flex-wrap:wrap }
+  .vh .t { font-weight:600; font-size:14px } .sp { flex:1 }
+  .chip { border:1px solid #8886; border-radius:12px; padding:1px 9px; font-size:12px } .chip.on { border-color:#4a7dff; color:#4a7dff; background:#4a7dff14 } .chip.btn { color:#4a7dff; border-color:#4a7dff66 }
+  .seg { display:inline-flex; border:1px solid #8886; border-radius:7px; overflow:hidden; font-size:12px } .seg span { padding:2px 9px } .seg .on { background:#4a7dff22; color:#4a7dff; font-weight:600 }
+  .stage { padding:20px; display:flex; justify-content:center; background: repeating-linear-gradient(45deg,#8880,#8880 10px,#8881 10px,#8881 20px) }
+  .phone { width:300px; border:1px solid #8887; border-radius:30px; padding:14px 14px 20px; background:var(--bg-primary,#fff); position:relative; font-size:13px; color:inherit }
+  .phone .nav { display:flex; justify-content:space-between; font-weight:600; margin:6px 4px 14px } .phone .nav span:first-child { color:#4a7dff; font-weight:400 }
+  .grp { font-size:11px; letter-spacing:.05em; text-transform:uppercase; opacity:.55; margin:10px 6px 4px }
+  .cell { border:1px solid #8884; border-radius:10px; overflow:hidden }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:9px 12px; border-bottom:1px solid #8883 } .row:last-child { border-bottom:none }
+  .row small { display:block; opacity:.6; font-size:11.5px }
+  .red { color:#d9534f } .tgl { width:34px; height:20px; border-radius:11px; background:#34c759; position:relative } .tgl::after { content:''; position:absolute; right:2px; top:2px; width:16px; height:16px; border-radius:50%; background:#fff }
+  .pin { position:absolute; width:22px; height:22px; border-radius:50% 50% 50% 0; transform:rotate(-45deg); background:#e0a800; color:#000; font:700 11px system-ui; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px #0004 }
+  .pin span { transform:rotate(45deg) }
+  .pin.ask { background:#4a7dff; color:#fff }
+  .thumbs { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:10px 12px; border-top:1px solid #8884; background:#8881; font-size:12px; text-align:center }
+  .th { border:1px solid #8885; border-radius:7px; padding:6px } .th.on { border:2px solid #4a7dff } .th.add { border-style:dashed; opacity:.6 } .th.rnd { border-color:#c99600 }
+  .th .mini { height:46px; border-radius:5px; background:#8882; margin-bottom:4px }
+  .edit-outline { outline:2px dashed #4a7dff; outline-offset:2px; border-radius:3px }
+  .caret::after { content:'|'; color:#4a7dff; animation: b 1s steps(1) infinite } @keyframes b { 50% { opacity:0 } }
+  .editbar { display:flex; gap:8px; align-items:center; padding:7px 12px; background:#4a7dff12; border-bottom:1px solid #4a7dff55; font-size:12.5px }
+  .q { border:1px solid #8885; border-radius:10px; padding:12px 14px; margin:10px 0; font-size:14px }
+  .q .h { font-weight:600; margin-bottom:6px } .q label { display:flex; gap:10px; padding:4px 0; align-items:flex-start } .q small { opacity:.65; display:block; font-size:12px }
+  .cost { font-size:12px; border:1px solid #c99600; color:#a57d00; border-radius:10px; padding:0 7px; margin-left:6px; white-space:nowrap }
+  .rec { font-size:11.5px; color:#4a7dff; margin-left:6px }
+  .notes li { margin:6px 0; font-size:14px; line-height:1.6 }
+</style>
+
+<!-- ① -->
+<div class="lbl">① A comp block in the plan</div>
+<div class="frame">
+  <h4>5. Settings → Phones</h4>
+  <p>The Phones screen lists paired phones, with the last connection time for each and a destructive Revoke.</p>
+  <div class="vb">
+    <div class="vh"><span class="t">Phones settings</span><span class="chip on">★ comp · iOS</span>
+      <span class="seg"><span class="on">Default</span><span>Empty</span><span>Revoking…</span><span>Error</span><span>Long names</span></span>
+      <span class="seg"><span>Compact</span><span class="on">Phone</span><span>Wide</span></span>
+      <span class="sp"></span><span class="chip">Pins 3</span><span class="chip">Compare</span><span class="chip">✎ Edit</span><span class="chip btn">✦ Ask</span></div>
+    <div class="stage">
+      <div class="phone">
+        <div class="nav"><span>‹ Settings</span><span>Phones</span><span></span></div>
+        <div class="grp">Paired</div>
+        <div class="cell">
+          <div class="row"><div>Dana's iPhone<small>Connected now · Tailscale</small></div><span class="red">Revoke</span></div>
+          <div class="row"><div>iPad Air<small>Last seen 12 days ago</small></div><span class="red">Revoke</span></div>
+        </div>
+        <div class="grp">Options</div>
+        <div class="cell"><div class="row"><div>Expire after 30 days offline</div><div class="tgl"></div></div></div>
+        <div style="margin:16px 6px 0; color:#4a7dff">＋ Pair a new phone…</div>
+        <div class="pin" style="left:252px; top:96px"><span>1</span></div>
+        <div class="pin ask" style="left:180px; top:196px"><span>✦</span></div>
+        <div class="pin" style="left:16px; top:240px"><span>3</span></div>
+      </div>
+    </div>
+    <div class="thumbs">
+      <div class="th on"><div class="mini"></div>Comp · iOS ★</div>
+      <div class="th"><div class="mini"></div>Flow: revoke (3 screens)</div>
+      <div class="th rnd"><div class="mini"></div>Refine 2 proposal<br><small style="opacity:.7">“adds the Error state”</small></div>
+      <div class="th add"><div class="mini" style="background:none"></div>＋ Another view…</div>
+    </div>
+  </div>
+  <p>Revoking asks for confirmation, then removes the phone immediately. A phone that is connected is disconnected within one second.</p>
+</div>
+
+<!-- ② -->
+<div class="lbl">② The same block in edit mode (the direct edits that survive a revision)</div>
+<div class="frame">
+  <div class="vb">
+    <div class="editbar"><b>Editing comp</b> · click text to change it · states and sizes stay switchable <span class="sp"></span><span class="chip">2 changes</span><span class="chip">Discard</span><span class="chip btn">Save as revision r4</span></div>
+    <div class="stage">
+      <div class="phone">
+        <div class="nav"><span>‹ Settings</span><span>Phones</span><span></span></div>
+        <div class="grp">Paired</div>
+        <div class="cell">
+          <div class="row"><div>Dana's iPhone<small>Connected now · Tailscale</small></div><span class="red edit-outline caret">Remove</span></div>
+          <div class="row"><div>iPad Air<small class="edit-outline">Offline for 12 days</small></div><span class="red">Remove</span></div>
+        </div>
+        <div class="grp">Options</div>
+        <div class="cell"><div class="row"><div>Expire after 30 days offline</div><div class="tgl"></div></div></div>
+        <div style="margin:16px 6px 0; color:#4a7dff">＋ Pair a new phone…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ③ -->
+<div class="lbl">③ The visual-cost toggle in triage (structured questions)</div>
+<div class="frame">
+  <div class="q"><div class="h">Who can revoke a phone?</div>
+    <label><input type="radio" checked> Only this Mac <span class="rec">recommended</span></label>
+    <label><input type="radio"> Any paired Mac</label>
+    <label><input type="radio"> Other… <span style="opacity:.5">________</span></label>
+  </div>
+  <div class="q"><div class="h">This plan has UI and a multi-component flow. Should I make visuals as I plan? <span style="font-weight:400;opacity:.65">(choose any)</span></div>
+    <label><input type="checkbox" checked><div>Comp: Settings → Phones (iOS) <span class="cost">≈ 2 min · ~40k tokens</span><small>States: default, empty, revoking, error</small></div></label>
+    <label><input type="checkbox" checked><div>Sequence diagram: pairing handshake <span class="cost">≈ 20 s · ~6k</span></div></label>
+    <label><input type="checkbox"><div>Clickable flow: pair → confirm → done <span class="cost">≈ 4 min · ~90k</span></div></label>
+    <label><input type="checkbox"><div>Other… <span style="opacity:.5">________</span></div></label>
+  </div>
+</div>
+
+<ol class="notes">
+  <li><b>States and sizes</b> come from the comp's manifest. A provider declares which states and sizes it supports, and the segmented controls are built from that list.</li>
+  <li><b>Pins</b> (yellow, numbered) are notes anchored to an element. Each one stores a CSS selector, the element's text, and an x/y fallback, so it survives small revisions. A <b>✦ blue pin</b> is an Ask thread anchored to that element. Pins are notes, so they go to rounds like any other note.</li>
+  <li><b>An amber-outlined thumbnail</b> is an alternate a round proposed, with that round's reason. Only you can make it ★ primary.</li>
+  <li><b>Edit mode</b> allows text edits only: you click into text and change it. Saving creates a new revision, <code>r&lt;n&gt;</code>, and the edit is fed to later threads and rounds as a human edit, so no one regenerates over it.</li>
+  <li><b>The cost estimate</b> comes from the provider's manifest and is scaled by the chosen model's price. It's labelled ≈ because it is an estimate.</li>
+</ol>

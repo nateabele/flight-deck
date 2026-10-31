@@ -1,0 +1,64 @@
+<h2>A slimmer proposed edit</h2>
+<p class="subtitle">These are shown at real scale in the plan column. Each option is drawn twice: at rest, and with the pointer over it. Both drop the header bar. Click the one you want.</p>
+
+<style>
+  .opt { border:2px solid #8883; border-radius:12px; margin:22px 0; cursor:pointer; overflow:hidden }
+  .opt.selected { border-color:#4a7dff; box-shadow:0 0 0 3px #4a7dff33 }
+  .ol { padding:10px 18px; font:600 15px -apple-system,system-ui; border-bottom:1px solid #8883 }
+  .ol span { font-weight:400; opacity:.7; font-size:13px; margin-left:8px }
+  .cols { display:grid; grid-template-columns:1fr 1fr }
+  .col { padding:18px 34px; font:15px/1.65 -apple-system,system-ui }
+  .col + .col { border-left:1px dashed #8884 }
+  .cap { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; opacity:.5; margin-bottom:6px }
+  .col h4 { font-size:16px; margin:4px 0 6px }
+  .col p { margin:8px 0; opacity:.88 }
+  .del { color:#d9534f; text-decoration:line-through; text-decoration-color:#d9534faa; background:#d9534f14 }
+  .ins { color:#1f8f3f; background:#2da44e1c; text-decoration: underline; text-decoration-color:#2da44e77; text-underline-offset:3px }
+  .mini { display:inline-flex; gap:2px; vertical-align:middle; margin-left:6px; border:1px solid #8885; border-radius:7px; padding:1px; background: var(--bg-primary, #fff0); font-size:12px; line-height:1 }
+  .mini b { padding:3px 6px; border-radius:5px; font-weight:600 }
+  .mini .y { color:#2da44e } .mini .n { color:#d9534f } .mini .t { color:#4a7dff; font-weight:400 }
+  .spark { color:#4a7dff; font-size:12px; vertical-align: super; margin-left:1px }
+  .gut { border-left:3px solid #2da44e; padding-left:12px; margin-left:-15px; position:relative }
+  .hover { position:absolute; right:0; top:-30px; display:flex; gap:2px; border:1px solid #8885; border-radius:8px; padding:2px; background: var(--bg-secondary, #fafafa); box-shadow:0 3px 10px #0002; font-size:12px }
+  .hover b { padding:3px 8px; border-radius:6px; font-weight:600 }
+  .hover .y { color:#2da44e } .hover .n { color:#d9534f } .hover .t { color:#4a7dff; font-weight:400 }
+  .tip { font-size:11.5px; opacity:.65 }
+  .old { display:block; opacity:.55; font-size:13.5px }
+</style>
+
+<!-- A -->
+<div class="opt" data-choice="track" onclick="toggleSelect(this)">
+  <div class="ol">A · Track changes <span>Word-level red and green inline, with a tiny ✓ ✗ chip where the change ends</span></div>
+  <div class="cols">
+    <div class="col"><div class="cap">At rest</div>
+      <h4>3. Revocation</h4>
+      <p>Tokens <span class="del">never expire; the Mac revokes them explicitly</span><span class="ins">expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time</span> from Settings → Phones.<span class="spark">✦</span></p>
+      <p>Revoking a phone removes its key from <code>controllers.json</code> and closes any live socket within one second.</p>
+    </div>
+    <div class="col"><div class="cap">Pointer over it</div>
+      <h4>3. Revocation</h4>
+      <p>Tokens <span class="del">never expire; the Mac revokes them explicitly</span><span class="ins">expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time</span> from Settings → Phones.<span class="mini"><b class="y">✓</b><b class="n">✗</b><b class="t">✦ thread</b></span></p>
+      <p>Revoking a phone removes its key from <code>controllers.json</code> and closes any live socket within one second.</p>
+      <div class="tip">✦ links to the thread that proposed it. Double-click the green text to edit it before accepting.</div>
+    </div>
+  </div>
+</div>
+
+<!-- B -->
+<div class="opt" data-choice="gutter" onclick="toggleSelect(this)">
+  <div class="ol">B · Gutter bar <span>The new text reads as normal prose, marked by a thin green bar in the margin. Pointing at it shows the old text and the buttons.</span></div>
+  <div class="cols">
+    <div class="col"><div class="cap">At rest</div>
+      <h4>3. Revocation</h4>
+      <p class="gut">Tokens expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time from Settings → Phones.<span class="spark">✦</span></p>
+      <p>Revoking a phone removes its key from <code>controllers.json</code> and closes any live socket within one second.</p>
+    </div>
+    <div class="col"><div class="cap">Pointer over it</div>
+      <h4>3. Revocation</h4>
+      <p class="gut" style="margin-top:34px"><span class="hover"><b class="y">✓ Accept</b><b class="n">✗</b><b class="t">Edit</b><b class="t">✦</b></span>
+        <span class="old"><span class="del">Tokens never expire; the Mac revokes them explicitly from Settings → Phones.</span></span>
+        <span class="ins" style="text-decoration:none">Tokens expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time from Settings → Phones.</span></p>
+      <p>Revoking a phone removes its key from <code>controllers.json</code>…</p>
+    </div>
+  </div>
+</div>
