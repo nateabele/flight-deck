@@ -77,12 +77,24 @@ final class VisualStubRefusalTests: XCTestCase {
         XCTAssertEqual(IntakeService.visualsUnavailable, "visuals_unavailable")
         XCTAssertFalse(svc.visualsAvailable)
         XCTAssertNil(svc.visualReader(i.id))
-        XCTAssertEqual(svc.phoneVisualFetch(i.id, visualID: "pairing-handshake", revision: 1, part: "snapshot",
-                                            offset: 0, limit: 1024),
-                       .failure(VisualRefusal(code: "visuals_unavailable")))
+        let refused = await svc.phoneVisualFetch(i.id, visualID: "pairing-handshake", revision: 1, part: "snapshot",
+                                                offset: 0, limit: 1024)
+        XCTAssertEqual(refused, .failure(VisualRefusal(code: "visuals_unavailable")))
         // And the phone is never told it may ask.
         let detail = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
         XCTAssertNil(detail.visuals)
+    }
+
+    /// The store hook V1 reads through: nil with no `visuals/` folder, the disk store once there is one.
+    func testTheVisualReaderIsTheDiskStoreOnlyWhereVisualsExist() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        XCTAssertNil(svc.visualReader(i.id))
+        try FileManager.default.createDirectory(
+            at: TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id)).visualsRoot, withIntermediateDirectories: true)
+        XCTAssertTrue(svc.visualReader(i.id) is DiskVisualStore)
+        XCTAssertNil(svc.visualReader(UUID()), "an intake the service does not know")
+        XCTAssertNil(PlanEditHooks().visuals, "the editor gets a store only when the detail view hands one in")
     }
 
     /// The real `FleetService` arm over a real socket answers the request with the stub's code,

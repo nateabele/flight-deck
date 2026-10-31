@@ -89,9 +89,9 @@ public struct NewBead: Codable, Equatable, Sendable {
     public var taskKind: KindID?
     /// Planning's new kind, when no listed one fits. Wins over `taskKind` when both are set.
     public var kindProposal: KindProposal?
-    /// The visuals this task must match. Not part of the agent's schema: code adds them, so a
-    /// task's "Fidelity references" are deterministic rather than whatever the agent remembered
-    /// to write (V-R3). nil on every change set written before visuals existed.
+    /// The visuals this task must match. The agent chooses them (they will be in its schema);
+    /// code writes only the "Fidelity references" text from them, so the section's wording and
+    /// links are deterministic (V-R3). nil on every change set written before visuals existed.
     public var visualRefs: [VisualRef]?
     public init(tempId: String, title: String, type: String = "task", priority: Int = 2,
                 description: String, acceptance: String? = nil, labels: [String] = [],

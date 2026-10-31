@@ -227,7 +227,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// with `WireFileChunk` as `fileRead` is. A request, not a `FleetCommand`: it answers with
     /// bytes on its `cid` and writes nothing. Not a `fileRead` either, which is scoped to a tab
     /// session and a path; this is scoped to an intake and a visual. `part` is a
-    /// `WireVisualPart`. Sent only when the detail has `visuals == true`.
+    /// `WireVisualPart` (`snapshot…` or `file:<path>`). Sent only when the detail has `visuals == true`.
     case intakeVisualFetch(id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int)
     /// Every paired host and its link state — `flightdeck host ls`. Answered from the Mac's
     /// own registry, so it costs no round trip to any host and works with all of them offline.

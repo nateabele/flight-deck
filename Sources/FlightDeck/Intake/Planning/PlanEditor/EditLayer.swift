@@ -881,6 +881,9 @@ struct PlanEditHooks {
     var acceptedStamp: Int?
     /// N1: typing won a same-line conflict on a checkpoint (`IntakeService.typingWon`).
     var typingWon: (_ checkpoint: Int, _ plan: String) -> Void = { _, _ in }
+    /// The intake's visuals on disk (`IntakeService.visualReader`), for the blocks that draw them;
+    /// nil when it has none, and a block then shows its quiet "missing visual" placeholder.
+    var visuals: (any VisualStoreReading)?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

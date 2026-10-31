@@ -733,11 +733,18 @@ final class FleetService: ObservableObject {
             }
         case .intakeVisualFetch(let id, let visualID, let revision, let part, let offset, let limit):
             // Bytes from `visuals/`, which only ThreadRunner writes; nothing here writes and
-            // nothing enters `FleetSnapshot`. Replies `fileChunk`, as `fileRead` does.
-            switch store.intakeService.phoneVisualFetch(id, visualID: visualID, revision: revision, part: part,
-                                                        offset: offset, limit: limit) {
-            case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
-            case .failure(let refusal): reply(.err(cid: cid, code: refusal.code))
+            // nothing enters `FleetSnapshot`. Replies `fileChunk`, as `fileRead` does. A `Task`
+            // for `fileRead`'s reason: reading and hashing up to `VisualLimits.maxBytes` must
+            // not block the main actor, and `reply` lands back here on `queue`.
+            Task { @MainActor in
+                switch await self.store.intakeService.phoneVisualFetch(
+                    id, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit
+                ) {
+                case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
+                case .failure(let refusal):
+                    Self.logger.info("check=visual_fetch code=\(refusal.code, privacy: .public)")
+                    reply(.err(cid: cid, code: refusal.code))
+                }
             }
         case .fileRead(let session, let path, let offset, let limit, let maxPixel):
             // A `Task` for `timeline`'s reason: the read and any image decode run detached,

@@ -27,10 +27,16 @@ final class ChangeSetVisualRefTests: XCTestCase {
 
     func testAnUnknownVisualIsRejectedWhenTheKnownSetIsGiven() {
         let cs = create([VisualRef(visualID: "pairing-handshake"), VisualRef(visualID: "ghost")])
-        let errors = ChangeSetValidator.validate(cs, against: graph, knownVisuals: ["pairing-handshake"]).failureErrors
+        let errors = ChangeSetValidator.validate(cs, against: graph, knownVisuals: ["pairing-handshake"]).errors
         XCTAssertEqual(errors, [.unknownVisual("ghost")])
         XCTAssertTrue(ValidationError.unknownVisual("ghost").message.contains("ghost"))
         XCTAssertTrue(ValidationError.unknownVisual("ghost").userMessage.contains("ghost"))
+    }
+
+    /// nil means "no check"; an empty set means the plan has no visuals, so every ref is unknown.
+    func testAnEmptyKnownSetRejectsEveryRef() {
+        let cs = create([VisualRef(visualID: "a")])
+        XCTAssertEqual(ChangeSetValidator.validate(cs, against: graph, knownVisuals: Set()).errors, [.unknownVisual("a")])
     }
 
     func testKnownVisualsPass() {
@@ -43,4 +49,9 @@ final class ChangeSetVisualRefTests: XCTestCase {
         let cs = create([VisualRef(visualID: "anything")])
         XCTAssertNoThrow(try ChangeSetValidator.validate(cs, against: graph).get())
     }
+
+}
+
+private extension Result where Failure == ValidationErrors {
+    var errors: [ValidationError] { if case .failure(let e) = self { e.errors } else { [] } }
 }

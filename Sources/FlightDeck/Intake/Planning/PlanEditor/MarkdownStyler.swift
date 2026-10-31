@@ -1,5 +1,5 @@
 import AppKit
-import IntakeKit
+import FleetKit
 
 /// An inline run inside a block: `range` is the content only (`bold`, not `**bold**`); its
 /// delimiters are in the block's `syntaxRanges`.
@@ -299,12 +299,13 @@ enum MarkdownStyler {
                 // headings the moment the human types the opening ```.
                 //
                 // Only a fence of the same character and at least the same length closes it
-                // (CommonMark): a plan that shows a ```markdown example inside a ````-fence
-                // would otherwise end its outer block at the example's first fence line.
+                // and carrying no info string (CommonMark): a plan that shows a ```markdown
+                // example inside a ````-fence would otherwise end its outer block at the
+                // example's first fence line, and "```swift" inside a block is code.
                 var close: Int?
                 var j = li + 1
                 while has(j) {
-                    if case .fence(let c2, let l2, _) = kinds[j], c2 == char, l2 >= length { close = j; break }
+                    if case .fence(let c2, let l2, let info2) = kinds[j], c2 == char, l2 >= length, info2.isEmpty { close = j; break }
                     j += 1
                 }
                 let last = close ?? lines.count - 1
@@ -312,7 +313,7 @@ enum MarkdownStyler {
                 // hairline instead of leaving an empty code line.
                 var syntax = [NSRange(location: s, length: min(e + 1, lines[last].end) - s)]
                 if let close { syntax.append(NSRange(location: lines[close].start, length: lines[close].end - lines[close].start)) }
-                let kind: MarkdownBlock.Kind = visualInfo(info).map { .visual(id: $0.id, pending: $0.pending) } ?? .code
+                let kind: MarkdownBlock.Kind = VisualFenceInfo.parse(info).map { .visual(id: $0.id, pending: $0.pending) } ?? .code
                 out.append(MarkdownBlock(kind: kind, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: syntax))
                 li = last + 1
             case .blank:
@@ -387,7 +388,11 @@ enum MarkdownStyler {
             var a = run, b = e
             while a < b, u[a] == 32 || u[a] == 9 { a += 1 }
             while b > a, u[b - 1] == 32 || u[b - 1] == 9 { b -= 1 }
-            return .fence(char: c, length: run - i, info: String(utf16CodeUnits: Array(u[a..<b]), count: b - a))
+            // A backtick fence's info has no backtick (CommonMark): "```code``` and more" is inline
+            // code in a paragraph, which is how the phone's reader reads it. Tildes may carry one.
+            var tick = false
+            if c == 96 { for k in a..<b where u[k] == 96 { tick = true; break } }
+            if !tick { return .fence(char: c, length: run - i, info: String(utf16CodeUnits: Array(u[a..<b]), count: b - a)) }
         }
         if indent <= 3, c == 35 {
             var j = i
@@ -408,22 +413,6 @@ enum MarkdownStyler {
             if j - i <= 9, j + 1 < e, u[j] == 46 || u[j] == 41, u[j + 1] == 32 { return .listItem(contentStart: j + 2) }
         }
         return .plain
-    }
-
-    /// `fd-visual id=<id> [pending]`, or nil for any other info string. A malformed one (no id,
-    /// or an id that is not a usable folder name) is an ordinary code block rather than a visual
-    /// pointing nowhere or somewhere it should not.
-    private static func visualInfo(_ info: String) -> (id: String, pending: Bool)? {
-        guard info.hasPrefix("fd-visual") else { return nil }
-        let words = info.split(whereSeparator: { $0 == " " || $0 == "\t" })
-        guard words.first == "fd-visual" else { return nil }
-        var id: String?
-        var pending = false
-        for word in words.dropFirst() {
-            if word.hasPrefix("id=") { id = String(word.dropFirst(3)) } else if word == "pending" { pending = true }
-        }
-        guard let id, VisualID.isValid(id) else { return nil }
-        return (id, pending)
     }
 
     /// Inline syntax on one line, by precedence: code spans first (nothing inside them is

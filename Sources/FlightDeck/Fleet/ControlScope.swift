@@ -140,8 +140,10 @@ enum ControlScope {
     private static func runnerPermits(_ request: FleetRequest, level: ControlScopeLevel) -> Bool {
         switch request {
         case .peer, .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search, .openConversation,
-             .intakeDetail, .intakePlan, .intakeThreadGet, .fileRead, .hostList, .hostInfo, .delegate, .infra, .accountList,
-             .accountSwitch:
+             .intakeDetail, .intakePlan, .intakeThreadGet, .intakeVisualFetch, .fileRead, .hostList, .hostInfo, .delegate,
+             .infra, .accountList, .accountSwitch:
+            // `.intakeVisualFetch` included: the fetch serves the phone, and a runner (the one
+            // process that writes `visuals/` and checkpoints) reads those files from disk itself.
             return false
         }
     }

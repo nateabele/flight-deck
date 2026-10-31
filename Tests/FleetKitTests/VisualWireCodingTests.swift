@@ -14,19 +14,22 @@ final class VisualWireCodingTests: XCTestCase {
     static let ref = WireVisualRef(
         id: "pairing-handshake", revision: 3, kinds: ["diagram", "canvas"],
         alternates: [WireVisualAlternate(revision: 2, kind: "canvas", reason: "closer to the comp")],
-        states: ["idle", "paired"])
+        states: ["idle", "paired"], sizes: ["wide", "narrow"], aspect: 1.5,
+        files: [WireVisualFile(path: "export/index.html", size: 120, sha256: "abc123")])
 
     // MARK: - Projection
 
     func testAVisualRefRoundTripsUnderTheSpecsNames() throws {
         XCTAssertEqual(try JSONDecoder().decode(WireVisualRef.self, from: JSONEncoder().encode(Self.ref)), Self.ref)
-        XCTAssertEqual(Set(try object(Self.ref).keys), ["id", "revision", "kinds", "alternates", "states"])
+        XCTAssertEqual(Set(try object(Self.ref).keys), ["id", "revision", "kinds", "alternates", "states", "sizes", "aspect", "files"])
         XCTAssertEqual(Self.ref.id, "pairing-handshake", "Identifiable by the visual's id")
     }
 
     func testAVisualRefWithOnlyIdAndRevisionStillLoads() throws {
         let ref = try JSONDecoder().decode(WireVisualRef.self, from: Data(#"{"id":"x","revision":1}"#.utf8))
         XCTAssertEqual(ref, WireVisualRef(id: "x", revision: 1))
+        XCTAssertNil(ref.files); XCTAssertNil(ref.sizes); XCTAssertNil(ref.aspect)
+        XCTAssertEqual(Set(try object(ref).keys), ["id", "revision", "kinds", "alternates", "states"], "optionals are absent, never null")
     }
 
     /// An older Mac's plan has no `visuals`; it decodes as nil, and writing it back adds nothing.
@@ -70,14 +73,17 @@ final class VisualWireCodingTests: XCTestCase {
     }
 
     func testAnOmittedOffsetIsZero() throws {
-        let json = #"{"op":"intake.visual.fetch","intake":"\#(intake.uuidString)","visualID":"x","revision":1,"part":"bundle","limit":10}"#
+        let json = #"{"op":"intake.visual.fetch","intake":"\#(intake.uuidString)","visualID":"x","revision":1,"part":"file:a.txt","limit":10}"#
         XCTAssertEqual(try JSONDecoder().decode(FleetRequest.self, from: Data(json.utf8)),
-                       .intakeVisualFetch(id: intake, visualID: "x", revision: 1, part: "bundle", offset: 0, limit: 10))
+                       .intakeVisualFetch(id: intake, visualID: "x", revision: 1, part: "file:a.txt", offset: 0, limit: 10))
     }
 
     func testPartSpellings() {
         XCTAssertEqual(WireVisualPart.snapshot, "snapshot")
-        XCTAssertEqual(WireVisualPart.bundle, "bundle")
+        XCTAssertEqual(WireVisualPart.file("export/index.html"), "file:export/index.html")
+        XCTAssertEqual(WireVisualPart.filePath(in: "file:export/index.html"), "export/index.html")
+        XCTAssertNil(WireVisualPart.filePath(in: "snapshot"))
+        XCTAssertNil(WireVisualPart.filePath(in: "file:"))
         XCTAssertEqual(WireVisualPart.snapshot(state: "paired", size: "wide"), "snapshot@paired-wide")
         XCTAssertEqual(VisualLimits.maxBytes, 10 * 1024 * 1024)
     }

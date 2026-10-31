@@ -1479,7 +1479,8 @@ private struct DocumentPlan: View, Equatable {
                                          projectPath: projectPath,
                                          queuedPlan: final ? nil : { [service, intakeID] in service.queuedPlan(intakeID, checkpoint: $0) },
                                          acceptedStamp: acceptedStamp,
-                                         typingWon: { [service, intakeID] in service.typingWon(intakeID, checkpoint: $0, plan: $1) }))
+                                         typingWon: { [service, intakeID] in service.typingWon(intakeID, checkpoint: $0, plan: $1) },
+                                         visuals: service.visualReader(intakeID)))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)

@@ -51,8 +51,8 @@ public struct ValidatedChangeSet: Equatable, Sendable {
 
 public enum ChangeSetValidator {
     /// `knownVisuals`: the ids of the visuals the plan has. nil skips the visual check, which is
-    /// right for every caller that predates visuals, and for a plan with none: a task cannot
-    /// name a visual that was never offered.
+    /// right for every caller that predates visuals. `Set()` is different: it means the plan
+    /// has no visuals, so every `visualRefs` entry is unknown.
     public static func validate(_ cs: ChangeSet, against graph: GraphSnapshot,
                                 knownVisuals: Set<String>? = nil) -> Result<ValidatedChangeSet, ValidationErrors> {
         var errors: [ValidationError] = []

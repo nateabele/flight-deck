@@ -164,4 +164,22 @@ final class MarkdownStylerFenceTests: XCTestCase {
         XCTAssertEqual(incremental, MarkdownStyler.blocks(edited))
         XCTAssertEqual(visuals(edited), [.visual(id: "a", pending: false)])
     }
+
+    // MARK: - CommonMark closing and opening (M1)
+
+    func testAClosingFenceCannotCarryAnInfoString() {
+        // "```swift" inside an open fence is code, not the end of it.
+        XCTAssertEqual(summary("```\nx\n```swift\ny\n```\nafter"), ["code[```\nx\n```swift\ny\n```]", "p"])
+    }
+
+    func testABacktickFenceWhoseInfoContainsABacktickIsNotAFence() {
+        // It is inline code on a line of prose, as the phone's reader sees it.
+        XCTAssertEqual(summary("```code``` and more\ntext"), ["p"])
+        // A tilde fence may contain a backtick in its info.
+        XCTAssertEqual(summary("~~~a`b\nx\n~~~"), ["code[~~~a`b\nx\n~~~]"])
+    }
+
+    func testAnUppercaseIdIsNotAVisual() {
+        XCTAssertEqual(MarkdownStyler.blocks("```fd-visual id=Foo\nx\n```").map(\.kind), [.code])
+    }
 }
