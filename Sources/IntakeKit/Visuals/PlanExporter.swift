@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// One file of a release export, with its path relative to `PlanExport.directory`.
 public struct ExportedFile: Equatable, Sendable {
@@ -69,7 +70,10 @@ public enum PlanExporter {
     /// when nothing usable is left. The title is agent- and human-written, so it never becomes a
     /// path component as it stands.
     public static func slug(for title: String) -> String {
-        let folded = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        // Transliterated first, so a title in another script still names its folder.
+        let latin = title.applyingTransform(.toLatin, reverse: false) ?? title
+        let folded = (latin.applyingTransform(.stripDiacritics, reverse: false) ?? latin)
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
         var out = ""
         var pendingHyphen = false
         for b in folded.lowercased().utf8 {
@@ -84,8 +88,13 @@ public enum PlanExporter {
         }
         if out.count > 48 { out = String(out.prefix(48)) }
         while out.hasSuffix("-") { out.removeLast() }
-        return out.isEmpty ? "plan" : out
+        if out.isEmpty { return "plan" }
+        // Windows cannot create these names, and a checkout there would fail.
+        return reservedNames.contains(out) ? out + "-x" : out
     }
+
+    private static let reservedNames: Set<String> = Set(
+        ["con", "prn", "aux", "nul"] + (1...9).flatMap { ["com\($0)", "lpt\($0)"] })
 
     /// The base slug, or `-2`, `-3`, … for the first folder that is free or this intake's own.
     public static func resolveSlug(title: String, intakeID: String, owner: (String) -> SlugOwner) -> String {
@@ -171,7 +180,7 @@ public enum PlanExporter {
         for entry in rev.manifest.files {
             guard isSafe(entry.path) else { throw Failure.unsafePath(entry.path) }
             guard seen.insert(entry.path).inserted else { continue }
-            out.append(ExportedFile(path: "\(base)/\(entry.path)", data: try readAll(store, id, rev.r, entry.path)))
+            out.append(ExportedFile(path: "\(base)/\(entry.path)", data: try readAll(store, id, rev.r, entry.path, sha256: entry.sha256)))
         }
         let readmePath = "\(base)/README.md"
         if out.contains(where: { $0.path == readmePath }) { throw Failure.unsafePath("README.md") }
@@ -184,16 +193,25 @@ public enum PlanExporter {
         return out
     }
 
-    private static func readAll(_ store: VisualStoreReading, _ id: VisualID, _ r: Int, _ name: String) throws -> Data {
+    private static func readAll(_ store: VisualStoreReading, _ id: VisualID, _ r: Int, _ name: String,
+                                sha256: String) throws -> Data {
         var data = Data()
         var offset: Int64 = 0
         while true {
             guard let slice = store.read(id, r: r, name: name, offset: offset, limit: chunkBytes) else {
                 throw Failure.unreadable(visual: id.rawValue, path: name)
             }
+            // Empty before the end is a broken store, not a short file: stop, don't export half.
+            if slice.data.isEmpty, offset < slice.size { throw Failure.unreadable(visual: id.rawValue, path: name) }
             data.append(slice.data)
             offset += Int64(slice.data.count)
-            if offset >= slice.size || slice.data.isEmpty { return data }
+            if offset >= slice.size {
+                // The manifest's hash is what the bytes were final with; an empty one is "not recorded".
+                if !sha256.isEmpty, SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() != sha256.lowercased() {
+                    throw Failure.unreadable(visual: id.rawValue, path: name)
+                }
+                return data
+            }
         }
     }
 
@@ -206,7 +224,7 @@ public enum PlanExporter {
     }
 
     private static func defaultSnapshot(_ m: VisualManifest) -> String? {
-        let state = m.states.first ?? "default"
+        let state = m.states.contains("default") ? "default" : (m.states.first ?? "default")
         let pngs = m.files.map(\.path).filter { $0.hasPrefix("snapshot@") && $0.hasSuffix(".png") && isSafe($0) }
         if let size = m.sizes.first, pngs.contains("snapshot@\(state)-\(size).png") { return "snapshot@\(state)-\(size).png" }
         return pngs.filter { $0.hasPrefix("snapshot@\(state)-") }.sorted().first ?? pngs.sorted().first

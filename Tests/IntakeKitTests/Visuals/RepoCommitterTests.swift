@@ -18,7 +18,10 @@ final class RepoCommitterTests: XCTestCase {
         try await git("add", "-A")
         try await git("commit", "-q", "-m", "init")
     }
-    override func tearDown() async throws { try? FileManager.default.removeItem(at: repo) }
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: repo)
+        if let outside { try? FileManager.default.removeItem(at: outside) }
+    }
 
     @discardableResult
     private func git(_ args: String...) async throws -> String {
@@ -35,9 +38,26 @@ final class RepoCommitterTests: XCTestCase {
     private func read(_ rel: String) -> String? { try? String(contentsOf: repo.appendingPathComponent(rel), encoding: .utf8) }
     private func exists(_ rel: String) -> Bool { FileManager.default.fileExists(atPath: repo.appendingPathComponent(rel).path) }
 
-    private func sample(_ body: String = "plan v1") -> PlanExport {
+    private func sample(_ body: String = "plan v1", intake: String = "intake-1") -> PlanExport {
         PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data(body.utf8)),
+                                         ExportedFile(path: PlanExporter.markerName, data: Data((intake + "\n").utf8)),
                                          ExportedFile(path: "visuals/a/x.txt", data: Data("x".utf8))], warnings: [])
+    }
+    private var outside: URL!
+    private func makeOutside() throws -> URL {
+        let o = FileManager.default.temporaryDirectory.appendingPathComponent("rc-out-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: o.appendingPathComponent("plans/demo"), withIntermediateDirectories: true)
+        try "precious".write(to: o.appendingPathComponent("plans/demo/keep.txt"), atomically: true, encoding: .utf8)
+        try "intake-1\n".write(to: o.appendingPathComponent("plans/demo/.flightdeck-intake"), atomically: true, encoding: .utf8)
+        outside = o
+        return o
+    }
+    private func commitAll(_ msg: String) async throws { try await git("add", "-A"); try await git("commit", "-q", "-m", msg) }
+    private func assertFails(_ expected: RepoCommitter.Failure, file: StaticString = #filePath, line: UInt = #line,
+                             _ body: () async throws -> Void) async {
+        do { try await body(); XCTFail("should have thrown", file: file, line: line) } catch {
+            XCTAssertEqual(error as? RepoCommitter.Failure, expected, file: file, line: line)
+        }
     }
     private func committer() -> RepoCommitter { RepoCommitter(runner: runner) }
 
@@ -66,6 +86,7 @@ final class RepoCommitterTests: XCTestCase {
     /// Review Focus 4.
     func testADirtyPlanFolderRefusesAndWritesNothing() async throws {
         try write("docs/plans/demo/plan.md", "committed\n")
+        try write("docs/plans/demo/.flightdeck-intake", "intake-1\n")
         try await git("add", "-A"); try await git("commit", "-q", "-m", "plan")
         try write("docs/plans/demo/plan.md", "hand edit\n")
         try write("docs/plans/demo/notes.txt", "untracked\n")
@@ -85,7 +106,8 @@ final class RepoCommitterTests: XCTestCase {
 
     func testAReReleaseOverwritesAndDropsFilesNoLongerExported() async throws {
         _ = try await committer().commit(sample("plan v1"), repo: repo)
-        let v2 = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("plan v2".utf8))], warnings: [])
+        let v2 = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("plan v2".utf8)),
+                                                  ExportedFile(path: PlanExporter.markerName, data: Data("intake-1\n".utf8))], warnings: [])
         _ = try await committer().commit(v2, repo: repo)
         XCTAssertEqual(read("docs/plans/demo/plan.md"), "plan v2")
         XCTAssertFalse(exists("docs/plans/demo/visuals/a/x.txt"))
@@ -112,12 +134,18 @@ final class RepoCommitterTests: XCTestCase {
 
     func testNeverUsesStashOrCheckout() async throws {
         let rec = RecordingRunner()
-        _ = try? await RepoCommitter(runner: rec).commit(sample(), repo: repo)
+        rec.top = repo.path
+        _ = try? await RepoCommitter(runner: rec, environment: ["GIT_DIR": "/elsewhere", "GIT_WORK_TREE": "/elsewhere",
+                                                               "GIT_INDEX_FILE": "/x", "GIT_OBJECT_DIRECTORY": "/x", "PATH": "/usr/bin"])
+            .commit(sample(), repo: repo)
         XCTAssertFalse(rec.calls.isEmpty)
+        XCTAssertTrue(rec.calls.contains { $0.arguments.contains(":(literal)docs/plans/demo") }, "one literal pathspec")
         for c in rec.calls {
             XCTAssertEqual(Array(c.arguments.prefix(2)), ["-C", repo.path])
             XCTAssertFalse(c.arguments.contains("stash") || c.arguments.contains("checkout") || c.arguments.contains("--no-verify"))
             XCTAssertEqual(c.environment["GIT_TERMINAL_PROMPT"], "0")
+            for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] { XCTAssertNil(c.environment[k], k) }
+            XCTAssertNil(c.environment["GIT_LITERAL_PATHSPECS"], "hooks would inherit it")
         }
     }
 
@@ -126,6 +154,122 @@ final class RepoCommitterTests: XCTestCase {
         do { _ = try await committer().commit(bad, repo: repo); XCTFail() } catch {
             XCTAssertEqual(error as? RepoCommitter.Failure, .unsafePath("../escape.txt"))
         }
+    }
+
+    // MARK: Safety review, fix round 1
+
+    func testASymlinkedDocsFolderRefusesAndTheOutsideFolderSurvives() async throws {
+        let o = try makeOutside()
+        try FileManager.default.createSymbolicLink(at: repo.appendingPathComponent("docs"), withDestinationURL: o)
+        try await commitAll("link docs")
+        await assertFails(.symlink("docs")) { _ = try await committer().commit(sample(), repo: repo) }
+        XCTAssertEqual(try String(contentsOf: o.appendingPathComponent("plans/demo/keep.txt")), "precious")
+    }
+
+    func testASymlinkedPlansFolderRefuses() async throws {
+        let o = try makeOutside()
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: repo.appendingPathComponent("docs/plans"),
+                                                   withDestinationURL: o.appendingPathComponent("plans"))
+        try await commitAll("link plans")
+        await assertFails(.symlink("docs/plans")) { _ = try await committer().commit(sample(), repo: repo) }
+        XCTAssertEqual(try String(contentsOf: o.appendingPathComponent("plans/demo/keep.txt")), "precious")
+    }
+
+    /// A folder that appeared after `resolveSlug` chose the slug must not be taken over.
+    func testAnUnmarkedCommittedFolderRefusesAndSurvives() async throws {
+        try write("docs/plans/demo/own.md", "mine\n")
+        try await commitAll("their docs")
+        await assertFails(.notOwned("docs/plans/demo")) { _ = try await committer().commit(sample(), repo: repo) }
+        XCTAssertEqual(read("docs/plans/demo/own.md"), "mine\n")
+        XCTAssertFalse(exists("docs/plans/demo/plan.md"))
+    }
+
+    func testAnotherIntakesFolderRefuses() async throws {
+        _ = try await committer().commit(sample(intake: "someone-else"), repo: repo)
+        await assertFails(.notOwned("docs/plans/demo")) { _ = try await committer().commit(sample(), repo: repo) }
+        XCTAssertEqual(read("docs/plans/demo/plan.md"), "plan v1")
+    }
+
+    func testIgnoredFilesInsideTheFolderRefuseAndSurvive() async throws {
+        try write(".gitignore", ".DS_Store\n*.swp\n")
+        try await commitAll("ignore")
+        _ = try await committer().commit(sample(), repo: repo)
+        try write("docs/plans/demo/.DS_Store", "finder")
+        do {
+            _ = try await committer().commit(sample("plan v2"), repo: repo)
+            XCTFail("should refuse")
+        } catch let RepoCommitter.Failure.dirty(_, status) {
+            XCTAssertTrue(status.contains(".DS_Store"), status)
+        }
+        XCTAssertEqual(read("docs/plans/demo/.DS_Store"), "finder")
+        XCTAssertEqual(read("docs/plans/demo/plan.md"), "plan v1")
+    }
+
+    func testAFailedDeleteRollsBack() async throws {
+        let first = PlanExport(slug: "demo", files: [ExportedFile(path: "a.txt", data: Data("a".utf8)),
+            ExportedFile(path: PlanExporter.markerName, data: Data("intake-1\n".utf8)),
+            ExportedFile(path: "sub/b.txt", data: Data("b".utf8))], warnings: [])
+        _ = try await committer().commit(first, repo: repo)
+        let sub = repo.appendingPathComponent("docs/plans/demo/sub").path
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: sub)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sub) }
+        do { _ = try await committer().commit(sample(), repo: repo); XCTFail("the delete should fail") } catch {}
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sub)
+        XCTAssertEqual(read("docs/plans/demo/a.txt"), "a")
+        XCTAssertEqual(read("docs/plans/demo/sub/b.txt"), "b")
+        let status = try await git("status", "--porcelain")
+        XCTAssertEqual(status, "")
+    }
+
+    func testAnIdenticalReReleaseIsANoChangeNotAnError() async throws {
+        let first = try await committer().commit(sample(), repo: repo)
+        XCTAssertFalse(first.noChange)
+        let again = try await committer().commit(sample(), repo: repo)
+        XCTAssertTrue(again.noChange)
+        XCTAssertEqual(again.sha, first.sha)
+        let count = try await git("rev-list", "--count", "HEAD")
+        XCTAssertEqual(count.trimmingCharacters(in: .whitespacesAndNewlines), "2")
+        XCTAssertEqual(read("docs/plans/demo/plan.md"), "plan v1")
+        let status = try await git("status", "--porcelain")
+        XCTAssertEqual(status, "")
+    }
+
+    func testAnExportedPathGitWouldIgnoreRefusesBeforeWriting() async throws {
+        try write(".gitignore", "*.png\n")
+        try await commitAll("ignore png")
+        let e = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("p".utf8)),
+            ExportedFile(path: "visuals/a/snapshot@default-1x.png", data: Data("png".utf8))], warnings: [])
+        await assertFails(.ignored(["docs/plans/demo/visuals/a/snapshot@default-1x.png"])) {
+            _ = try await committer().commit(e, repo: repo)
+        }
+        XCTAssertFalse(exists("docs/plans/demo"))
+    }
+
+    func testABadSlugIsRefused() async {
+        for bad in ["../x", "Demo", "a/b", "", "-a", "a--b", "a b"] {
+            let e = PlanExport(slug: bad, files: [ExportedFile(path: "plan.md", data: Data())], warnings: [])
+            await assertFails(.badSlug(bad)) { _ = try await committer().commit(e, repo: repo) }
+        }
+    }
+
+    func testAFolderInsideAnOuterRepoIsNotARepoRoot() async throws {
+        let inner = repo.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        do { _ = try await committer().commit(sample(), repo: inner); XCTFail() } catch RepoCommitter.Failure.notRepoRoot {}
+        XCTAssertFalse(exists("sub/docs"))
+    }
+
+    func testABlockedHookTimesOutInsteadOfHanging() async throws {
+        let hook = repo.appendingPathComponent(".git/hooks/pre-commit")
+        try "#!/bin/sh\nsleep 30\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let started = Date()
+        await assertFails(.timeout(step: "commit")) {
+            _ = try await RepoCommitter(runner: runner, gitTimeout: 1).commit(sample(), repo: repo)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 15)
+        XCTAssertFalse(exists("docs/plans/demo"), "rolled back")
     }
 
     func testSlugOwnerReadsTheMarker() async throws {
@@ -138,11 +282,17 @@ final class RepoCommitterTests: XCTestCase {
 }
 
 private final class RecordingRunner: CommandRunner, @unchecked Sendable {
+    var top = ""
     struct Call { var arguments: [String]; var environment: [String: String] }
     private(set) var calls: [Call] = []
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
         calls.append(Call(arguments: arguments, environment: environment))
-        return CommandResult(stdout: Data(), stderr: "", exitCode: 0)
+        // Answers the way a clean repo at `top` does, so the commit gets as far as its pathspecs.
+        var out = ""
+        var code: Int32 = 0
+        if arguments.contains("--show-toplevel") { out = top }
+        if arguments.contains("check-ignore") { code = 1 }
+        return CommandResult(stdout: Data(out.utf8), stderr: "", exitCode: code)
     }
 }

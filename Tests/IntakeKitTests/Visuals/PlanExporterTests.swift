@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import IntakeKit
 
 /// An in-memory store, so the exporter is tested without a disk.
@@ -6,6 +7,8 @@ private struct FakeStore: VisualStoreReading {
     var states: [VisualID: BlockState] = [:]
     var revisions: [RevisionRef: VisualManifest] = [:]
     var bytes: [String: Data] = [:]   // "<id>/<r>/<name>"
+    /// Answers every read with an empty slice while the file claims to be longer: a broken store.
+    var stall = false
 
     func visuals() -> [VisualID] { states.keys.sorted() }
     func blockState(_ id: VisualID) -> BlockState? { states[id] }
@@ -17,6 +20,7 @@ private struct FakeStore: VisualStoreReading {
     func read(_ id: VisualID, r: Int, name: String, offset: Int64, limit: Int) -> VisualFileSlice? {
         guard let m = revisions[RevisionRef(visualID: id, r: r)], m.files.contains(where: { $0.path == name }),
               let d = bytes["\(id.rawValue)/\(r)/\(name)"], offset >= 0, limit >= 0, offset <= Int64(d.count) else { return nil }
+        if stall { return VisualFileSlice(data: Data(), size: Int64(d.count)) }
         return VisualFileSlice(data: d.dropFirst(Int(offset)).prefix(limit), size: Int64(d.count))
     }
 }
@@ -24,13 +28,25 @@ private struct FakeStore: VisualStoreReading {
 final class PlanExporterTests: XCTestCase {
     private let vid = VisualID(rawValue: "pairing")!
 
-    private func entry(_ p: String) -> VisualFileEntry { VisualFileEntry(path: p, size: 1, sha256: "x") }
+    private func entry(_ p: String, _ d: Data? = nil) -> VisualFileEntry {
+        let data = d ?? Data("bytes:\(p)".utf8)
+        return VisualFileEntry(path: p, size: Int64(data.count),
+                               sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
+    }
+    /// Replaces a primary file's bytes and keeps the manifest's size and hash true to them.
+    private func setBytes(_ s: inout FakeStore, _ name: String, _ d: Data) {
+        s.bytes["pairing/2/\(name)"] = d
+        let ref = RevisionRef(visualID: vid, r: 2)
+        var m = s.revisions[ref]!
+        m.files = m.files.map { $0.path == name ? entry(name, d) : $0 }
+        s.revisions[ref] = m
+    }
 
     private func store(primary: Int = 2, alternates: [Int] = [1]) -> FakeStore {
         var s = FakeStore()
         let reps = (alternates + [primary]).map { RevisionRef(visualID: vid, r: $0) }
         s.states[vid] = BlockState(representations: reps, primary: RevisionRef(visualID: vid, r: primary))
-        let files = ["diagram.mmd", "snapshot@default-1x.png", "snapshot@empty-1x.png", "pins.json"].map(entry)
+        let files = ["diagram.mmd", "snapshot@default-1x.png", "snapshot@empty-1x.png", "pins.json"].map { entry($0) }
         s.revisions[RevisionRef(visualID: vid, r: primary)] = VisualManifest(
             provider: "mermaid", providerVersion: "1", kind: "diagram", title: "Pairing", entry: "diagram.mmd",
             states: ["default", "empty"], sizes: ["1x"], madeOnCheckpoint: 3, madeBy: .you, primary: true, files: files)
@@ -99,7 +115,7 @@ final class PlanExporterTests: XCTestCase {
     func testFilesLargerThanOneChunkAreReadWhole() throws {
         var s = store()
         let big = Data((0..<(PlanExporter.chunkBytes * 2 + 17)).map { UInt8($0 % 251) })
-        s.bytes["pairing/2/diagram.mmd"] = big
+        setBytes(&s, "diagram.mmd", big)
         XCTAssertEqual(try export(s).file("visuals/pairing/diagram.mmd")?.data, big)
     }
 
@@ -107,6 +123,28 @@ final class PlanExporterTests: XCTestCase {
         var s = store()
         s.bytes["pairing/2/diagram.mmd"] = nil
         XCTAssertThrowsError(try export(s)) { XCTAssertEqual($0 as? PlanExporter.Failure, .unreadable(visual: "pairing", path: "diagram.mmd")) }
+    }
+
+    func testBytesThatDoNotMatchTheManifestHashAreRefused() {
+        var s = store()
+        s.bytes["pairing/2/diagram.mmd"] = Data("tampered".utf8)
+        XCTAssertThrowsError(try export(s)) { XCTAssertEqual($0 as? PlanExporter.Failure, .unreadable(visual: "pairing", path: "diagram.mmd")) }
+    }
+
+    func testAnEmptySliceBeforeTheEndIsAnErrorNotAShortFile() {
+        var s = store()
+        s.stall = true
+        XCTAssertThrowsError(try export(s)) { XCTAssertEqual($0 as? PlanExporter.Failure, .unreadable(visual: "pairing", path: "diagram.mmd")) }
+    }
+
+    func testTheDefaultSnapshotPrefersTheStateNamedDefault() throws {
+        var s = store()
+        let ref = RevisionRef(visualID: vid, r: 2)
+        var m = s.revisions[ref]!
+        m.states = ["empty", "default"]
+        s.revisions[ref] = m
+        let md = String(decoding: try XCTUnwrap(export(s).file("plan.md")).data, as: UTF8.self)
+        XCTAssertTrue(md.contains("snapshot@default-1x.png"), md)
     }
 
     func testAManifestPathThatEscapesIsRefused() {
@@ -168,9 +206,18 @@ final class PlanSlugTests: XCTestCase {
         XCTAssertEqual(PlanExporter.slug(for: "Café Ünïcode"), "cafe-unicode")
         XCTAssertEqual(PlanExporter.slug(for: "../../etc/passwd"), "etc-passwd")
         XCTAssertEqual(PlanExporter.slug(for: "   "), "plan")
-        XCTAssertEqual(PlanExporter.slug(for: "日本語"), "plan")
+        XCTAssertEqual(PlanExporter.slug(for: "日本語"), "ri-ben-yu")
+        XCTAssertEqual(PlanExporter.slug(for: "!!!"), "plan")
         XCTAssertLessThanOrEqual(PlanExporter.slug(for: String(repeating: "word ", count: 40)).count, 48)
         XCTAssertFalse(PlanExporter.slug(for: String(repeating: "word ", count: 40)).hasSuffix("-"))
+    }
+
+    func testWindowsReservedNamesGetASuffix() {
+        for name in ["con", "PRN", "aux", "nul", "com1", "COM9", "lpt1", "lpt9"] {
+            XCTAssertEqual(PlanExporter.slug(for: name), name.lowercased() + "-x", name)
+        }
+        XCTAssertEqual(PlanExporter.slug(for: "com10"), "com10")
+        XCTAssertEqual(PlanExporter.slug(for: "console"), "console")
     }
 
     func testCollisionsAddTwoThenThree() {

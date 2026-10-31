@@ -243,6 +243,41 @@ final class PlanningRenderTests: XCTestCase {
                                  to: out.appendingPathComponent("planning-release-review.png"))
     }
 
+    /// The release sheet with the repo export listed above the buttons (spec §12, "Confirmation").
+    /// Needs no `br`: the review is built directly, so this renders on any Mac.
+    func testRenderReleaseReviewExportSection() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let store = SessionStore(provider: nil, persistence: FakePersistence(), intakesRoot: root)
+        var intake = Intake(projectPath: "/tmp/fixture", intent: "Build a field-service scheduling platform",
+                            createdAt: now.addingTimeInterval(-3600))
+        intake.state = .review
+        let ops: [ChangeOp] = [
+            .createBead(NewBead(tempId: "t1", title: "Technician skills", description: "Skill tags.",
+                                visualRefs: [VisualRef(visualID: "dispatch-board", states: ["default", "empty"])])),
+            .createBead(NewBead(tempId: "t2", title: "Offline check-in", description: "Queue check-ins.")),
+            .addEdge(from: .new("t2"), to: .new("t1"), kind: .blocks),
+        ]
+        intake.changeSet = ChangeSet(graphObservedAt: now, ops: ops)
+        let review = ReleaseReview(intake: intake, drift: Array(repeating: .holds, count: ops.count),
+                                   summary: "2 new tasks \u{00B7} 1 dependency", canRelease: true)
+        let slug = "field-service-scheduling"
+        let preview = PlanExportPreview(paths: [
+            ".flightdeck-intake", "plan.md",
+            "visuals/dispatch-board/README.md", "visuals/dispatch-board/diagram.mmd",
+            "visuals/dispatch-board/snapshot@default-1x.png", "visuals/dispatch-board/snapshot@empty-1x.png",
+            "visuals/dispatch-board/_unused-alternates/1/README.md",
+            "visuals/check-in/README.md", "visuals/check-in/export/index.html",
+        ].map { "docs/plans/\(slug)/\($0)" }, commitMessage: "docs: plan \(slug) for release")
+        let view = ReleaseReviewView(store: store, intakeID: intake.id, onClose: {}, previewReview: review,
+                                     exportPreview: preview)
+        try PlanningRender.write(view, size: NSSize(width: 680, height: 620),
+                                 to: out.appendingPathComponent("planning-release-review-export.png"))
+    }
+
     /// The shaping screen's three convergence states (`ConvergenceFixture`, shared with
     /// `ConvergenceRenderTests`) at both control-bar widths — 1100 pt is `ConvergenceRenderTests`'
     /// own focus, so this fills in the 700 pt the compact bar takes for converging and plateau
