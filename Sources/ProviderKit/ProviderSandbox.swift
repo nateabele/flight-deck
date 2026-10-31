@@ -23,6 +23,9 @@ public enum ProviderSandboxError: Error, Equatable, CustomStringConvertible {
     /// A link, FIFO or device in the output folder, by relative path. Copying it out would let
     /// a generator hand the caller a pointer to any file on the Mac.
     case outputNotRegularFile(String)
+    /// Something of the generator's process group outlived a SIGKILL; delivery, which reads its
+    /// folder, does not start while anything of the run can still write to it.
+    case generatorStillRunning
 
     public var description: String {
         switch self {
@@ -35,6 +38,7 @@ public enum ProviderSandboxError: Error, Equatable, CustomStringConvertible {
         case .snapshotFailed(let why): return "could not make a private copy of the provider: \(why)"
         case .programMissing(let name): return "the generator \(name) is not in the provider folder"
         case .outputNotRegularFile(let path): return "the generator's output \(path) is not a regular file"
+        case .generatorStillRunning: return "the generator's processes would not stop"
         }
     }
 }
@@ -45,6 +49,9 @@ public enum ProviderSandboxResult: Equatable, Sendable {
     case exited(code: Int32, stdout: Data, stderr: String, outputs: [String])
     /// The generator outlived its timeout. Its whole process group has been killed.
     case timedOut
+    /// The generator was stopped for writing too much: `"stdout"`, `"out/"`, `"tmp/"` or
+    /// `"file"` (one file past the per-file cap). Nothing is delivered.
+    case outputTooLarge(String)
 }
 
 /// Runs a visual provider's generator (spec §9, ruling K-R3): from a private, re-checked copy of
@@ -57,6 +64,30 @@ public struct ProviderSandbox: Sendable {
     public let snapshotRoot: URL
     /// Seconds between SIGTERM and SIGKILL once the timeout expires.
     public let killGrace: TimeInterval
+    public let limits: Limits
+    /// Tests only: runs after the generator and every process holding its pipes are gone, and
+    /// before delivery reads the output, standing in for a process that escaped both and
+    /// rewrites the folder at the worst moment.
+    var beforeDelivery: (@Sendable (URL) -> Void)?
+
+    public struct Limits: Sendable, Equatable {
+        /// Bytes of stdout kept in memory.
+        public var stdout: Int
+        /// Bytes on disk under `out/` (spec §9's 10 MB visual) and under `tmp/`.
+        public var output: Int
+        public var temp: Int
+        /// The largest single file the generator may write anywhere (`ulimit -f`).
+        public var file: Int
+
+        public init(stdout: Int, output: Int, temp: Int, file: Int) {
+            self.stdout = stdout
+            self.output = output
+            self.temp = temp
+            self.file = file
+        }
+
+        public static let standard = Limits(stdout: 1 << 20, output: 10 << 20, temp: 256 << 20, file: 64 << 20)
+    }
 
     /// The system's directories first, then Homebrew's (Apple silicon, then Intel), so
     /// `#!/usr/bin/env node` works without a provider shadowing a system tool.
@@ -93,11 +124,13 @@ public struct ProviderSandbox: Sendable {
         """
 
     public init(sandboxExecPath: String = "/usr/bin/sandbox-exec", runner: any CommandRunner = SystemCommandRunner(),
-                snapshotRoot: URL = FileManager.default.temporaryDirectory, killGrace: TimeInterval = 2) {
+                snapshotRoot: URL = FileManager.default.temporaryDirectory, killGrace: TimeInterval = 2,
+                limits: Limits = .standard) {
         self.sandboxExecPath = sandboxExecPath
         self.runner = runner
         self.snapshotRoot = snapshotRoot
         self.killGrace = killGrace
+        self.limits = limits
     }
 
     /// Runs `provider`'s generator once. On exit 0 the generator's output folder is copied into
@@ -146,12 +179,22 @@ public struct ProviderSandbox: Sendable {
         // has no business reading.
         let environment = ["PATH": Self.environmentPath, "HOME": tempPath, "TMPDIR": tempPath]
 
-        let outcome = try await runOnClock(arguments: arguments, cwd: cwd, environment: environment,
-                                           timeout: TimeInterval(generator.timeout.seconds), onSpawn: onSpawn)
-        guard case .exited(let code, let stdout, let stderr, _) = outcome else { return outcome }
-        guard code == 0 else { return outcome }
-        let outputs = try deliver(from: run.output, to: outputDirectory)
-        return .exited(code: code, stdout: stdout, stderr: stderr, outputs: outputs)
+        // Clamped, though the parser refuses more: a hand-built generator must not overflow the
+        // nanosecond arithmetic either.
+        let timeout = min(max(TimeInterval(generator.timeout.seconds), 0), TimeInterval(ProviderGenerator.maxTimeout.seconds))
+        let outcome = try await runOnClock(arguments: arguments, cwd: cwd, environment: environment, timeout: timeout,
+                                           output: run.output, temp: run.temp, onSpawn: onSpawn)
+        guard case .exited(let code, let stdout, let stderr, _) = outcome, code == 0 else { return outcome }
+        // Reached only once the group is confirmed gone and the runner has killed every pipe
+        // holder. A process that escaped both can still rewrite `out/`, so delivery reads it
+        // through descriptors that never follow a link.
+        beforeDelivery?(run.output)
+        let collected: Collected
+        do { collected = try Self.collect(run.output, limit: limits.output) } catch is TooLarge {
+            return .outputTooLarge("out/")
+        }
+        try Self.write(collected, to: outputDirectory)
+        return .exited(code: code, stdout: stdout, stderr: stderr, outputs: collected.files.map(\.path).sorted())
     }
 
     // MARK: - The checked copy
@@ -241,23 +284,46 @@ public struct ProviderSandbox: Sendable {
 
     /// `CommandRunner` has no timeout, so a watchdog races the run. On expiry it SIGTERMs the
     /// group and cancels the run, then SIGKILLs whatever is left after `killGrace`: a generator
-    /// that traps SIGTERM still dies, and so does every child in its group.
+    /// that traps SIGTERM still dies, and so does every child in its group. Beside it, the
+    /// stdout counter and a disk watchdog SIGKILL the group the moment a cap is passed.
     private func runOnClock(arguments: [String], cwd: URL, environment: [String: String], timeout: TimeInterval,
+                            output: URL, temp: URL,
                             onSpawn: (@Sendable (Int32) -> Void)?) async throws -> ProviderSandboxResult {
         let group = GroupID()
-        let expired = Flag()
-        let runner = self.runner, executable = sandboxExecPath, grace = killGrace
+        let stop = StopReason()
+        let stdoutBytes = ByteCount()
+        let runner = self.runner, grace = killGrace, limits = self.limits
+        // `ulimit -f` has the kernel stop any one file at the cap, which the disk watchdog
+        // (every 250 ms) would only notice after the fact. The unit is 1024 bytes in bash,
+        // macOS's /bin/sh; dash counts 512, which only halves the cap. The shell runs our fixed
+        // script and is replaced by `env`, then sandbox-exec, so the leader's pid is unchanged.
+        // `env -u`: the shell exports PWD and SHLVL, and `unset` cannot drop SHLVL.
+        let blocks = max(1, limits.file / 1024)
+        let launch = ["-c", "ulimit -f \(blocks) || exit 126; exec /usr/bin/env -u PWD -u OLDPWD -u SHLVL \"$@\"",
+                      "sh", sandboxExecPath] + arguments
         let work = Task {
-            try await runner.run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
-                                 processGroup: true, onSpawn: { pid in group.set(pid); onSpawn?(pid) })
+            try await runner.run(executable: "/bin/sh", arguments: launch, cwd: cwd, environment: environment,
+                                 processGroup: true, onSpawn: { pid in group.set(pid); onSpawn?(pid) },
+                                 onStdout: { chunk in
+                                     if stdoutBytes.add(chunk.count) > limits.stdout, stop.set(.tooLarge("stdout")) {
+                                         group.kill()
+                                     }
+                                 })
         }
         let watchdog = Task {
             try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            expired.set()
+            guard stop.set(.timedOut) else { return }
             if let pgid = group.value { killpg(pgid, SIGTERM) }
             work.cancel()
             try await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
             group.killIfAlive()
+        }
+        let disk = Task {
+            while !Task.isCancelled {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                if Self.diskUsage(output) > limits.output, stop.set(.tooLarge("out/")) { group.kill(); return }
+                if Self.diskUsage(temp) > limits.temp, stop.set(.tooLarge("tmp/")) { group.kill(); return }
+            }
         }
         let result: Result<CommandResult, Error>
         do {
@@ -270,51 +336,171 @@ public struct ProviderSandbox: Sendable {
             result = .failure(error)
         }
         watchdog.cancel()
+        disk.cancel()
         // The leader is gone, but a child that closed its streams can outlive it: sweep the
-        // group so nothing the generator started keeps running unowned.
+        // group, and wait for it to be empty, so nothing of the run is still writing when
+        // delivery reads `out/`.
         group.killIfAlive()
+        guard await group.waitUntilGone(seconds: 1) else { throw ProviderSandboxError.generatorStillRunning }
 
-        if expired.value { return .timedOut }
+        switch stop.value {
+        case .timedOut?: return .timedOut
+        case .tooLarge(let what)?: return .outputTooLarge(what)
+        case nil: break
+        }
         let done = try result.get()
+        // SIGXFSZ, the per-file cap, as a signal death or as the shell's 128 + signal exit.
+        if done.exitCode == 128 + SIGXFSZ { return .outputTooLarge("file") }
         return .exited(code: done.exitCode, stdout: done.stdout, stderr: done.stderr, outputs: [])
     }
 
-    // MARK: - Delivery
-
-    /// Checks every entry before copying any, so a refused output delivers nothing.
-    private func deliver(from source: URL, to destination: URL) throws -> [String] {
-        var files: [String] = []
-        var directories: [String] = []
-        try Self.walk(source, prefix: "", files: &files, directories: &directories)
-        let fm = FileManager.default
-        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        for dir in directories {
-            try fm.createDirectory(at: destination.appendingPathComponent(dir), withIntermediateDirectories: true)
+    /// Bytes allocated under `url`, from `lstat`, so a link is counted as itself and never
+    /// followed out of the folder.
+    static func diskUsage(_ url: URL) -> Int {
+        guard let dir = opendir(url.path) else { return 0 }
+        defer { closedir(dir) }
+        var total = 0
+        while let entry = readdir(dir) {
+            let name = entryName(entry)
+            if name == "." || name == ".." { continue }
+            let child = url.appendingPathComponent(name)
+            var info = stat()
+            guard lstat(child.path, &info) == 0 else { continue }
+            total += Int(info.st_blocks) * 512
+            if Self.isType(info, S_IFDIR) { total += diskUsage(child) }
         }
-        for file in files {
-            let target = destination.appendingPathComponent(file)
-            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
-            try fm.copyItem(at: source.appendingPathComponent(file), to: target)
-        }
-        return files.sorted()
+        return total
     }
 
-    private static func walk(_ dir: URL, prefix: String, files: inout [String], directories: inout [String]) throws {
-        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]
-        let entries = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)
-        for url in entries {
-            let relative = prefix.isEmpty ? url.lastPathComponent : "\(prefix)/\(url.lastPathComponent)"
-            let values = try? url.resourceValues(forKeys: Set(keys))
-            if values?.isSymbolicLink == true { throw ProviderSandboxError.outputNotRegularFile(relative) }
-            if values?.isDirectory == true {
-                directories.append(relative)
-                try walk(url, prefix: relative, files: &files, directories: &directories)
-            } else if values?.isRegularFile == true {
-                files.append(relative)
+    static func entryName(_ entry: UnsafeMutablePointer<dirent>) -> String {
+        withUnsafePointer(to: &entry.pointee.d_name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: entry.pointee.d_name)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    static func isType(_ info: stat, _ type: mode_t) -> Bool { (info.st_mode & S_IFMT) == type }
+
+    // MARK: - Delivery
+
+    struct Collected {
+        var directories: [String] = []
+        var files: [(path: String, data: Data)] = []
+        var bytes = 0
+    }
+
+    struct TooLarge: Error {}
+
+    /// Reads the whole output folder into memory before writing any of it, so a refused output
+    /// delivers nothing. Every entry is opened with O_NOFOLLOW relative to its parent's
+    /// descriptor, then checked with `fstat` on that descriptor: a link swapped in at any moment
+    /// fails the open instead of being followed, and no path is ever looked up twice. Hard links
+    /// are refused too: one is a regular file whose bytes belong to wherever it was linked from.
+    static func collect(_ folder: URL, limit: Int) throws -> Collected {
+        let root = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard root >= 0 else { throw ProviderSandboxError.snapshotFailed("cannot open the output folder") }
+        defer { close(root) }
+        var collected = Collected()
+        try collect(directory: root, prefix: "", limit: limit, into: &collected)
+        return collected
+    }
+
+    private static func collect(directory: Int32, prefix: String, limit: Int, into collected: inout Collected) throws {
+        for name in try names(in: directory) {
+            let relative = prefix.isEmpty ? name : "\(prefix)/\(name)"
+            // O_NONBLOCK: a FIFO would otherwise block the open until someone writes to it.
+            let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard fd >= 0 else { throw ProviderSandboxError.outputNotRegularFile(relative) }
+            defer { close(fd) }
+            var info = stat()
+            guard fstat(fd, &info) == 0 else { throw ProviderSandboxError.outputNotRegularFile(relative) }
+            if isType(info, S_IFDIR) {
+                collected.directories.append(relative)
+                try collect(directory: fd, prefix: relative, limit: limit, into: &collected)
+            } else if isType(info, S_IFREG), info.st_nlink == 1 {
+                let data = try readAll(fd, budget: limit - collected.bytes)
+                collected.bytes += data.count
+                collected.files.append((relative, data))
             } else {
                 throw ProviderSandboxError.outputNotRegularFile(relative)
             }
         }
+    }
+
+    private static func names(in directory: Int32) throws -> [String] {
+        let copy = dup(directory)
+        guard copy >= 0, let dir = fdopendir(copy) else {
+            if copy >= 0 { close(copy) }
+            throw ProviderSandboxError.snapshotFailed("cannot list the output folder")
+        }
+        defer { closedir(dir) }
+        var names: [String] = []
+        while let entry = readdir(dir) {
+            let name = entryName(entry)
+            if name != "." && name != ".." { names.append(name) }
+        }
+        return names.sorted()
+    }
+
+    /// Reads to EOF, refusing past `budget`: the disk watchdog samples, so this is the check
+    /// that holds at the moment of delivery.
+    private static func readAll(_ fd: Int32, budget: Int) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n < 0 { if errno == EINTR { continue }; throw ProviderSandboxError.snapshotFailed("cannot read the output") }
+            if n == 0 { return data }
+            data.append(contentsOf: buffer[0..<n])
+            if data.count > budget { throw TooLarge() }
+        }
+    }
+
+    /// Writes into the caller's folder the same way it read: each folder opened with
+    /// O_NOFOLLOW from its parent, each file created O_EXCL | O_NOFOLLOW after removing any
+    /// file of that name, so a link already in the destination is never written through.
+    static func write(_ collected: Collected, to destination: URL) throws {
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let root = open(destination.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard root >= 0 else { throw ProviderSandboxError.snapshotFailed("cannot open \(destination.path)") }
+        defer { close(root) }
+        for dir in collected.directories { close(try openFolder(dir, under: root)) }
+        for file in collected.files {
+            let parentPath = (file.path as NSString).deletingLastPathComponent
+            let name = (file.path as NSString).lastPathComponent
+            let parent = parentPath.isEmpty ? dup(root) : try openFolder(parentPath, under: root)
+            defer { close(parent) }
+            if unlinkat(parent, name, 0) != 0, errno != ENOENT {
+                throw ProviderSandboxError.snapshotFailed("cannot replace \(file.path) in the destination")
+            }
+            let fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+            guard fd >= 0 else { throw ProviderSandboxError.snapshotFailed("cannot create \(file.path) in the destination") }
+            defer { close(fd) }
+            let ok = file.data.withUnsafeBytes { bytes -> Bool in
+                var offset = 0
+                while offset < bytes.count {
+                    let n = Darwin.write(fd, bytes.baseAddress! + offset, bytes.count - offset)
+                    if n < 0 { if errno == EINTR { continue }; return false }
+                    offset += n
+                }
+                return true
+            }
+            guard ok else { throw ProviderSandboxError.snapshotFailed("cannot write \(file.path) in the destination") }
+        }
+    }
+
+    private static func openFolder(_ path: String, under root: Int32) throws -> Int32 {
+        var current = dup(root)
+        for part in path.split(separator: "/") {
+            let name = String(part)
+            _ = mkdirat(current, name, 0o755)
+            let next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(current)
+            guard next >= 0 else { throw ProviderSandboxError.snapshotFailed("\(path) is not a folder in the destination") }
+            current = next
+        }
+        return current
     }
 }
 
@@ -374,11 +560,43 @@ private final class GroupID: @unchecked Sendable {
         guard let pgid = value, killpg(pgid, 0) == 0 else { return }
         killpg(pgid, SIGKILL)
     }
+
+    /// While the leader may still be running, it holds the group id, so this cannot hit a
+    /// stranger.
+    func kill() {
+        if let pgid = value { killpg(pgid, SIGKILL) }
+    }
+
+    /// False when the group still has a member after `seconds`.
+    func waitUntilGone(seconds: Double) async -> Bool {
+        guard let pgid = value else { return true }
+        let deadline = Date().addingTimeInterval(seconds)
+        while killpg(pgid, 0) == 0 {
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return true
+    }
 }
 
-private final class Flag: @unchecked Sendable {
+/// Why the run was stopped, first cause only: a run killed for its stdout is not also
+/// reported as timed out because the clock ran out while it was dying.
+private final class StopReason: @unchecked Sendable {
+    enum Reason { case timedOut, tooLarge(String) }
     private let lock = NSLock()
-    private var isSet = false
-    func set() { lock.lock(); isSet = true; lock.unlock() }
-    var value: Bool { lock.lock(); defer { lock.unlock() }; return isSet }
+    private var reason: Reason?
+    /// True when this call set it.
+    func set(_ new: Reason) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard reason == nil else { return false }
+        reason = new
+        return true
+    }
+    var value: Reason? { lock.lock(); defer { lock.unlock() }; return reason }
+}
+
+private final class ByteCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    func add(_ n: Int) -> Int { lock.lock(); defer { lock.unlock() }; total += n; return total }
 }

@@ -42,10 +42,13 @@ final class ProviderSandboxTests: XCTestCase {
     }
 
     private func sandbox(sandboxExec: String = "/usr/bin/sandbox-exec",
-                         runner: any CommandRunner = SystemCommandRunner()) -> ProviderSandbox {
+                         runner: any CommandRunner = SystemCommandRunner(),
+                         limits: ProviderSandbox.Limits = .standard) -> ProviderSandbox {
         ProviderSandbox(sandboxExecPath: sandboxExec, runner: runner,
-                        snapshotRoot: tmp.appendingPathComponent("runs"), killGrace: 0.5)
+                        snapshotRoot: tmp.appendingPathComponent("runs"), killGrace: 0.5, limits: limits)
     }
+
+    private static let small = ProviderSandbox.Limits(stdout: 1 << 20, output: 1 << 20, temp: 1 << 20, file: 64 << 20)
 
     private func output() throws -> URL {
         let url = tmp.appendingPathComponent("out-\(UUID().uuidString)")
@@ -363,6 +366,130 @@ final class ProviderSandboxTests: XCTestCase {
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         try? p.run(); p.waitUntilExit()
+    }
+
+    // MARK: - Caps
+
+    /// The flood would go on for 30s; the stdout cap stops it at 1 MiB.
+    func testStdoutFloodIsStopped() async throws {
+        let start = Date()
+        let result = try await sandbox().run(
+            try provider(["/bin/sh", "-c", "head -c 4000000 /dev/zero; exec /bin/sleep 30"], timeout: 5),
+            outputDirectory: try output())
+        XCTAssertEqual(result, .outputTooLarge("stdout"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
+
+    /// Many small files, each far under the per-file cap, only add up past the folder cap.
+    /// Rate-limited so the RED run (no cap) cannot fill the disk before its timeout.
+    func testOutputFolderFloodIsStopped() async throws {
+        let out = try output()
+        let start = Date()
+        let result = try await sandbox(limits: Self.small).run(
+            try provider(["/bin/sh", "-c", "i=0; while :; do /bin/dd if=/dev/zero of=\"$1/f$i\" bs=65536 count=4 2>/dev/null; i=$((i+1)); /bin/sleep 0.02; done",
+                          "sh", "{out}"], timeout: 5),
+            outputDirectory: out)
+        XCTAssertEqual(result, .outputTooLarge("out/"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: out.path), [])
+    }
+
+    func testTempFolderFloodIsStopped() async throws {
+        let start = Date()
+        let result = try await sandbox(limits: Self.small).run(
+            try provider(["/bin/sh", "-c", "i=0; while :; do /bin/dd if=/dev/zero of=\"$TMPDIR/f$i\" bs=65536 count=4 2>/dev/null; i=$((i+1)); /bin/sleep 0.02; done"],
+                         timeout: 5),
+            outputDirectory: try output())
+        XCTAssertEqual(result, .outputTooLarge("tmp/"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
+
+    /// One file grows past the per-file cap faster than any periodic check could see it; the
+    /// kernel stops the write at the cap.
+    func testSingleFileOverTheCapIsStopped() async throws {
+        let out = try output()
+        let limits = ProviderSandbox.Limits(stdout: 1 << 20, output: 64 << 20, temp: 64 << 20, file: 1 << 20)
+        let result = try await sandbox(limits: limits).run(
+            try provider(["/bin/dd", "if=/dev/zero", "of={out}/big", "bs=65536", "count=64"]),
+            outputDirectory: out)
+        XCTAssertEqual(result, .outputTooLarge("file"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("big").path))
+    }
+
+    /// A timeout far past the parser's cap (a hand-built manifest) must not trap the
+    /// nanosecond arithmetic; it is clamped to ten minutes.
+    func testHugeTimeoutIsClamped() async throws {
+        let result = try await sandbox().run(try provider(["/usr/bin/true"], timeout: Int.max), outputDirectory: try output())
+        XCTAssertEqual(exited(result).code, 0)
+    }
+
+    // MARK: - Delivery
+
+    /// An escaped process swaps a file for a link after the run. Delivery opens every entry
+    /// with O_NOFOLLOW, so the link is refused rather than followed into the secret.
+    func testFileSwappedForALinkBeforeDeliveryIsRefused() async throws {
+        let secret = tmp.appendingPathComponent("secret.txt")
+        try Data("secret".utf8).write(to: secret)
+        let out = try output()
+        var s = sandbox()
+        s.beforeDelivery = { folder in
+            let x = folder.appendingPathComponent("x")
+            try? FileManager.default.removeItem(at: x)
+            try? FileManager.default.createSymbolicLink(at: x, withDestinationURL: secret)
+        }
+        do {
+            _ = try await s.run(try provider(["/bin/sh", "-c", "echo ok > \"$1/x\"", "sh", "{out}"]), outputDirectory: out)
+            XCTFail("a swapped-in link was delivered")
+        } catch {
+            XCTAssertEqual(error as? ProviderSandboxError, .outputNotRegularFile("x"))
+        }
+        XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: out.appendingPathComponent("x").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("x").path))
+    }
+
+    /// The same with a folder: `sub/` becomes a link to a folder holding a secret.
+    func testFolderSwappedForALinkBeforeDeliveryIsRefused() async throws {
+        let secrets = tmp.appendingPathComponent("secrets")
+        try FileManager.default.createDirectory(at: secrets, withIntermediateDirectories: true)
+        try Data("secret".utf8).write(to: secrets.appendingPathComponent("y"))
+        let out = try output()
+        var s = sandbox()
+        s.beforeDelivery = { folder in
+            let sub = folder.appendingPathComponent("sub")
+            try? FileManager.default.removeItem(at: sub)
+            try? FileManager.default.createSymbolicLink(at: sub, withDestinationURL: secrets)
+        }
+        do {
+            _ = try await s.run(try provider(["/bin/sh", "-c", "mkdir \"$1/sub\" && echo ok > \"$1/sub/y\"", "sh", "{out}"]),
+                                outputDirectory: out)
+            XCTFail("a swapped-in folder link was delivered")
+        } catch {
+            XCTAssertEqual(error as? ProviderSandboxError, .outputNotRegularFile("sub"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("sub/y").path))
+    }
+
+    /// A hard link is a regular file to `fstat`, but its bytes are whatever it was linked to,
+    /// read by the unsandboxed app during delivery. The sandbox already refuses `ln` from the
+    /// inside (measured: the generator-made link never appears), so the link is planted the way
+    /// an escaped process would, through the hook. Only files with one link are delivered.
+    func testHardLinkInOutputIsNotDelivered() async throws {
+        let secret = tmp.appendingPathComponent("hard-secret.txt")
+        try Data("secret".utf8).write(to: secret)
+        let out = try output()
+        var s = sandbox()
+        s.beforeDelivery = { folder in
+            let x = folder.appendingPathComponent("x")
+            try? FileManager.default.removeItem(at: x)
+            _ = link(secret.path, x.path)
+        }
+        do {
+            _ = try await s.run(try provider(["/bin/sh", "-c", "echo ok > \"$1/x\"", "sh", "{out}"]), outputDirectory: out)
+            XCTFail("a hard link was delivered")
+        } catch {
+            XCTAssertEqual(error as? ProviderSandboxError, .outputNotRegularFile("x"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("x").path))
     }
 
     // MARK: - Refusals
