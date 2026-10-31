@@ -324,8 +324,8 @@ final class CLIRunner {
         case .providerCheck:
             // Local, like `intakeRun`: main.swift runs it before a transport exists.
             break
-        case .intakeRun:
-            // main.swift intercepts `intake run` right after the usage check, before a
+        case .intakeRun, .intakeThreads:
+            // main.swift intercepts `intake run` and `intake threads` right after the usage check, before a
             // transport or this runner exists at all — the detached process has no fleet to
             // reach and no reply to wait on. `dispatch()` is only reached once `run()` has
             // already connected, so this arm is unreachable in practice and exists only to

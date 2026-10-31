@@ -57,6 +57,9 @@ public enum CLICommand: Equatable {
     /// `main.swift` runs it before any transport exists, since it reads files and never asks
     /// Flight Deck anything.
     case providerCheck(dir: String, runSamples: Bool)
+    /// `intake threads`: the detached ThreadRunner for one intake's ask threads, intercepted in
+    /// `main.swift` exactly as `intakeRun` is.
+    case intakeThreads(id: UUID, root: String)
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
@@ -467,20 +470,21 @@ public enum CLIArguments {
     private static func parseIntake(_ c: inout Cursor) throws -> CLICommand {
         let sub = try c.requirePositional("intake: missing subcommand")
         switch sub {
-        case "run":
-            let token = try c.requirePositional("intake run: missing id")
+        case "run", "threads":
+            // Both detached runners take the same arguments: the intake's id and its root.
+            let token = try c.requirePositional("intake \(sub): missing id")
             guard let id = UUID(uuidString: token) else {
-                throw CLIUsageError("intake run: requires a full UUID, got \"\(token)\"")
+                throw CLIUsageError("intake \(sub): requires a full UUID, got \"\(token)\"")
             }
             var root: String?
             while let flag = c.nextFlag() {
                 switch flag {
                 case "--root": root = try c.require(after: flag)
-                default: throw Cursor.unknownFlag(flag, in: "intake run")
+                default: throw Cursor.unknownFlag(flag, in: "intake \(sub)")
                 }
             }
-            guard let root else { throw CLIUsageError("intake run: --root DIR is required") }
-            return .intakeRun(id: id, root: root)
+            guard let root else { throw CLIUsageError("intake \(sub): --root DIR is required") }
+            return sub == "run" ? .intakeRun(id: id, root: root) : .intakeThreads(id: id, root: root)
 
         default:
             throw CLIUsageError("intake: unknown subcommand \"\(sub)\"")

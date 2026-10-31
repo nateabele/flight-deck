@@ -105,6 +105,30 @@ if case .intakeRun(let id, let root) = invocation.command {
     }
 }
 
+// The detached ask-thread runner (planning v2 §5), mirroring `intake run` above: no fleet, no
+// socket, the environment inherited as the app built it. The app's spawn is what injects
+// anything the runner must carry (PATH, the intake's runner token in `FLIGHT_DECK_CALLER`);
+// the turns' CLIs get it through `ThreadTurnExecutor`'s base environment. A signal cancels the
+// task, which cancels the running turns: they stay queued for the next runner.
+if case .intakeThreads(let id, let root) = invocation.command {
+    let environment = ProcessInfo.processInfo.environment
+    let runner = ThreadRunner(
+        root: URL(fileURLWithPath: root),
+        intakeID: id,
+        executor: ThreadTurnExecutor(runner: SystemCommandRunner(), environment: environment)
+    )
+    final class TaskBox { var task: Task<Void, Never>? }
+    let box = TaskBox()
+    let signalSources = RunnerSignals.install { box.task?.cancel() }
+    box.task = Task {
+        await runner.run()
+        exit(0)
+    }
+    withExtendedLifetime(signalSources) {
+        dispatchMain()
+    }
+}
+
 // `--socket` → `$FLIGHT_DECK_CONTROL_SOCKET` → `$FLIGHT_DECK_STATE_DIR/control.sock` → the
 // default state dir, mirroring scripts/answer-trigger.sh's own fallback.
 let stateDir = env["FLIGHT_DECK_STATE_DIR"] ?? (NSHomeDirectory() + "/Library/Application Support/Flight Deck")

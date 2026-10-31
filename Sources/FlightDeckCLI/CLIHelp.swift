@@ -627,6 +627,13 @@ public enum CLIHelp {
                     options: [("--root DIR", "required: the intake's directory")]
                 ),
                 Page(
+                    name: "intake threads", summary: "run an intake's ask threads (Flight Deck only)",
+                    usage: ["flightdeck intake threads ID --root DIR"],
+                    about: "The detached runner Flight Deck launches for a Flight Control intake's ask threads. Not for running by hand.",
+                    arguments: [("ID", "the intake's full id")],
+                    options: [("--root DIR", "required: the intake's directory")]
+                ),
+                Page(
                     name: "raw", summary: "send one protocol frame and print the replies",
                     usage: ["flightdeck raw FRAME"],
                     about: "Sends one client frame to Flight Deck and prints every reply to it. Covers any operation that has no verb yet.",
