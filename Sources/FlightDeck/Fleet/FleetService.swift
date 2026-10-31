@@ -724,6 +724,13 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "unknown_checkpoint"))
             }
             reply(.intakePlan(cid: cid, plan))
+        case .intakeThreadGet(let id, let threadID, let since):
+            // Read from `threads/`, which only ThreadRunner writes; nothing here writes and
+            // nothing enters `FleetSnapshot`, as for `intakePlan`.
+            switch store.intakeService.phoneThreadGet(id, threadID: threadID, since: since) {
+            case .success(let page): reply(.intakeThread(cid: cid, page))
+            case .failure(let refusal): reply(.err(cid: cid, code: refusal.code))
+            }
         case .fileRead(let session, let path, let offset, let limit, let maxPixel):
             // A `Task` for `timeline`'s reason: the read and any image decode run detached,
             // and `reply` lands back here on `queue`. Nothing is written and nothing enters
@@ -1453,6 +1460,21 @@ final class FleetService: ObservableObject {
             }
         case .intakeRounds(let id, let token, let config, let base):
             if let code = store.intakeService.phoneRounds(id, token: token, config: config, base: base) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadSend(let id, let token, let threadID, let anchor, let text):
+            // Every thread refusal is `IntakeService`'s (`IntakeService+Threads`), as for the
+            // sibling intake ops: `threads_unavailable` until threads ship.
+            if let code = store.intakeService.phoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadResolve(let id, let token, let threadID):
+            if let code = store.intakeService.phoneThreadResolve(id, token: token, threadID: threadID) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeDiffDecide(let id, let token, let threadID, let diffID, let accept):
+            if let code = store.intakeService.phoneDiffDecide(id, token: token, threadID: threadID, diffID: diffID,
+                                                               accept: accept) {
                 return .err(cid: cid, code: code)
             }
         case .swarmPause(let project):

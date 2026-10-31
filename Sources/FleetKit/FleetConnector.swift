@@ -143,6 +143,7 @@ public final class FleetConnector: @unchecked Sendable {
     /// The intake tables: one per answer shape, in the shared `cid` space like the rest.
     private var pendingIntakeDetail: [Int: (Result<WireIntakeDetail?, FleetRequestError>) -> Void] = [:]
     private var pendingIntakePlan: [Int: (Result<WireIntakePlan, FleetRequestError>) -> Void] = [:]
+    private var pendingIntakeThread: [Int: (Result<WireThreadPage, FleetRequestError>) -> Void] = [:]
     /// File reads for the phone's file viewer, one table per answer shape like the rest.
     private var pendingFile: [Int: (Result<WireFileChunk, FleetRequestError>) -> Void] = [:]
     /// A fourth answer type, on the same reasoning `pendingAcks` and `pendingOptions` give:
@@ -346,6 +347,19 @@ public final class FleetConnector: @unchecked Sendable {
         pendingIntakePlan[cid] = completion
     }
 
+    /// Ask for one ask thread's conversation after turn `since` (all of it when nil). Same
+    /// contract as `requestIntakeDetail`. Only for a Mac whose detail says `threads == true`.
+    public func requestIntakeThread(
+        id: UUID, threadID: UUID, since: Int?,
+        then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.intakeThreadGet(id: id, threadID: threadID, since: since))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingIntakeThread[cid] = completion
+    }
+
     /// Ask for a byte range of a file a transcript links. Same contract as
     /// `requestIntakeDetail`; a Mac too old to know `file.read` answers `unsupported`.
     public func requestFile(
@@ -505,6 +519,14 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingIntakePlan.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveIntakeThread(
+        _ cid: Int, with result: Result<WireThreadPage, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingIntakeThread.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -780,6 +802,9 @@ public final class FleetConnector: @unchecked Sendable {
         case .intakePlan(let cid, let plan):
             resolveIntakePlan(cid, with: .success(plan))
             return
+        case .intakeThread(let cid, let page):
+            resolveIntakeThread(cid, with: .success(page))
+            return
         case .fileChunk(let cid, let file):
             resolveFile(cid, with: .success(file))
             return
@@ -803,6 +828,10 @@ public final class FleetConnector: @unchecked Sendable {
             }
             if pendingIntakePlan[cid] != nil {
                 resolveIntakePlan(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingIntakeThread[cid] != nil {
+                resolveIntakeThread(cid, with: .failure(.server(code: code)))
                 return
             }
             if pendingFile[cid] != nil {
@@ -1080,6 +1109,9 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingIntakePlan = pendingIntakePlan
         pendingIntakePlan.removeAll()
         for completion in outstandingIntakePlan.values { completion(.failure(.disconnected)) }
+        let outstandingIntakeThread = pendingIntakeThread
+        pendingIntakeThread.removeAll()
+        for completion in outstandingIntakeThread.values { completion(.failure(.disconnected)) }
         let outstandingFile = pendingFile
         pendingFile.removeAll()
         for completion in outstandingFile.values { completion(.failure(.disconnected)) }

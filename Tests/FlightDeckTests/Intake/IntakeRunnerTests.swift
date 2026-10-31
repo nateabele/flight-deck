@@ -699,6 +699,34 @@ final class IntakeRunnerTests: XCTestCase {
 // MARK: - Human edits and notes
 
 extension IntakeRunnerTests {
+    /// `applyThreadDiff` before ask threads ship (P1 Task 0): the runner neither applies it nor
+    /// acks it. Everything queued before it is folded and acked; it and everything after it wait
+    /// on disk for a build that can apply it, in order. And the runner still exits — a held
+    /// command must not read as "unacked work" to the late-command recheck and spin it.
+    func testApplyThreadDiffIsLeftUnackedAndTheRunnerStillExits() async throws {
+        _ = try store.appendCommand(.step)
+        let first = await runner(scripted()).run()
+        XCTAssertEqual(first, .paused)
+
+        _ = try store.appendCommand(.extend(.refine, by: 1))
+        let held = try store.appendCommand(.applyThreadDiff(thread: ThreadID(UUID()), diff: UUID(), checkpoint: 1,
+                                                            markdown: "# Plan\n\n## Scope\nOne, edited\n"))
+        _ = try store.appendCommand(.step)
+        let runner = runner(scripted())
+        let exited = expectation(description: "the runner exits")
+        let box = StatusBox()
+        Task { box.status = await runner.run(); exited.fulfill() }
+        await fulfillment(of: [exited], timeout: 10)
+
+        XCTAssertEqual(box.status, .paused)
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.extraRefinement, 1, "the command before it is applied")
+        XCTAssertEqual(tape.ackedCommandSeq, held - 1, "it is never acked unapplied")
+        XCTAssertEqual(tape.checkpoints.count, 1, "the ▶ behind it waits its turn")
+        XCTAssertNil(store.userEdits(checkpoint: 1), "nothing applied it")
+        XCTAssertEqual(store.commands(after: tape.ackedCommandSeq).map(\.seq), [held, held + 1])
+    }
+
     /// `.editPlan` is applied by the runner (it owns `checkpoints/`): the edit lands as
     /// `plan.user.md`, `drafts/0.md` stays as generated, and the next round reviews the edit.
     func testEditPlanIsWrittenByTheRunnerAndFeedsTheNextRound() async throws {
@@ -910,5 +938,14 @@ extension IntakeRunnerTests {
         let stopped = await run.value
         XCTAssertEqual(stopped, .stopped)
         XCTAssertNil(store.loadTape().roundStartedAt)
+    }
+}
+
+private final class StatusBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _status: RunnerStatus?
+    var status: RunnerStatus? {
+        get { lock.withLock { _status } }
+        set { lock.withLock { _status = newValue } }
     }
 }

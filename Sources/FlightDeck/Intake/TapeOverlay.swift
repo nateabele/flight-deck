@@ -16,11 +16,11 @@ enum TapeOverlay {
     /// The commands whose effect on the tape is decided by `TapePlanner.apply` alone, so folding
     /// them here can't disagree with the runner. `.stop` is the runner's own (it also ends the
     /// round, and its "Stopping…" is `HaltRequest`'s); notes have the notes rail's own
-    /// optimistic copy; a plan edit is a file, not tape state.
+    /// optimistic copy; a plan edit, a thread's accepted diff included, is a file, not tape state.
     static func folds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview, .pause, .extend, .trim: true
-        case .stop, .note, .removeNote, .setNoteKind, .editPlan: false
+        case .stop, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff: false
         }
     }
 

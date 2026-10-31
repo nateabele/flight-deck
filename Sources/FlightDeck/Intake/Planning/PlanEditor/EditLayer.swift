@@ -243,36 +243,16 @@ enum EditLayer {
 
     // MARK: - Re-targeting a stale edit
 
-    /// What to send for an edit committed after its checkpoint stopped being the plan head.
-    struct Retarget: Equatable, Sendable {
-        var command: TapeCommand
-        /// Set when the edit could not be carried: it stays on its checkpoint, and the banner
-        /// points the human at it.
-        var conflict: EditConflict?
-    }
+    /// What to send for an edit committed after its checkpoint stopped being the plan head —
+    /// `PlanRebase`'s, since the rule moved to IntakeKit (R4).
+    typealias Retarget = PlanRebase.Retarget
 
-    /// The runner's own carry rule (`PlanLayers.carryForward`), for the one case it can't see:
-    /// an edit committed after the new head already exists. Kept on the old checkpoint it
-    /// would feed nothing (`TapeStore.headPlanCheckpoint`), so it is three-way merged onto the
-    /// head — ours = the head's plan, base = the text the edit was typed on, theirs = the edit —
-    /// and sent for the head. A conflict keeps it where it was typed, as before.
-    ///
-    /// Nonisolated and async, so `git` runs off the main actor. The app's own environment is
-    /// enough: `git` is `/usr/bin/git`, on every PATH, and a login-shell lookup here would
-    /// block for seconds.
+    /// `PlanRebase.retarget`, which ThreadRunner shares: one carry rule for a stale edit and a
+    /// stale thread diff. Kept under this name so the editor's callers didn't move with it.
     static func retarget(markdown: String, typedOn: Int, base: String, head: Int, headPlan: String,
                          runner: CommandRunner) async -> Retarget {
-        let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("flightdeck-carry-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: scratch) }
-        switch await PlanLayers.carryForward(ours: headPlan, base: base, theirs: markdown, runner: runner,
-                                             environment: ProcessInfo.processInfo.environment, scratch: scratch) {
-        case .merged(let plan):
-            return Retarget(command: .editPlan(checkpoint: head, markdown: plan), conflict: nil)
-        case .conflicted:
-            return Retarget(command: .editPlan(checkpoint: typedOn, markdown: markdown),
-                            conflict: EditConflict(edits: typedOn, landedIn: head))
-        }
+        await PlanRebase.retarget(markdown: markdown, typedOn: typedOn, base: base, head: head, headPlan: headPlan,
+                                  runner: runner)
     }
 
     // MARK: - Attributes

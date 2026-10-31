@@ -49,8 +49,9 @@ public enum Triage {
 
     /// One clarifying question. `cost` is left out in P0: nothing reads it yet, and every field
     /// here must be in `required` for strict mode, so an unused one is a field the agent must
-    /// invent a value for.
-    private static let questionItem = #"{"type":"object","additionalProperties":false,"required":["id","text","kind","options","recommended","allowOther"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"kind":{"type":"string","enum":["single","multi","toggle","text"]},"options":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","label","detail"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"detail":{"type":["string","null"]}}}},"recommended":{"type":"array","items":{"type":"string"}},"allowOther":{"type":"boolean"}}}"#
+    /// invent a value for. Internal, not private: `ThreadActions.schemaJSON` embeds this exact
+    /// fragment, so a thread's question and a triage question can't drift apart.
+    static let questionItem = #"{"type":"object","additionalProperties":false,"required":["id","text","kind","options","recommended","allowOther"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"kind":{"type":"string","enum":["single","multi","toggle","text"]},"options":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","label","detail"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"detail":{"type":["string","null"]}}}},"recommended":{"type":"array","items":{"type":"string"}},"allowOther":{"type":"boolean"}}}"#
 
     /// Strict-mode schema for both `codex exec --output-schema` and `claude --json-schema`:
     /// every object declares `additionalProperties: false` and lists every property in

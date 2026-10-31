@@ -99,6 +99,11 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// drops the socket on an op it does not know. nil from such a Mac, and the phone says to
     /// answer on the Mac.
     public var structuredQuestions: Bool?
+    /// true from a Mac that accepts the ask-thread ops (`intake.thread.*`, `intake.diff.decide`)
+    /// — the phone's licence to offer Ask. Separate from `steer` for the same reason `choose` is:
+    /// an older Mac drops the socket on an op it does not know. nil from such a Mac, and from
+    /// this one until threads ship.
+    public var threads: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -108,7 +113,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
         roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
         roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil,
-        structuredQuestions: Bool? = nil
+        structuredQuestions: Bool? = nil, threads: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -118,6 +123,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.roundConfig = roundConfig
         self.editRounds = editRounds; self.roundsMenu = roundsMenu; self.roundsLock = roundsLock
         self.structuredQuestions = structuredQuestions
+        self.threads = threads
     }
 }
 
@@ -655,15 +661,23 @@ public struct WireIntakePlan: Codable, Equatable, Sendable {
     public var notes: [WireNote]
     public var added: [Int]?
     public var removed: [WireRemovedBlock]?
+    /// The intake's ask threads, for the reader's cards and index; their turns are fetched on
+    /// demand (`intake.thread.get`). nil from a Mac without threads.
+    public var threads: [WireThreadSummary]?
+    /// Every thread's diffs still awaiting the human, in full, for the reader's gutter. nil from
+    /// a Mac without threads.
+    public var pendingDiffs: [WirePendingDiff]?
 
     public init(
         checkpoint: Int, roundName: String, editsVersion: String, markdown: String,
         outline: [WireSection] = [], notes: [WireNote] = [], added: [Int]? = nil,
-        removed: [WireRemovedBlock]? = nil
+        removed: [WireRemovedBlock]? = nil, threads: [WireThreadSummary]? = nil,
+        pendingDiffs: [WirePendingDiff]? = nil
     ) {
         self.checkpoint = checkpoint; self.roundName = roundName; self.editsVersion = editsVersion
         self.markdown = markdown; self.outline = outline; self.notes = notes
         self.added = added; self.removed = removed
+        self.threads = threads; self.pendingDiffs = pendingDiffs
     }
 }
 

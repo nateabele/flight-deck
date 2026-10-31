@@ -331,6 +331,18 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// runs) and answers a refusal as `refused: <the Mac's sentence>`. Sent only when the detail
     /// has `editRounds == true`.
     case intakeRounds(id: UUID, token: UUID, config: WireRoundConfig, base: WireRoundConfig)
+    /// The phone asking a thread something (`intake.thread.send`): a reply to thread `threadID`,
+    /// or a new thread when it is nil — about `anchor` (the reader's block and phrase, as for
+    /// `intakeNote`), or the whole plan when that is nil too. The conversation itself is a read,
+    /// `FleetRequest.intakeThreadGet`. **Sent only when the detail has `threads == true`** — an
+    /// older Mac drops the socket on this unknown op, as on the three below.
+    case intakeThreadSend(id: UUID, token: UUID, threadID: UUID?, anchor: WireThreadAnchor?, text: String)
+    /// The phone resolving a thread (`intake.thread.resolve`); it takes no more turns until it
+    /// is reopened.
+    case intakeThreadResolve(id: UUID, token: UUID, threadID: UUID)
+    /// The phone's ✓ or ✗ on a thread's diff (`intake.diff.decide`). Refused with `diff_stale`
+    /// when a newer round left the diff unrebasable: accepting it would apply a guess.
+    case intakeDiffDecide(id: UUID, token: UUID, threadID: UUID, diffID: UUID, accept: Bool)
 
     /// Pause or resume project `project`'s swarm (L3-S §8). Idempotent by state, so no token.
     /// Sent only for a project whose snapshot carries `swarm`, which an older Mac never sends —
@@ -347,6 +359,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case block, approve, feedback
         case command, stage, mode, noteID, kind, checkpoint, quote, preset, config, base
         case round, digest, answers
+        case threadID, anchor, diffID, accept
     }
 
     private enum Op: String, Codable {
@@ -372,6 +385,9 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeAnswer = "intake.answer"
         case intakeStart = "intake.start"
         case intakeRounds = "intake.rounds"
+        case intakeThreadSend = "intake.thread.send"
+        case intakeThreadResolve = "intake.thread.resolve"
+        case intakeDiffDecide = "intake.diff.decide"
         case swarmPause = "swarm.pause"
         case swarmResume = "swarm.resume"
         case handoffConfirm = "handoff.confirm"
@@ -503,6 +519,26 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(token, forKey: .token)
             try c.encode(config, forKey: .config)
             try c.encode(base, forKey: .base)
+        case .intakeThreadSend(let id, let token, let threadID, let anchor, let text):
+            try c.encode(Op.intakeThreadSend, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            // Absent, not null, for a new thread and for the whole plan.
+            try c.encodeIfPresent(threadID, forKey: .threadID)
+            try c.encodeIfPresent(anchor, forKey: .anchor)
+            try c.encode(text, forKey: .text)
+        case .intakeThreadResolve(let id, let token, let threadID):
+            try c.encode(Op.intakeThreadResolve, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(threadID, forKey: .threadID)
+        case .intakeDiffDecide(let id, let token, let threadID, let diffID, let accept):
+            try c.encode(Op.intakeDiffDecide, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(threadID, forKey: .threadID)
+            try c.encode(diffID, forKey: .diffID)
+            try c.encode(accept, forKey: .accept)
         case .swarmPause(let project):
             try c.encode(Op.swarmPause, forKey: .op); try c.encode(project, forKey: .project)
         case .swarmResume(let project):
@@ -665,6 +701,28 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 token: try c.decode(UUID.self, forKey: .token),
                 config: try c.decode(WireRoundConfig.self, forKey: .config),
                 base: try c.decode(WireRoundConfig.self, forKey: .base)
+            )
+        case .intakeThreadSend:
+            self = .intakeThreadSend(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                threadID: try c.decodeIfPresent(UUID.self, forKey: .threadID),
+                anchor: try c.decodeIfPresent(WireThreadAnchor.self, forKey: .anchor),
+                text: try c.decode(String.self, forKey: .text)
+            )
+        case .intakeThreadResolve:
+            self = .intakeThreadResolve(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                threadID: try c.decode(UUID.self, forKey: .threadID)
+            )
+        case .intakeDiffDecide:
+            self = .intakeDiffDecide(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                threadID: try c.decode(UUID.self, forKey: .threadID),
+                diffID: try c.decode(UUID.self, forKey: .diffID),
+                accept: try c.decode(Bool.self, forKey: .accept)
             )
         case .swarmPause: self = .swarmPause(project: try c.decode(UUID.self, forKey: .project))
         case .swarmResume: self = .swarmResume(project: try c.decode(UUID.self, forKey: .project))
@@ -879,6 +937,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case intakeDetail(cid: Int, WireIntakeDetail?)
     /// The reply to `FleetRequest.intakePlan`. Unsequenced, like `page`.
     case intakePlan(cid: Int, WireIntakePlan)
+    /// The reply to `FleetRequest.intakeThreadGet`. Unsequenced, like `page`: a conversation
+    /// fetched on demand is not fleet state.
+    case intakeThread(cid: Int, WireThreadPage)
     /// The reply to `FleetRequest.fileRead`. Unsequenced, like `page`: a file is not fleet state.
     case fileChunk(cid: Int, WireFileChunk)
     /// The reply to `FleetRequest.hostList`. Unsequenced, like `page`: link state is not
@@ -946,13 +1007,13 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
         case line, machine, machines, orphans, unreadable, checks, choices, switched, budget
-        case file
+        case file, thread
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
         case peer, snapshot, caughtUp, ack, err, page, options, endpoints, conversations, hits, session
-        case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
+        case ask, closed, intakeDetail, intakePlan, intakeThread, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
         case infraProgress, infraMachine, infraList, infraDoctor, infraDone, infraBudget
@@ -1031,6 +1092,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.intakePlan, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(plan, forKey: .plan)
+        case .intakeThread(let cid, let page):
+            try c.encode(Tag.intakeThread, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(page, forKey: .thread)
         case .fileChunk(let cid, let file):
             try c.encode(Tag.fileChunk, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -1188,6 +1253,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .intakePlan:
                 self = .intakePlan(cid: try c.decode(Int.self, forKey: .cid),
                                    try c.decode(WireIntakePlan.self, forKey: .plan))
+            case .intakeThread:
+                self = .intakeThread(cid: try c.decode(Int.self, forKey: .cid),
+                                     try c.decode(WireThreadPage.self, forKey: .thread))
             case .fileChunk:
                 self = .fileChunk(cid: try c.decode(Int.self, forKey: .cid),
                                   try c.decode(WireFileChunk.self, forKey: .file))
@@ -1275,7 +1343,7 @@ public extension ServerFrame {
         case .ack(let cid), .err(let cid, _, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
-             .intakeDetail(let cid, _), .intakePlan(let cid, _), .fileChunk(let cid, _), .hostList(let cid, _),
+             .intakeDetail(let cid, _), .intakePlan(let cid, _), .intakeThread(let cid, _), .fileChunk(let cid, _), .hostList(let cid, _),
              .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
              .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),

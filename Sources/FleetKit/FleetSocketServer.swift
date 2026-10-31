@@ -1100,7 +1100,7 @@ public extension ServerFrame {
         case .delegateStarted, .delegateNotice, .delegateOutput, .infraProgress:
             return true
         case .peer, .snapshot, .event, .caughtUp, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
-             .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .fileChunk, .hostList,
+             .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .intakeThread, .fileChunk, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
              .recipeCheck, .hostDisk, .infraMachine, .infraList, .infraDoctor, .infraDone,
              .infraBudget, .accountChoices, .accountSwitched:

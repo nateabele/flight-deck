@@ -102,8 +102,9 @@ enum ControlScope {
         case .viewing:
             return true
         case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
-             .intakeAnswer, .intakeStart, .intakeRounds:
-            // An intake is a project's, not the asking session's: no session id names it.
+             .intakeAnswer, .intakeStart, .intakeRounds, .intakeThreadSend, .intakeThreadResolve, .intakeDiffDecide:
+            // An intake is a project's, not the asking session's: no session id names it. Its
+            // ask threads too — a thread's agent is not the tab that asked.
             return false
         case .swarmPause, .swarmResume, .handoffConfirm, .handoffDecline:
             // A swarm and its hand-offs are a project's, not the asking session's.
@@ -128,7 +129,7 @@ enum ControlScope {
             // Messaging another tab is a cross-tab write, not a read disguised as a request.
             return level == .full || caller == .human
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
-             .intakeDetail, .intakePlan:
+             .intakeDetail, .intakePlan, .intakeThreadGet:
             return true
         case .fileRead:
             // A read, and of nothing a local caller cannot already `cat` from its own shell.

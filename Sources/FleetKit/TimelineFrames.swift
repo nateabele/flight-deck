@@ -218,6 +218,11 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     case intakeDetail(id: UUID, ifNot: String?)
     /// A checkpoint's plan (nil: the head), with a block diff against its parent when `changes`.
     case intakePlan(id: UUID, checkpoint: Int?, changes: Bool)
+    /// One ask thread's conversation (`intake.thread.get`): its turns after seq `since` (all of
+    /// them when nil), answered with `WireThreadPage`. A request, not a `FleetCommand`, because
+    /// it answers with data on its `cid` and writes nothing — `intakePlan`'s shape. Sent only
+    /// when the detail has `threads == true`.
+    case intakeThreadGet(id: UUID, threadID: UUID, since: Int?)
     /// Every paired host and its link state — `flightdeck host ls`. Answered from the Mac's
     /// own registry, so it costs no round trip to any host and works with all of them offline.
     case hostList
@@ -253,6 +258,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case query, conversationID, projectPath
         case intake, ifNot, checkpoint, changes, name, agent, target
         case path, offset, maxPixel
+        case threadID, since
     }
 
     private enum Op: String, Codable {
@@ -266,6 +272,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case openConversation = "search.open"
         case intakeDetail = "intake.detail"
         case intakePlan = "intake.plan"
+        case intakeThreadGet = "intake.thread.get"
         case hostList = "host.list"
         case hostInfo = "host.info"
         case accountList = "account.list"
@@ -316,6 +323,11 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .intake)
             try c.encodeIfPresent(checkpoint, forKey: .checkpoint)
             try c.encode(changes, forKey: .changes)
+        case .intakeThreadGet(let id, let threadID, let since):
+            try c.encode(Op.intakeThreadGet, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encode(threadID, forKey: .threadID)
+            try c.encodeIfPresent(since, forKey: .since)
         case .hostList:
             try c.encode(Op.hostList, forKey: .op)
         case .hostInfo(let name):
@@ -402,6 +414,10 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .intakePlan(id: try c.decode(UUID.self, forKey: .intake),
                                checkpoint: try c.decodeIfPresent(Int.self, forKey: .checkpoint),
                                changes: try c.decodeIfPresent(Bool.self, forKey: .changes) ?? false)
+        case .intakeThreadGet:
+            self = .intakeThreadGet(id: try c.decode(UUID.self, forKey: .intake),
+                                    threadID: try c.decode(UUID.self, forKey: .threadID),
+                                    since: try c.decodeIfPresent(Int.self, forKey: .since))
         case .hostList:
             self = .hostList
         case .hostInfo:
