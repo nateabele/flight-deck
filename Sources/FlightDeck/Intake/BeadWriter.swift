@@ -32,7 +32,14 @@ struct BeadWriter {
     /// Deck's intake rather than whichever shell user happened to run it.
     let actor: String
 
-    init(runner: FlywheelProcessRunner = SystemFlywheelProcessRunner(), brPath: String = "br", actor: String) {
+    /// The slug release exported the plan under (`docs/plans/<slug>/`). With it, a task that
+    /// cites visuals gets a "Fidelity references" section (V-R3); without it, none, because
+    /// there is no exported path to point at.
+    let planSlug: String?
+
+    init(runner: FlywheelProcessRunner = SystemFlywheelProcessRunner(), brPath: String = "br", actor: String,
+         planSlug: String? = nil) {
+        self.planSlug = planSlug
         self.runner = runner
         self.brPath = brPath
         self.actor = actor
@@ -65,7 +72,7 @@ struct BeadWriter {
         switch step {
         case .create(let bead):
             var args = ["create", "--title", bead.title, "-t", bead.type, "-p", String(bead.priority),
-                        "--description", bead.description]
+                        "--description", FidelityReferences.appending(to: bead.description, refs: bead.visualRefs, slug: planSlug)]
             // `--acceptance` here, `--acceptance-criteria` on `.update` below — both spellings
             // verified live against `br 0.6.0 --help` (create's is a documented alias); this
             // is not a mismatch to "fix".

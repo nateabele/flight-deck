@@ -99,3 +99,15 @@ final class ReleaseSheetModelTests: XCTestCase {
                        "BlueFalcon has no Flight Deck session — mail only")
     }
 }
+
+final class ReleaseSheetExportLinesTests: XCTestCase {
+    func testTheSheetListsTheFilesAndTheCommit() {
+        let preview = PlanExportPreview(paths: ["docs/plans/p/plan.md", "docs/plans/p/visuals/a/README.md"],
+                                        commitMessage: "docs: plan p for release")
+        let model = ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:], export: preview)
+        XCTAssertEqual(model.exportLines, ["Writes 2 files to the repo", "docs/plans/p/plan.md",
+                                           "docs/plans/p/visuals/a/README.md",
+                                           "Commits only those paths: docs: plan p for release"])
+        XCTAssertEqual(ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:]).exportLines, [])
+    }
+}
