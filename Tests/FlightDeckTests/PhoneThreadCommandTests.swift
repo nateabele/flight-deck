@@ -228,6 +228,23 @@ final class PhoneThreadCommandTests: XCTestCase {
         XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
     }
 
+    /// The edit landed, the decision append failed, and ThreadRunner then marked the diff stale
+    /// (the edit changed the passage it quoted): the retry must still record the decision.
+    func testRetryAfterEditLandedAndDiffWentStaleStillRecordsTheDecision() async throws {
+        let i = try seed(); let svc = await makeService(); let t = ThreadID(); let d = diff(t)
+        let dir = IntakeStore(root: root).directory(for: i.id)
+        try Data().write(to: dir.appendingPathComponent("threads"))
+        let token = UUID()
+        let pending = FakeThreadReader(records: [record(t)], diffsByThread: [t: [d]])
+        XCTAssertEqual(svc.applyPhoneDiffDecide(i.id, token: token, threadID: t.raw, diffID: d.id, accept: true, reader: pending), "write_failed")
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("threads"))
+        var stale = d; stale.state = .stale
+        let went = FakeThreadReader(records: [record(t)], diffsByThread: [t: [stale]])
+        XCTAssertNil(svc.applyPhoneDiffDecide(i.id, token: token, threadID: t.raw, diffID: d.id, accept: true, reader: went))
+        XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
+        XCTAssertEqual(tapeCommands(i.id).filter { if case .applyThreadDiff = $0 { true } else { false } }.count, 1)
+    }
+
     func testRejectWritesOnlyTheDecision() async throws {
         let i = try seed(); let svc = await makeService(); let t = ThreadID(); let d = diff(t)
         let reader = FakeThreadReader(records: [record(t)], diffsByThread: [t: [d]])

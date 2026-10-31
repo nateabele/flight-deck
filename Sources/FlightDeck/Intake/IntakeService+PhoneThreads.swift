@@ -182,8 +182,15 @@ extension IntakeService {
         let thread = ThreadID(raw: threadID)
         guard reader.threads().contains(where: { $0.id == thread }) else { return refuse("unknown_thread", id) }
         guard let diff = reader.diffs(thread).first(where: { $0.id == diffID }) else { return refuse("unknown_diff", id) }
+        let tape = tapeStore(id)
+        // An edit already on the tape means an earlier ✓ got this far: the diff may have gone
+        // stale BECAUSE the edit changed its passage, and the retry must still record the decision.
+        let alreadyQueued = tape.commands(after: 0).contains {
+            if case .applyThreadDiff(_, let queued, _, _) = $0.command { queued == diffID } else { false }
+        }
         switch diff.state {
-        case .stale: return refuse("diff_stale", id)
+        case .stale:
+            if !(doAccept && alreadyQueued) { return refuse("diff_stale", id) }
         case .accepted, .rejected:
             // The same decision twice is an ack (a second phone, or a retry under a new token).
             if (diff.state == .accepted) == doAccept {
@@ -194,11 +201,7 @@ extension IntakeService {
         case .pending: break
         }
 
-        let tape = tapeStore(id)
         if doAccept {
-            let alreadyQueued = tape.commands(after: 0).contains {
-                if case .applyThreadDiff(_, let queued, _, _) = $0.command { queued == diffID } else { false }
-            }
             if !alreadyQueued {
                 let load: (Int, String) -> Data? = { self.checkpointFile(id, checkpoint: $0, $1) }
                 guard let markdown = PlanSection.effectivePlan(checkpoint: diff.checkpoint, tape: storedTape(id), loadFile: load),
