@@ -843,7 +843,16 @@ public struct RoundExecutor: Sendable {
                             observedAt: observedAt,
                             // Read fresh every round, like AGENTS.md: a kind proposed and released
                             // by another intake is offered to this one's next round.
-                            kinds: KindRegistryStore.promptKinds(project: inputs.project))
+                            kinds: KindRegistryStore.promptKinds(project: inputs.project),
+                            threadDecisions: threadDecisions(inputs))
+    }
+
+    /// The ask threads' decisions since the last round landed (spec §11), read fresh from
+    /// `threads/` (ThreadRunner's, read-only here), with the head plan's accepted diffs.
+    private func threadDecisions(_ inputs: RoundInputs) -> [ThreadDecision] {
+        let accepted = inputs.store.headPlanCheckpoint(in: inputs.tape).map { inputs.store.threadEditSources(checkpoint: $0) } ?? []
+        return ThreadDecisions.since(inputs.tape.head?.createdAt, reader: ThreadStore(intakeDirectory: inputs.store.intakeDirectory),
+                                     accepted: accepted)
     }
 
     /// The version each pending note was written on, for those written on a plan other than the

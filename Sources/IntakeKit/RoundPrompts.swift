@@ -215,9 +215,11 @@ public struct RoundContext: Sendable {
     public var observedAt: Date
     /// The project's task kinds, offered to every round that creates tasks (spec L3-R §4).
     public var kinds: [TaskKind]
+    /// What the human decided in ask threads since the last round (spec §11).
+    public var threadDecisions: [ThreadDecision]
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
                 readmeFile: String?, notes: [PlanNote] = [], noteVersions: [UUID: String] = [:], humanEdits: String? = nil,
-                observedAt: Date, kinds: [TaskKind] = []) {
+                observedAt: Date, kinds: [TaskKind] = [], threadDecisions: [ThreadDecision] = []) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
@@ -228,6 +230,7 @@ public struct RoundContext: Sendable {
         self.humanEdits = humanEdits
         self.observedAt = observedAt
         self.kinds = kinds
+        self.threadDecisions = threadDecisions
     }
 }
 
@@ -278,6 +281,9 @@ public enum RoundPrompts {
     /// Empty when there is nothing to say, so no stage gets a bare header.
     private static func steering(_ c: RoundContext) -> String {
         var s = humanEditsBlock(c.humanEdits)
+        if !c.threadDecisions.isEmpty {
+            s += "\n\n" + threadDecisionsHeader + "\n" + c.threadDecisions.map(threadDecision).joined(separator: "\n")
+        }
         let general = c.notes.filter { $0.anchor == nil }
         if !general.isEmpty {
             let lines = general.map { note in
@@ -290,6 +296,21 @@ public enum RoundPrompts {
             let items = anchored.enumerated().map { i, pair in anchoredNote(i + 1, pair.0, pair.1, version: c.noteVersions[pair.0.id]) }
             s += "\n\nThe human's notes on specific passages of the plan:\n" + items.joined(separator: "\n\n")
         }
+        return s
+    }
+
+    /// The thread-decisions block's first line (spec §11).
+    public static let threadDecisionsHeader = "What the human decided in ask threads since the last round. Each decision is the human's: keep it, and keep the change it made:"
+
+    /// `- "Title", on "quote" (Section): decision`, the decision's further lines and the edit
+    /// note indented under it.
+    private static func threadDecision(_ d: ThreadDecision) -> String {
+        let anchor = d.quote.map { "on \"\($0)\"" + (d.section.map { " (\($0))" } ?? "") } ?? "on the whole plan"
+        var lines = d.decision.map { planLines($0) } ?? []
+        let first = lines.isEmpty ? "" : " " + lines.removeFirst()
+        var s = "- \"\(d.title)\", \(anchor):\(first)"
+        s += lines.map { "\n  \($0)" }.joined()
+        if d.acceptedEdit { s += "\n  Its change is already in the plan, among the human's edits." }
         return s
     }
 

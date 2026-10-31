@@ -235,6 +235,77 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertFalse(RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json").contains("The human steering this plan says:"))
     }
 
+    // MARK: - Thread decisions (spec §11)
+
+    /// Every stage that takes steering also takes what the human decided in ask threads since the
+    /// last round: title, anchor and decision line, and whether its change is already one of the
+    /// human's edits. The decision is the reason behind an accepted diff, so a refine round that
+    /// sees it doesn't quietly undo the change. With none, no header.
+    func testEveryStagePromptCarriesTheThreadDecisions() {
+        var c = context()
+        c.threadDecisions = [
+            ThreadDecision(title: "Queue store", quote: "Use SQLite for the queue.", section: "Storage",
+                           decision: "Files, not SQLite: no new deps.\nRevisit at 10k jobs.", acceptedEdit: true),
+            ThreadDecision(title: "Whole plan", quote: nil, section: nil, decision: "Mac only for v1.", acceptedEdit: false),
+        ]
+        let prompts = [
+            RoundPrompts.draft(c, persona: .general),
+            RoundPrompts.synthesis(c, ownDraft: "/i/a.md", otherDrafts: ["/i/b.md"]),
+            RoundPrompts.review(c, planFile: "/i/plan.md", round: 1),
+            RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for p in prompts {
+            XCTAssertTrue(p.contains(RoundPrompts.threadDecisionsHeader), p)
+            XCTAssertTrue(p.contains("""
+            - "Queue store", on "Use SQLite for the queue." (Storage): Files, not SQLite: no new deps.
+              Revisit at 10k jobs.
+              Its change is already in the plan, among the human's edits.
+            """), p)
+            XCTAssertTrue(p.contains("- \"Whole plan\", on the whole plan: Mac only for v1."), p)
+        }
+        XCTAssertFalse(RoundPrompts.review(context(), planFile: "/i/plan.md", round: 1).contains(RoundPrompts.threadDecisionsHeader))
+    }
+
+    /// What a round is told: for each thread not resolved, its latest decision from a turn that
+    /// ended since the last round landed, and whether one of its diffs is among the head's
+    /// edits. A thread with neither, a divider, an empty decision, a decision from before the
+    /// round, and a resolved thread (which never feeds rounds, spec §5) say nothing.
+    func testThreadDecisionsAreEachUnresolvedThreadsLatestSinceTheLastRound() {
+        let landed = Date(timeIntervalSince1970: 1_000)
+        func turn(_ seq: Int, _ decision: String?, endedAt: TimeInterval?, divider: Bool = false) -> ThreadTurn {
+            ThreadTurn(seq: seq, messageID: divider ? ThreadTurn.dividerPrefix + "2" : "m\(seq)", decision: decision,
+                       checkpoint: 1, startedAt: Date(timeIntervalSince1970: 0),
+                       endedAt: endedAt.map { Date(timeIntervalSince1970: $0) })
+        }
+        func record(_ title: String, _ status: ThreadStatus = .open, anchor: ThreadAnchor = .wholePlan) -> ThreadRecord {
+            ThreadRecord(id: ThreadID(), title: title, anchor: anchor, status: status, agent: .claude, model: "m",
+                         effort: "e", followsCheckpoint: 1, createdAt: Date(timeIntervalSince1970: 0))
+        }
+        let storage = record("Queue store", anchor: ThreadAnchor(note: NoteAnchor(checkpoint: 1, quote: "Use SQLite.", section: "Storage")))
+        let old = record("Old news"), resolved = record("Done", .resolved), quiet = record("Quiet"), accepted = record("Accepted only")
+        let reader = FakeThreads(records: [storage, old, resolved, quiet, accepted], turnsByThread: [
+            storage.id: [turn(1, "First call.", endedAt: 1_500), turn(2, "Files, not SQLite.", endedAt: 1_600),
+                         turn(3, "", endedAt: 1_700), turn(4, nil, endedAt: nil), turn(5, "Now reading", endedAt: 1_800, divider: true)],
+            old.id: [turn(1, "Before the round.", endedAt: 900)],
+            resolved.id: [turn(1, "Resolved call.", endedAt: 1_500)],
+            quiet.id: [turn(1, nil, endedAt: 1_500)],
+            accepted.id: [turn(1, "  ", endedAt: 1_500)],
+        ])
+        let decisions = ThreadDecisions.since(landed, reader: reader,
+                                              accepted: [ThreadEditSource(thread: accepted.id, diff: UUID()),
+                                                         ThreadEditSource(thread: resolved.id, diff: UUID())])
+        XCTAssertEqual(decisions, [
+            ThreadDecision(title: "Queue store", quote: "Use SQLite.", section: "Storage", decision: "Files, not SQLite.",
+                           acceptedEdit: false),
+            ThreadDecision(title: "Accepted only", quote: nil, section: nil, decision: nil, acceptedEdit: true),
+        ])
+        XCTAssertEqual(ThreadDecisions.since(nil, reader: reader, accepted: []).map(\.title), ["Queue store", "Old news"],
+                       "before any round, every decision is since the last one")
+    }
+
     /// A synthesizer is a fresh session: "the drafting task you were just given" pointed at a
     /// conversation it never had. It needs the intent, the Q&A and the project files itself.
     func testSynthesisPromptStandsOnItsOwn() {
@@ -464,4 +535,14 @@ final class RoundPromptsTests: XCTestCase {
         let cs = try RoundPrompts.decode(ChangeSetOutput.self, out.structured)
         XCTAssertEqual(cs.changeSet.ops.count, 0)
     }
+}
+
+/// A `ThreadStoreReading` over fixed values, in the order given.
+private struct FakeThreads: ThreadStoreReading {
+    var records: [ThreadRecord]
+    var turnsByThread: [ThreadID: [ThreadTurn]]
+    func threads() -> [ThreadRecord] { records }
+    func turns(_ id: ThreadID) -> [ThreadTurn] { turnsByThread[id] ?? [] }
+    func diffs(_ id: ThreadID) -> [ThreadDiff] { [] }
+    func activity(_ id: ThreadID) -> String? { nil }
 }

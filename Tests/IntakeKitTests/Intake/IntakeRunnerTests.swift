@@ -722,6 +722,35 @@ extension IntakeRunnerTests {
         XCTAssertTrue(commands.calls.isEmpty, "a stopped tape runs no round")
     }
 
+    /// The accepted diff is the human's edit AND says where it came from: the checkpoint records
+    /// the thread and the diff beside `plan.user.md`, once however often the command is refolded,
+    /// so the next round can tell a thread's change from a hand edit. A plain edit adds no source;
+    /// an edit that reverts the plan to what was generated drops the layer and its sources.
+    func testAnAcceptedThreadDiffRecordsItsThreadAndDiffOnTheEdit() async throws {
+        _ = try store.appendCommand(.step)
+        let first = await runner(scripted()).run()
+        XCTAssertEqual(first, .paused)
+
+        let thread = ThreadID(UUID()), diff = UUID()
+        _ = try store.appendCommand(.applyThreadDiff(thread: thread, diff: diff, checkpoint: 1,
+                                                     markdown: "# Plan\n\n## Scope\nOne, from a thread\n"))
+        _ = try store.appendCommand(.editPlan(checkpoint: 1, markdown: "# Plan\n\n## Scope\nOne, from a thread, by hand\n"))
+        _ = try store.appendCommand(.applyThreadDiff(thread: thread, diff: diff, checkpoint: 1,
+                                                     markdown: "# Plan\n\n## Scope\nOne, from a thread, by hand\n"))
+        _ = try store.appendCommand(.applyThreadDiff(thread: ThreadID(UUID()), diff: UUID(), checkpoint: 99, markdown: "nowhere"))
+        _ = try store.appendCommand(.stop)
+        let stopped = await runner(scripted()).run()
+        XCTAssertEqual(stopped, .stopped)
+
+        XCTAssertEqual(store.userEdits(checkpoint: 1), "# Plan\n\n## Scope\nOne, from a thread, by hand\n")
+        XCTAssertEqual(store.threadEditSources(checkpoint: 1), [ThreadEditSource(thread: thread, diff: diff)])
+        XCTAssertEqual(store.threadEditSources(checkpoint: 99), [])
+
+        try store.writeUserEdits(checkpoint: 1, markdown: Self.draftPlan)
+        XCTAssertNil(store.userEdits(checkpoint: 1))
+        XCTAssertEqual(store.threadEditSources(checkpoint: 1), [], "no layer, no sources")
+    }
+
     /// `.editPlan` is applied by the runner (it owns `checkpoints/`): the edit lands as
     /// `plan.user.md`, `drafts/0.md` stays as generated, and the next round reviews the edit.
     func testEditPlanIsWrittenByTheRunnerAndFeedsTheNextRound() async throws {

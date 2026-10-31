@@ -303,12 +303,14 @@ private actor TapeKeeper {
                 TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
                 applyEdit(checkpoint: checkpoint, markdown: markdown)
-            case .applyThreadDiff(_, _, let checkpoint, let markdown):
+            case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
                 // The payload is exactly `editPlan`'s — the whole edited plan for one checkpoint
-                // — and so is the effect: the human accepted the text, so it is their edit.
-                // Recording which thread and diff it came from (provenance for the rail and the
-                // round record) is Task 6's; until then the ids ride along unread.
-                applyEdit(checkpoint: checkpoint, markdown: markdown)
+                // — and so is the effect: the human accepted the text, so it is their edit. It
+                // also records which thread and diff it came from, so the next round can name
+                // the thread whose decision explains the edit (spec §11).
+                if applyEdit(checkpoint: checkpoint, markdown: markdown) {
+                    try? store.recordThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
+                }
             }
             tape.ackedCommandSeq = envelope.seq
         }
@@ -325,9 +327,12 @@ private actor TapeKeeper {
     /// or never written) has nowhere to go and is dropped. Best effort, like `save`: a failed
     /// write can't pause anything from inside the command watcher; the app sees no layer and
     /// the human can save again.
-    private func applyEdit(checkpoint: Int, markdown: String) {
-        guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return }
-        try? store.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
+    /// Returns whether the edit was written.
+    @discardableResult
+    private func applyEdit(checkpoint: Int, markdown: String) -> Bool {
+        guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return false }
+        do { try store.writeUserEdits(checkpoint: checkpoint, markdown: markdown) } catch { return false }
+        return true
     }
 
     func startRound(_ next: PlannedRound) -> Tape {

@@ -238,9 +238,37 @@ public struct TapeStore: Sendable {
         let markdown = MarkdownUnwrap.unwrap(markdown)
         if markdown == PlanLayers.generatedPlan(checkpointDirectory(checkpoint)) {
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            // No layer, nothing for a thread to have contributed to.
+            try? FileManager.default.removeItem(at: threadEditSourcesURL(checkpoint: checkpoint))
             return
         }
         try Data(markdown.utf8).write(to: url, options: .atomic)
+    }
+
+    /// `checkpoints/<id>/plan.user.threads.json`: which ask threads' accepted diffs are in the
+    /// checkpoint's `plan.user.md` (spec §5, "records the thread as its source"). The layer itself
+    /// is the whole edited plan, the same bytes a hand edit writes, so without this a round
+    /// could not tell a thread's change from the human's own.
+    public func threadEditSourcesURL(checkpoint: Int) -> URL {
+        checkpointDirectory(checkpoint).appendingPathComponent("plan.user.threads.json")
+    }
+
+    /// The threads whose accepted diffs are in `checkpoint`'s edit layer, oldest first; empty
+    /// with none (or no layer).
+    public func threadEditSources(checkpoint: Int) -> [ThreadEditSource] {
+        guard userEdits(checkpoint: checkpoint) != nil,
+              let data = try? Data(contentsOf: threadEditSourcesURL(checkpoint: checkpoint)) else { return [] }
+        return (try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data)) ?? []
+    }
+
+    /// Runner-only, beside `writeUserEdits`: records that `source`'s diff is in the layer. Once
+    /// per diff, so a refolded command adds nothing.
+    public func recordThreadEdit(checkpoint: Int, _ source: ThreadEditSource) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        var sources = (try? Data(contentsOf: url)).flatMap { try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: $0) } ?? []
+        guard !sources.contains(source) else { return }
+        sources.append(source)
+        try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
     }
 
     /// Every note on `tape` for the app to list or highlight: the ones rounds already consumed,

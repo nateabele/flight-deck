@@ -1,0 +1,149 @@
+import XCTest
+@testable import IntakeKit
+
+/// An agent that answers every turn with one diff and a decision, as a real one would after
+/// reading the anchored section. No tokens.
+private struct ProposingAgent: ThreadTurnExecuting {
+    func run(_ r: ThreadTurnRequest) async throws -> ThreadTurnOutcome {
+        .answered(ThreadAnswer(reply: "One target keeps v1 small.", decision: "Mac only for v1.",
+                               actions: [.proposeDiff(ProposedThreadDiff(checkpoint: 1, quote: "One",
+                                                                         replacement: "One, Mac only"))]),
+                  sessionID: "thread-session")
+    }
+}
+
+/// P1 end to end, every runner real and every agent scripted: ✦ Ask on a passage → the thread's
+/// agent replies with a diff → the human accepts it → the next round's seats see the edit as
+/// the human's and the thread's decision line beside it (spec §11).
+final class AskThreadEndToEndTests: XCTestCase {
+    private let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
+    private let claudeB = ModelChoice(agent: .claude, model: "B", effort: "medium")
+    private static let draftPlan = "# Plan\n\n## Scope\nOne\n"
+    private var root: URL!
+    private var intake: Intake!
+
+    private var project: URL { root.appendingPathComponent("project") }
+    private var intakes: URL { root.appendingPathComponent("intakes") }
+    private var directory: URL { IntakeStore(root: intakes).directory(for: intake.id) }
+    private var tapeStore: TapeStore { TapeStore(intakeDirectory: directory) }
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("AskThreadE2E-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        intake = Intake(projectPath: project.path, intent: "Add dark mode")
+        intake.roundConfig = RoundConfig(drafters: [Slot(codexA)], synthesizer: nil, reviewer: Slot(codexA),
+                                         integrator: claudeB, encoder: codexA, polisher: nil, refinementCap: 2,
+                                         polishCap: 0, freshEyesAndDedup: false, defaultPlay: .step, customized: false)
+        try IntakeStore(root: intakes).save(intake)
+    }
+
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: root) }
+
+    private func round(_ runner: ScriptedHarnessRunner) async -> RunnerStatus {
+        await IntakeRunner(root: intakes, intakeID: intake.id,
+                           executor: RoundExecutor(runner: runner, graphReader: GraphReader(runner: runner, environment: [:])),
+                           environment: ["PATH": "/usr/bin:/bin"], pollInterval: .milliseconds(20)).run()
+    }
+
+    private static func seats(_ call: ScriptedHarnessRunner.Call) -> CommandResult {
+        switch call.role {
+        case "drafter": return ok(call, "d", json(DraftOutput(plan: draftPlan)))
+        case "reviewer":
+            return ok(call, "rev", json(ReviewOutput(changes: [ProposedChange(section: "## Scope", rationale: "r", edit: "e")],
+                                                     summary: "found 1")))
+        default:
+            let plan = call.cwd.appendingPathComponent("plan.md")
+            let before = (try? String(contentsOf: plan, encoding: .utf8)) ?? ""
+            try! (before + "\n## Added\nline\n").write(to: plan, atomically: true, encoding: .utf8)
+            return ok(call, "int", json(IntegrateOutput(agree: 1, somewhat: 0, disagree: 0, notes: "applied")))
+        }
+    }
+
+    private func threads() async {
+        await ThreadRunner(root: intakes, intakeID: intake.id, executor: ProposingAgent(), pollInterval: .milliseconds(20)).run()
+    }
+
+    func testAskReplyAcceptAndTheNextRoundSeesTheDecision() async throws {
+        // A draft to ask about.
+        _ = try tapeStore.appendCommand(.step)
+        let drafted = await round(ScriptedHarnessRunner(Self.seats))
+        XCTAssertEqual(drafted, .paused)
+        XCTAssertEqual(tapeStore.effectivePlan(checkpoint: 1), Self.draftPlan)
+
+        // ✦ Ask on "One".
+        let thread = ThreadID()
+        let commands = ThreadCommandStore(intakeDirectory: directory)
+        try commands.append(.open(thread, ThreadAnchor(note: NoteAnchor(checkpoint: 1, quote: "One", section: "Scope")),
+                                  title: "Why one target?", agent: .claude, model: "m", effort: "e"))
+        try commands.append(.message(thread, text: "Why only one?", messageID: "m1", source: nil, elementID: nil,
+                                     subjectRevision: nil))
+        await threads()
+
+        // The reply, and a pending diff.
+        let store = ThreadStore(intakeDirectory: directory)
+        let turn = try XCTUnwrap(store.turns(thread).last)
+        XCTAssertEqual(turn.reply, "One target keeps v1 small.")
+        XCTAssertEqual(turn.decision, "Mac only for v1.")
+        let diff = try XCTUnwrap(store.diffs(thread).first)
+        XCTAssertEqual(diff.state, .pending)
+        XCTAssertEqual(store.thread(thread)?.status, .needsYou)
+
+        // ✓: the edit first, then the decision (the app's order).
+        XCTAssertEqual(try ThreadAccept.append(diff, editedMarkdown: nil, to: tapeStore), .appended)
+        XCTAssertEqual(try ThreadAccept.append(diff, editedMarkdown: nil, to: tapeStore), .already, "a retry appends nothing")
+        try commands.append(.decideDiff(thread, diff: diff.id, accept: true))
+        await threads()
+        XCTAssertEqual(store.diffs(thread).first?.state, .accepted)
+        XCTAssertEqual(store.thread(thread)?.status, .open)
+
+        // The next round: the accepted text is the human's edit, its source recorded, and the
+        // seats are told the decision behind it.
+        _ = try tapeStore.appendCommand(.step)
+        let next = ScriptedHarnessRunner(Self.seats)
+        let refined = await round(next)
+        XCTAssertEqual(refined, .paused)
+        XCTAssertEqual(tapeStore.userEdits(checkpoint: 1), "# Plan\n\n## Scope\nOne, Mac only\n")
+        XCTAssertEqual(tapeStore.threadEditSources(checkpoint: 1), [ThreadEditSource(thread: thread, diff: diff.id)])
+        let reviewer = try XCTUnwrap(next.calls("reviewer").first).prompt
+        XCTAssertTrue(reviewer.contains("+One, Mac only"), reviewer)
+        XCTAssertTrue(reviewer.contains(RoundPrompts.threadDecisionsHeader), reviewer)
+        XCTAssertTrue(reviewer.contains("""
+        - "Why one target?", on "One" (Scope): Mac only for v1.
+          Its change is already in the plan, among the human's edits.
+        """), reviewer)
+    }
+
+    /// An accept composes on the newest version there is under the commands lock: a hand edit
+    /// still queued for the head is kept, a diff from an older checkpoint is stale (re-propose
+    /// it), and an edited accept carries the human's text as it is.
+    func testAnAcceptComposesOnTheNewestQueuedEditOfTheHead() async throws {
+        _ = try tapeStore.appendCommand(.step)
+        let drafted = await round(ScriptedHarnessRunner(Self.seats))
+        XCTAssertEqual(drafted, .paused)
+        let thread = ThreadID()
+        let diff = ThreadDiff(thread: thread, turn: 1, checkpoint: 1,
+                              anchor: NoteAnchor(checkpoint: 1, quote: "One", section: "Scope"), old: "One", new: "One, Mac only")
+        _ = try tapeStore.appendCommand(.editPlan(checkpoint: 1, markdown: "# Plan\n\n## Scope\nOne\n\n## Risks\nNone\n"))
+
+        XCTAssertEqual(try ThreadAccept.append(diff, editedMarkdown: nil, to: tapeStore), .appended)
+        guard case .applyThreadDiff(thread, diff.id, 1, let markdown) = try XCTUnwrap(tapeStore.commands(after: 0).last).command
+        else { return XCTFail("expected applyThreadDiff") }
+        XCTAssertEqual(markdown, "# Plan\n\n## Scope\nOne, Mac only\n\n## Risks\nNone\n", "the queued hand edit is kept")
+
+        var old = diff
+        old.id = UUID()
+        old.checkpoint = 0
+        XCTAssertEqual(try ThreadAccept.append(old, editedMarkdown: nil, to: tapeStore), .stale)
+
+        var edited = diff
+        edited.id = UUID()
+        XCTAssertEqual(try ThreadAccept.append(edited, editedMarkdown: "# Plan\n\n## Scope\nTwo\n", to: tapeStore), .appended)
+        guard case .applyThreadDiff(_, edited.id, 1, "# Plan\n\n## Scope\nTwo\n") = try XCTUnwrap(tapeStore.commands(after: 0).last).command
+        else { return XCTFail("expected the edited markdown") }
+
+        var gone = diff
+        gone.id = UUID()
+        gone.old = "Nowhere in the plan"
+        XCTAssertEqual(try ThreadAccept.append(gone, editedMarkdown: nil, to: tapeStore), .stale)
+    }
+}
