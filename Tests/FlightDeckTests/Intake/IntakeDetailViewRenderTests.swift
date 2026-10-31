@@ -34,6 +34,7 @@ final class IntakeDetailViewRenderTests: XCTestCase {
             throw XCTSkip("set FD_INTAKE_RENDER_DIR to render intake-detail PNGs")
         }
         let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 
         var asking = Intake(projectPath: "/tmp/project", intent: "Add a contributor note to the README about the release swap")
         asking.state = .needsAnswers
@@ -59,13 +60,72 @@ final class IntakeDetailViewRenderTests: XCTestCase {
         let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         // Partially typed drafts go through the same file a relaunch reads them back from.
-        service.saveAnswerDrafts(asking.id, questions: open, answers: ["One short paragraph.", "Link to it", ""])
+        service.saveAnswerDrafts(asking.id, round: 1, answers: [
+            StructuredAnswer(questionID: "q1", other: "One short paragraph."),
+            StructuredAnswer(questionID: "q2", other: "Link to it"),
+            StructuredAnswer(questionID: "q3")])
 
         try render(IntakeDetailView(service: service, intake: asking, onOpenReview: {}), to: out.appendingPathComponent("qa-a.png"))
         try render(IntakeDetailView(service: service, intake: choosing, onOpenReview: {}), to: out.appendingPathComponent("qa-b.png"))
         try render(IntakeDetailView(service: service, intake: choosing, onOpenReview: {}, expandedRounds: [0]),
                    to: out.appendingPathComponent("qa-c.png"))
         try render(IntakeDetailView(service: service, intake: failed, onOpenReview: {}), to: out.appendingPathComponent("qa-d.png"))
+    }
+
+    private static let structuredRound: [StructuredQuestion] = [
+        StructuredQuestion(id: "scope", text: "Which machines should the check run on?", kind: .single,
+                           options: [.init(id: "all", label: "Every paired machine", detail: "Slowest, but catches host-specific failures."),
+                                     .init(id: "mini", label: "Just the Mac mini", detail: "Where the UI tests already run."),
+                                     .init(id: "local", label: "This Mac only")],
+                           recommended: ["mini"], allowOther: true),
+        StructuredQuestion(id: "docs", text: "Which docs should change?", kind: .multi,
+                           options: [.init(id: "readme", label: "README.md"),
+                                     .init(id: "ops", label: "docs/AGENT-OPERATIONS.md", detail: "The release ritual lives here."),
+                                     .init(id: "changelog", label: "CHANGELOG.md")],
+                           recommended: ["readme", "ops"], allowOther: true),
+        StructuredQuestion(id: "badge", text: "Keep the existing build badge?", kind: .toggle,
+                           options: [.init(id: "yes", label: "Keep the badge")], recommended: ["yes"]),
+        StructuredQuestion(id: "wording", text: "Any wording the note must avoid?", kind: .text),
+    ]
+
+    private func structuredIntake() -> Intake {
+        var i = Intake(projectPath: "/tmp/project", intent: "Add a contributor note to the README")
+        i.state = .needsAnswers
+        i.exchanges = [TriageExchange(questions: Self.structuredRound.map(\.text), structured: Self.structuredRound)]
+        return i
+    }
+
+    /// Runs on every CI pass (no env var): each kind lays out to a real size, a choice question
+    /// is taller than a text one, and the recommended option is marked. The PNG below is for the
+    /// eye; this is the gate.
+    func testStructuredQuestionsLayOutAndMarkTheRecommendation() {
+        func size(_ q: StructuredQuestion) -> NSSize {
+            let host = NSHostingView(rootView: StructuredQuestionView(question: q, answer: .constant(q.initialAnswer))
+                .frame(width: 400))
+            return host.fittingSize
+        }
+        let sizes = Self.structuredRound.map(size)
+        for s in sizes {
+            XCTAssertGreaterThan(s.width, 0)
+            XCTAssertGreaterThan(s.height, 0)
+        }
+        XCTAssertGreaterThan(sizes[0].height, sizes[3].height, "a three-option choice outgrows a text field")
+        let marked = Self.structuredRound.map { q in q.options.compactMap { StructuredQuestionView.caption(for: $0, in: q) }.count }
+        XCTAssertEqual(marked, [1, 2, 1, 0])
+    }
+
+    func testRenderStructuredQuestions() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_INTAKE_RENDER_DIR"] else {
+            throw XCTSkip("set FD_INTAKE_RENDER_DIR to render intake-detail PNGs")
+        }
+        let intake = structuredIntake()
+        let store = IntakeStore(root: root)
+        try store.save(intake)
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                    availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try render(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
+                   to: URL(fileURLWithPath: dir).appendingPathComponent("structured-questions.png"))
     }
 
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,

@@ -160,7 +160,7 @@ REMOTE
     fi
   fi
   # A render run writes its PNGs on the UI-test Mac, to the same absolute path it was given here.
-for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR; do
+for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_INTAKE_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR; do
   [ -n "${!name:-}" ] || continue
   mkdir -p "${!name}"
   rsync -a -e "$RSYNC_SSH" "$HOST:${!name}/" "${!name}/" >>"$LOG" 2>&1 || true
@@ -236,7 +236,7 @@ fi
 # --- Run -------------------------------------------------------------------
 # The knobs travel as NAME=VALUE arguments, never spliced into a command string.
 ENVARGS=(FD_TEST_LOCAL=1 FD_SKIP_BUILD=1 FD_MENUBAR_PREBUILT=1)
-for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS FD_PLAN_TABLE_RENDER_DIR FD_NOTES_RENDER FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR FD_RENDER_APPEARANCE; do
+for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS FD_PLAN_TABLE_RENDER_DIR FD_NOTES_RENDER FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_INTAKE_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR FD_RENDER_APPEARANCE; do
   [ -n "${!name:-}" ] && ENVARGS+=("$name=${!name}")
 done
 [ -n "${FD_TRACE_BEEPS:-}" ] && ENVARGS+=("FD_BEEP_DYLIB=$ROOT/DerivedData/beeptrace/libBeepTrace.dylib")
@@ -268,7 +268,7 @@ set -e
 rsync -a -e "$RSYNC_SSH" "$HOST:$ROOT/DerivedData/fd-test-shards" "$HOST:$ROOT/DerivedData/fd-test-class-timings.tsv" \
   DerivedData/ >>"$LOG" 2>&1 || true
 # A render run writes its PNGs on the UI-test Mac, to the same absolute path it was given here.
-for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR; do
+for name in FD_PLAN_TABLE_RENDER_DIR FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_INTAKE_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR; do
   [ -n "${!name:-}" ] || continue
   mkdir -p "${!name}"
   rsync -a -e "$RSYNC_SSH" "$HOST:${!name}/" "${!name}/" >>"$LOG" 2>&1 || true

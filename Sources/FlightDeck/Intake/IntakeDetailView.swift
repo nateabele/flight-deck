@@ -38,13 +38,12 @@ struct IntakeDetailView: View {
     /// column since it was held (`presentColumn`).
     @State private var columnGeneration = 0
 
-    /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
-    /// questions. Reloaded via `.task(id:)` below whenever the question set changes — the
+    /// Answer drafts for `.needsAnswers`, one per presented question and in the same order. Reloaded via `.task(id:)` below whenever the question set changes — the
     /// same `IntakeDetailView` instance lives across a `needsAnswers` → `triaging` →
     /// `needsAnswers` round trip (selection doesn't change), so a plain `@State` seeded
     /// once at init would still hold the previous round's drafts. Mirrored to
     /// `answer-drafts.json` through the service so a relaunch (a release swap) keeps them.
-    @State private var answers: [String] = []
+    @State private var structuredAnswers: [StructuredAnswer] = []
     @State private var selectedPreset: Preset = .bead
     /// Indices into `intake.exchanges` whose Clarifications section is open. Collapsed by
     /// default: answered rounds are there to look back at, not to push the live work down.
@@ -618,15 +617,23 @@ struct IntakeDetailView: View {
         }
     }
 
-    private var openQuestions: [String] {
+    private var openQuestions: [StructuredQuestion] {
         guard let open = intake.exchanges.last, open.answers == nil else { return [] }
-        return open.questions
+        return open.presentedQuestions
     }
 
-    /// The open round as a grouped form: numbered, fully wrapped questions, each over a
-    /// multi-line answer field. Sent rounds leave this form and reappear under Clarifications.
+    /// What the drafts task re-runs on: the intake and the open round's questions, options
+    /// included, so a follow-up round never inherits the previous round's choices.
+    private struct OpenRound: Equatable {
+        var intakeID: UUID
+        var questions: [StructuredQuestion]
+    }
+
+    /// The open round as a grouped form: numbered, fully wrapped questions, each over the
+    /// controls its kind calls for. Sent rounds leave this form and reappear under Clarifications.
     private var needsAnswersBody: some View {
         let questions = openQuestions
+        let round = intake.exchanges.count - 1
         return VStack(alignment: .leading, spacing: 6) {
             Text(questions.count == 1 ? "Question" : "Questions").font(.headline)
             GroupedRows(count: questions.count) { i in
@@ -635,14 +642,11 @@ struct IntakeDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(questions[i])
+                        Text(questions[i].text)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
-                        TextField("Answer \(i + 1)", text: answerBinding(i), prompt: Text("Your answer"), axis: .vertical)
-                            .labelsHidden()
-                            .lineLimit(2...6)
-                            .textFieldStyle(.roundedBorder)
-                            .dropsFilePaths(into: answerBinding(i), projectPath: intake.projectPath)
+                        StructuredQuestionView(question: questions[i], answer: answerBinding(questions[i]),
+                                               projectPath: intake.projectPath)
                     }
                 }
             }
@@ -653,36 +657,43 @@ struct IntakeDetailView: View {
         // Keyed on the questions' CONTENTS (and the intake): a follow-up round with the same
         // number of questions used to keep the previous round's answers typed into the new
         // questions' fields, ready to send against questions they never answered.
-        .task(id: [intake.id.uuidString] + questions) {
-            answers = service.answerDrafts(intake.id, questions: questions)
-                ?? Array(repeating: "", count: questions.count)
+        .task(id: OpenRound(intakeID: intake.id, questions: questions)) {
+            let saved = service.answerDrafts(intake.id, round: round) ?? []
+            structuredAnswers = questions.map { q in saved.first { $0.questionID == q.id } ?? q.initialAnswer }
         }
         // Debounced write-through: every keystroke restarts this task, so the file is written
         // once typing pauses. `saveAnswerDrafts` refuses a round already sent, so a write
         // racing Send can't resurrect it.
-        .task(id: answers) { [answers, id = intake.id] in
+        .task(id: structuredAnswers) { [structuredAnswers, id = intake.id] in
             try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled else { return }
-            service.saveAnswerDrafts(id, questions: questions, answers: answers)
+            guard !Task.isCancelled, !structuredAnswers.isEmpty else { return }
+            service.saveAnswerDrafts(id, round: round, answers: structuredAnswers)
         }
     }
 
-    private func answerBinding(_ index: Int) -> Binding<String> {
+    /// Until the drafts task lands the list is empty (or last round's), so a question without
+    /// an answer shows its recommendation rather than nothing, and writes extend the list.
+    private func answerBinding(_ question: StructuredQuestion) -> Binding<StructuredAnswer> {
         Binding(
-            get: { index < answers.count ? answers[index] : "" },
+            get: { structuredAnswers.first { $0.questionID == question.id } ?? question.initialAnswer },
             set: { newValue in
-                guard index < answers.count else { return }
-                answers[index] = newValue
+                if let i = structuredAnswers.firstIndex(where: { $0.questionID == question.id }) {
+                    structuredAnswers[i] = newValue
+                } else {
+                    structuredAnswers.append(newValue)
+                }
             }
         )
     }
 
-    /// At least one answer, and none of them blank once whitespace/newlines are trimmed —
-    /// otherwise "Send answers" would ship empty strings straight to `IntakeService.answer`,
-    /// which has no guard of its own against that (it only checks `state == .needsAnswers`
-    /// and a non-empty exchange).
-    static func canSendAnswers(_ answers: [String]) -> Bool {
-        !answers.isEmpty && !answers.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Every question complete, and at least one question — otherwise "Send answers" would ship
+    /// blank text answers straight to `IntakeService.answer`, which has no guard of its own
+    /// against that (it only checks `state == .needsAnswers` and a non-empty exchange). A
+    /// question with no answer yet is incomplete, never vacuously complete.
+    static func canSendAnswers(_ questions: [StructuredQuestion], _ answers: [StructuredAnswer]) -> Bool {
+        !questions.isEmpty && questions.allSatisfy { q in
+            answers.first { $0.questionID == q.id }.map(q.isComplete) ?? false
+        }
     }
 
     /// Spec §9: the recommendation, the fidelity as a segmented choice, and the rounds it will
@@ -1108,7 +1119,7 @@ struct IntakeDetailView: View {
         case .commandReturn:
             button
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!Self.canSendAnswers(answers))
+                .disabled(!Self.canSendAnswers(openQuestions, structuredAnswers))
         case .defaultAction: button.keyboardShortcut(.defaultAction)
         case .none: button
         }
@@ -1117,8 +1128,8 @@ struct IntakeDetailView: View {
     private func performPrimary() {
         switch intake.state {
         case .needsAnswers:
-            guard Self.canSendAnswers(answers) else { return }
-            service.answer(intake.id, answers: answers)
+            guard Self.canSendAnswers(openQuestions, structuredAnswers) else { return }
+            service.answer(intake.id, structured: structuredAnswers)
         case .awaitingChoice, .parked:
             if selectedPreset == .bead { service.choose(intake.id, preset: .bead) } else { startShaping() }
         case .review: onOpenReview()

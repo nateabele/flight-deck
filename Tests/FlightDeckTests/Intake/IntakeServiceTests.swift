@@ -337,22 +337,27 @@ final class IntakeServiceTests: XCTestCase {
     }
 
     /// Unsent answers survive a relaunch (a release swap mid-answer) by coming back through a
-    /// fresh service on the same root — and only against the exact questions they were typed for.
-    func testAnswerDraftsSurviveAFreshServiceOnlyForTheSameQuestions() throws {
+    /// fresh service on the same root — and only for the round they were typed in.
+    func testAnswerDraftsSurviveAFreshServiceOnlyForTheSameRound() throws {
         let questions = ["Which README?", "Keep the badge?"]
         var seeded = Intake(projectPath: "/p", intent: "Add a note")
         seeded.state = .needsAnswers
         seeded.exchanges = [TriageExchange(questions: questions)]
         try IntakeStore(root: root).save(seeded)
+        let drafts = [StructuredAnswer(questionID: "q1", other: "The root one"),
+                      StructuredAnswer(questionID: "q2", other: "Ye")]
 
         let first = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
-        first.saveAnswerDrafts(seeded.id, questions: questions, answers: ["The root one", "Ye"])
+        first.saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
 
         let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
-        XCTAssertEqual(relaunched.answerDrafts(seeded.id, questions: questions), ["The root one", "Ye"])
-        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: ["Which README?", "Something else?"]))
-        // A mismatch deletes the stale file, so the original questions no longer match either.
-        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: questions))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
+        // A newer round replaced these questions; the stale file is deleted, not matched later.
+        var next = try IntakeStore(root: root).load(id: seeded.id)
+        next.exchanges = [TriageExchange(questions: ["Which README?", "Something else?"])]
+        try IntakeStore(root: root).save(next)
+        let after = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(after.answerDrafts(seeded.id, round: 0))
     }
 
     /// Sending the round deletes its drafts, and a debounced save arriving after Send is refused
@@ -361,12 +366,13 @@ final class IntakeServiceTests: XCTestCase {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
                               br: MutableRunner(Self.brReplies(Self.openGraph)))
         let id = await capture(svc)
-        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["The root one"])
-        XCTAssertEqual(svc.answerDrafts(id, questions: ["Which README?"]), ["The root one"])
-        svc.answer(id, answers: ["The root one"])
-        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["late"])
+        let draft = [StructuredAnswer(questionID: "q1", other: "The root one")]
+        svc.saveAnswerDrafts(id, round: 0, answers: draft)
+        XCTAssertEqual(svc.answerDrafts(id, round: 0), draft)
+        svc.answer(id, structured: draft)
+        svc.saveAnswerDrafts(id, round: 0, answers: [StructuredAnswer(questionID: "q1", other: "late")])
         await svc.task(for: id)?.value
-        XCTAssertNil(svc.answerDrafts(id, questions: ["Which README?"]))
+        XCTAssertNil(svc.answerDrafts(id, round: 0))
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: IntakeStore(root: root).directory(for: id).appendingPathComponent("answer-drafts.json").path))
     }

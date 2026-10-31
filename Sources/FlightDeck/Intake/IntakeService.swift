@@ -1012,7 +1012,7 @@ final class IntakeService: ObservableObject {
     /// What `answer-drafts.json` holds: the unsent answers, and the exact questions they were
     /// typed against — so a follow-up round with the same number of questions can never pick
     /// up drafts written for different ones. `answers` stays the rendered strings so a file
-    /// written now still reads under the string API; `round` and `structured` are optional so a
+    /// from before structured answers still reads; `round` and `structured` are optional so a
     /// file written before they existed still decodes.
     private struct AnswerDrafts: Codable {
         var questions: [String]
@@ -1025,20 +1025,11 @@ final class IntakeService: ObservableObject {
         store.directory(for: id).appendingPathComponent("answer-drafts.json")
     }
 
-    /// Persists the open round's unsent answers. `intake.json` already survives a relaunch in
-    /// every state; the drafts were `@State` alone, so a release swap mid-answer threw away
-    /// whatever had been typed. Refused unless `questions` is still the open round: a debounced
-    /// write landing after Send would otherwise resurrect drafts for a round already answered.
-    func saveAnswerDrafts(_ id: UUID, questions: [String], answers: [String]) {
-        guard let i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last,
-              open.answers == nil, open.questions == questions, answers.count == questions.count
-        else { return }
-        guard let data = try? JSONEncoder().encode(AnswerDrafts(questions: questions, answers: answers)) else { return }
-        try? data.write(to: answerDraftsURL(id), options: .atomic)
-    }
-
-    /// The structured version, keyed by the open round's index. Refused for any round but the
-    /// open one, for the same reason as above.
+    /// Persists the open round's unsent answers, keyed by the round's index. `intake.json`
+    /// already survives a relaunch in every state; the drafts were `@State` alone, so a release
+    /// swap mid-answer threw away whatever had been typed. Refused for any round but the open
+    /// one: a debounced write landing after Send would otherwise resurrect drafts for a round
+    /// already answered.
     func saveAnswerDrafts(_ id: UUID, round: Int, answers: [StructuredAnswer]) {
         guard let i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last,
               open.answers == nil, round == i.exchanges.count - 1 else { return }
@@ -1051,20 +1042,8 @@ final class IntakeService: ObservableObject {
         try? data.write(to: answerDraftsURL(id), options: .atomic)
     }
 
-    /// The drafts saved against exactly `questions`, or nil. Drafts for any other question set
-    /// are stale — a newer round replaced them — so they're deleted rather than left to match
-    /// by accident later.
-    func answerDrafts(_ id: UUID, questions: [String]) -> [String]? {
-        guard let data = try? Data(contentsOf: answerDraftsURL(id)),
-              let drafts = try? JSONDecoder().decode(AnswerDrafts.self, from: data) else { return nil }
-        guard drafts.questions == questions, drafts.answers.count == questions.count else {
-            clearAnswerDrafts(id)
-            return nil
-        }
-        return drafts.answers
-    }
-
-    /// The structured drafts for the open round. A file with strings only (written before
+    /// The drafts for the open round, or nil. Drafts for any other question set are stale (a newer
+    /// round replaced them), so they are deleted rather than left to match by accident later. A file with strings only (written before
     /// structured answers) loads as text answers while its questions still equal the round's.
     func answerDrafts(_ id: UUID, round: Int) -> [StructuredAnswer]? {
         guard let data = try? Data(contentsOf: answerDraftsURL(id)),
