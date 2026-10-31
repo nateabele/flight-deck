@@ -314,6 +314,17 @@ targets:
     platform: macOS
     sources:
       - Tests/IntakeKitTests
+      # Pure helpers that tests in both lanes use. Compiled into this bundle from where they
+      # already live instead of being moved or copied: each bundle gets its own module-internal
+      # copy, and the two bundles never share a process.
+      - path: Tests/FlightDeckTests/FlightControlL3/Index/IndexFixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/L3Fixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Fakes/ContractFakes.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RoutingTestData.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RoutingFixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RuleWireTestData.swift
+      - path: Tests/FlightDeckTests/CPUTime.swift
+      - path: Tests/FlightDeckTests/Intake/ScriptedHarnessRunner.swift
       # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
       # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
       - path: Tests/FlightDeckTests/Fixtures

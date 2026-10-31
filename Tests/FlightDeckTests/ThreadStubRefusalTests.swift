@@ -8,6 +8,24 @@ import IntakeKit
 /// thread ops are scoped like the sibling intake ops. The wire bytes are `ThreadWireCodingTests`.
 @MainActor
 final class ThreadStubRefusalTests: XCTestCase {
+    /// One of each thread command. Copied from `ThreadWireCodingTests`, which moved to the
+    /// window-free FleetKitTests bundle; this app-hosted bundle can no longer reach it.
+    private static func commands(intake: UUID, thread: UUID) -> [(FleetCommand, String)] {
+        let token = UUID()
+        return [
+            (.intakeThreadSend(id: intake, token: token, threadID: nil,
+                               anchor: WireThreadAnchor(checkpoint: 3, block: 7, quote: "the job"), text: "Why?"),
+             "intake.thread.send"),
+            (.intakeThreadSend(id: intake, token: token, threadID: thread, anchor: nil, text: "And then?"),
+             "intake.thread.send"),
+            (.intakeThreadAnswer(id: intake, token: token, threadID: thread,
+                                 answers: [WireStructuredAnswer(questionID: "q1", selected: ["a"], other: "and b")]),
+             "intake.thread.answer"),
+            (.intakeThreadResolve(id: intake, token: token, threadID: thread), "intake.thread.resolve"),
+            (.intakeDiffDecide(id: intake, token: token, threadID: thread, diffID: UUID(), accept: true), "intake.diff.decide"),
+        ]
+    }
+
     private let thread = UUID()
     private var root: URL!
     private var harness: FleetTestHarness!
@@ -55,7 +73,7 @@ final class ThreadStubRefusalTests: XCTestCase {
     /// The get is a read and is always allowed, like `intake.plan`.
     func testThreadWritesAreFleetWideAndTheGetIsARead() {
         let me = UUID()
-        for (command, _) in ThreadWireCodingTests.commands(intake: UUID(), thread: thread) {
+        for (command, _) in Self.commands(intake: UUID(), thread: thread) {
             XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(me)), "\(command)")
             XCTAssertTrue(ControlScope.permits(command, level: .full, caller: .session(me)), "\(command)")
         }
@@ -69,10 +87,10 @@ final class ThreadStubRefusalTests: XCTestCase {
         let own = UUID()
         let runner = ControlCaller.intakeRunner(own)
         for level in ControlScopeLevel.allCases {
-            for (command, _) in ThreadWireCodingTests.commands(intake: own, thread: thread) {
+            for (command, _) in Self.commands(intake: own, thread: thread) {
                 XCTAssertTrue(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
             }
-            for (command, _) in ThreadWireCodingTests.commands(intake: UUID(), thread: thread) {
+            for (command, _) in Self.commands(intake: UUID(), thread: thread) {
                 XCTAssertFalse(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
             }
             XCTAssertFalse(ControlScope.permits(FleetCommand.viewing(session: nil), level: level, caller: runner))
