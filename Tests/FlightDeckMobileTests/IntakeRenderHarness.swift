@@ -646,7 +646,8 @@ private enum Fixture {
                     id: "q5", text: "Where should failures be reported?", kind: "single",
                     options: [WireOption(id: "log", label: "The log"), WireOption(id: "pager", label: "The pager")],
                     allowOther: true),
-            ])
+            ],
+            digest: "0f1e2d3c4b5a6978")
         return d
     }()
 

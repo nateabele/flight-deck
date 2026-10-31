@@ -117,7 +117,8 @@ final class IntakeWireCodingTests: XCTestCase {
                     WireStructuredQuestion(id: "q1", text: "Pick one", kind: "single",
                                            options: [WireOption(id: "a", label: "A", detail: "the first"), WireOption(id: "b", label: "B")],
                                            recommended: ["a"], allowOther: true),
-                    WireStructuredQuestion(id: "q2", text: "Anything else?", kind: "text")]),
+                    WireStructuredQuestion(id: "q2", text: "Anything else?", kind: "text")],
+                digest: "6660fac6cf48ba4e"),
             choice: nil, failure: nil, pendingNotes: 1, halt: nil, headCheckpoint: 3,
             servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200), structuredQuestions: true)
         let data = try JSONEncoder().encode(detail)
@@ -130,6 +131,7 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(q.open, ["Who?"])
         XCTAssertNil(q.round)
         XCTAssertNil(q.structured)
+        XCTAssertNil(q.digest)
         let option = try JSONDecoder().decode(WireOption.self, from: Data(#"{"id":"a","label":"A"}"#.utf8))
         XCTAssertNil(option.detail)
         // The whole detail from a Mac that predates the flag: nil is what keeps the phone from
@@ -145,13 +147,14 @@ final class IntakeWireCodingTests: XCTestCase {
 
     func testIntakeAnswerCommandRoundTrips() throws {
         let command = FleetCommand.intakeAnswer(
-            id: UUID(), token: UUID(), round: 2,
+            id: UUID(), token: UUID(), round: 2, digest: "6660fac6cf48ba4e",
             answers: [WireStructuredAnswer(questionID: "q1", selected: ["a"], other: nil),
                       WireStructuredAnswer(questionID: "q2", selected: [], other: "typed")])
         let data = try JSONEncoder().encode(command)
         XCTAssertEqual(try JSONDecoder().decode(FleetCommand.self, from: data), command)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(json["op"] as? String, "intake.answer")
+        XCTAssertEqual(json["digest"] as? String, "6660fac6cf48ba4e")
         XCTAssertNotNil(json["id"])
         XCTAssertNil(json["intakeID"])
         XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(UUID())))

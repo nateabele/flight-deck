@@ -149,9 +149,9 @@ struct IntakeScreen: View {
         .buttonStyle(.borderless)
     }
 
-    private func answer(_ answers: [WireStructuredAnswer], round: Int) {
+    private func answer(_ answers: [WireStructuredAnswer], round: Int, digest: String) {
         answeredRound = round
-        commands.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: round, answers: answers) },
+        commands.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: round, digest: digest, answers: answers) },
                       onAck: { model.refresh() },
                       onFailure: { error in
                           answeredRound = nil
@@ -189,12 +189,12 @@ struct IntakeScreen: View {
 
     @ViewBuilder private func sections(for d: WireIntakeDetail, now: Date) -> some View {
         if d.structuredQuestions == true, d.summary.state == "needsAnswers", let q = d.questions,
-           let structured = q.structured, !structured.isEmpty, let round = q.round {
+           let structured = q.structured, !structured.isEmpty, let round = q.round, let digest = q.digest {
             StructuredQuestionForm(
                 title: "Round \(q.answered.count + 1) · \(structured.count) question\(structured.count == 1 ? "" : "s")",
                 questions: structured, sending: commands.inFlight.contains(.answer) || answeredRound == round,
                 enabled: frozenAt == nil
-            ) { answers in answer(answers, round: round) }
+            ) { answers in answer(answers, round: round, digest: digest) }
             .id("\(round)-\(formEpoch)")
         } else if let open = d.questions?.open {
             Section("Round \(d.questions!.answered.count + 1) · \(open.count) question\(open.count == 1 ? "" : "s")") {

@@ -85,13 +85,14 @@ final class IntakeCommandModelTests: XCTestCase {
         let c = StubCommander(), m = model(c)
         let id = intake
         let answers = [WireStructuredAnswer(questionID: "q1", selected: ["a"])]
-        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, answers: answers) }, onAck: {})
-        guard case .intakeAnswer(_, _, let round, let sent)? = c.commands.first else { return XCTFail("not sent") }
+        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
+        guard case .intakeAnswer(_, _, let round, let digest, let sent)? = c.commands.first else { return XCTFail("not sent") }
         XCTAssertEqual(round, 2)
+        XCTAssertEqual(digest, "d2")
         XCTAssertEqual(sent, answers)
         c.answer(.failure(.server(code: "stale_questions")))
         XCTAssertEqual(m.message, "These questions changed. Here are the new ones.")
-        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, answers: answers) }, onAck: {})
+        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
         c.answer(.failure(.server(code: "invalid_answer")))
         XCTAssertEqual(m.message, "Your Mac wouldn't do that (invalid_answer).")
     }

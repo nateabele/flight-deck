@@ -356,10 +356,16 @@ public struct WireQuestions: Codable, Equatable, Sendable {
     /// The open round as choices (a legacy string round arrives as text questions), so the phone
     /// has one shape to render. `open` stays for a phone that predates this field.
     public var structured: [WireStructuredQuestion]?
+    /// The open round's `questionsDigest`: what it asks, not where it sits. `round` alone is not
+    /// unique — the Mac's retry clears the exchanges, so a fresh round reuses index 0 — and an
+    /// answer or a phone draft keyed by index alone could land on different questions. An
+    /// answer sends it back; the Mac refuses a mismatch (`stale_questions`).
+    public var digest: String?
 
     public init(open: [String]? = nil, answered: [WireExchange] = [],
-                round: Int? = nil, structured: [WireStructuredQuestion]? = nil) {
+                round: Int? = nil, structured: [WireStructuredQuestion]? = nil, digest: String? = nil) {
         self.open = open; self.answered = answered; self.round = round; self.structured = structured
+        self.digest = digest
     }
 }
 

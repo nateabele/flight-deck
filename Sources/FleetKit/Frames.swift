@@ -311,10 +311,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// — an older Mac drops the socket on this unknown op, as for the four above.
     case intakeChoose(id: UUID, token: UUID, preset: String)
     /// The phone answering the open clarifying round by choosing. `round` is the exchange index
-    /// the phone was shown, so answers typed against a round the Mac has since moved past are
-    /// refused (`stale_questions`) rather than applied to different questions. **Sent only when the detail has
-    /// `structuredQuestions == true`** — an older Mac drops the socket on this unknown op.
-    case intakeAnswer(id: UUID, token: UUID, round: Int, answers: [WireStructuredAnswer])
+    /// and `digest` the round's `WireQuestions.digest` the phone was shown, so answers typed
+    /// against a round the Mac has since moved past, or replaced at the same index by a retry,
+    /// are refused (`stale_questions`) rather than applied to different questions.
+    /// **Sent only when the detail has `structuredQuestions == true`** — an older Mac drops the
+    /// socket on this unknown op.
+    case intakeAnswer(id: UUID, token: UUID, round: Int, digest: String, answers: [WireStructuredAnswer])
     /// The phone starting a fidelity with its Rounds edited (`intake.start`): `config` is what the
     /// phone wants to run, `base` the preset's stock config it edited from. The Mac refuses with
     /// `rounds_changed` when the stock config is no longer `base`, and otherwise runs
@@ -344,7 +346,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case isCollapsed, project, title, agent, accountIndex
         case block, approve, feedback
         case command, stage, mode, noteID, kind, checkpoint, quote, preset, config, base
-        case round, answers
+        case round, digest, answers
     }
 
     private enum Op: String, Codable {
@@ -481,11 +483,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(preset, forKey: .preset)
-        case .intakeAnswer(let id, let token, let round, let answers):
+        case .intakeAnswer(let id, let token, let round, let digest, let answers):
             try c.encode(Op.intakeAnswer, forKey: .op)
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(round, forKey: .round)
+            try c.encode(digest, forKey: .digest)
             try c.encode(answers, forKey: .answers)
         case .intakeStart(let id, let token, let preset, let config, let base):
             try c.encode(Op.intakeStart, forKey: .op)
@@ -645,6 +648,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 round: try c.decode(Int.self, forKey: .round),
+                digest: try c.decode(String.self, forKey: .digest),
                 answers: try c.decode([WireStructuredAnswer].self, forKey: .answers)
             )
         case .intakeStart:

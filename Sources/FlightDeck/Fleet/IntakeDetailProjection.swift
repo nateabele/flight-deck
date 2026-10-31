@@ -127,7 +127,8 @@ enum IntakeDetailProjection {
         let wireQuestions: WireQuestions? = i.exchanges.isEmpty ? nil : WireQuestions(
             open: open, answered: answered,
             round: openRound == nil ? nil : i.exchanges.count - 1,
-            structured: openRound?.presentedQuestions.map(Self.wireQuestion))
+            structured: openRound?.presentedQuestions.map(Self.wireQuestion),
+            digest: openRound?.questionsDigest)
         let choice: WireChoice? = choosing ? WireChoice(
             recommended: i.recommended?.rawValue, reason: i.recommendationReason, chosen: i.chosenPreset?.rawValue,
             roundsSummary: (i.chosenPreset ?? i.recommended).flatMap { p in i.roundConfig.map { RoundConfigEditor.summary(preset: p, config: $0) } },

@@ -456,11 +456,28 @@ final class IntakePhoneCommandTests: XCTestCase {
         return i
     }
 
+    /// The open round's digest, as the projection shows it to the phone.
+    private func digest(_ i: Intake) -> String { i.exchanges.last?.questionsDigest ?? "" }
+
+    func testPhoneAnswerForAReplacedRoundAtTheSameIndexIsStale() async throws {
+        // A retry clears the exchanges: the new round is index 0 again, asking something else.
+        // An answer to the old round 0 names the old digest and must not land on the new one.
+        var i = try seedAsking(rounds: 1)
+        let old = digest(i)
+        i.exchanges = [TriageExchange(questions: ["Something else?"])]
+        try IntakeStore(root: root).save(i)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "for the old question")]
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: old, answers: answers, token: UUID()), "stale_questions")
+        XCTAssertNil(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers)
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
+    }
+
     func testPhoneAnswerAnswersTheOpenRound() async throws {
         let i = try seedAsking(rounds: 1)
         let svc = await makeService()
         let answers = [WireStructuredAnswer(questionID: "q1", selected: [], other: "the README")]
-        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()))
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
         let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
         XCTAssertEqual(after.exchanges[0].answers, ["the README"])
         XCTAssertEqual(after.exchanges[0].structuredAnswers, [StructuredAnswer(questionID: "q1", selected: [], other: "the README")])
@@ -469,11 +486,11 @@ final class IntakePhoneCommandTests: XCTestCase {
     func testPhoneAnswerPassesOnTheServicesRefusal() async throws {
         let i = try seedAsking(rounds: 1)
         let svc = await makeService()
-        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "zz", other: "x")], token: UUID()),
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "zz", other: "x")], token: UUID()),
                        "unknown_question")
-        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "q1", other: " ")], token: UUID()),
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "q1", other: " ")], token: UUID()),
                        "invalid_answer")
-        XCTAssertEqual(svc.phoneAnswer(UUID(), round: 0, answers: [], token: UUID()), "unknown_intake")
+        XCTAssertEqual(svc.phoneAnswer(UUID(), round: 0, digest: "", answers: [], token: UUID()), "unknown_intake")
     }
 
     func testPhoneAnswerForAnEarlierRoundIsRefusedAsStale() async throws {
@@ -482,7 +499,7 @@ final class IntakePhoneCommandTests: XCTestCase {
         let i = try seedAsking(rounds: 2)
         let svc = await makeService()
         let answers = [WireStructuredAnswer(questionID: "q1", other: "old")]
-        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()), "stale_questions")
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()), "stale_questions")
         let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
         XCTAssertNil(after.exchanges[1].answers)
         XCTAssertEqual(after.state, .needsAnswers)
@@ -494,8 +511,8 @@ final class IntakePhoneCommandTests: XCTestCase {
         let i = try seedAsking(rounds: 1)
         let svc = await makeService()
         let answers = [WireStructuredAnswer(questionID: "q1", other: "first")]
-        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()))
-        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "q1", other: "second")],
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "q1", other: "second")],
                                        token: UUID()), "stale_questions")
         XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["first"])
     }
@@ -505,9 +522,9 @@ final class IntakePhoneCommandTests: XCTestCase {
         let svc = await makeService()
         let token = UUID()
         let answers = [WireStructuredAnswer(questionID: "q1", other: "once")]
-        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: token))
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: token))
         // The retry meets a state its first delivery changed; it must be acked, not refused stale.
-        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: token))
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: token))
         XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["once"])
     }
 }
