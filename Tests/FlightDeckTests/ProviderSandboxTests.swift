@@ -168,7 +168,7 @@ final class ProviderSandboxTests: XCTestCase {
         let keys = Set(String(decoding: stdout, as: UTF8.self).split(separator: "\n").compactMap {
             $0.split(separator: "=", maxSplits: 1).first.map(String.init)
         })
-        XCTAssertEqual(keys, ["PATH", "HOME", "TMPDIR"])
+        XCTAssertEqual(keys, ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"])
         // Homebrew's prefixes too, after the system's, so `#!/usr/bin/env node` finds node.
         XCTAssertTrue(String(decoding: stdout, as: UTF8.self)
             .contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin\n"))
@@ -492,6 +492,77 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("x").path))
     }
 
+    // MARK: - Round 2
+
+    /// The runner keeps stdout only to just past the cap, so a flood from a process outside the
+    /// group, which the counter's group kill cannot reach, costs no memory either.
+    func testStdoutCaptureIsPassedToTheRunner() async throws {
+        let runner = CaptureRecordingRunner()
+        _ = try? await sandbox(runner: runner).run(try provider(["/usr/bin/true"]), outputDirectory: try output())
+        XCTAssertEqual(runner.capture, ProviderSandbox.Limits.standard.stdout + 1)
+    }
+
+    /// `kill` reached any process of the same user, Flight Deck included. Now only the sandbox's
+    /// own processes, so a generator can still stop its children.
+    func testSignalToAnOutsideProcessIsDenied() async throws {
+        let outside = Process()
+        outside.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        outside.arguments = ["300"]
+        try outside.run()
+        defer { outside.terminate() }
+        let result = try await sandbox().run(try provider(["/bin/kill", "-TERM", "\(outside.processIdentifier)"]),
+                                             outputDirectory: try output())
+        XCTAssertNotEqual(exited(result).code, 0)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(outside.isRunning, "the sandbox signalled a process outside it")
+
+        let own = try await sandbox().run(
+            try provider(["/bin/sh", "-c", "/bin/sleep 30 & if kill $!; then echo stopped; fi; wait"]),
+            outputDirectory: try output())
+        guard case .exited(_, let stdout, _, _) = own else { return XCTFail("\(own)") }
+        XCTAssertEqual(String(decoding: stdout, as: UTF8.self), "stopped\n")
+    }
+
+    /// The user's temp folder holds other provider runs and the user's caches; /private/tmp
+    /// holds other sessions' scratch files. Neither is readable; the run's own folder still is.
+    func testUserTempAndPrivateTmpAreUnreadable() async throws {
+        let secret = "secret-\(UUID().uuidString)"
+        let inTemp = tmp.appendingPathComponent("planted.txt")
+        try Data(secret.utf8).write(to: inTemp)
+        let inPrivateTmp = URL(fileURLWithPath: "/private/tmp/fd-sandbox-probe-\(UUID().uuidString)")
+        try Data(secret.utf8).write(to: inPrivateTmp)
+        defer { try? FileManager.default.removeItem(at: inPrivateTmp) }
+        for planted in [inTemp, inPrivateTmp] {
+            let result = try await sandbox().run(try provider(["/bin/cat", planted.path]), outputDirectory: try output())
+            guard case .exited(let code, let stdout, _, _) = result else { return XCTFail("\(result)") }
+            XCTAssertNotEqual(code, 0, planted.path)
+            XCTAssertFalse(String(decoding: stdout, as: UTF8.self).contains(secret), planted.path)
+        }
+        // The generator still works from its own folder.
+        let own = try await sandbox().run(try provider(["/bin/cat", "provider.toml"]), outputDirectory: try output())
+        XCTAssertEqual(exited(own).code, 0, exited(own).stderr)
+    }
+
+    /// `getpwuid` needs a Mach service the sandbox denies; USER and LOGNAME let `getpass` and
+    /// friends answer without it.
+    func testUserNameResolvesWithoutTheDirectoryService() async throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/python3"), "no python3")
+        let result = try await sandbox().run(
+            try provider(["/usr/bin/python3", "-c", "import getpass; print(getpass.getuser())"]), outputDirectory: try output())
+        guard case .exited(0, let stdout, _, _) = result else { return XCTFail("\(result)") }
+        XCTAssertEqual(String(decoding: stdout, as: UTF8.self), String(cString: getpwuid(getuid())!.pointee.pw_name) + "\n")
+    }
+
+    /// A program that ignores SIGXFSZ gets EFBIG and exits 1 on its own; the file left at the
+    /// cap says why.
+    func testFileCapIsReportedWhenSIGXFSZIsIgnored() async throws {
+        let limits = ProviderSandbox.Limits(stdout: 1 << 20, output: 64 << 20, temp: 64 << 20, file: 1 << 20)
+        let perl = "$SIG{XFSZ} = 'IGNORE'; open(my $f, '>', $ARGV[0]) or die; print $f '0' x (4 << 20) or die \"w: $!\\n\"; close $f or die \"c: $!\\n\""
+        let result = try await sandbox(limits: limits).run(try provider(["/usr/bin/perl", "-e", perl, "{out}/big"]),
+                                                           outputDirectory: try output())
+        XCTAssertEqual(result, .outputTooLarge("file"))
+    }
+
     // MARK: - Refusals
 
     func testMissingSandboxExecIsRefusedAndNothingRuns() async throws {
@@ -618,6 +689,25 @@ private final class SpawnCountingRunner: CommandRunner, @unchecked Sendable {
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
         lock.lock(); count += 1; lock.unlock()
+        return CommandResult(stdout: Data(), stderr: "", exitCode: 0)
+    }
+}
+
+/// Runs nothing and remembers the stdout capture it was asked for.
+private final class CaptureRecordingRunner: CommandRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Int?
+    var capture: Int? { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+             processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+        CommandResult(stdout: Data(), stderr: "", exitCode: 0)
+    }
+
+    func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+             processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+             onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?) async throws -> CommandResult {
+        lock.lock(); recorded = stdoutCapture; lock.unlock()
         return CommandResult(stdout: Data(), stderr: "", exitCode: 0)
     }
 }

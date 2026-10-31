@@ -104,7 +104,13 @@ public struct ProviderSandbox: Sendable {
     /// - `mach-lookup` and `appleevent-send`: any system service that acts for its caller (the
     ///   pasteboard server answered `pbpaste`);
     /// - reads of the home folder: `~/.ssh` and the login keychain, copyable into `out/`.
-    /// Home stays readable only where the run itself lives and where its input is.
+    /// Round two closed three more:
+    /// - reads of the user's `/private/var/folders/<xx>/<yy>/` (its `T/` holds other provider
+    ///   runs, its `C/` the user's caches) and of `/private/tmp` (other sessions' scratch files);
+    /// - `signal`: a generator could `kill -TERM` any process of the same user, Flight Deck
+    ///   included. Now only its own processes, so it can still stop its children.
+    /// All of that stays readable only where the run itself lives and where its input is: the
+    /// allow comes after every read deny.
     public static let profile = """
         (version 1)
         (allow default)
@@ -115,12 +121,15 @@ public struct ProviderSandbox: Sendable {
           (subpath (param "TEMP_DIR"))
           (literal "/dev/null"))
         (deny file-read* (subpath (param "HOME_DIR")))
+        (deny file-read* (subpath (param "USER_VAR_DIR")) (subpath "/private/tmp"))
         (allow file-read*
           (subpath (param "RUN_ROOT"))
           (subpath (param "INPUT_DIR")))
         (deny lsopen)
         (deny appleevent-send)
         (deny mach-lookup)
+        (deny signal)
+        (allow signal (target same-sandbox))
         """
 
     public init(sandboxExecPath: String = "/usr/bin/sandbox-exec", runner: any CommandRunner = SystemCommandRunner(),
@@ -158,7 +167,6 @@ public struct ProviderSandbox: Sendable {
         try snapshot(provider, into: run)
 
         let profileURL = run.root.appendingPathComponent("profile.sb")
-        try Data(Self.profile.utf8).write(to: profileURL)
         // Real paths: `$TMPDIR` is under /var, a link to /private/var, and the sandbox matches
         // `subpath` against the resolved path, so the unresolved one would allow nothing.
         let outPath = try Self.realPath(run.output)
@@ -166,6 +174,9 @@ public struct ProviderSandbox: Sendable {
         let rootPath = try Self.realPath(run.root)
         let inputPath = try inputDirectory.map { try Self.realPath($0) } ?? rootPath
         let homePath = try Self.realPath(Self.userHome)
+        let userVarPath = try Self.userVarFolder()
+        let ancestors = Self.ancestors(of: [rootPath, inputPath])
+        try Data(Self.profile(ancestorCount: ancestors.count).utf8).write(to: profileURL)
         let cwd = run.snapshot
 
         var values = placeholders
@@ -174,10 +185,16 @@ public struct ProviderSandbox: Sendable {
         let args = generator.command.dropFirst().map { Self.substitute($0, values) }
         let arguments = ["-D", "OUTPUT_DIR=\(outPath)", "-D", "TEMP_DIR=\(tempPath)",
                          "-D", "HOME_DIR=\(homePath)", "-D", "RUN_ROOT=\(rootPath)", "-D", "INPUT_DIR=\(inputPath)",
-                         "-f", profileURL.path, program] + args
+                         "-D", "USER_VAR_DIR=\(userVarPath)"]
+            + ancestors.enumerated().flatMap { ["-D", "ANCESTOR_\($0.offset)=\($0.element)"] }
+            + ["-f", profileURL.path, program] + args
         // Nothing inherited: the app's environment holds tokens and socket paths a generator
         // has no business reading.
-        let environment = ["PATH": Self.environmentPath, "HOME": tempPath, "TMPDIR": tempPath]
+        // USER and LOGNAME because `getpwuid` needs a Mach service the profile denies: without
+        // them `id -un`, Python's `getpass` and the like fail inside the sandbox.
+        let user = Self.userName
+        let environment = ["PATH": Self.environmentPath, "HOME": tempPath, "TMPDIR": tempPath,
+                           "USER": user, "LOGNAME": user]
 
         // Clamped, though the parser refuses more: a hand-built generator must not overflow the
         // nanosecond arithmetic either.
@@ -271,6 +288,49 @@ public struct ProviderSandbox: Sendable {
         return FileManager.default.homeDirectoryForCurrentUser
     }
 
+    /// The base profile, plus metadata reads of each folder above the run and the input:
+    /// `mkdir -p` and `realpath` stat every ancestor, and those lie in denied areas (the temp
+    /// folder, home). Only `file-read-metadata`, only those exact folders: their contents stay
+    /// unlistable. Each path is a `-D` parameter, never text in the profile.
+    static func profile(ancestorCount: Int) -> String {
+        guard ancestorCount > 0 else { return profile }
+        let literals = (0..<ancestorCount).map { "  (literal (param \"ANCESTOR_\($0)\"))" }.joined(separator: "\n")
+        return profile + "\n(allow file-read-metadata\n" + literals + ")\n"
+    }
+
+    /// Every proper ancestor of `paths`, "/" included, without repeats, in a stable order.
+    static func ancestors(of paths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for path in paths {
+            var current = (path as NSString).deletingLastPathComponent
+            while true {
+                if seen.insert(current).inserted { result.append(current) }
+                if current == "/" || current.isEmpty { break }
+                current = (current as NSString).deletingLastPathComponent
+            }
+        }
+        return result
+    }
+
+    static var userName: String {
+        if let entry = getpwuid(getuid()), let name = entry.pointee.pw_name { return String(cString: name) }
+        return NSUserName()
+    }
+
+    /// The per-user `/private/var/folders/<xx>/<yy>`, the parent of `confstr`'s temp folder
+    /// rather than of `$TMPDIR`, which the app's environment could have moved.
+    static func userVarFolder() throws -> String {
+        var temp = FileManager.default.temporaryDirectory.path
+        let size = confstr(_CS_DARWIN_USER_TEMP_DIR, nil, 0)
+        if size > 0 {
+            var buffer = [CChar](repeating: 0, count: size)
+            if confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, size) > 0 { temp = String(cString: buffer) }
+        }
+        let resolved = try realPath(URL(fileURLWithPath: temp, isDirectory: true))
+        return (resolved as NSString).deletingLastPathComponent
+    }
+
     static func realPath(_ url: URL) throws -> String {
         // `realpath(3)`, not `resolvingSymlinksInPath`, which strips /private back off.
         guard let resolved = realpath(url.path, nil) else {
@@ -308,7 +368,11 @@ public struct ProviderSandbox: Sendable {
                                      if stdoutBytes.add(chunk.count) > limits.stdout, stop.set(.tooLarge("stdout")) {
                                          group.kill()
                                      }
-                                 })
+                                 },
+                                 // A process outside the group (no group kill reaches it) can
+                                 // flood stdout through the runner's drain grace; one byte past
+                                 // the cap is all the runner may keep.
+                                 stdoutCapture: limits.stdout + 1)
         }
         let watchdog = Task {
             try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -351,6 +415,10 @@ public struct ProviderSandbox: Sendable {
         let done = try result.get()
         // SIGXFSZ, the per-file cap, as a signal death or as the shell's 128 + signal exit.
         if done.exitCode == 128 + SIGXFSZ { return .outputTooLarge("file") }
+        // A program that ignores SIGXFSZ (Python, node) gets EFBIG and exits on its own terms;
+        // a file left at the cap is how the cap shows.
+        let fileCap = blocks * 1024
+        if Self.largestFile(output) >= fileCap || Self.largestFile(temp) >= fileCap { return .outputTooLarge("file") }
         return .exited(code: done.exitCode, stdout: done.stdout, stderr: done.stderr, outputs: [])
     }
 
@@ -370,6 +438,23 @@ public struct ProviderSandbox: Sendable {
             if Self.isType(info, S_IFDIR) { total += diskUsage(child) }
         }
         return total
+    }
+
+    /// The largest regular file under `url`, by `lstat`.
+    static func largestFile(_ url: URL) -> Int {
+        guard let dir = opendir(url.path) else { return 0 }
+        defer { closedir(dir) }
+        var largest = 0
+        while let entry = readdir(dir) {
+            let name = entryName(entry)
+            if name == "." || name == ".." { continue }
+            let child = url.appendingPathComponent(name)
+            var info = stat()
+            guard lstat(child.path, &info) == 0 else { continue }
+            if isType(info, S_IFDIR) { largest = max(largest, largestFile(child)) }
+            else if isType(info, S_IFREG) { largest = max(largest, Int(info.st_size)) }
+        }
+        return largest
     }
 
     static func entryName(_ entry: UnsafeMutablePointer<dirent>) -> String {
