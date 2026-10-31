@@ -276,7 +276,7 @@ final class IntakeServiceTests: XCTestCase {
         let id = await capture(svc)
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .needsAnswers)
-        XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"])])
+        XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"], structured: [.text(id: "q1", "Which README?")])])
         XCTAssertEqual(i.triage, HeadlessSession(agent: .codex, sessionID: "S1", model: "m1", effort: "high"))
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
         // Inputs the agent was pointed at exist beside intake.json.

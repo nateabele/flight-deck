@@ -2326,7 +2326,7 @@ final class IntakeService: ObservableObject {
 
         switch result.triage {
         case .questions(let q):
-            i.exchanges.append(TriageExchange(questions: q))
+            i.exchanges.append(TriageExchange(questions: q.map(\.text), answers: nil, structured: q))
             i.state = .needsAnswers
         case .recommendation(let preset, let reason, let cs):
             if case .encodeNow = turn, cs == nil {

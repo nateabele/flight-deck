@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TriageResult: Equatable, Sendable {
-    case questions([String])
+    case questions([StructuredQuestion])
     case recommendation(preset: Preset, reason: String, changeSet: ChangeSet?)
 }
 
@@ -47,6 +47,11 @@ public enum Triage {
                    "properties":{"graphObservedAt":{"type":"string"},"ops":{"type":"array","items":\(op)}}}
     """
 
+    /// One clarifying question. `cost` is left out in P0: nothing reads it yet, and every field
+    /// here must be in `required` for strict mode, so an unused one is a field the agent must
+    /// invent a value for.
+    private static let questionItem = #"{"type":"object","additionalProperties":false,"required":["id","text","kind","options","recommended","allowOther"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"kind":{"type":"string","enum":["single","multi","toggle","text"]},"options":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","label","detail"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"detail":{"type":["string","null"]}}}},"recommended":{"type":"array","items":{"type":"string"}},"allowOther":{"type":"boolean"}}}"#
+
     /// Strict-mode schema for both `codex exec --output-schema` and `claude --json-schema`:
     /// every object declares `additionalProperties: false` and lists every property in
     /// `required`, with optional values typed `[<type>, "null"]` instead of simply omitted —
@@ -56,15 +61,30 @@ public enum Triage {
      "required":["kind","questions","preset","reason","changeSet"],
      "properties":{
       "kind":{"type":"string","enum":["questions","recommendation"]},
-      "questions":{"type":["array","null"],"items":{"type":"string"}},
+      "questions":{"type":["array","null"],"items":\(questionItem)},
       "preset":{"type":["string","null"],"enum":["singleTask","sketch","featurePlan","fullPlan",null]},
       "reason":\(nullableString),
       "changeSet":\(changeSetSchemaFragment)}}
     """
 
+    /// A question item as the agent sends it: an object, or a bare string from an older prompt
+    /// or a stored fixture. Ids of a bare string are assigned by `normalize`, by position.
+    private struct WireQuestion: Decodable {
+        let question: StructuredQuestion
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let s = try? c.decode(String.self) {
+                question = .text(id: "", s)
+            } else {
+                question = try c.decode(StructuredQuestion.self)
+            }
+        }
+    }
+
     private struct Wire: Decodable {
         let kind: String
-        let questions: [String]?
+        let questions: [WireQuestion]?
         let preset: Preset?
         let reason: String?
         let changeSet: ChangeSet?
@@ -77,12 +97,61 @@ public enum Triage {
         switch w.kind {
         case "questions":
             guard let q = w.questions, !q.isEmpty else { throw Malformed(why: "questions kind with no questions") }
-            return .questions(q)
+            return .questions(normalize(q.map(\.question)))
         case "recommendation":
             guard let p = w.preset, let r = w.reason else { throw Malformed(why: "recommendation without preset/reason") }
             return .recommendation(preset: p, reason: r, changeSet: w.changeSet)
         default:
             throw Malformed(why: "unknown kind \(w.kind)")
+        }
+    }
+
+    /// Makes an agent's questions safe to render and answer. Duplicate ids would make two
+    /// questions share one answer; a choice question with no real choice would show an
+    /// unanswerable picker, so it degrades to free text and keeps its options as hints.
+    public static func normalize(_ raw: [StructuredQuestion]) -> [StructuredQuestion] {
+        // Every member of a duplicate group is renumbered, not just the later ones: which of two
+        // same-id questions the answer belongs to is exactly what a duplicate leaves unknowable.
+        let questionIDs = renumbered(raw.map(\.id), prefix: "q")
+        return raw.enumerated().map { index, original in
+            var q = original
+            q.id = questionIDs[index]
+            let optionIDs = renumbered(q.options.map(\.id), prefix: "o")
+            q.options = zip(q.options, optionIDs).map { option, id in
+                var o = option
+                o.id = id
+                return o
+            }
+            let valid = Set(q.options.map(\.id))
+            q.recommended = q.recommended.filter { valid.contains($0) }
+            let malformed: Bool
+            switch q.kind {
+            case .single, .multi: malformed = q.options.count < 2
+            case .toggle: malformed = q.options.count != 1
+            case .text: malformed = false
+            }
+            if malformed {
+                if !q.options.isEmpty { q.text += " (e.g. \(q.options.map(\.label).joined(separator: ", ")))" }
+                q.kind = .text
+            }
+            if q.kind == .text { q.options = []; q.recommended = [] }
+            if q.kind == .single || q.kind == .multi { q.allowOther = true }
+            return q
+        }
+    }
+
+    /// Ids with any empty or repeated one replaced by `<prefix><position>`. A positional id that
+    /// lands on a kept id is bumped, so the result is always unique.
+    private static func renumbered(_ ids: [String], prefix: String) -> [String] {
+        var counts: [String: Int] = [:]
+        for id in ids { counts[id, default: 0] += 1 }
+        var used = Set(ids.filter { !$0.isEmpty && counts[$0] == 1 })
+        return ids.enumerated().map { index, id in
+            if !id.isEmpty, counts[id] == 1 { return id }
+            var n = index + 1
+            while used.contains("\(prefix)\(n)") { n += 1 }
+            used.insert("\(prefix)\(n)")
+            return "\(prefix)\(n)"
         }
     }
 
@@ -208,6 +277,11 @@ public enum Triage {
           constraints, and every ambiguity you would otherwise settle by guessing. Ask
           rather than assume. Leave out only a question the intent or the files above
           already answer.
+        - Ask each question as a choice when you can. Prefer kind `single` or `multi` with 2 to 5
+          short options, and name your pick in `recommended` (option ids) when there is a sensible
+          default. Use `toggle`, with exactly one option, for a yes or no about one thing. Use
+          `text` only for an answer no list could cover. Number question ids `q1`, `q2` and so on,
+          and give options short slug ids. Leave `recommended` empty when you have no pick.
 
         Choose one of four fidelity presets:
         - Single task: no drafting or refinement — you encode the change set yourself in one pass.

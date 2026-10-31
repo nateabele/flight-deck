@@ -2,7 +2,7 @@
  "required":["kind","questions","preset","reason","changeSet"],
  "properties":{
   "kind":{"type":"string","enum":["questions","recommendation"]},
-  "questions":{"type":["array","null"],"items":{"type":"string"}},
+  "questions":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"required":["id","text","kind","options","recommended","allowOther"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"kind":{"type":"string","enum":["single","multi","toggle","text"]},"options":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","label","detail"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"detail":{"type":["string","null"]}}}},"recommended":{"type":"array","items":{"type":"string"}},"allowOther":{"type":"boolean"}}}},
   "preset":{"type":["string","null"],"enum":["singleTask","sketch","featurePlan","fullPlan",null]},
   "reason":{"type":["string","null"]},
   "changeSet":{"type":["object","null"],"additionalProperties":false,"required":["graphObservedAt","ops"],

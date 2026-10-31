@@ -4,7 +4,7 @@ import IntakeKit
 final class TriageTests: XCTestCase {
     func testDecodesQuestions() throws {
         let d = Data(#"{"kind":"questions","questions":["Mac only?"],"preset":null,"reason":null,"changeSet":null}"#.utf8)
-        XCTAssertEqual(try Triage.decode(d), .questions(["Mac only?"]))
+        XCTAssertEqual(try Triage.decode(d), .questions([.text(id: "q1", "Mac only?")]))
     }
     func testDecodesBeadRecommendationWithChangeSet() throws {
         let d = Data(#"""
@@ -96,10 +96,76 @@ final class TriageTests: XCTestCase {
         let out = try HeadlessOutput.parse(.codex, stdout: try load("triage-codex-live", "jsonl"))
         guard case .questions(let qs) = try Triage.decode(out.structured) else { return XCTFail() }
         XCTAssertEqual(qs.count, 1)
+        XCTAssertTrue(qs.allSatisfy { $0.kind == .text })
     }
     func testDecodesLiveClaudeOutput() throws {
         let out = try HeadlessOutput.parse(.claude, stdout: try load("triage-claude-live", "json"))
         guard case .questions(let qs) = try Triage.decode(out.structured) else { return XCTFail() }
         XCTAssertEqual(qs.count, 1)
+        XCTAssertTrue(qs.allSatisfy { $0.kind == .text })
+    }
+
+    // MARK: structured questions
+
+    private func decodeQuestions(_ items: String) throws -> [StructuredQuestion] {
+        let d = Data(#"{"kind":"questions","questions":\#(items),"preset":null,"reason":null,"changeSet":null}"#.utf8)
+        guard case .questions(let qs) = try Triage.decode(d) else { XCTFail("not questions"); return [] }
+        return qs
+    }
+    func testDecodesStructuredQuestions() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"q1","text":"Which store?","kind":"single","options":[
+          {"id":"a","label":"A","detail":null},{"id":"b","label":"B","detail":"faster"},{"id":"c","label":"C","detail":null}],
+          "recommended":["b"],"allowOther":true}]
+        """#)
+        XCTAssertEqual(qs.count, 1)
+        XCTAssertEqual(qs[0].kind, .single)
+        XCTAssertEqual(qs[0].options.map(\.id), ["a", "b", "c"])
+        XCTAssertEqual(qs[0].options[1].detail, "faster")
+        XCTAssertEqual(qs[0].recommended, ["b"])
+    }
+    func testDecodesLegacyStringQuestions() throws {
+        let qs = try decodeQuestions(#"["Who?"]"#)
+        XCTAssertEqual(qs, [.text(id: "q1", "Who?")])
+    }
+    func testMalformedChoiceQuestionDegradesToText() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"q1","text":"Which?","kind":"single","options":[{"id":"m","label":"Mac","detail":null}],"recommended":[],"allowOther":false}]
+        """#)
+        XCTAssertEqual(qs[0].kind, .text)
+        XCTAssertEqual(qs[0].text, "Which? (e.g. Mac)")
+        XCTAssertTrue(qs[0].options.isEmpty)
+    }
+    func testDuplicateIdsAreRenumbered() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"x","text":"One?","kind":"single","options":[{"id":"a","label":"A","detail":null},{"id":"a","label":"B","detail":null}],"recommended":["zz"],"allowOther":false},
+         {"id":"x","text":"Two?","kind":"text","options":[],"recommended":[],"allowOther":false}]
+        """#)
+        XCTAssertEqual(qs.map(\.id), ["q1", "q2"])
+        XCTAssertEqual(qs[0].options.map(\.id), ["o1", "o2"])
+        XCTAssertEqual(qs[0].recommended, [])
+        XCTAssertTrue(qs[0].allowOther, "single always allows Other")
+    }
+    func testToggleNeedsExactlyOneOption() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"q1","text":"Ok?","kind":"toggle","options":[{"id":"y","label":"Yes","detail":null},{"id":"n","label":"No","detail":null}],"recommended":[],"allowOther":false}]
+        """#)
+        XCTAssertEqual(qs[0].kind, .text)
+    }
+    func testSchemaSurvivesGeminiCompatible() throws {
+        let compat = GeminiSchema.compatible(Triage.schemaJSON)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(compat.utf8)) as? [String: Any])
+        let props = try XCTUnwrap(root["properties"] as? [String: Any])
+        let questions = try XCTUnwrap(props["questions"] as? [String: Any])
+        let item = try XCTUnwrap(questions["items"] as? [String: Any])
+        let kind = try XCTUnwrap((item["properties"] as? [String: Any])?["kind"] as? [String: Any])
+        XCTAssertEqual(kind["enum"] as? [String], ["single", "multi", "toggle", "text"])
+        XCTAssertNil(kind["anyOf"])
+    }
+    func testPromptAsksForChoices() {
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: nil, readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertTrue(p.contains("`single` or `multi`"), p)
+        XCTAssertTrue(p.contains("`recommended`"), p)
     }
 }
