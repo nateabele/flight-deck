@@ -137,8 +137,8 @@ enum TimelineStyle {
     }
 
     /// A message another Claude session sent this one — the one `.systemNotice` that is an
-    /// agent talking rather than the harness. It is drawn as prose: Markdown, uncut, expanding
-    /// in place. Every other notice stays machine text, which is why this is gated on the
+    /// agent talking rather than the harness. It is drawn as prose: Markdown, collapsed to
+    /// `peerCollapsedLines` and opening in place. Every other notice stays machine text, which is why this is gated on the
     /// wrapper name and not on the kind (see `rendersMarkdown(_:)`).
     ///
     /// A message this session sent is one too (`TimelinePeerSend`): the same prose, travelling
@@ -438,6 +438,24 @@ enum TimelineStyle {
     /// this screen the reader is handed a way out of.
     static let proseCeilingLines = 120
 
+    /// How much of another session's message a row shows before it is opened.
+    ///
+    /// **Collapsed by default, because a peer message is traffic between agents, not the
+    /// conversation.** The reader asked for it: a coordinating session receives and sends
+    /// dozens of these, each a few paragraphs of task bookkeeping, and drawn whole they push
+    /// the reader's own exchange with the agent off the screen. Three lines say who and
+    /// what; the header's chevron opens the rest in place.
+    static let peerCollapsedLines = 3
+
+    /// The opacity of a collapsed peer message, so it reads as secondary to the agent's own
+    /// prose beside it while still being legible at a glance.
+    static let collapsedPeerOpacity = 0.6
+
+    /// The line budget a collapsed row of this item is cut to.
+    static func collapsedCeiling(for item: TimelineItem) -> Int {
+        isPeerMessage(item) ? peerCollapsedLines : proseCeilingLines
+    }
+
     /// Whether a body runs past `limit` lines in the prose column — hard breaks plus wraps.
     ///
     /// **It stops the moment the answer is known**, which is what makes it safe to call from a
@@ -500,7 +518,7 @@ enum TimelineStyle {
             return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
         case .systemNotice where isPeerMessage(item):
             guard !expanded else { return nil }
-            return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
+            return exceeds(peerCollapsedLines, item.body.text) ? peerCollapsedLines : nil
         case .thinking:
             return 6
         case .prompt, .unknown, .toolCall, .toolResult, .systemNotice:
@@ -605,10 +623,11 @@ enum TimelineStyle {
         guard rendersMarkdown(item) else {
             return .init(segments: [.prose(item.body.text)], hasMore: false)
         }
-        guard !expanded, exceeds(proseCeilingLines, item.body.text) else {
+        let ceiling = collapsedCeiling(for: item)
+        guard !expanded, exceeds(ceiling, item.body.text) else {
             return .init(segments: TimelineSegmenter.segments(of: item.body.text), hasMore: false)
         }
-        return TimelineSegmenter.clamp(item.body.text, budget: proseCeilingLines)
+        return TimelineSegmenter.clamp(item.body.text, budget: ceiling)
     }
 
     /// The task notification this item carries, or `nil` for everything else.

@@ -503,6 +503,11 @@ page.
     `flightdeck peer send "<name>" '…'`. Each reply is a prose row headed "To <name>" (or "To
     another session" for a socket address) with a paper-plane glyph, not a JSON tree or a
     terminal card. A send to a name nobody has carries the Error chip.
+67a″. **Peer messages arrive collapsed.** A message, received or sent, longer than three lines
+    shows its first three, dimmed, with a chevron at the right end of its header and no More
+    link. Tapping the chevron or anywhere on the header line opens it in place at full
+    opacity, and the chevron turns down; tapping again closes it. A message of three lines or
+    fewer is drawn whole, undimmed, with no chevron. The agent's own prose is never collapsed.
 67b. **Paste text into a prompt on the Mac** (enough that Claude Code wraps it as a paste) and
     check the phone's "You" row: the pasted text reads inline with what you typed around it,
     and no `<pasted_content id="…">` or `</pasted_content …>` tag shows. Paste one that itself

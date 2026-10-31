@@ -87,6 +87,10 @@ struct TimelineRow: View {
             content
             chips
         }
+        // A peer message is drawn collapsed and a step back from the conversation until it is
+        // opened (`TimelineStyle.peerCollapsedLines`). One opacity over the whole row, so the
+        // heading and the preview recede together and come back together.
+        .opacity(isCollapsedPeer ? TimelineStyle.collapsedPeerOpacity : 1)
         .padding(.vertical, 2)
         // One stop per row, one sentence. Combining would read a symbol, a heading, a chip and
         // two monospaced panels as five stops on a list hundreds of rows long.
@@ -171,7 +175,37 @@ struct TimelineRow: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
+            if peerChevron { peerChevronButton }
         }
+        // The whole heading line opens a peer message, not only the chevron: the chevron is a
+        // caption-sized glyph, and the line it sits on is the target a thumb will actually hit.
+        // Attached only to such a row: on a tool row the same gesture would swallow the tap
+        // that opens its detail screen.
+        .modifier(HeaderTap(action: peerChevron ? toggleExpanded : nil))
+    }
+
+    /// A peer message opens from its header, where a reader scanning a column of collapsed
+    /// rows looks, rather than from a More link under a three-line preview.
+    private var peerChevron: Bool {
+        TimelineStyle.isPeerMessage(item) && expandsInPlace
+    }
+
+    /// Collapsed and dimmed. A peer message short enough to show whole has nothing to open,
+    /// so it is not dimmed either: it is already everything it will ever be.
+    private var isCollapsedPeer: Bool { peerChevron && !isExpanded }
+
+    private var peerChevronButton: some View {
+        Button {
+            toggleExpanded?()
+        } label: {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// `.primary` for an agent's own prose rather than its tint, because that heading sits
@@ -414,7 +448,8 @@ struct TimelineRow: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        if expandsInPlace {
+        // A peer message's way out is its header chevron, so it carries no second one here.
+        if expandsInPlace && !TimelineStyle.isPeerMessage(item) {
             moreLink
         }
     }
@@ -462,6 +497,20 @@ struct TimelineRow: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(Color.accentColor)
+    }
+}
+
+/// A tap on a peer message's heading line opens or closes it; on any other row, nothing.
+private struct HeaderTap: ViewModifier {
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let action {
+            content.contentShape(Rectangle()).onTapGesture(perform: action)
+        } else {
+            content
+        }
     }
 }
 
