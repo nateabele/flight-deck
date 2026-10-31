@@ -10,14 +10,14 @@ struct VisualRefusal: Error, Equatable, Sendable {
 }
 
 /// The visual blocks' entry points on the Mac (planning v2 §7, §10). V3 owns this file and
-/// fills these in; until then the one op (`VisualFetch.serve`) refuses with `visuals_unavailable`, the detail's
+/// fills these in; until V4 opens `VisualFetch.gateOpen` the one op (`VisualFetch.serve`) refuses with `visuals_unavailable`, the detail's
 /// `visuals` flag stays off so a phone never sends it, and nothing is read from `visuals/`.
 extension IntakeService {
     static let visualsUnavailable = "visuals_unavailable"
     static var visualsRefusal: VisualRefusal { .unavailable }
 
     /// Whether this Mac serves visuals. The detail's `visuals` flag follows it.
-    var visualsAvailable: Bool { false }
+    var visualsAvailable: Bool { VisualFetch.gateOpen }
 
     /// The intake's visuals on disk: always a disk store, even before the intake has a
     /// `visuals/` folder, in which case it serves nothing until the folder appears. Always
