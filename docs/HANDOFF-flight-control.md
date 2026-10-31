@@ -1002,6 +1002,8 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
   as `test-unit.sh`, and `FD_SKIP_BUILD=1`. The two bundles have no test host, so xctest does not launch the app.
   - Pure helpers that both lanes use stay in `Tests/FlightDeckTests` and are listed under the logic
     targets in `project.yml`, so each bundle compiles its own copy.
+  - A new test in `IntakeKitTests` or `FleetKitTests` that uses a shared helper from `Tests/FlightDeckTests`
+    must have that helper listed in `project.yml` first, or the logic lane does not compile.
 - `./scripts/test-unit.sh` builds on this Mac and runs on the UI-test Mac (`FD_UITEST_HOST` in
   the git-ignored `scripts/local.env`), via `test-unit-remote.sh`. That is the default.
   - It rsyncs the checkout to the **same absolute path** there. It shares the remote lock with the XCUITests.
