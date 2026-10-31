@@ -55,7 +55,7 @@ final class VisualBlockView: NSView {
     private let filmstrip = NSView()
     private var tiles: [VisualTile] = []
     private let addTile = VisualTile()
-    private let placeholder = NSView()
+    private let placeholder = FlippedBox()
     private var web: VisualWebView?
 
     override var isFlipped: Bool { true }
@@ -433,13 +433,15 @@ final class VisualBlockView: NSView {
             let c = compareLabel.fittingSize
             compareLabel.frame = NSRect(x: left, y: (h - c.height) / 2, width: c.width, height: c.height)
         }
-        body.frame = NSRect(x: 0, y: h, width: w, height: VisualBlockLayout.body)
+        // Inset a point at the sides, so the block's border still shows beside the white paper.
+        body.frame = NSRect(x: 1, y: h, width: w - 2, height: VisualBlockLayout.body - (filmstrip.isHidden ? 1 : 0))
+        let bw = body.frame.width
         if comparing {
-            let half = (w - 14 * 3) / 2
-            mainPane.frame = NSRect(x: 14, y: 12, width: half, height: VisualBlockLayout.body - 24)
-            otherPane.frame = NSRect(x: 28 + half, y: 12, width: half, height: VisualBlockLayout.body - 24)
+            let half = (bw - 14 * 3) / 2
+            mainPane.frame = NSRect(x: 13, y: 12, width: half, height: VisualBlockLayout.body - 24)
+            otherPane.frame = NSRect(x: 27 + half, y: 12, width: half, height: VisualBlockLayout.body - 24)
         } else {
-            mainPane.frame = NSRect(x: 0, y: 0, width: w, height: VisualBlockLayout.body)
+            mainPane.frame = body.bounds
         }
         filmstrip.frame = NSRect(x: 0, y: h + VisualBlockLayout.body, width: w, height: filmstrip.isHidden ? 0 : VisualBlockLayout.filmstrip)
         let count = CGFloat(tiles.count + 1)
@@ -494,6 +496,12 @@ final class VisualBlockView: NSView {
     }
 
     // MARK: - For tests
+
+    /// Every picture the block shows is in: the body's (both panes in Compare) and each thumbnail's.
+    var picturesReady: Bool {
+        guard !model.representations.isEmpty else { return true }
+        return mainPane.image != nil && (otherPane.isHidden || otherPane.image != nil) && tiles.allSatisfy { $0.image != nil }
+    }
 
     var testSnapshot: (comparing: Bool, selected: Int, tiles: [String], chip: String, compareTitle: String, placeholder: String?) {
         (comparing, selected, tiles.map(\.label), chip.stringValue, compareButton.title,
@@ -661,4 +669,9 @@ final class VisualTile: NSView {
         (isSelected ? NSColor.controlAccentColor : proposed ? NSColor.systemOrange : PlanTheme.wash(dark: 0.25, light: 0.22)).setStroke()
         path.stroke()
     }
+}
+
+/// A plain container laid out top-down, like the block itself.
+final class FlippedBox: NSView {
+    override var isFlipped: Bool { true }
 }

@@ -50,8 +50,19 @@ final class VisualBlockOverlay {
     private var storeIdentity: String?
     /// The plan checkpoint shown, for the block states it recorded (spec §7).
     var checkpoint: Int? { didSet { if checkpoint != oldValue { reload() } } }
-    /// Make a block's alternate its primary — see `VisualBlockView.onMakePrimary`.
-    var onMakePrimary: ((String, Int) -> Void)?
+    /// Off, no block goes live and every block shows its picture: a render's, since a web view's
+    /// content is not in its layer and would draw blank.
+    var allowsLive = true
+    /// Make a block's alternate its primary — see `VisualBlockView.onMakePrimary`. Nil (as in
+    /// P2a, where nothing here may write `block.json`) leaves "Make primary" disabled.
+    var onMakePrimary: ((String, Int) -> Void)? {
+        didSet {
+            for (key, block) in blocks {
+                let id = String(key[..<(key.lastIndex(of: "#") ?? key.endIndex)])
+                block.onMakePrimary = onMakePrimary.map { action in { r in action(id, r) } }
+            }
+        }
+    }
 
     private var models: [String: VisualBlockModel] = [:]
     /// The views, by `<id>#<n>` (the n-th block of that id in the plan), so typing that moves a
@@ -192,7 +203,7 @@ final class VisualBlockOverlay {
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
             block.setWantsPictures(!visible.isEmpty && block.frame.intersects(near))
             guard !block.model.representations.isEmpty else { continue }
-            if shown, !block.isLive, !block.comparing {
+            if shown, allowsLive, !block.isLive, !block.comparing {
                 // A block that was already on screen and lost its web view to a newer one waits
                 // for a free slot, rather than taking one back and starting a tug of war.
                 if VisualLivePool.shared.hasRoom || !wasShown { VisualLivePool.shared.grant(block) }
