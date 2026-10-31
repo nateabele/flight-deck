@@ -51,6 +51,15 @@ public protocol ThreadTurnExecuting: Sendable {
 /// `ActivityPublisher` into the thread's live activity, then parsed and decoded. The same shape
 /// as a round seat's `RoundExecutor.attempt`, without the round's bookkeeping.
 public struct ThreadTurnExecutor: ThreadTurnExecuting {
+    /// What an agent CLI a turn starts presents to Flight Deck's control socket, in
+    /// `FLIGHT_DECK_CALLER` (I4). With no token the socket reads a caller as the human, who is
+    /// unscoped, so an agent whose shell can reach the socket (codex's) would act as the user.
+    /// This value is neither a tab token nor a runner token, so `ControlScope.caller` reads it as
+    /// invalid and the agent fails closed. The runner's own token never reaches an agent: the
+    /// runner keeps it for its own calls.
+    public static let agentCaller = "thread-agent:none"
+    static let callerVariable = "FLIGHT_DECK_CALLER"
+
     private let runner: CommandRunner
     private let environment: [String: String]
     private let userHome: URL
@@ -85,7 +94,10 @@ public struct ThreadTurnExecutor: ThreadTurnExecuting {
             return .failed(Diagnosis(category: .harnessError, detail: "\(r.agent.displayName) can't run a thread turn: \(error)",
                                      action: "Switch this thread to another agent."), sessionID: nil)
         }
-        let env = HeadlessCommand.environment(for: command, base: environment, home: userHome, account: r.account)
+        var base = environment
+        base[Self.callerVariable] = Self.agentCaller
+        let env = HeadlessCommand.environment(for: command, base: base, home: userHome, account: r.account,
+                                              readable: r.readable)
 
         let stdoutFile = r.runDirectory.appendingPathComponent("stdout")
         guard fm.createFile(atPath: stdoutFile.path, contents: nil) else {

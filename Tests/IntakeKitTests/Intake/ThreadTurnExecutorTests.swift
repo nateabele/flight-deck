@@ -49,6 +49,33 @@ final class ThreadTurnExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("activity.json").path))
     }
 
+    /// I4: the agent's CLI never acts as anyone on the control socket. With no token a caller
+    /// is the unscoped human, so the agent gets a value the socket refuses as invalid, and never
+    /// the runner's own token, which the runner keeps for itself.
+    func testTheAgentCarriesAnInvalidCallerNeverTheRunnerToken() async throws {
+        let runnerToken = "intake-runner:\(UUID().uuidString).abc123"
+        let runner = Spy(CommandResult(stdout: Self.stream(#"{"reply":"x","decision":null,"actions":null}"#), stderr: "", exitCode: 0))
+        _ = try await ThreadTurnExecutor(runner: runner, environment: ["PATH": "/usr/bin", "FLIGHT_DECK_CALLER": runnerToken],
+                                         userHome: URL(fileURLWithPath: "/nonexistent-fd-home")).run(request())
+        let env = try XCTUnwrap(runner.calls.first?.environment)
+        XCTAssertEqual(env["FLIGHT_DECK_CALLER"], ThreadTurnExecutor.agentCaller)
+        XCTAssertEqual(ThreadTurnExecutor.agentCaller, "thread-agent:none")
+        XCTAssertFalse(env.values.contains(runnerToken), "the runner token reaches no agent")
+        XCTAssertEqual(env["PATH"], "/usr/bin")
+    }
+
+    /// I3, end to end: an OpenCode turn's config scopes reads outside the repo to its workspace.
+    func testAnOpenCodeTurnReadsOutsideTheRepoOnlyInItsWorkspace() async throws {
+        let runner = Spy(CommandResult(stdout: Data(), stderr: "", exitCode: 1))
+        var r = request()
+        r.agent = .opencode
+        _ = try await ThreadTurnExecutor(runner: runner, environment: [:], userHome: URL(fileURLWithPath: "/nonexistent-fd-home"))
+            .run(r)
+        let config = try XCTUnwrap(runner.calls.first?.environment["OPENCODE_CONFIG_CONTENT"])
+        let escaped = r.readable[0].path.replacingOccurrences(of: "/", with: "\\/")
+        XCTAssertTrue(config.contains(#""external_directory":{"*":"deny",""# + escaped + #"\/*":"allow"}"#), config)
+    }
+
     /// An answer that isn't a thread answer is the agent's to fix: malformed, with the reason
     /// and the session to resume.
     func testAnAnswerThatDoesNotDecodeIsMalformed() {
@@ -89,7 +116,8 @@ final class ThreadTurnExecutorTests: XCTestCase {
 }
 
 private final class Spy: CommandRunner, @unchecked Sendable {
-    struct Call { var executable: String; var arguments: [String]; var cwd: URL; var processGroup: Bool }
+    struct Call { var executable: String; var arguments: [String]; var cwd: URL; var processGroup: Bool
+        var environment: [String: String] = [:] }
     private let lock = NSLock()
     private var _calls: [Call] = []
     let result: CommandResult
@@ -98,7 +126,8 @@ private final class Spy: CommandRunner, @unchecked Sendable {
 
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
-        lock.withLock { _calls.append(Call(executable: executable, arguments: arguments, cwd: cwd, processGroup: processGroup)) }
+        lock.withLock { _calls.append(Call(executable: executable, arguments: arguments, cwd: cwd, processGroup: processGroup,
+                                           environment: environment)) }
         return result
     }
 }
