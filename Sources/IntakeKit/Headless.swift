@@ -9,9 +9,9 @@ public enum HeadlessAccess: Sendable, Equatable {
     /// An ask-thread turn (planning v2 R1, D5): it may interrogate the repo with the reading
     /// commands in `HeadlessCommand.threadReadCommands` as well as read files, and writes
     /// nothing. A separate case rather than a change to `.readOnly`, so every round seat keeps
-    /// the argv it was probed with. Each adapter gets what it can actually enforce: claude and
-    /// opencode an allow-list of command patterns, codex and gemini their existing read-only
-    /// sandboxes (whose shells already run reads only), grok the file tools alone.
+    /// the argv it was probed with. Each adapter gets what it can actually enforce: claude an
+    /// allow-list of command patterns, codex and gemini their existing read-only sandboxes
+    /// (whose shells already run reads only), grok and opencode the file tools alone.
     case threadRead
 }
 
@@ -139,9 +139,7 @@ public enum HeadlessCommand {
                                             "ls", "cat", "head", "wc", "find"]
 
     /// The flags that make an allowed reading command write or run something else, and a
-    /// redirect after any of them. Every pattern starts with the command it guards: a deny rule
-    /// beats any allow in claude, and in OpenCode's sorted config it sorts after that command's
-    /// own allow, so whichever way overlapping patterns are ordered the deny isn't shadowed.
+    /// redirect after any of them, as claude deny rules, which beat any allow.
     public static let threadDeniedPatterns: [String] =
         threadReadCommands.map { "\($0) *>*" }
         + ["find *-delete*", "find *-exec*", "find *-ok*", "find *-fprint*", "find *-fls*"]
@@ -159,8 +157,10 @@ public enum HeadlessCommand {
 
     /// Whether a thread turn on `agent` can only read files, never run a reading command — the
     /// thread header says "reads files only" for it. Grok's shell can't be confined to commands
-    /// by pattern, so it gets no shell at all.
-    public static func threadReadsFilesOnly(_ agent: AgentID) -> Bool { agent == .grok }
+    /// by pattern, and OpenCode's bash checks path arguments only for a few commands, so an
+    /// allowed `head` could read outside the workspace (`OpenCodeProfile.threadPermission`);
+    /// neither gets a shell at all.
+    public static func threadReadsFilesOnly(_ agent: AgentID) -> Bool { agent == .grok || agent == .opencode }
 
     // MARK: grok (grok 1.0.30, 2026-10-07 — see GrokProfile for where each fact came from)
 

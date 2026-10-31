@@ -165,14 +165,16 @@ final class HeadlessThreadReadTests: XCTestCase {
 
     // MARK: grok
 
-    /// Grok has no way to scope a shell to reading commands, so a thread turn gets the file
-    /// tools only and Bash stays denied; the thread header says so.
-    func testGrokReadsFilesOnly() throws {
+    /// Grok and OpenCode thread agents read files only (R1, fix round 2): grok's shell can't be
+    /// confined to reading commands, and OpenCode's bash checks path arguments for only a few
+    /// commands, so `head ~/.ssh/…` would read past the workspace. The thread header says so.
+    func testGrokAndOpenCodeReadFilesOnly() throws {
         let args = try argv(req(.grok, .threadRead))
         XCTAssertEqual(value(after: "--tools", in: args), HeadlessCommand.grokReadOnlyTools)
         XCTAssertTrue(zip(args, args.dropFirst()).contains { $0 == "--deny" && $1 == "Bash" })
         XCTAssertTrue(HeadlessCommand.threadReadsFilesOnly(.grok))
-        for agent in [AgentID.claude, .codex, .gemini, .opencode] {
+        XCTAssertTrue(HeadlessCommand.threadReadsFilesOnly(.opencode))
+        for agent in [AgentID.claude, .codex, .gemini] {
             XCTAssertFalse(HeadlessCommand.threadReadsFilesOnly(agent), "\(agent) runs read commands")
         }
     }
@@ -180,37 +182,18 @@ final class HeadlessThreadReadTests: XCTestCase {
 
     // MARK: opencode
 
-    /// OpenCode gets its own agent, defined in `OPENCODE_CONFIG_CONTENT`: the read-only tools,
-    /// plus `permission.bash` patterns for the read commands and denies for their writing flags.
-    func testOpenCodeGetsAThreadAgentWithBashPatterns() throws {
+    /// OpenCode's thread agent, pinned byte for byte: the read-only file tools, bash denied
+    /// outright (no allow pattern, so OpenCode removes the tool), and reads outside the repo
+    /// only in the workspace.
+    func testOpenCodeThreadAgentHasNoBash() throws {
         let command = try HeadlessCommand.build(req(.opencode, .threadRead), home: Self.noHome)
         XCTAssertEqual(value(after: "--agent", in: command.arguments), OpenCodeProfile.threadAgent)
-        let env = HeadlessCommand.environment(for: command, base: [:], home: Self.noHome)
-        let config = try XCTUnwrap(env["OPENCODE_CONFIG_CONTENT"])
-        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any])
-        let agents = try XCTUnwrap(object["agent"] as? [String: Any])
-        let thread = try XCTUnwrap(agents[OpenCodeProfile.threadAgent] as? [String: Any])
-        let permission = try XCTUnwrap(thread["permission"] as? [String: Any])
-        XCTAssertEqual(permission["*"] as? String, "deny")
-        XCTAssertEqual(permission["read"] as? String, "allow")
-        XCTAssertNil(permission["edit"], "no edit rule: `*: deny` removes the tool")
-        let bash = try XCTUnwrap(permission["bash"] as? [String: String])
-        XCTAssertEqual(bash["*"], "deny")
-        for pattern in ["rg *", "git log *", "git show *", "git diff *", "git blame *", "git grep *", "ls *", "cat *",
-                        "head *", "wc *", "find *"] {
-            XCTAssertEqual(bash[pattern], "allow", pattern)
-        }
-        for pattern in ["find *-delete*", "find *-exec*", "git diff *--output*", "rg *--pre*", "cat *>*"] {
-            XCTAssertEqual(bash[pattern], "deny", pattern)
-        }
-        // Each deny names its command first, so in the sorted config it follows that command's
-        // allow: whichever way OpenCode orders overlapping rules, the deny is never shadowed by
-        // a broader allow sorted after it.
-        let keys = bash.keys.sorted()
-        for (pattern, decision) in bash where decision == "deny" && pattern != "*" {
-            let allowIndex = try XCTUnwrap(keys.firstIndex { bash[$0] == "allow" && pattern.hasPrefix($0.dropLast()) })
-            XCTAssertLessThan(allowIndex, try XCTUnwrap(keys.firstIndex(of: pattern)), pattern)
-        }
+        let env = HeadlessCommand.environment(for: command, base: [:], home: Self.noHome,
+                                              readable: [URL(fileURLWithPath: "/intake/threads/t/workspace")])
+        let readOnlyAgent = #""flightdeck-readonly":{"description":"Flight Deck planning agent","mode":"primary","permission":{"*":"deny","glob":"allow","grep":"allow","list":"allow","read":"allow"}}"#
+        XCTAssertEqual(env["OPENCODE_CONFIG_CONTENT"],
+                       #"{"agent":{"# + readOnlyAgent
+                       + #","flightdeck-thread":{"description":"Flight Deck planning agent","mode":"primary","permission":{"*":"deny","bash":{"*":"deny"},"external_directory":{"*":"deny","\/intake\/threads\/t\/workspace\/*":"allow"},"glob":"allow","grep":"allow","list":"allow","read":"allow"}}},"autoupdate":false,"share":"disabled"}"#)
     }
 
     /// I3: the thread agent may read outside the repo only inside the workspace it is handed —

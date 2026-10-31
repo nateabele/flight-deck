@@ -105,9 +105,14 @@ public struct OpenCodeProfile: AgentProfile {
         return permission
     }
 
-    /// A thread turn's: the read-only set, plus `bash` for the read commands only (R1). Each
-    /// command is allowed bare and with arguments; its writing flags are denied by patterns
-    /// that start with the command, so they sort after its allow (`threadDeniedPatterns`).
+    /// A thread turn's: the read-only file tools and no shell (fix round 2). OpenCode 1.18.34's
+    /// bash checks path arguments against `external_directory` only for `cd`, `rm`, `cp`, `mv`,
+    /// `mkdir`, `touch`, `chmod`, `chown` and `cat` (read out of the binary), so an allowed
+    /// `head -c … ~/.ssh/id_ed25519` or `git diff --no-index /etc/hosts /dev/null` would read past
+    /// the workspace, and filtering path arguments by pattern can't be made reliable. `read`,
+    /// `grep`, `glob` and `list` are checked against `external_directory`, so the agent keeps
+    /// those; it loses the repo's git history. `bash: {"*": "deny"}` has no allow pattern, so
+    /// OpenCode removes the tool rather than refusing calls to it.
     ///
     /// `external_directory` opens only the thread's workspace (`readable`), which lives under
     /// the intake, outside the repo the run is rooted in: `{"*": "deny", "<workspace>/*":
@@ -117,13 +122,7 @@ public struct OpenCodeProfile: AgentProfile {
     /// `realpath(3)` resolves it, since OpenCode reports `/tmp/…` as `/private/tmp/…`.
     static func threadPermission(readable: [URL]) -> [String: Any] {
         var permission = readOnlyPermission
-        var bash: [String: String] = ["*": "deny"]
-        for command in HeadlessCommand.threadReadCommands {
-            bash[command] = "allow"
-            bash["\(command) *"] = "allow"
-        }
-        for pattern in HeadlessCommand.threadDeniedPatterns { bash[pattern] = "deny" }
-        permission["bash"] = bash
+        permission["bash"] = ["*": "deny"]
         var outside: [String: String] = ["*": "deny"]
         for dir in readable {
             let path = dir.standardizedFileURL.path
