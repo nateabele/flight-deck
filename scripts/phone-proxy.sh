@@ -21,8 +21,13 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 DEVICE="${DEVICE:-Mobile3}"
 SERVICE=_remotepairing._tcp
 
+# `connected` counts too: it is CoreDevice holding a live tunnel to the phone, a step past
+# `available (paired)`, and any `devicectl device …` call can leave it there. Matching only
+# `available` made this wait 60 s and fail for a phone that was already reachable
+# (2026-10-31).
 available() {
-  xcrun devicectl list devices 2>/dev/null | grep -E "^$DEVICE[[:space:]]" | grep -q "available (paired)"
+  xcrun devicectl list devices 2>/dev/null | grep -E "^$DEVICE[[:space:]]" \
+    | grep -Eq "available \(paired\)|[[:space:]]connected[[:space:]]"
 }
 
 # NOT "already available, nothing to do": devicectl keeps listing the phone `available
