@@ -359,11 +359,11 @@ page.
     it — deleting that modifier fails no test.
 45. **An `AskUserQuestion`, answered from the phone.** Ask claude to ask you something with
     three options. The card must show the question, its header, and each option with its
-    description. Tap the **third**. The terminal's selection must move down twice and submit,
-    and the transcript must record the third option's own label — not the first, and not a row
-    the Mac has no label for.
+    description. Tap the **third**: it ticks, and nothing is sent. Tap **Send answer**. The
+    terminal's selection must move down twice and submit, and the transcript must record the
+    third option's own label — not the first, and not a row the Mac has no label for.
 46. **The simple race.** Get a dialog up, let the phone draw it, answer it *in the terminal*,
-    then tap on the phone before it refreshes. The phone must say **"Your Mac has moved on from
+    then pick and send on the phone before it refreshes. The phone must say **"Your Mac has moved on from
     this."** and the terminal must not move a row.
 47. **The hard race, and it is the most important item on this list.** Answer a permission
     prompt at the Mac's keyboard and let claude raise the next one **immediately**, so the
@@ -520,7 +520,7 @@ page.
     Then do it as the FIRST of two questions: that row reads "Next" there and "Submit" when the
     question is alone, and pressing the wrong one either commits early or fails to commit.
     **Then answer in your own words.** Every question card has a "Type something" field under
-    its options. On a lone single-select question, type a word and tap the orange arrow; the
+    its options. On a lone single-select question, type a word and tap **Send answer**; the
     terminal must show your words on its row and then commit them. On a checkbox question,
     tick one box and type in the field; its tick appears. Send, and the Mac must tick the box,
     paste your words (its row ticks with no Return), then press Submit and the review. Check
