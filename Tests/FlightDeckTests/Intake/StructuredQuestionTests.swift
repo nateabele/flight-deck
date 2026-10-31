@@ -57,6 +57,28 @@ final class StructuredQuestionTests: XCTestCase {
         XCTAssertEqual(question(.toggle, options: ["on"]).initialAnswer.selected, [])
     }
 
+    func testInitialAnswerDropsRecommendedIdsThatAreNotOptions() {
+        XCTAssertEqual(question(.single, recommended: ["zzz"]).initialAnswer.selected, [])
+        XCTAssertEqual(question(.multi, recommended: ["a", "zzz"]).initialAnswer.selected, ["a"])
+    }
+
+    func testInitialAnswerCapsSingleAndToggleAtOnePick() {
+        XCTAssertEqual(question(.single, recommended: ["a", "b"]).initialAnswer.selected, ["a"])
+        XCTAssertEqual(question(.toggle, recommended: ["a", "b"]).initialAnswer.selected, ["a"])
+    }
+
+    func testRenderFallsBackToTheIdForAnUnknownSelection() {
+        XCTAssertEqual(question(.single).render(.init(questionID: "q1", selected: ["ghost"], other: nil)), "ghost")
+        XCTAssertEqual(question(.multi).render(.init(questionID: "q1", selected: ["a", "ghost"], other: nil)), "A, ghost")
+    }
+
+    func testToggleIgnoresForeignIds() {
+        let toggle = question(.toggle, options: ["on"])
+        XCTAssertEqual(toggle.render(.init(questionID: "q1", selected: ["other"], other: nil)), "No")
+        XCTAssertEqual(toggle.render(.init(questionID: "q1", selected: ["other", "on"], other: nil)), "Yes")
+        XCTAssertTrue(toggle.isComplete(.init(questionID: "q1", selected: ["other"], other: nil)))
+    }
+
     func testLegacyExchangeDecodesAndPresentsAsTextQuestions() throws {
         let json = #"{"questions":["Who?","When?"],"answers":null}"#
         let ex = try JSONDecoder().decode(TriageExchange.self, from: Data(json.utf8))

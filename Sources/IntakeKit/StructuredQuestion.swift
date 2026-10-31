@@ -74,7 +74,9 @@ public struct StructuredQuestion: Codable, Equatable, Sendable {
         case .text:
             return other ?? ""
         case .toggle:
-            return a.selected.isEmpty ? "No" : "Yes"
+            // Only the toggle's own option means Yes; a stray id from a stale or invented answer
+            // must not flip the agent's reading to Yes.
+            return options.first.map { a.selected.contains($0.id) } == true ? "Yes" : "No"
         case .single:
             if let id = a.selected.first { return label(for: id) }
             return other.map { "Other: \($0)" } ?? ""
