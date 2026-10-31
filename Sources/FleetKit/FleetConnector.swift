@@ -851,7 +851,7 @@ public final class FleetConnector: @unchecked Sendable {
             // resume point. (An installed phone from before these tags cannot decode them at
             // all; it is safe because the Mac never sends it one, not because of this arm.)
             return
-        case .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone:
+        case .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone, .infraBudget:
             // Cloud infra's replies, which answer only `infra.*` requests the phone never
             // sends: dropped as strays for the same reasons as the delegation replies above.
             return

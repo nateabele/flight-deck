@@ -35,6 +35,9 @@ struct InfraMachine: Codable, Equatable, Identifiable, Sendable {
     /// none, and the Reaper retries only the ones a destroy left behind.
     var destroyAttempts: Int? = nil
     var lastDestroyAt: Date? = nil
+    /// The Flight Deck session whose `up` (or `run --on`) created it: its spend is that
+    /// session's, whoever uses the machine later. Nil for a shell outside any tab.
+    var session: UUID? = nil
     var id: String { name }
 }
 

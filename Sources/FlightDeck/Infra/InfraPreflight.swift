@@ -18,6 +18,9 @@ enum InfraError: Error, Equatable {
     case nameInUse(String)
     /// The machine never said hello. `console` is its boot console, when the cloud had one.
     case enrollTimeout(console: String?)
+    /// The machine ended before it enrolled: its boot could not install or enroll hostd, and it
+    /// powered itself off. `console` as for `enrollTimeout`.
+    case enrollFailed(console: String?)
     case notFound(String)
     /// An `extend` (or other request) the rules forbid; the text says which rule and what to do.
     case refused(String)

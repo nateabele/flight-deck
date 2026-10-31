@@ -88,8 +88,9 @@ protocol DelegationHostDirectory: AnyObject {
 protocol InfraUpProviding: AnyObject {
     /// Creates `[infra.<name>]` (or takes over the one already running), returning once it is
     /// a paired, online host. `notice` gets each progress line. Throws `DelegationError` with
-    /// the `infra_*` code and its finished line.
-    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL,
+    /// the `infra_*` code and its finished line. A machine it creates is `session`'s, and
+    /// counts against that session's budget.
+    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?,
                              notice: @escaping (String) -> Void) async throws
     /// The §8.4 line for a cloud machine; nil for any other host.
     @MainActor func costLine(host: String) -> String?
@@ -470,7 +471,7 @@ final class DelegationService {
             ptySize: run.columns.flatMap { columns in run.rows.map { TerminalSize(columns: columns, rows: $0) } },
             // Only a service is kept alive past a lost controller, so only a service's counts.
             fetch: fetch, pool: recipe?.pool, orphanTimeout: service ? recipe?.orphanTimeout : nil)
-        try await ensureCloudHost(host, config: config, worktree: worktree, cid: cid, reply: reply)
+        try await ensureCloudHost(host, config: config, worktree: worktree, owner: owner, cid: cid, reply: reply)
         let link = try deps.hosts.link(named: host)
         // Before anything streams, so a detached run (whose stream ends on `delegateStarted`)
         // still shows what the machine it lands on is costing.
@@ -539,7 +540,7 @@ final class DelegationService {
     /// A run aimed at a `[infra.<name>]` machine that is not a paired host yet: created first
     /// when the recipe says `auto_up`, with its progress as notices; otherwise refused with the
     /// command that creates it, rather than the directory's bare "unknown host".
-    private func ensureCloudHost(_ host: String, config: DelegateConfig, worktree: URL, cid: Int,
+    private func ensureCloudHost(_ host: String, config: DelegateConfig, worktree: URL, owner: UUID?, cid: Int,
                                  reply: @escaping (ServerFrame) -> Void) async throws {
         guard let recipe = config.infra[host],
               !deps.hosts.hostNames.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) else { return }
@@ -557,7 +558,7 @@ final class DelegationService {
         case .module(let path): what = "module \(path)"
         }
         reply(.delegateNotice(cid: cid, message: "creating \(host) (\(what))…"))
-        try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree) { line in
+        try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree, session: owner) { line in
             reply(.delegateNotice(cid: cid, message: line))
         }
     }

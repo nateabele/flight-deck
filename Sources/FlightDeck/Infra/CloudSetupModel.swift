@@ -528,6 +528,7 @@ final class CloudSetupModel: ObservableObject {
         case TofuError.failed(let step, let message): "\(step): \(message)"
         case TofuError.missingOutput(let output): "the module has no \(output) output"
         case InfraError.enrollTimeout: "the machine did not enroll in time"
+        case InfraError.enrollFailed: "the machine could not install or enroll hostd"
         default: String(describing: error)
         }
     }

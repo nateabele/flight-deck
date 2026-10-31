@@ -70,11 +70,11 @@ const typed = (args: string) => ({
 const startSession = ($: { session: { start: (e: { cwd: string; surface: 'terminal'; isInteractive: true }) => Promise<unknown> } }) =>
   $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
 
-test('registers /switch-account inside a Flight Deck tab only', async ($, on) => {
+test('registers /switch-account and /budget inside a Flight Deck tab only', async ($, on) => {
   mock.env(on, IN_TAB)
   const seen = host(on, () => ({ exitCode: 0 }))
   await startSession($)
-  expect(seen.registered).toEqual(['switch-account'])
+  expect(seen.registered).toEqual(['switch-account', 'budget'])
 })
 
 test('registers nothing, and still lets session.start through, outside a Flight Deck tab', async ($, on) => {

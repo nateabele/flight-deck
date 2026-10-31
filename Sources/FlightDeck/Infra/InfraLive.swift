@@ -197,6 +197,10 @@ final class LiveCloudAccount: CloudAccount, ComputeAPIEnabling, @unchecked Senda
         guard let account = try? await live() else { return nil }
         return await account.consoleOutput(instanceID: instanceID, region: region)
     }
+    func instanceEnded(instanceID: String, region: String) async -> Bool {
+        guard let account = try? await live() else { return false }
+        return await account.instanceEnded(instanceID: instanceID, region: region)
+    }
     func listOwned(owner: String) async throws -> [OwnedResource] { try await live().listOwned(owner: owner) }
     func deleteOwned(_ resource: OwnedResource) async throws { try await live().deleteOwned(resource) }
 
@@ -319,6 +323,7 @@ extension InfraLive {
             registry: InfraRegistry(fileURL: root.appendingPathComponent("infra.json"),
                                     workRoot: root.appendingPathComponent("infra", isDirectory: true)),
             ledger: CostLedger(fileURL: root.appendingPathComponent("infra-ledger.json")),
+            budgets: SessionBudgets(fileURL: root.appendingPathComponent("infra-budgets.json")),
             hosts: hosts, env: env)
 
         var reaper: Reaper?

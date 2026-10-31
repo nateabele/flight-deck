@@ -239,7 +239,9 @@ final class InfraControlWireTests: XCTestCase {
         let frames = await frames(.up(name: "gpu", cwd: h.repo.path))
         guard let (code, message) = error(frames) else { return }
         XCTAssertEqual(code, "infra_failed")
-        XCTAssertEqual(message, h.registry.machine(named: "gpu")?.failure)
+        // The text `up` recorded when it failed, though the rollback has since removed the record.
+        XCTAssertEqual(message, InfraService.failureText(TofuError.failed(step: "apply", message: "InsufficientInstanceCapacity")))
+        XCTAssertNil(h.registry.machine(named: "gpu"))
     }
 
     func testDownStreamsAndEndsDone() async throws {

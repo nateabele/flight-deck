@@ -1103,7 +1103,7 @@ public extension ServerFrame {
              .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .fileChunk, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
              .recipeCheck, .hostDisk, .infraMachine, .infraList, .infraDoctor, .infraDone,
-             .accountChoices, .accountSwitched:
+             .infraBudget, .accountChoices, .accountSwitched:
             return false
         }
     }

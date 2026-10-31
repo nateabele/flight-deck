@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SwitchAccountChoice, SwitchAccountChoices } from '../types'
+import { flightdeck } from './cli'
 
 // `/switch-account`: moves this conversation to another account or pool, in this same tab.
 // Flight Deck does the move (`flightdeck account switch`, see docs/ARCHITECTURE.md); this module
@@ -13,27 +14,6 @@ import type { SwitchAccountChoice, SwitchAccountChoices } from '../types'
 
 const PANE = 'switch-account'
 const choices = atom({ plugin: 'flight-deck', key: 'switchAccount' } as const, null)
-
-type Cli = { ok: boolean; text: string }
-
-/** Runs `flightdeck <args>` for this tab, as the tab: the id comes from the tab's own environment. */
-async function flightdeck($: EngineInterface, args: string[]): Promise<Cli> {
-  const cli = await $.env.get('FLIGHTDECK_CLI')
-  const session = await $.env.get('FLIGHT_DECK_SESSION_ID')
-  if (!cli || !session) return { ok: false, text: 'This is not a Flight Deck tab.' }
-  try {
-    const ran = await $.process.run([cli, ...args], {
-      env: { FLIGHT_DECK_SESSION_ID: session },
-      timeoutMs: 20_000,
-    })
-    if (ran.exitCode === 0) return { ok: true, text: ran.stdout.trim() }
-    // The CLI prints a refusal as "flightdeck: <message>" on stderr.
-    const said = (ran.stderr || ran.stdout).trim().replace(/^flightdeck: /, '')
-    return { ok: false, text: said || `flightdeck exited ${ran.exitCode}` }
-  } catch (error) {
-    return { ok: false, text: `Could not run flightdeck: ${String(error)}` }
-  }
-}
 
 /** Closes the picker, asks for the move, and says how it went. */
 async function choose($: EngineInterface, target: string) {
@@ -56,19 +36,14 @@ function describe(account: SwitchAccountChoice, indent: string): string {
   return `${indent}${mark}${account.displayName}${email} - ${state}${account.isCurrent ? ' (current)' : ''}`
 }
 
+/** Registered by flight-deck.tsx, inside a Flight Deck tab only. */
+export const command = {
+  name: 'switch-account',
+  description: 'Move this conversation to another account or pool',
+  argumentHint: '[email | account | pool]',
+}
+
 export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    if ((await $.env.get('FLIGHT_DECK_SESSION_ID')) && (await $.env.get('FLIGHTDECK_CLI'))) {
-      await $.command.register({
-        name: 'switch-account',
-        description: 'Move this conversation to another account or pool',
-        argumentHint: '[email | account | pool]',
-      })
-    }
-
-    return next(e)
-  })
-
   on('command.run', { command: 'switch-account' }, async ($, e) => {
     const target = e.args.trim()
     if (target) return { text: (await flightdeck($, ['account', 'switch', '--', target])).text }

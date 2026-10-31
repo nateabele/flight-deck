@@ -92,6 +92,8 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
     var outputs: TofuOutputs? { get { lock.withLock { _outputs } } set { lock.withLock { _outputs = newValue } } }
     var failApply: TofuError? { get { lock.withLock { _failApply } } set { lock.withLock { _failApply = newValue } } }
     var failDestroy: TofuError? { get { lock.withLock { _failDestroy } } set { lock.withLock { _failDestroy = newValue } } }
+    private var _failInit: TofuError?
+    var failInit: TofuError? { get { lock.withLock { _failInit } } set { lock.withLock { _failInit = newValue } } }
     var refreshGone: Bool { get { lock.withLock { _gone } } set { lock.withLock { _gone = newValue } } }
     /// Machines (by work directory name) whose refresh finds the instance gone, when
     /// `refreshGone` would say so for every one.
@@ -107,7 +109,10 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
 
     private func record(_ step: String) { lock.withLock { _calls.append(step) } }
 
-    func initialize(workdir: URL) async throws { record("init") }
+    func initialize(workdir: URL) async throws {
+        record("init")
+        if let failInit { throw failInit }
+    }
 
     /// When set, every `apply` suspends here until the test opens it.
     let applyGate = ApplyGate()
@@ -208,6 +213,10 @@ final class FakeAccount: CloudAccount, ComputeAPIEnabling, @unchecked Sendable {
     func providerEnvironment() -> [String: String] { ["AWS_PROFILE": "example"] }
     func moduleVars() -> [String: String] { cloud == "gcp" ? ["project": "example-project"] : [:] }
     func consoleOutput(instanceID: String, region: String) async -> String? { console }
+    private var _ended = false
+    /// What `instanceEnded` answers: the machine powered itself off.
+    var ended: Bool { get { lock.withLock { _ended } } set { lock.withLock { _ended = newValue } } }
+    func instanceEnded(instanceID: String, region: String) async -> Bool { ended }
     func listOwned(owner: String) async throws -> [OwnedResource] {
         try lock.withLock {
             _owners.append(owner)
@@ -356,6 +365,7 @@ final class InfraHarness {
     let repo: URL
     let registry: InfraRegistry
     let ledger: CostLedger
+    let budgets: SessionBudgets
     let dialer = InfraHostDialer()
     /// The one clock for everything: the hosts' links, the Reaper, and the service's `now`.
     let clock = ManualHostLinkClock(now: InfraMachine.fixtureNow)
@@ -367,6 +377,7 @@ final class InfraHarness {
     var budget = BudgetSettings.default
     var events: [InfraEvent] = []
     var enrollTimeout: TimeInterval = 600
+    var instancePoll: TimeInterval = 30
     var consoleOutput: String? { get { account.console } set { account.console = newValue } }
     var tailnet: TailnetIntegration
     var resolver: ToolResolver
@@ -379,7 +390,7 @@ final class InfraHarness {
     /// What `env.baseEnvironment` answers; a test may make it slow or record where it ran.
     var baseEnvironment: @Sendable () async -> [String: String] = { ["PATH": "/usr/bin:/bin:/login/shell/bin"] }
 
-    lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, hosts: hosts, env: environment())
+    lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, budgets: budgets, hosts: hosts, env: environment())
 
     init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("infra-h-\(UUID().uuidString)")
@@ -393,6 +404,7 @@ final class InfraHarness {
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         registry = InfraRegistry(fileURL: root.appendingPathComponent("infra.json"), workRoot: root.appendingPathComponent("infra"))
         ledger = CostLedger(fileURL: root.appendingPathComponent("infra-ledger.json"))
+        budgets = SessionBudgets(fileURL: root.appendingPathComponent("infra-budgets.json"))
         hosts = HostService(registry: HostRegistry(fileURL: root.appendingPathComponent("hosts.json"), secrets: InMemoryHostSecretStore()),
                             controllerName: "test-mac", dial: dialer, clock: clock)
         tailnet = TailnetIntegration(cli: nil, http: FakeHTTP(), secrets: MemoryTailnetSecrets())
@@ -432,6 +444,7 @@ final class InfraHarness {
             budget: { [unowned self] in self.budget },
             baseEnvironment: baseEnvironment,
             enrollTimeout: enrollTimeout,
+            instancePoll: instancePoll,
             tailnetJoin: (interval: 0.01, timeout: 1),
             launchGrace: 0)
     }
@@ -475,7 +488,7 @@ final class InfraHarness {
     @discardableResult
     func readyMachine(_ name: String, deadline: Date? = nil, idle: HostKit.Duration = .init(seconds: 1800),
                       hourlyUSD: Double? = 0.5, createdAt: Date? = nil, network: NetworkMode = .public,
-                      allowCIDR: String? = "203.0.113.9/32") throws -> InfraMachine {
+                      allowCIDR: String? = "203.0.113.9/32", session: UUID? = nil) throws -> InfraMachine {
         let createdAt = createdAt ?? now
         let slot = try hosts.enroll(key: .mint(), name: name, endpoints: ["198.51.100.7:47410"]).slot
         dialer.bringUp(slot)
@@ -484,12 +497,13 @@ final class InfraHarness {
         m.idle = idle
         m.allowCIDR = network == .public ? allowCIDR : nil
         m.address = "198.51.100.7"
+        m.session = session
         try registry.upsert(m)
         try prepareWorkdir(name)
         let vars: [String: Any] = ["fd_name": name, "fd_allow_cidr": m.allowCIDR ?? ""]
         try JSONSerialization.data(withJSONObject: vars).write(
             to: registry.workdir(for: name).appendingPathComponent("module").appendingPathComponent(InfraWorkdir.varsFile))
-        if let hourlyUSD { try ledger.open(name: name, hourlyUSD: hourlyUSD, at: createdAt) }
+        if let hourlyUSD { try ledger.open(name: name, hourlyUSD: hourlyUSD, at: createdAt, session: session) }
         return m
     }
 

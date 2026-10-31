@@ -885,7 +885,9 @@ final class FleetService: ObservableObject {
             }
             // No cancellation: a CLI that goes away mid-`up` must not abandon a machine that
             // is half created. The app finishes it, and `infra down` cancels it.
-            infra.handle(request, cid: cid, reply: reply)
+            // The session is the token's, so a tab spends against, and sets, only its own budget.
+            let session: UUID? = if case .session(let id) = controlCaller(client) { id } else { nil }
+            infra.handle(request, session: session, cid: cid, reply: reply)
         }
     }
 

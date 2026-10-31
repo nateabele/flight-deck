@@ -912,11 +912,13 @@ final class DelegationServiceTests: XCTestCase {
     final class FakeInfraUp: InfraUpProviding {
         let hosts: FakeHosts
         var ensured: [String] = []
+        var sessions: [UUID?] = []
         var costLines: [String: String] = [:]
         var failure: Error?
         init(hosts: FakeHosts) { self.hosts = hosts }
-        func ensureUp(name: String, config: InfraConfig, repoRoot: URL, notice: @escaping (String) -> Void) async throws {
+        func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?, notice: @escaping (String) -> Void) async throws {
             ensured.append(name)
+            sessions.append(session)
             notice("tofu init")
             if let failure { throw failure }
             hosts.links[name] = FakeHostLink(name: name)
@@ -947,6 +949,7 @@ final class DelegationServiceTests: XCTestCase {
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
         _ = try await started(frames)
         XCTAssertEqual(infra.ensured, ["gpu"])
+        XCTAssertEqual(infra.sessions, [tab], "the machine is the asking tab's, for its session budget")
         XCTAssertEqual(Array(notices(frames).prefix(2)), ["creating gpu (aws-linux, t3.small)…", "tofu init"])
         let gpu = try XCTUnwrap(hosts.links["gpu"])
         XCTAssertEqual(gpu.requests.map(Self.op).prefix(3), ["sync.tips", "sync.push", "run.start"],

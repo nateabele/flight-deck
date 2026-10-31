@@ -914,12 +914,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case infraDoctor(cid: Int, [WireInfraCheck])
     /// `down` done: the machine or orphan is gone. Terminal.
     case infraDone(cid: Int)
+    /// The reply to `infra.budget`.
+    case infraBudget(cid: Int, WireSessionBudget)
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, epoch, cid, code, message, page, options, endpoints, peerJSON
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
-        case line, machine, machines, orphans, unreadable, checks, choices, switched
+        case line, machine, machines, orphans, unreadable, checks, choices, switched, budget
         case file
     }
 
@@ -929,7 +931,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
-        case infraProgress, infraMachine, infraList, infraDoctor, infraDone
+        case infraProgress, infraMachine, infraList, infraDoctor, infraDone, infraBudget
         case accountChoices, accountSwitched
         case fileChunk
     }
@@ -1080,6 +1082,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case .infraDone(let cid):
             try c.encode(Tag.infraDone, forKey: .t)
             try c.encode(cid, forKey: .cid)
+        case .infraBudget(let cid, let budget):
+            try c.encode(Tag.infraBudget, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(budget, forKey: .budget)
         case .accountChoices(let cid, let choices):
             try c.encode(Tag.accountChoices, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -1217,6 +1223,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                                     try c.decode([WireInfraCheck].self, forKey: .checks))
             case .infraDone:
                 self = .infraDone(cid: try c.decode(Int.self, forKey: .cid))
+            case .infraBudget:
+                self = .infraBudget(cid: try c.decode(Int.self, forKey: .cid),
+                                    try c.decode(WireSessionBudget.self, forKey: .budget))
             case .accountChoices:
                 self = .accountChoices(cid: try c.decode(Int.self, forKey: .cid),
                                        try c.decode(WireAccountChoices.self, forKey: .choices))
@@ -1248,7 +1257,7 @@ public extension ServerFrame {
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
              .recipeCheck(let cid, _), .hostDisk(let cid, _), .infraProgress(let cid, _),
              .infraMachine(let cid, _), .infraList(let cid, _, _, _), .infraDoctor(let cid, _), .infraDone(let cid),
-             .accountChoices(let cid, _), .accountSwitched(let cid, _):
+             .infraBudget(let cid, _), .accountChoices(let cid, _), .accountSwitched(let cid, _):
             return cid
         }
     }

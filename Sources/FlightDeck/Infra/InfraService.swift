@@ -41,6 +41,9 @@ struct InfraEnvironment {
     var baseEnvironment: @Sendable () async -> [String: String] = { InfraToolEnvironment.defaultBase() }
     /// How long a machine has to say hello once it has an address (spec §5.1: 10 minutes).
     var enrollTimeout: TimeInterval = 600
+    /// How often the enroll wait asks the cloud whether the instance is still running: a boot
+    /// that cannot enroll powers itself off, and `up` should fail then, not at the timeout.
+    var instancePoll: TimeInterval = 30
     /// How often, and for how long, `up` asks the Tailscale API whether the machine has joined.
     var tailnetJoin: (interval: TimeInterval, timeout: TimeInterval) = (2, 300)
     /// At launch, how long an enrolling machine's link gets to come up before a machine already
@@ -59,6 +62,7 @@ struct InfraEnvironment {
 final class InfraService {
     let registry: InfraRegistry
     let ledger: CostLedger
+    let budgets: SessionBudgets
     let hosts: HostService
     private let env: InfraEnvironment
     /// One provisioning task per tool: a second caller awaits the first's download instead of
@@ -70,14 +74,18 @@ final class InfraService {
     /// Each `up` in flight and its worst case, counted by the next launch's guardrails until
     /// it is done: without it two `up`s could both pass max-concurrent and the monthly cap.
     private var launching: [String: Double] = [:]
+    /// Each `up` in flight that belongs to a session, and what it will bill until when: the
+    /// next launch of that session counts it, as `launching` counts its worst case.
+    private var launchingBurns: [String: (session: UUID, burn: SessionBudgetModel.Burn)] = [:]
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
     /// Tailscale auth keys outlive the boot that redeems them by this much at most.
     static let authKeyExpiry = HostKit.Duration(seconds: 900)
 
-    init(registry: InfraRegistry, ledger: CostLedger, hosts: HostService, env: InfraEnvironment) {
+    init(registry: InfraRegistry, ledger: CostLedger, budgets: SessionBudgets, hosts: HostService, env: InfraEnvironment) {
         self.registry = registry
         self.ledger = ledger
+        self.budgets = budgets
         self.hosts = hosts
         self.env = env
     }
@@ -105,7 +113,9 @@ final class InfraService {
 
     // MARK: - up
 
-    func up(name: String, config: InfraConfig, repoRoot: URL,
+    /// `session` is the tab that asked: a machine it creates is that session's, counted against
+    /// its budget, and given a deadline no later than when that budget runs out.
+    func up(name: String, config: InfraConfig, repoRoot: URL, session: UUID? = nil,
             events: @escaping (InfraEvent) -> Void) async throws -> InfraMachine {
         try claim(name)
         defer { release(name) }
@@ -121,6 +131,14 @@ final class InfraService {
         // Reserve this launch and read everyone else's in one synchronous step: of two
         // concurrent `up`s, the later one always sees the earlier.
         let key = name.lowercased()
+        let hourly = plan.catalogHourly ?? config.maxHourly
+        let ttlDeadline = env.now().addingTimeInterval(TimeInterval(config.ttl.seconds))
+        // Before anything is reserved: a refusal here leaves nothing to undo.
+        let budgetDeadline = try sessionLaunchDeadline(name: name, session: session, hourly: hourly, ttlDeadline: ttlDeadline)
+        // Non-nil exactly when the session has a budget, which then also prices the machine.
+        if let session, let hourly, let budgetDeadline {
+            launchingBurns[key] = (session, .init(hourlyUSD: hourly, until: budgetDeadline))
+        }
         let others = launching.filter { $0.key != key }
         launching[key] = (plan.catalogHourly ?? config.maxHourly).map { CostModel.worstCase(hourly: $0, ttl: config.ttl) } ?? 0
         let counted = Set(registry.machines.filter { $0.state != .gone }.map { $0.name.lowercased() }).union(others.keys)
@@ -137,18 +155,22 @@ final class InfraService {
         }
 
         let createdAt = env.now()
-        let deadline = createdAt.addingTimeInterval(TimeInterval(config.ttl.seconds))
+        let deadline = min(createdAt.addingTimeInterval(TimeInterval(config.ttl.seconds)), budgetDeadline ?? .distantFuture)
+        if let budgetDeadline, budgetDeadline < ttlDeadline {
+            events(.progress("this session's budget runs out in \(Self.span(budgetDeadline.timeIntervalSince(createdAt))), so \(name) is destroyed then rather than at its \(config.ttl.formatted) TTL"))
+        }
         let client: TailscaleOAuthClient? = if case .available(let c) = mode { c } else { nil }
         var machine = InfraMachine(
             name: name, repoRoot: repo.path, cloud: cloud, instanceType: config.instanceType ?? "",
             region: config.region ?? "", slot: nil, state: .planned, failure: nil,
             network: client == nil ? .public : .tailnet, createdAt: createdAt, deadline: deadline, idle: config.idle,
             allowCIDR: nil, instanceID: nil, address: nil, hourlyUSD: plan.catalogHourly ?? config.maxHourly,
-            machineDeadline: deadline)
+            machineDeadline: deadline, session: session)
         try registry.upsert(machine)
 
+        var applyBegan = false
         do {
-            try await provision(&machine, plan: plan, client: client, account: account, events: events)
+            try await provision(&machine, plan: plan, client: client, account: account, applyBegan: &applyBegan, events: events)
         } catch {
             let message = Self.failureText(error)
             machine.state = .failed
@@ -157,6 +179,10 @@ final class InfraService {
                 Self.logger.error("\(name, privacy: .public): could not record the failure: \(String(describing: error), privacy: .public)")
             }
             events(.failed(message))
+            // Once an apply began, something may be running and billing, and nothing will use
+            // it: destroyed now, under this `up`'s claim. Before that nothing was created, and
+            // the failed record is left for the user, as it always was.
+            if applyBegan { await rollBack(name, events: events) }
             throw error
         }
         events(.cost(costLine(for: machine, now: env.now())))
@@ -168,7 +194,8 @@ final class InfraService {
     /// last state it reached, for `up` to mark failed; every step after `apply` began can have
     /// created something, so a failed machine is always kept for `down`.
     private func provision(_ machine: inout InfraMachine, plan: InfraLaunchPlan, client: TailscaleOAuthClient?,
-                           account: CloudAccount?, events: @escaping (InfraEvent) -> Void) async throws {
+                           account: CloudAccount?, applyBegan: inout Bool,
+                           events: @escaping (InfraEvent) -> Void) async throws {
         let name = machine.name, config = plan.config
         let key = FleetDeviceKey.mint()
         try hosts.enroll(key: key, name: name, endpoints: [])
@@ -193,7 +220,8 @@ final class InfraService {
             cloud: machine.cloud, tailscaleAuthKey: authKey, tailscaleHostname: authKey == nil ? nil : hostname))
         let workdir = try InfraWorkdir.prepare(
             root: registry.workdir(for: name).deletingLastPathComponent(), name: name, moduleSource: plan.moduleSource,
-            vars: moduleVars(name: name, config: config, userData: userData, allowCIDR: machine.allowCIDR, account: account))
+            vars: moduleVars(name: name, config: config, ttlSeconds: Self.ttlSeconds(machine), userData: userData,
+                             allowCIDR: machine.allowCIDR, account: account))
 
         let tofu = try await tofu(cloud: machine.cloud)
         events(.progress("tofu init"))
@@ -201,14 +229,15 @@ final class InfraService {
         // Billing starts with the apply, not with `ready`: a failed apply can still leave a
         // running instance, and its hours are real until `down` closes the segment.
         let applyStart = env.now()
-        if let rate = machine.hourlyUSD { try ledger.open(name: name, hourlyUSD: rate, at: applyStart) }
+        applyBegan = true
+        if let rate = machine.hourlyUSD { try ledger.open(name: name, hourlyUSD: rate, at: applyStart, session: machine.session) }
         try await Self.forwardingProgress(events) { try await tofu.apply(workdir: workdir, progress: $0) }
 
         let outputs = try await tofu.outputs(workdir: workdir)
         machine.instanceID = outputs.instanceID
         if machine.hourlyUSD == nil, let rate = outputs.hourlyUSD {
             machine.hourlyUSD = rate
-            try ledger.open(name: name, hourlyUSD: rate, at: applyStart)
+            try ledger.open(name: name, hourlyUSD: rate, at: applyStart, session: machine.session)
         }
         try registry.upsert(machine)
 
@@ -229,8 +258,10 @@ final class InfraService {
         try registry.upsert(machine)
 
         events(.progress("waiting for \(name) to enroll"))
-        guard await waitOnline(slot: key.slot, timeout: env.enrollTimeout) else {
-            throw InfraError.enrollTimeout(console: await console(machine, account))
+        switch await waitEnrolled(slot: key.slot, machine: machine, account: account) {
+        case .online: break
+        case .ended: throw InfraError.enrollFailed(console: await console(machine, account))
+        case .timedOut: throw InfraError.enrollTimeout(console: await console(machine, account))
         }
         machine.state = .ready
         try registry.upsert(machine)
@@ -257,6 +288,39 @@ final class InfraService {
             }
             guard Date() < giveUp else { return nil }
             try await Task.sleep(nanoseconds: UInt64(env.tailnetJoin.interval * 1_000_000_000))
+        }
+    }
+
+    private enum EnrollWait { case online, ended, timedOut }
+
+    /// `slot` coming online within the enroll timeout, asking the cloud every `instancePoll`
+    /// whether the instance still runs: a boot that cannot install or enroll hostd powers
+    /// itself off on AWS, and waiting out the timeout for it would only bill.
+    private func waitEnrolled(slot: UUID, machine: InfraMachine, account: CloudAccount?) async -> EnrollWait {
+        guard let account, let id = machine.instanceID else {
+            return await waitOnline(slot: slot, timeout: env.enrollTimeout) ? .online : .timedOut
+        }
+        let giveUp = Date().addingTimeInterval(env.enrollTimeout)
+        while true {
+            let left = giveUp.timeIntervalSinceNow
+            guard left > 0 else { return .timedOut }
+            if await waitOnline(slot: slot, timeout: min(env.instancePoll, left)) { return .online }
+            if await account.instanceEnded(instanceID: id, region: machine.region) { return .ended }
+        }
+    }
+
+    /// Destroys a machine whose `up` failed after its apply began. Its progress goes to
+    /// `events`, but a destroy failure only as progress: the `up`'s own failure stays the one
+    /// reported. A failed destroy leaves the machine `failed` with its attempt counted, for the
+    /// Reaper to retry.
+    private func rollBack(_ name: String, events: @escaping (InfraEvent) -> Void) async {
+        events(.progress("destroying \(name), which failed before it was ready"))
+        do {
+            try await destroyClaimed(name: name) { event in
+                if case .failed(let why) = event { events(.progress(why)) } else { events(event) }
+            }
+        } catch {
+            events(.progress("\(name) could not be destroyed yet; Flight Deck retries, and `flightdeck infra down \(name)` tries now"))
         }
     }
 
@@ -315,6 +379,11 @@ final class InfraService {
     func down(name: String, events: @escaping (InfraEvent) -> Void) async throws {
         try claim(name)
         defer { release(name) }
+        try await destroyClaimed(name: name, events: events)
+    }
+
+    /// `down`'s work, for a caller that already holds the name's claim.
+    private func destroyClaimed(name: String, events: @escaping (InfraEvent) -> Void) async throws {
         guard var machine = registry.machine(named: name) else { throw InfraError.notFound(name) }
         machine.state = .destroying
         try registry.upsert(machine)
@@ -392,6 +461,13 @@ final class InfraService {
         guard proposed <= limit.addingTimeInterval(1) else {
             throw InfraError.refused("\(name) can run \(Self.span(limit.timeIntervalSince(now))) more at most: the machine's own timer was set at creation; run `flightdeck infra down \(name)` and `up` again to run longer")
         }
+        if let session = machine.session, let b = budgets.budget(for: session) {
+            let status = sessionStatus(session, now: now, replacing: (name.lowercased(), proposed))
+            if let end = status.exhaustsAt, end < proposed {
+                let left = InfraPreflight.usd(max(0, b.capUSD - status.spent))
+                throw InfraError.refused("This session's budget has \(left) of \(InfraPreflight.usd(b.capUSD)) left, which runs out in \(Self.span(end.timeIntervalSince(now))) at the session's current rates; `/budget <usd>` raises it.")
+            }
+        }
         let budget = env.budget()
         if let rate = machine.hourlyUSD {
             let remaining = HostKit.Duration(seconds: max(0, Int(proposed.timeIntervalSince(now).rounded(.up))))
@@ -410,6 +486,116 @@ final class InfraService {
         machine.deadline = proposed
         try registry.upsert(machine)
         return machine
+    }
+
+    // MARK: - Session budgets
+
+    /// What one session's budget stands at: spent in its window, what its machines bill now,
+    /// and when the budget runs out if they keep running to their deadlines. Every figure comes
+    /// from the ledger and the registry alone, so the same records always give the same answer.
+    struct SessionStatus {
+        let budget: SessionBudget?
+        let spent: Double
+        let hourly: Double
+        /// Nil with no budget, or when every machine's deadline comes first; `now` once used up.
+        let exhaustsAt: Date?
+        /// Its machines that still exist, by name.
+        let machines: [String]
+        var exhausted: Bool { exhaustsAt.map { $0 <= now } ?? false }
+        let now: Date
+    }
+
+    /// `replacing` gives one machine (by lowercased name) another deadline, for `extend` to ask
+    /// what the session would look like with it.
+    func sessionStatus(_ session: UUID, now: Date, replacing: (String, Date)? = nil) -> SessionStatus {
+        let budget = budgets.budget(for: session)
+        let spent = ledger.spent(session: session, since: budget?.since ?? .distantPast, now: now)
+        var burns = sessionBurns(session, now: now)
+        if let (key, until) = replacing, let burn = burns[key] { burns[key] = .init(hourlyUSD: burn.hourlyUSD, until: until) }
+        let live = burns.values.filter { $0.until > now }
+        let exhausts = budget.flatMap { SessionBudgetModel.exhaustion(remaining: $0.capUSD - spent, burns: Array(live), now: now) }
+        let machines = registry.machines.filter { $0.session == session }.map(\.name).sorted()
+        return SessionStatus(budget: budget, spent: spent, hourly: live.reduce(0) { $0 + $1.hourlyUSD },
+                             exhaustsAt: exhausts, machines: machines, now: now)
+    }
+
+    /// What each of the session's machines will bill from now, by lowercased name: every one
+    /// that exists and can be priced (a failed one may still be running), and every `up` of the
+    /// session in flight, until its deadline.
+    private func sessionBurns(_ session: UUID, now: Date, excluding key: String? = nil) -> [String: SessionBudgetModel.Burn] {
+        var burns: [String: SessionBudgetModel.Burn] = [:]
+        for m in registry.machines where m.session == session && m.state != .gone {
+            guard let rate = m.hourlyUSD else { continue }
+            burns[m.name.lowercased()] = .init(hourlyUSD: rate, until: m.deadline)
+        }
+        for (k, v) in launchingBurns where v.session == session { burns[k] = v.burn }
+        if let key { burns[key] = nil }
+        return burns
+    }
+
+    /// The deadline a session's budget gives a new machine, nil when it sets none (no session,
+    /// or no budget); throws the refusal when the budget is used up or would end it at once.
+    private func sessionLaunchDeadline(name: String, session: UUID?, hourly: Double?, ttlDeadline: Date) throws -> Date? {
+        guard let session, let b = budgets.budget(for: session) else { return nil }
+        let now = env.now()
+        let spent = ledger.spent(session: session, since: b.since, now: now)
+        let burns = Array(sessionBurns(session, now: now, excluding: name.lowercased()).values)
+        switch SessionBudgetModel.checkLaunch(name: name, hourly: hourly, ttlDeadline: ttlDeadline, remaining: b.capUSD - spent,
+                                              capUSD: b.capUSD, burns: burns, now: now) {
+        case .refused(let why):
+            throw InfraError.preflight([PreflightCheck(name: "session budget", ok: false, detail: why, fix: nil)])
+        case .allowed(let deadline):
+            return deadline
+        }
+    }
+
+    /// `infra.budget`: changes the session's budget as asked, then says where it stands.
+    func budget(_ action: InfraRequest.BudgetAction, session: UUID) throws -> WireSessionBudget {
+        let now = env.now()
+        switch action {
+        case .show: break
+        case .set(let usd):
+            try Self.validCap(usd)
+            try budgets.set(session, capUSD: usd, now: now)
+        case .renew(let usd):
+            if let usd { try Self.validCap(usd) }
+            guard try budgets.renew(session, capUSD: usd, now: now) != nil else {
+                throw InfraError.refused("this session has no budget to renew; give an amount, as `/budget renew 20`")
+            }
+        case .clear:
+            try budgets.clear(session)
+        }
+        return wire(sessionStatus(session, now: now), session: session)
+    }
+
+    private static func validCap(_ usd: Double) throws {
+        guard usd.isFinite, usd > 0 else {
+            throw InfraError.refused("a budget must be a positive number of dollars, as `/budget 20`")
+        }
+    }
+
+    func wire(_ s: SessionStatus, session: UUID) -> WireSessionBudget {
+        let usd = InfraPreflight.usd
+        let remaining = s.budget.map { max(0, $0.capUSD - s.spent) }
+        var parts: [String]
+        if let b = s.budget {
+            parts = ["session budget \(usd(b.capUSD))", "spent ~\(usd(s.spent))", "\(usd(remaining ?? 0)) left"]
+        } else {
+            parts = ["no cloud budget for this session", "its machines spent ~\(usd(s.spent))"]
+        }
+        if s.hourly > 0 { parts.append("\(usd(s.hourly))/h now") }
+        if s.budget != nil {
+            if s.exhausted { parts.append("used up: its machines are being destroyed") }
+            else if let end = s.exhaustsAt { parts.append("runs out in \(Self.span(end.timeIntervalSince(s.now)))") }
+            else if s.hourly > 0 { parts.append("lasts past every machine's TTL") }
+        }
+        if !s.machines.isEmpty { parts.append(s.machines.joined(separator: ", ")) }
+        let iso = ISO8601DateFormatter()
+        return WireSessionBudget(
+            session: session.uuidString, capUsd: s.budget?.capUSD, since: s.budget.map { iso.string(from: $0.since) },
+            spentUsd: s.spent, remainingUsd: remaining, hourlyUsd: s.hourly,
+            exhaustsIn: s.exhaustsAt.map { max(0, Int($0.timeIntervalSince(s.now))) }, machines: s.machines,
+            line: parts.joined(separator: " · "))
     }
 
     // MARK: - list, doctor
@@ -632,6 +818,7 @@ final class InfraService {
     private func release(_ name: String) {
         busy.remove(name.lowercased())
         launching[name.lowercased()] = nil
+        launchingBurns[name.lowercased()] = nil
     }
 
     /// Runs one OpenTofu step, handing each resource it starts to `events` in order, and only
@@ -671,6 +858,9 @@ final class InfraService {
             month += " of " + (cap == cap.rounded() ? "$\(Int(cap))" : usd(cap))
         }
         parts.append(month)
+        if let session = m.session, let b = budgets.budget(for: session) {
+            parts.append("session ~\(usd(ledger.spent(session: session, since: b.since, now: now))) of \(usd(b.capUSD))")
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -719,7 +909,7 @@ final class InfraService {
 
     /// Spec §5.3's inputs, the preset's own variables, the account's (`project`), and for a
     /// user module its `vars` — which can never override an `fd_` input.
-    private func moduleVars(name: String, config: InfraConfig, userData: String, allowCIDR: String?,
+    private func moduleVars(name: String, config: InfraConfig, ttlSeconds: Int, userData: String, allowCIDR: String?,
                             account: CloudAccount?) -> [String: InfraVar] {
         var vars: [String: InfraVar] = [
             "fd_name": .string(name),
@@ -727,7 +917,8 @@ final class InfraService {
             "fd_labels": .map(["flightdeck": "1", "flightdeck-owner": ownerLabel, "flightdeck-name": name]),
             // Empty is tailnet mode: no inbound rule at all.
             "fd_allow_cidr": .string(allowCIDR ?? ""),
-            "ttl_seconds": .number(Double(config.ttl.seconds)),
+            // The machine's own timer: the TTL, or less when a session budget ends it sooner.
+            "ttl_seconds": .number(Double(ttlSeconds)),
             "spot": .bool(config.spot),
         ]
         if let region = config.region { vars["region"] = .string(region) }
@@ -739,6 +930,12 @@ final class InfraService {
             for (k, v) in config.vars where vars[k] == nil { vars[k] = .string(v) }
         }
         return vars
+    }
+
+    /// Whole seconds from creation to the deadline, at least 1: the TTL a session budget may
+    /// have shortened, as the module's own timer is set to it.
+    static func ttlSeconds(_ m: InfraMachine) -> Int {
+        max(1, Int(m.deadline.timeIntervalSince(m.createdAt)))
     }
 
     /// The first 12 lowercase hex characters of SHA-256 of the controller id: the GCP preset
@@ -770,6 +967,7 @@ final class InfraService {
         case TofuError.failed(let step, let message): text = "\(step): \(message)"
         case TofuError.missingOutput(let output): text = "the module has no \(output) output"
         case InfraError.enrollTimeout: text = "the machine did not enroll in time; its console output is in the error"
+        case InfraError.enrollFailed: text = "the machine could not install or enroll hostd and powered itself off; its console output is in the error"
         default: text = String(describing: error)
         }
         return SecretRedaction.redact(InfraPreflight.fix(forFailure: text).map { "\(text)\n\($0)" } ?? text)

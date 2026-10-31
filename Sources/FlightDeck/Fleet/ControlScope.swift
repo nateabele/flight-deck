@@ -172,7 +172,13 @@ enum ControlScope {
             // `infra ls` and `doctor` only read. `up`, `down` and `extend` create, destroy or
             // spend money on a machine that belongs to the Mac, not to the tab that asked (any
             // tab's runs may land on it), so they follow the fleet-wide rule, like `host prune`.
-            return infra.isReadOnly || level == .full || caller == .human
+            //
+            // `budget` is the exception the other way: it changes only the asking tab's own
+            // session budget (the app reads the session from the token), so it follows the
+            // own-session rule, as `delegate` does.
+            if infra.isReadOnly || level == .full || caller == .human { return true }
+            guard case .budget = infra, case .session = caller else { return false }
+            return level == .ownSession
         }
     }
 }

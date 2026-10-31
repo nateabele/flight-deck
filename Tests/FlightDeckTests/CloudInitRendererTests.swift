@@ -141,6 +141,26 @@ final class CloudInitRendererTests: XCTestCase {
         }
     }
 
+    /// A download that fails must fail the step: piped into `sh`, an empty download "succeeds".
+    /// Install and enroll each mark a failure, and on AWS (only: a GCE poweroff merely stops the
+    /// VM, its disk still billing) a last step powers a machine that cannot enroll off at once.
+    func testAFailedInstallOrEnrollPowersAnAWSMachineOff() throws {
+        for o in [base, tailnetGCP] {
+            let y = try CloudInitRenderer.render(payload, o)
+            let lines = y.components(separatedBy: "\n")
+            let install = lines[line(y, "hostd-install.sh")]
+            XCTAssertFalse(install.contains("| sh"), install)
+            XCTAssertTrue(install.contains("-o ~/hostd-install.sh") && install.hasSuffix("|| touch /run/flightdeck/failed\" ]"), install)
+            XCTAssertTrue(lines[line(y, "flightdeck-hostd enroll")].contains("|| touch /run/flightdeck/failed"))
+            let poweroff = lines.firstIndex { $0.contains("systemctl poweroff; fi") }
+            if o.cloud == "aws" {
+                XCTAssertEqual(poweroff, line(y, "flightdeck-hostd enroll") + 1, "right after the enroll")
+            } else {
+                XCTAssertNil(poweroff, "never on GCP")
+            }
+        }
+    }
+
     /// Ruling 3: a failed enroll must not stop the steps after it. cloud-init's runcmd script
     /// carries on past a failing entry, so the enroll is its own entry and is never chained.
     func testEnrollIsItsOwnUnchainedStep() throws {

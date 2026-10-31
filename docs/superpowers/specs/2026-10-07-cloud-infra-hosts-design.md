@@ -329,6 +329,29 @@ gpu · g6.xlarge · $0.80/h est. · up 1h12m · ~$0.96 · TTL 2h48m · month ~$1
 `monthUsd`, `monthCapUsd`). `infra ls` adds a total row. Settings → Hosts shows the rate and
 spend beside each cloud host.
 
+### 8.5 Session budgets (added 2026-10-24)
+
+A Flight Deck session (one tab) can carry a dollar budget of its own, set with `/budget` in
+Claude Code or `flightdeck infra budget` in the tab. `/budget 20` sets the cap and keeps the
+spend so far; `/budget renew [20]` starts a fresh window from now; `/budget clear` removes it.
+Settings → Cloud's caps and guardrails still apply on top.
+
+- **Attribution.** The session is the caller token's (`FLIGHT_DECK_CALLER`), never the request's.
+  Each machine an `up` or `run --on` auto-up creates records it (`InfraMachine.session`), and so
+  does each of its ledger segments (`CostSegment.session`). A session's spend is the sum of its own
+  segments inside its window: nothing else on the Mac, and no cloud billing API, changes it.
+- **Before `up`.** Refused when the budget is used up, when the machine can't be priced, or when
+  the budget would end it in under 15 minutes. Otherwise its deadline is the earlier of its TTL and
+  the instant the session's spend reaches the cap with every session machine billing to its
+  deadline (`SessionBudgetModel.exhaustion`, piecewise exact). That deadline is also the machine's
+  own timer (`ttl_seconds`, cloud-init's poweroff), so the budget holds with the Mac asleep.
+- **`extend`** is refused past that instant.
+- **While running.** Each Reaper pass recomputes the instant from the ledger. 10 minutes before it,
+  a warning; at it, every machine of the session is destroyed on that pass, with no grace.
+- **Who sets it.** The person, not the agent: the plugin's `/budget` module refuses a Bash call that
+  would change it. A guardrail like `ControlScope`, not a boundary. A tab may change its own budget
+  under the `ownSession` scope.
+
 ## 9. Guided setup
 
 Settings → Cloud → **Set up…** opens a sheet: a checklist whose items turn green as live

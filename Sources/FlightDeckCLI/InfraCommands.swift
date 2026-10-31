@@ -2,7 +2,7 @@ import FleetKit
 import Foundation
 import HostKit
 
-// `flightdeck infra up|down|ls|doctor|extend` (cloud infra hosts, spec §8.4 and §10): parsing,
+// `flightdeck infra up|down|ls|doctor|extend|budget` (cloud infra hosts, spec §8.4 and §10): parsing,
 // the request each verb sends, and everything it prints. The app owns every credential, the
 // OpenTofu state and the budget (InfraControlWire.swift), so the CLI only names what it wants.
 
@@ -15,6 +15,8 @@ public enum InfraCommand: Equatable {
     case doctor
     /// `by` as written (`1h`); already checked to parse, and sent as seconds.
     case extend(name: String, by: String)
+    /// The calling tab's session budget.
+    case budget(InfraRequest.BudgetAction)
 
     func request(cwd: String) -> InfraRequest {
         switch self {
@@ -24,13 +26,14 @@ public enum InfraCommand: Equatable {
         case .ls(let orphans): return .list(orphans: orphans)
         case .doctor: return .doctor
         case .extend(let name, let by): return .extend(name: name, seconds: HostKit.Duration.parse(by)?.seconds ?? 0)
+        case .budget(let action): return .budget(action)
         }
     }
 }
 
 enum InfraArguments {
     static func parse(_ c: inout CLIArguments.Cursor) throws -> CLICommand {
-        let sub = try c.requirePositional("infra: missing subcommand (up, down, ls, doctor or extend)")
+        let sub = try c.requirePositional("infra: missing subcommand (up, down, ls, doctor, extend or budget)")
         switch sub {
         case "up":
             return .infra(.up(name: try c.requirePositional("infra up: missing machine name")))
@@ -68,9 +71,37 @@ enum InfraArguments {
                 throw CLIUsageError("infra extend: duration must be like 30m, 1h or 1h30m, got \"\(by)\"")
             }
             return .infra(.extend(name: name, by: by))
+        case "budget":
+            return .infra(.budget(try budgetAction(&c)))
         default:
             throw CLIUsageError("infra: unknown subcommand \"\(sub)\"")
         }
+    }
+}
+
+extension InfraArguments {
+    /// `[show]`, `[set] USD`, `renew [USD]`, `clear`: a bare amount sets, as `/budget 20` does.
+    static func budgetAction(_ c: inout CLIArguments.Cursor) throws -> InfraRequest.BudgetAction {
+        let action: InfraRequest.BudgetAction
+        switch c.optionalPositional() {
+        case nil, "show": action = .show
+        case "set": action = .set(usd: try usd(c.requirePositional("infra budget set: missing amount (e.g. 20)")))
+        case "renew": action = .renew(usd: try c.optionalPositional().map(usd))
+        case "clear", "off": action = .clear
+        case let amount?: action = .set(usd: try usd(amount))
+        }
+        if let extra = c.optionalPositional() { throw CLIUsageError("infra budget: unexpected \"\(extra)\"") }
+        if let flag = c.nextFlag() { throw CLIArguments.Cursor.unknownFlag(flag, in: "infra budget") }
+        return action
+    }
+
+    /// `20`, `7.50`, `$7.50`: positive and finite, so a typo never sets a zero or unbounded cap.
+    static func usd(_ text: String) throws -> Double {
+        let digits = text.hasPrefix("$") ? String(text.dropFirst()) : text
+        guard let value = Double(digits), value.isFinite, value > 0 else {
+            throw CLIUsageError("infra budget: the amount must be positive dollars like 20 or 7.50, got \"\(text)\"")
+        }
+        return value
     }
 }
 
@@ -136,6 +167,9 @@ final class InfraCommandRunner {
                         self.hooks.out(InfraOutput.orphans(orphans, unreadable: unreadable))
                     }
                 }
+                self.finish(0)
+            case .infraBudget(_, let budget):
+                self.hooks.out(self.wantsJSON ? CLIOutput.json(budget) : budget.line)
                 self.finish(0)
             case .infraDoctor(_, let checks):
                 self.hooks.out(self.wantsJSON ? CLIOutput.json(checks) : InfraOutput.doctor(checks))

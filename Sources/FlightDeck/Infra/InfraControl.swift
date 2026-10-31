@@ -10,7 +10,10 @@ extension InfraService {
     /// `up` reads `[infra.<name>]` from `cwd`'s repo through the same loader `delegate.*` uses,
     /// so a recipe `run --on gpu` would see and the one `infra up gpu` creates are one and the
     /// same.
-    func handle(_ request: InfraRequest, cid: Int,
+    ///
+    /// `session` is the asking tab's, from its caller token (nil for a shell outside any tab):
+    /// what `up` creates is that session's, and `budget` reads and sets that session's alone.
+    func handle(_ request: InfraRequest, session: UUID? = nil, cid: Int,
                 config: DelegateConfigLoading = LiveConfigLoader(),
                 worktrees: WorktreeLocating = LiveWorktreeLocator(),
                 reply: @escaping (ServerFrame) -> Void) {
@@ -31,7 +34,7 @@ extension InfraService {
                 switch request {
                 case .up(let name, let cwd):
                     let (root, recipe) = try await Self.recipe(name, cwd: cwd, config: config, worktrees: worktrees)
-                    let machine = try await self.up(name: name, config: recipe, repoRoot: root, events: events)
+                    let machine = try await self.up(name: name, config: recipe, repoRoot: root, session: session, events: events)
                     reply(.infraMachine(cid: cid, self.wire(machine, now: self.now)))
                 case .down(_, let orphanID?):
                     try await self.downOrphan(id: orphanID)
@@ -49,6 +52,12 @@ extension InfraService {
                     reply(.infraDoctor(cid: cid, await self.doctor().map {
                         WireInfraCheck(name: $0.name, ok: $0.ok, detail: $0.detail, fix: $0.fix)
                     }))
+                case .budget(let action):
+                    guard let session else {
+                        throw Refusal(code: "infra_no_session",
+                                      message: "a cloud budget belongs to a Flight Deck session: run /budget in the session, or `flightdeck infra budget` in its tab")
+                    }
+                    reply(.infraBudget(cid: cid, try self.budget(action, session: session)))
                 case .extend(let name, let seconds):
                     let machine = try await self.extend(name: name, by: HostKit.Duration(seconds: seconds))
                     reply(.infraMachine(cid: cid, self.wire(machine, now: self.now)))
@@ -101,6 +110,9 @@ extension InfraService {
         case InfraError.enrollTimeout(let console):
             let first = recorded ?? failureText(error)
             return ("infra_enroll_timeout", console.map { "\(first)\n\(Self.tail($0))" } ?? first)
+        case InfraError.enrollFailed(let console):
+            let first = recorded ?? failureText(error)
+            return ("infra_enroll_failed", console.map { "\(first)\n\(Self.tail($0))" } ?? first)
         case InfraError.notFound(let what):
             return ("infra_not_found", "no cloud machine or orphan named \(what); flightdeck infra ls --orphans lists them")
         case InfraError.refused(let why):
@@ -126,10 +138,10 @@ extension InfraService {
 /// `run --on` a cloud machine (`DelegationService`): the same `up` `infra up` runs, its errors
 /// worded and coded as `infra.up`'s are, so the CLI prints the same lines either way.
 extension InfraService: InfraUpProviding {
-    func ensureUp(name: String, config: InfraConfig, repoRoot: URL, notice: @escaping (String) -> Void) async throws {
+    func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?, notice: @escaping (String) -> Void) async throws {
         var recorded: String?
         do {
-            _ = try await up(name: name, config: config, repoRoot: repoRoot) { event in
+            _ = try await up(name: name, config: config, repoRoot: repoRoot, session: session) { event in
                 switch event {
                 case .progress(let line): notice(line)
                 case .failed(let message): recorded = message
