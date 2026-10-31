@@ -192,7 +192,6 @@ struct ConvergenceHeatmap: View {
         .background(GeometryReader { geo in
             Color.clear.onAppear { width = geo.size.width }.onChange(of: geo.size.width) { _, w in width = w }
         })
-        .environment(\.colorScheme, .dark)
         // Esc closes it (spec §8.3). Focus is taken when it opens so Esc works at once; the ring
         // would outline the whole map, which the cells' own rings already cover.
         .focusable()
@@ -389,7 +388,7 @@ struct ConvergenceHeatmap: View {
                     Text("\(lines)")
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(lum > 0.55 ? Color(white: 0.08) : CardTone.ph)
+                        .foregroundStyle(lum > 0.55 ? Instrument.inkInverse : CardTone.ph)
                 }
                 if selected { shape.strokeBorder(CardTone.accent, lineWidth: 1.5) }
             }
@@ -852,12 +851,11 @@ struct SectionVersionsCard: View {
         .frame(width: 320, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 9)
-                .fill(LinearGradient(colors: [Color(red: 0.102, green: 0.118, blue: 0.145), Color(red: 0.059, green: 0.071, blue: 0.086)],
+                .fill(LinearGradient(colors: [Instrument.cardTop, Instrument.cardBottom],
                                      startPoint: .top, endPoint: .bottom))
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(CardTone.ph.opacity(0.16), lineWidth: 1))
-                .shadow(color: .black.opacity(0.6), radius: 17, y: 14)
+                .shadow(color: Instrument.cardShadow, radius: 17, y: 14)
         )
-        .environment(\.colorScheme, .dark)
     }
 
     private static func word(_ verdict: Verdict) -> String {

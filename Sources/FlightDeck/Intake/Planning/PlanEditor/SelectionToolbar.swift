@@ -13,15 +13,13 @@ struct SelectionToolbar: View {
             ForEach(NoteStyle.kinds, id: \.self) { kind in
                 Item(title: NoteStyle.label(kind), symbol: NoteStyle.symbol(kind)) { onChoose(kind) }
             }
-            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1, height: 16).padding(.horizontal, 2)
+            Rectangle().fill(Instrument.lift.opacity(0.12)).frame(width: 1, height: 16).padding(.horizontal, 2)
             Item(title: "Highlight", symbol: "highlighter") { onChoose(nil) }
         }
         .padding(3)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(white: 0.17).opacity(0.97)))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.09)))
-        .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
-        // The same dark chrome in either appearance, like the board's glass it floats beside.
-        .environment(\.colorScheme, .dark)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Instrument.toolbar))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Instrument.lift.opacity(0.09)))
+        .shadow(color: Instrument.toolbarShadow, radius: 8, y: 3)
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Annotate the selection")
@@ -40,7 +38,7 @@ struct SelectionToolbar: View {
                     .font(.system(size: 12))
                     .padding(.horizontal, 8)
                     .frame(height: 24)
-                    .background(hovering ? Color.white.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    .background(hovering ? Instrument.lift.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

@@ -114,7 +114,7 @@ struct DeparturesBoard: View {
                         flap(model.now.value, code: model.now.valueCode, surface: "board.now", font: Style.nowFont,
                              detail: model.failure == nil && model.now.shortDetail == nil ? model.now.detail : nil,
                              accessory: model.failure.map { AnyView(FailureCardBody(failure: $0)) })
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Instrument.ink)
                         chip
                     }
                 }
@@ -127,7 +127,7 @@ struct DeparturesBoard: View {
                     Text(model.inTheAir.value)
                         .font(.system(size: 28, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(model.nowChip == "FAILED" ? Palette.red : .white)
+                        .foregroundStyle(model.nowChip == "FAILED" ? Palette.red : Instrument.ink)
                         .lineLimit(1)
                         // Shrink rather than truncate: "34:…" hides the minutes that matter.
                         .minimumScaleFactor(0.5)
@@ -141,7 +141,7 @@ struct DeparturesBoard: View {
                     }
                 } value: {
                     flap(model.stopsAt.value, code: model.stopsAt.valueCode, surface: "board.stopsAt", font: Style.stopFont)
-                        .foregroundStyle(preview == nil ? Palette.blue2 : .white)
+                        .foregroundStyle(preview == nil ? Palette.blue2 : Instrument.ink)
                 }
                 cell(model.callingAt, width: unit * 1.45, divider: false) { caption in
                     Text(caption(0))
@@ -152,7 +152,7 @@ struct DeparturesBoard: View {
             }
         }
         .frame(height: Style.fieldsHeight)
-        .background(LinearGradient(colors: [.white.opacity(0.025), .clear], startPoint: .top, endPoint: .bottom))
+        .background(LinearGradient(colors: [Instrument.lift.opacity(0.025), .clear], startPoint: .top, endPoint: .bottom))
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.ph.opacity(0.08)).frame(height: 1) }
     }
 
@@ -224,8 +224,8 @@ struct DeparturesBoard: View {
     private var chip: some View {
         let (fill, text): (Color, Color) = switch model.nowChip {
         case "FAILED": (Palette.red.opacity(0.85), .white)
-        case "NEEDS YOU": (Palette.amber, Color(red: 0.106, green: 0.071, blue: 0.016))
-        case "PAUSED", "STOPPED": (Palette.ph, Color(white: 0.07))
+        case "NEEDS YOU": (Instrument.amberFill, Instrument.onAmber)
+        case "PAUSED", "STOPPED": (Palette.ph, Instrument.inkInverse)
         default: (.clear, Palette.ph)
         }
         return Text(model.nowChip)
@@ -369,7 +369,7 @@ struct DeparturesBoard: View {
                 Text("×2").font(Font(Style.crossCheckNS)).foregroundStyle(labelColor(slot).opacity(0.75))
             }
             if let clock {
-                Text(clock).font(Font(Style.clockNS)).monospacedDigit().foregroundStyle(.white)
+                Text(clock).font(Font(Style.clockNS)).monospacedDigit().foregroundStyle(Instrument.ink)
             }
             if slot.flagged {
                 Image(systemName: "flag.fill").font(.system(size: 8)).foregroundStyle(Palette.amber)
@@ -383,7 +383,7 @@ struct DeparturesBoard: View {
 
     private func labelColor(_ slot: TapeSlot) -> Color {
         switch slot.state {
-        case .live: .white
+        case .live: Instrument.ink
         case .failed: Palette.red
         case .selected: Palette.blue2
         case _ where slot.id == model.stopSlotID: Palette.blue2
@@ -400,7 +400,7 @@ struct DeparturesBoard: View {
         ZStack {
             switch slot.state {
             case .done where isReview:
-                shape.fill(Palette.amber)
+                shape.fill(Instrument.amberFill)
             case .done:
                 shape.fill(LinearGradient(colors: [Palette.ph.opacity(slot.major ? 0.28 : 0.2), Palette.ph.opacity(slot.major ? 0.18 : 0.13)],
                                           startPoint: .top, endPoint: .bottom))
@@ -439,15 +439,16 @@ struct DeparturesBoard: View {
             if slot.id == model.stopSlotID {
                 shape.strokeBorder(Color.accentColor, lineWidth: 1.75).shadow(color: Color.accentColor.opacity(0.45), radius: 8)
             } else if slot.id == model.pausedAtSlotID {
-                shape.strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
+                shape.strokeBorder(Instrument.ink.opacity(0.85), lineWidth: 1.5)
             }
         }
     }
 
     private func barTextColor(_ slot: TapeSlot, isReview: Bool) -> Color {
         switch slot.state {
-        case .done where isReview: Color(red: 0.106, green: 0.071, blue: 0.016)
-        case .selected, .failed: .white
+        case .done where isReview: Instrument.onAmber
+        case .selected: .white
+        case .failed: Instrument.ink
         case .done: Palette.ph
         case .live, .future: slot.id == model.stopSlotID ? Palette.blue2 : Palette.ph3
         }
@@ -631,14 +632,14 @@ private enum Palette {
     static let ph = SplitFlapCard.phosphor
     static let ph2 = ph.opacity(0.66)
     static let ph3 = ph.opacity(0.4)
-    static let blue2 = Color(red: 124 / 255, green: 188 / 255, blue: 1)
-    static let red = Color(red: 1, green: 107 / 255, blue: 97 / 255)
-    static let amber = Color(red: 1, green: 179 / 255, blue: 64 / 255)
-    static let glass0 = Color(red: 0x13 / 255, green: 0x16 / 255, blue: 0x1b / 255)
-    static let glass1 = Color(red: 0x0c / 255, green: 0x0e / 255, blue: 0x11 / 255)
+    static let blue2 = Instrument.blue
+    static let red = Instrument.red
+    static let amber = Instrument.amber
+    static let glass0 = Instrument.glassTop
+    static let glass1 = Instrument.glassBottom
 }
 
-/// Dark glass: a top-lit gradient, a hairline rim, and faint scan lines.
+/// The board's glass: a top-lit gradient, a hairline rim, and faint scan lines.
 private struct Glass: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12)
@@ -651,8 +652,8 @@ private struct Glass: View {
                 }
                 .clipShape(shape)
             )
-            .overlay(shape.strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
+            .overlay(shape.strokeBorder(Instrument.lift.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: Instrument.glassShadow, radius: 1, y: 0.5)
     }
 }
 

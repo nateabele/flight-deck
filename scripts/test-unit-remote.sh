@@ -11,6 +11,7 @@
 #                                       and the menu-bar harness; the log comes back as
 #                                       DerivedData/fd-test-shards/beeps.log. Off by default.
 #   FD_REMOTE_LOAD_RUNS=N               repeat the run N times under CPU burners (two per core)
+#   FD_RENDER_APPEARANCE=light          draw the planning renders (`PlanningRender`) in light, not dark
 #
 # Why another machine: the suite is not headless. *LiveTests classes open real windows (a
 # ParkedWindow at -10000 plus orderFrontRegardless), NSHostingView renders run, and the menu-bar
@@ -235,7 +236,7 @@ fi
 # --- Run -------------------------------------------------------------------
 # The knobs travel as NAME=VALUE arguments, never spliced into a command string.
 ENVARGS=(FD_TEST_LOCAL=1 FD_SKIP_BUILD=1 FD_MENUBAR_PREBUILT=1)
-for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS FD_PLAN_TABLE_RENDER_DIR FD_NOTES_RENDER FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR; do
+for name in FD_TEST_FILTER FD_TEST_SHARDS FD_SKIP_MENUBAR FD_REMOTE_LOAD_RUNS FD_PLAN_TABLE_RENDER_DIR FD_NOTES_RENDER FD_PLAN_TYPE_RENDER_DIR FD_PLANNING_RENDER_DIR FD_FC_SIDEBAR_RENDER_DIR FD_ROUNDS_RENDER_DIR FD_RENDER_APPEARANCE; do
   [ -n "${!name:-}" ] && ENVARGS+=("$name=${!name}")
 done
 [ -n "${FD_TRACE_BEEPS:-}" ] && ENVARGS+=("FD_BEEP_DYLIB=$ROOT/DerivedData/beeptrace/libBeepTrace.dylib")
