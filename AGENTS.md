@@ -53,6 +53,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # unit suite, run on the UI-test Mac (opens windows; FD_TEST_LOCAL=1 for this Mac) — your normal TDD loop
+./scripts/test-logic.sh        # pure IntakeKit/FleetKit tests (Tests/IntakeKitTests, Tests/FleetKitTests) on THIS Mac: no app, no window, no remote lock, exits non-zero on failure; FD_TEST_FILTER=ClassA,ClassB/testX — use it first for model/wire/store logic
 ./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full` — and its baseline note before assuming a red run is your bug)
 ./scripts/smoke.sh              # GUI UITest on the UI-test Mac, ends "SMOKE PASS" (see rule 4);
                                 # result bundle + log copied back to DerivedData/smoke-remote/

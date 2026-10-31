@@ -990,6 +990,18 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 
 ### 8.1 Tests run on the UI-test Mac
 
+- **Which lane:**
+  - A test that imports only XCTest, Foundation, `IntakeKit` and/or `FleetKit` (no `@testable import FlightDeck`,
+    no window, no `Network` socket or Bonjour) goes in `Tests/IntakeKitTests` or `Tests/FleetKitTests`.
+    Run it with `./scripts/test-logic.sh`.
+  - Any other test stays in `Tests/FlightDeckTests` and runs through `test-unit.sh`.
+  - Put every new pure test file in the first group. It then runs in seconds, in parallel across
+    worktrees, with no wait for the remote lock.
+- `./scripts/test-logic.sh` runs on this Mac. It never uses the UI-test Mac or its lock, and it
+  exits non-zero on any failure. It takes `FD_TEST_FILTER=ClassA,ClassB/testX`, with the same comma form
+  as `test-unit.sh`, and `FD_SKIP_BUILD=1`. The two bundles have no test host, so xctest does not launch the app.
+  - Pure helpers that both lanes use stay in `Tests/FlightDeckTests` and are listed under the logic
+    targets in `project.yml`, so each bundle compiles its own copy.
 - `./scripts/test-unit.sh` builds on this Mac and runs on the UI-test Mac (`FD_UITEST_HOST` in
   the git-ignored `scripts/local.env`), via `test-unit-remote.sh`. That is the default.
   - It rsyncs the checkout to the **same absolute path** there. It shares the remote lock with the XCUITests.
