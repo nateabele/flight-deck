@@ -27,6 +27,15 @@ final class TapeStoreComposingAppendTests: XCTestCase {
         XCTAssertEqual(store.commands(after: 2).map(\.command), [.editPlan(checkpoint: 1, markdown: "X and more")])
     }
 
+    /// The lock's descriptor is close-on-exec: a process the holder spawns while it holds the
+    /// lock (a runner starting an agent CLI) must not inherit it, or the child would keep the
+    /// file locked for as long as it lives and every append would wait on it.
+    func testTheCommandsLockIsNotInheritedByAChildProcess() throws {
+        let url = store.intakeDirectory.appendingPathComponent("x.lock")
+        let flags = try LockedAppend.withLockedFile(url) { handle, _ in fcntl(handle.fileDescriptor, F_GETFD) }
+        XCTAssertNotEqual(flags & FD_CLOEXEC, 0)
+    }
+
     func testAComposerThatDeclinesAppendsNothing() throws {
         try store.appendCommand(.pause)
         XCTAssertNil(try store.appendCommand(composing: { _ in nil }))

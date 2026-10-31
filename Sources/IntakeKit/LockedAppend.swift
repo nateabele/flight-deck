@@ -23,8 +23,10 @@ public enum LockedAppend {
         )
         // open(O_CREAT), never `FileManager.createFile`: that replaces the file with a new inode,
         // so two processes racing to create it would each lock a different file and exclude
-        // nobody.
-        let fd = open(url.path, O_RDWR | O_CREAT, 0o644)
+        // nobody. O_CLOEXEC: a child spawned while the lock is held (a runner starting an agent
+        // CLI on another thread) would otherwise inherit the descriptor, and an `flock` lives as
+        // long as any descriptor on it, so every append would wait on that child.
+        let fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw LockError(file: url.lastPathComponent) }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? handle.close() }
