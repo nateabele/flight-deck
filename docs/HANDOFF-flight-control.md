@@ -95,12 +95,35 @@ Triage runs in the app process, not in the runner. `IntakeService.runTriage` use
 `HeadlessCommand.build`.
 
 - **Types** (`Sources/IntakeKit/Triage.swift`):
-  - `TriageResult` is `.questions([String])` or `.recommendation(preset:reason:changeSet:)`.
+  - `TriageResult` is `.questions([StructuredQuestion])` or `.recommendation(preset:reason:changeSet:)`.
   - `enum Triage` holds the schema and the prompts: initial, answers, correction and encodeNow.
-  - `TriageExchange` (`Intake.swift`) holds one round of questions and answers.
+  - `TriageExchange` (`Intake.swift`) holds one round of questions and answers. `questions` and
+    `answers` are the plain strings, which the rounds still read. `structured` and
+    `structuredAnswers` are optional, so an old `intake.json` decodes unchanged.
+  - `StructuredQuestion` (`StructuredQuestion.swift`) has `id`, `text`, `kind` (`single`,
+    `multi`, `toggle` or `text`), `options` (id, label, detail), `recommended` (option ids) and
+    `allowOther`. `StructuredAnswer` has `questionID`, `selected` (option ids) and `other`.
+  - `presentedQuestions` is what the UI shows: `structured`, or the strings as text questions
+    `q1`, `q2` and so on.
+  - `questionsDigest` names a round by its questions' ids, texts, kinds and option ids (FNV-1a
+    64, 16 hex digits). `retry` clears the exchanges, so a round index is not unique. Drafts and
+    phone answers key on the digest.
+  - `isComplete`, `accepts` and `render` check and render one answer. `accepts` refuses an
+    unknown option id, a duplicate id, and a selection on a text question. A choice renders as
+    its label. Other renders as `labels; Other: text`.
+- **Schema:** each item of `questions` is an object with `id`, `text`, `kind`, `options`,
+  `recommended` and `allowOther`. The decoder still accepts a plain string. A malformed object
+  (an unknown kind, missing fields) degrades to a text question instead of failing triage. Only an
+  item with no text is dropped.
+- **`Triage.normalize`** makes duplicate or empty ids unique, drops `recommended` ids that are
+  not options, turns a choice with too few options into text (the options become hints), and sets
+  `allowOther` on every single and multi question.
   - `HeadlessSession` (`Intake.swift`) is stored under the JSON key `harness`. The key is legacy; do not rename it.
 - **Files:** `<intake>/triage/{graph.json, bv.json, schema.json}`. Unsent answers go to
-  `<intake>/answer-drafts.json`, written with a 400 ms debounce.
+  `<intake>/answer-drafts.json`, written with a 400 ms debounce. The file holds the round index,
+  the round's digest and the `structured` answers beside the old strings. Drafts for another
+  round or digest are deleted. A file without a digest or `structured` still loads while its
+  round and question texts match.
 - **Validation:** a change set that fails validation gets one correction turn. A second failure
   sets the intake to `failed`.
 
@@ -425,7 +448,8 @@ the heatmap.
   - The position survives tab and project switches, but not a relaunch.
 - **File drops** (`DroppedPaths.swift`):
   - On the plan, a drop inserts `[path](path)` links at the drop point as one undo step. Paths are relative to the project, or start with `~`. Several items become a list on an empty line.
-  - On the new-note draft and the question answers, `.dropsFilePaths` appends plain paths.
+  - On the new-note draft, a text question's answer and the Other field of a choice question,
+    `.dropsFilePaths` appends plain paths. Option rows and toggles take no drop.
 - **Links** (`PlanLinks.swift`): ⌘-click opens a link. Holding ⌘ shows a tip with the target. `:42` and `#L42` suffixes are stripped. In-document `#anchor` links are not supported.
 - **Outline and breadcrumb:** `PlanReadingPosition` shows "§ Title" in the pinned board's footer, and a click jumps there. `PlanFocus` is how a heatmap cell asks for a Diff at a section.
 
@@ -502,7 +526,7 @@ fidelity". Several working plans get a line each.
 | Screen | Files | What it does |
 |---|---|---|
 | Intake row | `IntakeRow.swift` | Glyph, title, pill and one fact in the Sessions list |
-| Intake screen | `IntakeScreen.swift`, `IntakeDetailModel.swift`, `IntakePresence.swift` | `BoardStrip` with transport keys (Stop asks first; a long press on a play key sets the default). Sections: questions ("Answer on your Mac for now."), clarifications, fidelity, review ("Review and release on your Mac for now."), failure, Rounds, agents, rounds (with −/+), plan. Polls every 1.5 s while visible, using an etag. |
+| Intake screen | `IntakeScreen.swift`, `IntakeDetailModel.swift`, `IntakePresence.swift` | `BoardStrip` with transport keys (Stop asks first; a long press on a play key sets the default). Sections: questions (`StructuredQuestionForm.swift`: choose, then Send; "Answer on your Mac for now." when the Mac does not set `structuredQuestions`), clarifications, fidelity, review ("Review and release on your Mac for now."), failure, Rounds, agents, rounds (with −/+), plan. Polls every 1.5 s while visible, using an etag. |
 | Fidelity chooser | `FidelityChooser` in `RoundInspectorModel.swift`, UI in `IntakeScreen.swift` | Sends `intake.choose`, or `intake.start` if the Rounds were edited |
 | Round inspector and editor | `RoundInspectorScreen.swift`, `RoundInspectorModel.swift`, `RoundEditorModel.swift` (`RoundEditor`, pure), `RoundEditorView.swift` | Read-only by stage, or an editor when `RoundEditing.make` allows it. Choosing: "Start sends these rounds." Shaping: Revert and Save (`intake.rounds`). Shows provider icons and "Claude > Opus 5.5" names. |
 | Round detail | `RoundDetailScreen.swift`, `RoundFacts.swift` | One landed round: facts, agents, sections changed (each links to the reader's changes), notes consumed |
@@ -511,6 +535,7 @@ fidelity". Several working plans get a line each.
 | Note sheet | `NoteSheet.swift`, `NoteComposer.swift` (`NoteComposer`, `NoteOutbox`) | Quote, kind chips, text. The outbox keeps sent notes visible until the plan shows them. |
 | Clarifications | `ClarificationsScreen.swift` | Answered Q&A, read-only |
 | Model | `FlightControlModel.swift`, `IntakeCommands.swift` | Banners, one detail and one command model per intake, a plan cache of 4. Commands time out after 10 s and reuse their token within 60 s. |
+| Answer form | `AnswerFormModel.swift`, `AnswerDraftStore.swift` | One per intake. Decides when the form shows, when it reads "Sending…", and when it starts again, all keyed on the round's digest. Chosen answers persist per intake and digest in UserDefaults until a send is acked. |
 
 `PlanReviewScreen` and `PlanReviewModel` are the Plannotator plan gate for sessions, not Flight
 Control.
@@ -534,19 +559,22 @@ Control.
 | `intake.choose` | preset | `choose` |
 | `intake.start` | preset, config, base | `editRounds` |
 | `intake.rounds` | config, base | `editRounds` |
+| `intake.answer` | id, token, round, digest, answers | `structuredQuestions` |
 
 - **Wire types** (`IntakeWire.swift`):
   - The core: `WireIntakeSummary`, `WireIntakeDetail`, `WireBoard`, `WireControls`, `WireRound`, `WireNote` (with optional `checkpoint` and `version`).
   - Rounds: `WireRoundConfig`, `WireRoundsMenu`, `WireRoundsLock`, `RoundsRefusal`.
-  - Others: `WireQuestions`, `WireChoice`, `WireFailure`, `WireIntakePlan`.
+  - Questions: `WireQuestions` (with `round`, `structured` and `digest` for the open round), `WireStructuredQuestion`, `WireOption`, `WireStructuredAnswer`.
+  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan`.
 - **Capability flags** are all on `WireIntakeDetail`:
-  - The flags are `steer`, `choose`, `noteKind` and `editRounds`.
+  - The flags are `steer`, `choose`, `noteKind`, `editRounds` and `structuredQuestions`.
   - The payloads are `roundConfig`, `roundsMenu` (while choosing or shaping) and `roundsLock` (while shaping).
   - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (around line 148).
-  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options` and `RoundEditing.make`.
+  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make` and `AnswerFormModel.openRound`.
 - **Handlers** (`IntakeService.phone*`, about lines 1206 to 1427, dispatched from `FleetService.swift`):
-  - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote` and `phoneSetNoteKind`.
-  - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, and `refused: <sentence>`.
+  - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote`, `phoneSetNoteKind` and `phoneAnswer`.
+  - `phoneAnswer` refuses `stale_questions` when the round or digest is not the open round's, or the round is already answered. Otherwise it passes on `answer(_:structured:)`'s code: `unknown_question` (a missing, unknown or repeated question id) or `invalid_answer` (an incomplete answer, or one `accepts` refuses). An unknown intake is `unknown_intake`.
+  - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, `stale_questions`, `unknown_question`, `invalid_answer`, and `refused: <sentence>`.
   - Each handler remembers the last 16 tokens, so a retry is idempotent.
   - The phone's words for each code are in `CommandCopy.message`.
 
@@ -817,6 +845,12 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
   - edit rounds (`308b16f9`);
   - provider icons (`ad78cb54`).
 - **Agents** are told "tasks" in every prompt and schema (`148a97ad`).
+- **Planning v2 P0, structured questions** (branch `planning-v2-p0`):
+  - question model and schema (`ff2c81f4`, `4efd40ab`);
+  - triage asks choices and still reads strings (`17c0f5b2`, `08842183`);
+  - the Mac takes structured answers (`59ddd44b`) and answers by choosing (`49d97c84`);
+  - `intake.answer` and the phone form (`4348e14d`, `5d792468`);
+  - fixes: option ids checked (`86dc144e`); rounds named by digest on the Mac (`3d1d9709`) and on the wire (`570e90d4`); phone token, form and drafts per round (`24b0114f`); refusal words (`ecfaefdf`); Other takes file drops (`ff9478c4`).
 - **Gemini** read-only seats run under an FD-owned agy project, so reads work again (`3416e35e`).
 - **Tests:** the unit suite runs on the UI-test Mac by default (`412f9a25`).
 
@@ -859,7 +893,6 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 ### 7.5 Phone
 
 - **Gap (against the phone principle):** the phone cannot do these yet:
-  - answer triage questions;
   - review or release;
   - retry or discard;
   - start a new intake;
@@ -1023,7 +1056,7 @@ These principles come from the maintainer's recent requests. Apply them to new w
 | `docs/AGENT-OPERATIONS.md` | Running inside the app, the release ritual, remote tests, worktrees, the shared checkout | Current. It does not describe the merge lock. |
 | `docs/MOBILE.md` | Phone device checklist | **Stale line 7:** "Flight Control … is not on the phone yet". Items 75 to 103 match the code. It says "hundred and two items", but there are 103. |
 | `docs/MOBILE-UI.md` | How to work on phone screens; the Wi-Fi Bonjour proxy | Current. No Flight Control content. |
-| `docs/FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md` | Phone Phase 3 scope: answers, start, retry, discard, review, release | Mostly current. Choose and start were built. The rest was not. |
+| `docs/FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md` | Phone Phase 3 scope: answers, start, retry, discard, review, release | Mostly current. Choose, start and answers were built (answers as `intake.answer`, Planning v2 P0). The rest was not. |
 | `docs/FLIGHT-CONTROL-MOBILE-HANDOFF.md` | The original terrain map for phone Flight Control | Partly stale; §0.1 is marked superseded. |
 | `docs/FLIGHT-CONTROL-COVERAGE-HANDOFF.md` | Design brief for cross-check coverage | **Stale.** It says nothing is built; coverage, cross-check and rotations now exist. Historical. |
 | `docs/FLYWHEEL-INTAKE-CHECKLIST.md` | Manual GUI checklist for intake, triage, release and the planning UI | Never walked. It predates inspector modes, the timeline editor, notes pinning and archive. |

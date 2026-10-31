@@ -17,5 +17,6 @@ unverified until someone has run it and written the date beside it.
 
 - [ ] Unverified. The form appears for an intake that needs answers.
 - [ ] Unverified. Send shows "Sending…", then the next stage appears.
-- [ ] Unverified. Answer on the Mac first, then send from the phone. The phone shows "These questions changed." and then the new questions.
+- [ ] Unverified. Answer on the Mac first, then send from the phone. The phone shows "These questions were answered or replaced." and then shows what the intake does next (new questions or the fidelity).
+- [ ] Unverified. Choose some answers, force quit the app, and open the intake again. The answers you chose are still selected.
 - [ ] Unverified. Against a Mac without this feature, the phone still says "Answer on your Mac for now".

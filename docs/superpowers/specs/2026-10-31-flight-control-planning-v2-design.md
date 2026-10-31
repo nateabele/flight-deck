@@ -136,7 +136,7 @@ public struct StructuredAnswer: Codable, Equatable, Sendable {
 
 - **Storage:** `TriageExchange` gains optional `structured: [StructuredQuestion]?` and `structuredAnswers: [StructuredAnswer]?`.
   - A legacy exchange (strings only) still decodes and still renders as text questions.
-  - `qaTranscript` renders structured answers as `Q:` / `A: <labels>; other: <text>`.
+  - `qaTranscript` renders structured answers as `Q:` / `A: <labels>; Other: <text>`.
 - **Schema:** the triage schema in `Triage.swift` gains the structured form. When a triage agent returns plain strings, they become `text` questions, so no adapter gets worse.
 - **UI:** `StructuredQuestionView` on the Mac (SwiftUI), with a twin on the phone.
   - Radio rows for single, checkbox rows for multi, a switch for toggle, and a text field for text.
