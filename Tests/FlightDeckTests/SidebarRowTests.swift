@@ -59,6 +59,30 @@ final class SidebarRowTests: XCTestCase {
         XCTAssertNotEqual(SidebarRow.project(a.id).id, SidebarRow.empty(a.id).id)
     }
 
+    func testAllThreeCasesSharingAUUIDHaveDistinctIDs() {
+        let id = UUID()
+        let ids: Set<SidebarRow.ID> = [
+            SidebarRow.project(id).id, SidebarRow.empty(id).id, SidebarRow.session(id, project: id).id,
+        ]
+
+        XCTAssertEqual(ids.count, 3)
+    }
+
+    func testASessionKeepsItsIDWhenItMovesToAnotherProject() {
+        let session = UUID()
+
+        XCTAssertEqual(SidebarRow.session(session, project: UUID()).id,
+                       SidebarRow.session(session, project: UUID()).id)
+    }
+
+    func testIdentityStringKeepsTheDocumentedPrefixes() {
+        let id = UUID()
+
+        XCTAssertEqual(SidebarRow.project(id).identityString, "p:\(id.uuidString)")
+        XCTAssertEqual(SidebarRow.session(id, project: UUID()).identityString, "s:\(id.uuidString)")
+        XCTAssertEqual(SidebarRow.empty(id).identityString, "e:\(id.uuidString)")
+    }
+
     // MARK: - accountMismatched
 
     func testMatchingAccountsAreNotAMismatch() {

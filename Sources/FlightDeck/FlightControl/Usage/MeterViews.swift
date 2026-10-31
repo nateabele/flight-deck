@@ -100,7 +100,7 @@ enum MeterFormatter {
 
         let detail: String?
         if let error { detail = error }
-        else if h.state == .unknown { detail = reading == nil ? "no reading" : "No current reading" }
+        else if h.state == .unknown { detail = reading.map(unknownReadingText) ?? "no reading" }
         else { detail = nil }
         return AccountMeterModel(
             id: "\(pool.id.rawValue)|\(h.account.id?.uuidString ?? "slot")",
@@ -148,6 +148,13 @@ enum MeterFormatter {
     }
 
     private static func severity(_ m: AccountMeterModel) -> Double { (m.state == .overHard ? 2 : 1) + (m.fraction ?? 0) }
+
+    /// Why a reading yields no number: one with no windows at all (claude off a subscription
+    /// reports none) is current but has no limits; otherwise its windows have gone stale with no
+    /// reset to hold until.
+    static func unknownReadingText(_ reading: UsageReading) -> String {
+        reading.windows.isEmpty ? "No limits reported" : "No current reading"
+    }
 }
 
 /// One window of an account's Accounts-pane row.
@@ -237,6 +244,8 @@ extension MeterFormatter {
         struct Projected {
             let window: UsageWindow
             let fraction: Double?
+            /// "reset" only when the reset is what zeroed the number: a fresh window whose reset
+            /// predates its reading keeps its value, and routing counts it, so row and tooltip must too.
             func zeroedByReset(now: Date) -> Bool {
                 guard let resetsAt = window.resetsAt, let fraction else { return false }
                 return resetsAt <= now && fraction == 0 && window.utilization != 0
@@ -275,20 +284,18 @@ extension MeterFormatter {
         }
 
         // The held numbers stay in the tooltip when none of them can be trusted as a number.
-        let usable = projected.compactMap { p in p.fraction.map { (window: p.window, fraction: $0) } }
+        let usable = projected.compactMap { p in p.fraction.map { (projected: p, window: p.window, fraction: $0) } }
         guard !usable.isEmpty else {
-            return AccountUsageRowModel(body: .message("No current reading"), soft: soft, hard: hard,
-                                        tooltip: tooltipLines.joined(separator: "\n"))
+            return AccountUsageRowModel(body: .message(reading.map(unknownReadingText) ?? "No current reading"),
+                                        soft: soft, hard: hard, tooltip: tooltipLines.joined(separator: "\n"))
         }
 
         let first = usable.first { $0.window.name == "five_hour" } ?? usable.sorted { $0.window.name < $1.window.name }[0]
         let second = usable.filter { $0.window.name != first.window.name }.max { $0.fraction < $1.fraction }
         let rows = [first, second].compactMap { $0 }.map { u -> AccountUsageLine in
-            // "reset" only when the reset is what zeroed the number; a fresh window whose reset
-            // predates its reading keeps its value, and routing counts it, so the row must too.
             let resetText: String
             if let resetsAt = u.window.resetsAt, resetsAt > now { resetText = resetColumn(resetsAt) }
-            else if u.window.resetsAt != nil, u.window.utilization != 0, u.fraction == 0 { resetText = "reset" }
+            else if u.projected.zeroedByReset(now: now) { resetText = "reset" }
             else { resetText = "" }
             return AccountUsageLine(label: windowLabel(u.window.name), fraction: u.fraction, state: state(u.fraction),
                                     percentText: percent(u.fraction), resetText: resetText)
@@ -303,7 +310,7 @@ struct AccountUsageCluster: View {
     let model: AccountUsageRowModel
     let accountName: String
 
-    static let width: CGFloat = 198
+    static let width: CGFloat = 202
 
     var body: some View {
         VStack(spacing: 0) {
@@ -317,7 +324,7 @@ struct AccountUsageCluster: View {
                             MeterTrack(fraction: line.fraction, soft: model.soft, hard: model.hard, state: line.state)
                                 .frame(width: 40, height: 4)
                             Text(line.percentText).monospacedDigit().lineLimit(1)
-                                .frame(width: 40, alignment: .trailing)
+                                .frame(width: 44, alignment: .trailing)
                             Text(line.resetText).foregroundStyle(.secondary).lineLimit(1)
                                 .frame(width: 54, alignment: .leading)
                         }
@@ -329,8 +336,9 @@ struct AccountUsageCluster: View {
             }
         }
         .font(.caption)
-        // 52 + 40 + 40 + 54 of columns plus 3 x 4 of spacing: the fixed copy ("Sonnet wk", "Refused",
-        // "Wed 12 PM") measures wider at .caption than a guessed width would hold.
+        // 52 + 40 + 44 + 54 of columns plus 3 x 4 of spacing: the fixed copy ("Sonnet wk", "Refused",
+        // "Wed 12 PM") measures wider at .caption than a guessed width would hold. The percent
+        // column is 44, not the 40 "Refused" measures (39.5), so a font change cannot truncate it.
         .frame(width: Self.width)
         .help(model.tooltip)
         // As `AccountMeterBar`: an AXGroup carries no AXValue, a Text carries its string as `value`,

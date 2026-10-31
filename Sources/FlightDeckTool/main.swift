@@ -7,65 +7,6 @@ import IntakeKit
 // the reader gone.
 signal(SIGPIPE, SIG_IGN)
 
-// Every verb from the spec's command table (docs/superpowers/specs/2026-09-24-flightdeck-cli-
-// design.md), one line each, then how `--` works, since a dash-led text is the one argument
-// shape the lines above cannot show. `--help`'s only output, and also what a usage error prints
-// below its own message.
-let usageLines = [
-    "flightdeck ls [--project P]",
-    "flightdeck tail [--session S] [--since SEQ] [--no-snapshot]",
-    "flightdeck wait S --for idle|busy|waiting|gone [--timeout D]",
-    "flightdeck send S \"text\" [--wait [--timeout D]]",
-    "flightdeck peer list|send|receive|mcp   native cross-agent tab messaging (peer --help)",
-    "flightdeck new P [--agent A [--account N]]",
-    "flightdeck close S",
-    "flightdeck reopen S",
-    "flightdeck rename S \"t\"",
-    "flightdeck read S",
-    "flightdeck unread S",
-    "flightdeck collapse P [--off]",
-    "flightdeck prompt S",
-    "flightdeck answer S '[[0,1],[2]]' [--call C]",
-    "flightdeck abort S",
-    "flightdeck plan approve S [--feedback F]",
-    "flightdeck plan reject S [--feedback F]",
-    "flightdeck plan annotate S \"text\" [--block N]",
-    "flightdeck timeline S [--before N|--after N|--around N] [--limit N]",
-    "flightdeck search \"q\" [--limit N]",
-    "flightdeck open CONVO --project PATH",
-    "flightdeck closed",
-    "flightdeck intake run ID --root DIR   run an intake's planning rounds (started by Flight Deck)",
-    "flightdeck options P",
-    "flightdeck host ls [--disk [HOST]]",
-    "flightdeck host info <host>",
-    "flightdeck host prune <host> [--repo R]",
-    "flightdeck account list [--json] [--session S]   accounts and pools this tab's agent can move to",
-    "flightdeck account switch TARGET [--session S]   move this conversation to an email, account or pool",
-    "flightdeck run [--on H] [--include P]... [--fetch G]... [--env K=V]... [--pty] [--screen] [--detach] -- cmd...",
-    "flightdeck run RECIPE [same flags] [-- extra args]",
-    "flightdeck exec --on H -- cmd...      run in the host's checkout without syncing",
-    "flightdeck up RECIPE | up --on H --port L:R... -- cmd...",
-    "flightdeck down|restart|sync SERVICE",
-    "flightdeck ps",
-    "flightdeck wait RUN [--timeout S]     exits with the run's status; 124 on timeout",
-    "flightdeck logs RUN [--follow]",
-    "flightdeck stop RUN",
-    "flightdeck diff|apply RUN",
-    "flightdeck recipe ls|check",
-    "flightdeck recipe add NAME --run CMD [--host H] [--service] [--long] [--screen] [--port P]... [--apply auto]",
-    "  (delegation failures exit 125 with one flightdeck: line naming the host and the next step)",
-    "flightdeck infra up <name>            create [infra.<name>] from this repo's delegate.toml",
-    "flightdeck infra down <name> | --orphan <id>",
-    "flightdeck infra ls [--orphans]",
-    "flightdeck infra doctor",
-    "flightdeck infra extend <name> <duration>",
-    "  (infra failures exit 125, one flightdeck: line per problem, each with its fix)",
-    "flightdeck raw '<ClientFrame JSON>'",
-    "",
-    "Flags go before or after operands. Put -- before text that starts with -:",
-    "  flightdeck send S --wait -- \"- text\"",
-]
-
 func writeStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
 }
@@ -80,13 +21,14 @@ let invocation: CLIInvocation
 do {
     invocation = try CLIArguments.parse(Array(CommandLine.arguments.dropFirst()))
 } catch let error as CLIUsageError {
+    // The failing verb's usage, not every verb's: the full help is one --help away.
     writeStderr("flightdeck: \(error.message)")
-    usageLines.forEach(writeStderr)
+    CLIHelp.hint(for: Array(CommandLine.arguments.dropFirst())).forEach(writeStderr)
     exit(2)
 }
 
-if invocation.command == .help {
-    usageLines.forEach { print($0) }
+if case .help(let topic) = invocation.command {
+    print(CLIHelp.text(for: topic))
     exit(0)
 }
 

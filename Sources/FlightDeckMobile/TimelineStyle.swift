@@ -53,8 +53,11 @@ enum TimelineStyle {
             // Which session is talking is the reader's first question, and "Cross session
             // message" answers a different one. A Mac too old to send `sender` still gets a
             // word rather than the wrapper's name.
-            guard let sender = item.body.sender, !sender.isEmpty else { return "Another session" }
-            return sender
+            let named = item.body.sender.flatMap { $0.isEmpty ? nil : $0 }
+            // A message this session sent says who it went to, so the two halves of an
+            // exchange read as one, each headed with the other party's name.
+            if isSentPeerMessage(item) { return "To \(named ?? "another session")" }
+            return named ?? "Another session"
         case .systemNotice:
             // The wrapper's own name, humanised — "Task notification", "System reminder".
             // Named rather than lumped under one word because the reader's first question
@@ -93,6 +96,7 @@ enum TimelineStyle {
         case .thinking: return "brain"
         case .toolCall, .toolResult: return symbol(forTool: item.body.tool)
         case .prompt: return "questionmark.circle.fill"
+        case .systemNotice where isSentPeerMessage(item): return "paperplane.fill"
         case .systemNotice where isPeerMessage(item): return "bubble.left.and.bubble.right.fill"
         case .systemNotice: return "gearshape.fill"
         case .unknown: return "circle.dotted"
@@ -136,8 +140,16 @@ enum TimelineStyle {
     /// agent talking rather than the harness. It is drawn as prose: Markdown, uncut, expanding
     /// in place. Every other notice stays machine text, which is why this is gated on the
     /// wrapper name and not on the kind (see `rendersMarkdown(_:)`).
+    ///
+    /// A message this session sent is one too (`TimelinePeerSend`): the same prose, travelling
+    /// the other way, so it gets every rule here and a heading of its own.
     static func isPeerMessage(_ item: TimelineItem) -> Bool {
-        item.kind == .systemNotice && item.body.tool == "cross-session-message"
+        item.kind == .systemNotice
+            && (item.body.tool == "cross-session-message" || item.body.tool == TimelinePeerSend.tool)
+    }
+
+    static func isSentPeerMessage(_ item: TimelineItem) -> Bool {
+        item.kind == .systemNotice && item.body.tool == TimelinePeerSend.tool
     }
 
     // MARK: What it says

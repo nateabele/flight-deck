@@ -109,15 +109,19 @@ public enum HeadroomPolicy {
     /// clock and ours — or a status line replaying old limits under a new `readAt`
     /// (`CapacityLedger.merged`) — so a fresh number stands and a stale one is past its reset.
     public static func effectiveUtilization(of window: UsageWindow, readAt: Date, now: Date) -> Double? {
-        let fresh = max(0, now.timeIntervalSince(readAt)) <= freshness
+        let fresh = isFresh(readAt: readAt, now: now)
         guard let resets = window.resetsAt else { return fresh ? window.utilization : nil }
         if resets > now { return window.utilization }
         return resets > readAt || !fresh ? 0 : window.utilization
     }
 
-    /// Age is clamped at zero: a reading stamped slightly in the future is simply new.
     public static func isFresh(_ reading: UsageReading, now: Date) -> Bool {
-        max(0, now.timeIntervalSince(reading.readAt)) <= freshness
+        isFresh(readAt: reading.readAt, now: now)
+    }
+
+    /// Age is clamped at zero: a reading stamped slightly in the future is simply new.
+    public static func isFresh(readAt: Date, now: Date) -> Bool {
+        max(0, now.timeIntervalSince(readAt)) <= freshness
     }
 
     public static func evaluate(account: AccountRef, reading: UsageReading?, rejection: Rejection?,

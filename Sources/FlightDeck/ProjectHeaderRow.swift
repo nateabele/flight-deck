@@ -27,6 +27,10 @@ struct ProjectHeaderRow: View {
     @State private var showingSwarmPopover = false
     @State private var showingTurnOff = false
     @State private var showingRemoval = false
+    /// The lines the removal dialog lists, read from disk (AGENTS.md, the hooks) when the user
+    /// picks "Remove Flight Control from Repo…" rather than from the dialog's `message:`
+    /// closure, which SwiftUI rebuilds on every `body` pass whether or not the dialog is up.
+    @State private var plannedRemovalChanges: [String] = []
     /// This project's Flight Control status, absorbing `IntakeService`'s publishes so the
     /// indicator redraws only when the status changes. Attached below, only while Flight
     /// Control is on for the project, so a plain project never builds the service.
@@ -223,7 +227,12 @@ struct ProjectHeaderRow: View {
             probeFlywheelStatusIfNeeded()
             attachFlightControl()
         }
-        .onChange(of: isFlywheelEnabled) { attachFlightControl() }
+        .onChange(of: isFlywheelEnabled) {
+            attachFlightControl()
+            // Enabling or turning off Flight Control installs or leaves hooks, which is exactly
+            // what `flywheelStatus` reports; the mount-time probe would otherwise outlive it.
+            probedFlywheelStatus = FlywheelProjectProbe.status(of: repo.url)
+        }
         .contextMenu {
             Button("New Session") { store.newClaudeTab(in: repo.url) }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
@@ -322,15 +331,18 @@ struct ProjectHeaderRow: View {
         .confirmationDialog("Remove Flight Control from \(repo.displayName)?", isPresented: $showingRemoval) {
             Button("Remove", role: .destructive) { Task { _ = await store.removeFlightControl(from: repo.url.standardizedFileURL) } }
         } message: {
-            Text(FlightControlRepoRemoval(runner: SystemFlywheelProcessRunner()).plannedChanges(repo: repo.url.standardizedFileURL)
-                .joined(separator: "\n"))
+            Text(plannedRemovalChanges.joined(separator: "\n"))
         }
     }
 
     /// Offered only while Flight Control is off and its guard or hook is still in the repo.
     @ViewBuilder private var removeFromRepoItem: some View {
         if flywheelStatus.guardInstalled || flywheelStatus.beadsSyncHooksInstalled {
-            Button("Remove Flight Control from Repo…") { showingRemoval = true }
+            Button("Remove Flight Control from Repo…") {
+                plannedRemovalChanges = FlightControlRepoRemoval(runner: SystemFlywheelProcessRunner())
+                    .plannedChanges(repo: repo.url.standardizedFileURL)
+                showingRemoval = true
+            }
         }
     }
 
@@ -375,11 +387,17 @@ struct ProjectHeaderRow: View {
     /// remember every non-hit. The context menu needs the detection either way to choose
     /// between "Enable Flight Control…" and "Set Up Flight Control…", so a miss falls back to
     /// `probedFlywheelStatus` — this row's own memoized on-demand probe, populated once by
-    /// `.onAppear` (see `probeFlywheelStatusIfNeeded`) rather than re-run here. The live probe
-    /// is kept as a last-resort fallback for the brief window before that `.onAppear` fires
-    /// (SwiftUI's first `body` pass), not as the steady-state path.
+    /// `.onAppear` (see `probeFlywheelStatusIfNeeded`) rather than re-run here.
+    ///
+    /// Never probes inline, not even as a last resort: the old `FlywheelEnableResolution.status`
+    /// fallback did, and a render that landed before `.onAppear` (or after the suggestion was
+    /// dropped) paid several file reads per row. Before the first probe lands this reads as "not
+    /// a flywheel project", which nothing can act on — the menu is not open and no dialog is up
+    /// during the first `body` pass.
     private var flywheelStatus: FlywheelStatus {
-        FlywheelEnableResolution.status(for: repo.url, store: store, cached: probedFlywheelStatus)
+        store.flywheelSuggestion(for: repo.url) ?? probedFlywheelStatus ?? FlywheelStatus(
+            hasBeads: false, hasAgentMailMarker: false, guardInstalled: false, beadsSyncHooksInstalled: false
+        )
     }
 
     /// Runs the FileManager-backed probe at most once per row mount, into `@State`, instead of

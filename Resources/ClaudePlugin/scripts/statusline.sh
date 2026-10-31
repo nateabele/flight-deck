@@ -1,6 +1,7 @@
 #!/bin/bash
 # Flight Deck's claude status line: records the account's rate-limit windows for Flight
-# Control's usage meter (L3-U), then runs the user's own status line unchanged.
+# Control's usage meter (L3-U) and the conversation's context-window fill for the phone, then
+# runs the user's own status line unchanged.
 #
 # Flight Deck installs this per claude tab with `--settings '{"statusLine":…}'`. Claude Code
 # hands a status line command a JSON object on stdin that carries `.rate_limits.<window>`
@@ -41,8 +42,9 @@ record_usage() {
   export LC_ALL=C
   local pl=/usr/bin/plutil dir=$FLIGHT_DECK_USAGE_DIR
   local limits last name session tab fp file old kinds kind pct resets at windows sep now tmp home
-  limits=$(printf '%s' "$input" | $pl -extract rate_limits json -o - - 2>/dev/null) || return 0
-  [ -n "$limits" ] || return 0
+  local used size context
+  # An API-key login has no rate limits; its context fill is still worth recording.
+  limits=$(printf '%s' "$input" | $pl -extract rate_limits json -o - - 2>/dev/null) || limits=""
 
   tab=${FLIGHT_DECK_SESSION_ID:-}
   case "$tab" in *[!A-Za-z0-9-]*) tab="" ;; esac
@@ -59,7 +61,8 @@ record_usage() {
   [ "$old" = "$fp" ] && return 0
 
   windows="" sep=""
-  kinds=$(printf '%s' "$input" | $pl -extract rate_limits raw -o - - 2>/dev/null)
+  kinds=""
+  [ -n "$limits" ] && kinds=$(printf '%s' "$input" | $pl -extract rate_limits raw -o - - 2>/dev/null)
   for kind in $kinds; do
     case "$kind" in *[!a-z0-9_]*) continue ;; esac
     pct=$(printf '%s' "$limits" | $pl -extract "$kind.used_percentage" raw -o - - 2>/dev/null)
@@ -71,7 +74,17 @@ record_usage() {
     windows="$windows$sep{\"kind\":\"$kind\",\"percentUsed\":$pct,\"resetsAt\":$at}"
     sep=","
   done
-  [ -n "$windows" ] || return 0
+
+  # `used_percentage` is null until the conversation's first reply.
+  context=null
+  used=$(printf '%s' "$input" | $pl -extract context_window.used_percentage raw -o - - 2>/dev/null)
+  case "$used" in '' | *[!0-9.]* | *.*.*) ;; *)
+    size=$(printf '%s' "$input" | $pl -extract context_window.context_window_size raw -o - - 2>/dev/null)
+    case "$size" in '' | *[!0-9]*) size=null ;; esac
+    context="{\"usedPercent\":$used,\"windowSize\":$size}"
+    ;;
+  esac
+  [ -n "$windows" ] || [ "$context" != null ] || return 0
 
   # The login this claude bills, so a second claude left in the tab on another account (a move
   # that missed its daemon) is credited to its own account, not the tab's. Dropped, not escaped,
@@ -82,8 +95,8 @@ record_usage() {
   [ -n "$tab" ] && tab="\"$tab\"" || tab=null
   [ -n "$session" ] && session="\"$session\"" || session=null
   tmp="$dir/.$name.$$.tmp"
-  if printf '{"v":1,"tab":%s,"session":%s,"home":"%s","readAt":"%s","fp":"%s","rateLimits":[%s]}' \
-       "$tab" "$session" "$home" "$now" "$fp" "$windows" > "$tmp" 2>/dev/null; then
+  if printf '{"v":1,"tab":%s,"session":%s,"home":"%s","readAt":"%s","fp":"%s","rateLimits":[%s],"context":%s}' \
+       "$tab" "$session" "$home" "$now" "$fp" "$windows" "$context" > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
   else
     rm -f "$tmp"

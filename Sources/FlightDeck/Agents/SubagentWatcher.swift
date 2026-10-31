@@ -24,9 +24,22 @@ import Foundation
 /// other and publish stale trees in a burst. A requested full rescan is the exception — it is
 /// remembered and run when the scan in flight lands, because the fold asks for one when it
 /// sees a launch and dropping it would leave the tree a launch behind.
+///
+/// **A conversation with nothing live rescans slowly.** The full rescan exists to notice a
+/// finished agent resumed by `SendMessage`, and that only matters to someone watching a
+/// conversation that is doing something. With every agent done (the usual state of a tab that
+/// is idle, or asleep), the rescan backs off from `fullRescanInterval` to
+/// `idleRescanInterval`: a measured 3.5% of a core went to re-listing 238-file folders that
+/// had not changed. A folder change (a new agent) or `requestRescan()` (the fold saw a
+/// launch) still rescans at once, and a resumed agent is noticed within the slow interval.
+/// Skipping an asleep tab's ticks outright is not done here: the sleep set lives in
+/// `SessionSleepController`, which the watcher has no reference to, and an asleep tab's agents
+/// are mostly done, so the backoff already takes it to one listing a minute.
 @MainActor
 final class SubagentWatcher {
     static let fullRescanInterval: TimeInterval = 10
+    /// The full rescan's interval while no agent is live. See the type comment.
+    static let idleRescanInterval: TimeInterval = 60
 
     /// Shared by every watcher. Serial, so 65 sessions' scans take turns on one thread instead
     /// of each claiming one, and `.utility` because nothing here has a deadline.
@@ -128,12 +141,21 @@ final class SubagentScanner: @unchecked Sendable {
     private(set) var statCount = 0
     private(set) var tailReadCount = 0
     private(set) var lastScanRanOnMain: Bool?
-    /// A nil value is a file whose meta was not yet readable: retried on every rescan, so an
+    /// An agent absent from here has no readable meta yet: retried on every rescan, so an
     /// agent seen mid-creation is not left without a node for the life of the conversation.
-    private var metas: [String: SubagentMeta?] = [:]
+    /// Not `[String: SubagentMeta?]`: the double optional made `build` and the pruning
+    /// below spend their time in `type metadata accessor for Optional`.
+    private var metas: [String: SubagentMeta] = [:]
     private var scans: [String: (stamp: TranscriptStamp, state: SubagentNode.State)] = [:]
     private var folderStamp: TranscriptStamp?
     private var lastFullRescan = Date.distantPast
+
+    /// How soon after the last `rescan` `poll` runs another. Slow when no agent is live; see
+    /// `SubagentWatcher`.
+    private var rescanInterval: TimeInterval {
+        scans.values.contains { $0.state != .done }
+            ? SubagentWatcher.fullRescanInterval : SubagentWatcher.idleRescanInterval
+    }
 
     init(directory: URL) { self.directory = directory }
 
@@ -145,7 +167,7 @@ final class SubagentScanner: @unchecked Sendable {
         let folder = TranscriptStamp(of: directory)
         statCount += 1
         let folderChanged = folder != folderStamp
-        let due = now.timeIntervalSince(lastFullRescan) >= SubagentWatcher.fullRescanInterval
+        let due = now.timeIntervalSince(lastFullRescan) >= rescanInterval
         if folderChanged || due {
             return rescan(since: since, now: now, keepDoneSince: keepDoneSince)
         }
@@ -162,7 +184,14 @@ final class SubagentScanner: @unchecked Sendable {
         return changed ? build(keepDoneSince: keepDoneSince) : nil
     }
 
-    /// Everything, from scratch: listing plus one stat per file, re-reading only what changed.
+    /// Everything, from scratch: one directory listing, re-reading only what changed.
+    ///
+    /// **The listing is the stat.** `DirectoryStamps.list` takes every file's identity, size
+    /// and nanosecond mtime from a single `getattrlistbulk`, the same call `contentsOfDirectory`
+    /// makes, so a rescan stats nothing per file: 238 `stat`s were a third of its cost, and
+    /// the files older than `since`, nearly all of them, are dropped on the listed mtime.
+    /// The stamp is the same one `poll` takes with `stat`, inode included, so an append
+    /// (size, mtime), a rewrite (mtime) and a replace (inode) are all still seen.
     ///
     /// **An unknown process start publishes nothing and reads nothing.** `since` is nil
     /// before the first registry row pins the tab, and always after claude exits (a dead pid
@@ -180,34 +209,32 @@ final class SubagentScanner: @unchecked Sendable {
         statCount = 1
         folderStamp = TranscriptStamp(of: directory)
         lastFullRescan = now
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil)) ?? []
         var seen: Set<String> = []
-        for file in files where file.pathExtension == "jsonl" {
-            let name = file.deletingPathExtension().lastPathComponent
-            guard name.hasPrefix("agent-") else { continue }
-            let id = String(name.dropFirst("agent-".count))
-            guard SubagentID.isValid(id) else { continue }
-            statCount += 1
-            guard let stamp = TranscriptStamp(of: file) else { continue }
-            if stamp.modified < since { continue }
+        for (name, stamp) in DirectoryStamps.list(directory) {
+            guard name.hasPrefix("agent-"), name.hasSuffix(".jsonl") else { continue }
+            let id = String(name.dropFirst("agent-".count).dropLast(".jsonl".count))
+            guard SubagentID.isValid(id), stamp.modified >= since else { continue }
             seen.insert(id)
-            if (metas[id] ?? nil) == nil {
-                metas[id] = .some(SubagentFiles.meta(
-                    at: directory.appendingPathComponent("agent-\(id).meta.json")))
+            if metas[id] == nil {
+                metas[id] = SubagentFiles.meta(
+                    at: directory.appendingPathComponent("agent-\(id).meta.json"))
             }
             if let previous = scans[id], previous.stamp == stamp { continue }
-            scans[id] = (stamp, readState(of: file))
+            scans[id] = (stamp, readState(of: jsonl(id)))
         }
-        scans = scans.filter { seen.contains($0.key) }
-        metas = metas.filter { seen.contains($0.key) }
+        // Pruning rebuilds a dictionary only when something is actually gone.
+        if scans.count != seen.count || scans.keys.contains(where: { !seen.contains($0) }) {
+            scans = scans.filter { seen.contains($0.key) }
+        }
+        if metas.keys.contains(where: { !seen.contains($0) }) {
+            metas = metas.filter { seen.contains($0.key) }
+        }
         return build(keepDoneSince: keepDoneSince)
     }
 
     private func build(keepDoneSince: Date?) -> SubagentTree {
         let states = scans.mapValues { ($0.state, $0.stamp.modified) }
-        return SubagentTree.build(metas: metas.compactMapValues { $0 }, states: states,
-                                  keepDoneSince: keepDoneSince)
+        return SubagentTree.build(metas: metas, states: states, keepDoneSince: keepDoneSince)
     }
 
     private func jsonl(_ id: String) -> URL { directory.appendingPathComponent("agent-\(id).jsonl") }
@@ -221,5 +248,64 @@ final class SubagentScanner: @unchecked Sendable {
         let lines = TranscriptPager.page(url: file, anchor: .latest,
                                          limit: PromptService.tailRecords)?.lines ?? []
         return SubagentFiles.state(ofTail: lines)
+    }
+}
+
+/// A folder's regular files with their `TranscriptStamp`s, from one `getattrlistbulk` pass.
+///
+/// Why not `contentsOfDirectory(includingPropertiesForKeys:)`: its values are a `Date` (a
+/// `Double`, so no nanoseconds) and no inode, and reading them back costs a dictionary per
+/// file. Measured over 240 files that was no cheaper than a `stat` each. This asks the
+/// kernel for exactly the five numbers a stamp holds and returns the stamp itself.
+enum DirectoryStamps {
+    /// Empty when the folder cannot be opened or listed, like the `try?` it replaces.
+    static func list(_ directory: URL) -> [(name: String, stamp: TranscriptStamp)] {
+        let fd = open(directory.path, O_RDONLY | O_DIRECTORY)
+        guard fd >= 0 else { return [] }
+        defer { close(fd) }
+        var request = attrlist()
+        request.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        request.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS) | attrgroup_t(ATTR_CMN_NAME)
+            | attrgroup_t(ATTR_CMN_DEVID) | attrgroup_t(ATTR_CMN_OBJTYPE)
+            | attrgroup_t(ATTR_CMN_MODTIME) | attrgroup_t(ATTR_CMN_FILEID)
+        request.fileattr = attrgroup_t(ATTR_FILE_DATALENGTH)
+        let wanted = request.commonattr & ~attrgroup_t(ATTR_CMN_RETURNED_ATTRS)
+
+        var buffer = [UInt8](repeating: 0, count: 128 * 1024)
+        var found: [(name: String, stamp: TranscriptStamp)] = []
+        buffer.withUnsafeMutableBytes { raw in
+            while true {
+                let count = getattrlistbulk(fd, &request, raw.baseAddress, raw.count, 0)
+                guard count > 0 else { return }
+                var entry = raw.baseAddress!
+                for _ in 0..<count {
+                    let length = Int(entry.loadUnaligned(as: UInt32.self))
+                    defer { entry += length }
+                    // Layout, in attribute-bit order: length, returned set, name reference,
+                    // device, object type, mtime, file id, data length. All packed to 4.
+                    var field = entry + 4
+                    let returned = field.loadUnaligned(as: attribute_set_t.self)
+                    field += MemoryLayout<attribute_set_t>.size
+                    guard returned.commonattr & wanted == wanted,
+                          returned.fileattr & attrgroup_t(ATTR_FILE_DATALENGTH) != 0 else { continue }
+                    let nameAt = field
+                    let reference = nameAt.loadUnaligned(as: attrreference_t.self)
+                    field += MemoryLayout<attrreference_t>.size
+                    let device = field.loadUnaligned(as: Int32.self); field += 4
+                    let type = field.loadUnaligned(as: UInt32.self); field += 4
+                    let mtime = field.loadUnaligned(as: timespec.self)
+                    field += MemoryLayout<timespec>.size
+                    let inode = field.loadUnaligned(as: UInt64.self); field += 8
+                    let size = field.loadUnaligned(as: Int64.self)
+                    guard type == VREG.rawValue else { continue }
+                    let name = String(cString: (nameAt + Int(reference.attr_dataoffset))
+                        .assumingMemoryBound(to: CChar.self))
+                    found.append((name, TranscriptStamp(
+                        device: device, inode: inode, size: size,
+                        mtimeSeconds: mtime.tv_sec, mtimeNanoseconds: mtime.tv_nsec)))
+                }
+            }
+        }
+        return found
     }
 }

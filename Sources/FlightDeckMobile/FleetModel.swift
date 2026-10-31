@@ -811,6 +811,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         )
     }
 
+    /// Tab `session`'s account, its choices to move to (already narrowed to the project's pool
+    /// by the Mac), each account's usage and the tab's context fill — the session sheet's data.
+    func accountChoices(session: UUID) async -> Result<WireAccountChoices, FleetRequestError> {
+        guard let connector else { return .failure(.disconnected) }
+        return await withCheckedContinuation { continuation in
+            connector.requestAccountChoices(session: session) { continuation.resume(returning: $0) }
+        }
+    }
+
     func reconnect() {
         connect()
     }

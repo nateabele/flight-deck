@@ -494,7 +494,15 @@ page.
     "You", never "Cross session message"), with a speech-bubble glyph, its numbered lists and
     code spans rendered as markdown, and no `<cross-session-message>` tag anywhere. The idle
     one is the regression: before, the phone dropped it entirely and showed the agent
-    answering nobody.
+    answering nobody. Then send one with `flightdeck peer send` to a Claude tab that has a
+    relay, and one to a codex tab. The relayed one is headed by its WRITER, not by the
+    receiving tab's own name. The codex one is a message row, not a `ReceiveMessages` tool
+    card. Neither shows a socket path, a `<\cross-session-message` tag, a `[Peer transport: …]`
+    note or a `[Relayed by Flight Deck: …]` note.
+67a′. **Reply from the receiving session** with `SendMessage` and with
+    `flightdeck peer send "<name>" '…'`. Each reply is a prose row headed "To <name>" (or "To
+    another session" for a socket address) with a paper-plane glyph, not a JSON tree or a
+    terminal card. A send to a name nobody has carries the Error chip.
 67b. **Paste text into a prompt on the Mac** (enough that Claude Code wraps it as a paste) and
     check the phone's "You" row: the pasted text reads inline with what you typed around it,
     and no `<pasted_content id="…">` or `</pasted_content …>` tag shows. Paste one that itself

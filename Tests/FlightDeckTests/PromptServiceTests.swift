@@ -891,6 +891,84 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_SUB")
     }
 
+    // MARK: The registry tick does not re-read an unchanged subagent file
+
+    /// Counts subagent-file reads through the real pager, so the file's actual bytes are what
+    /// the service sees and only the number of times it asked is observed.
+    private final class SubagentReads: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+        func hit() { lock.lock(); n += 1; lock.unlock() }
+    }
+
+    private func countingSubagentReads(_ service: PromptService) -> SubagentReads {
+        let reads = SubagentReads()
+        service.tail = { url, limit in
+            if url.path.contains("/subagents/") { reads.hit() }
+            let page = TranscriptPager.page(url: url, anchor: .latest, limit: limit)
+            return (page?.lines ?? [], page?.hasMore ?? false)
+        }
+        return reads
+    }
+
+    private func append(_ line: String, to file: URL) throws {
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    /// The cost this exists for: every 2 Hz tick re-paged and re-parsed the subagent's tail
+    /// while the hook log named its dialog. An unchanged file is one `stat` after the first.
+    func testUnchangedSubagentFileIsNotRescannedAcrossPolls() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        _ = try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let reads = countingSubagentReads(service)
+        for _ in 0..<5 {
+            XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_SUB")
+        }
+        XCTAssertEqual(reads.count, 1, "five polls over one unchanged file read it once")
+    }
+
+    /// Correctness over the saving: an append moves the stamp, so the answer clears on the
+    /// next poll and a newly raised dialog is found on the poll after it is written.
+    func testAnAppendToTheSubagentFileIsPickedUpOnTheNextPoll() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        let file = try writeSubagent(for: store, id, agent: "a28ad87b",
+                                     [sidechain(bashLine("toolu_SUB"))])
+        var dialog = PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB")
+        service.pendingDialog = { _ in dialog }
+        // Reads are not counted here: once the prompt clears, the poll falls through to the
+        // folder walk, which reads the same file off-main and would make a count racy.
+        XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_SUB")
+
+        try append(sidechain(resultLine("toolu_SUB")), to: file)
+        let answered = service.polledOpenPrompt(inSession: id)
+        if case .success? = answered { XCTFail("an answered subagent prompt must clear") }
+
+        try append(sidechain(bashLine("toolu_NEW")), to: file)
+        dialog = PendingDialog(agentID: "a28ad87b", callID: "toolu_NEW")
+        XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_NEW")
+    }
+
+    /// A tap is the one place a stale answer is not acceptable: `answer` reads regardless.
+    func testAnAnswerRereadsTheSubagentFileEvenWhenPollsCachedIt() throws {
+        let (service, store, spy, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        _ = try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let reads = countingSubagentReads(service)
+        _ = service.polledOpenPrompt(inSession: id)
+        spy.showOptions(["Yes", "No"], selected: 0)
+        XCTAssertNil(code(service.answer(session: id, agent: "a28ad87b", call: "toolu_SUB",
+                                         answer: .allow, token: UUID())))
+        XCTAssertEqual(reads.count, 2)
+    }
+
     /// The tap that happened: the main agent's call, no agent. Refused, nothing typed.
     func testAnAnswerForTheMainAgentsCallIsRefusedWhileASubagentDialogIsUp() throws {
         let (service, spy, id) = try subagentDialogBehindAMainAgentCall()

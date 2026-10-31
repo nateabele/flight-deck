@@ -3,8 +3,9 @@ import IntakeKit
 @testable import FlightDeck
 
 /// What a meter says is decided here, not in SwiftUI, so it can be pinned: the percentages, the
-/// reset time in the viewer's clock, the source and its age, "no reading" versus "stale", and
-/// when the sidebar row shows a meter at all (only past soft).
+/// reset time in the viewer's clock, the source and its age, "no reading" versus "No current
+/// reading" versus "No limits reported", and when the sidebar row shows a meter at all (only past
+/// soft).
 final class MeterFormatterTests: XCTestCase {
     private let utc = TimeZone(identifier: "UTC")!
     private let posix = Locale(identifier: "en_US_POSIX")
@@ -46,6 +47,9 @@ final class MeterFormatterTests: XCTestCase {
         XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: nil, error: nil, now: now).detail, "no reading")
         let stale = UsageRefs.reading(UsageRefs.spare, 0.5, at: now.addingTimeInterval(-3600))
         XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: stale, error: nil, now: now).detail, "No current reading")
+        let empty = UsageReading(account: UsageRefs.spare, windows: [], readAt: now, source: "test", hardRejection: false)
+        XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: empty, error: nil, now: now).detail, "No limits reported",
+                       "a current reading with no windows is not a stale one")
         XCTAssertEqual(MeterFormatter.account(h, pool: pool, reading: nil, error: "Codex app-server: transportClosed", now: now).detail,
                        "Codex app-server: transportClosed", "a source error is the more useful sentence")
         let m = MeterFormatter.account(h, pool: pool, reading: nil, error: nil, now: now)

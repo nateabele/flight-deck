@@ -58,7 +58,7 @@ struct CodexPeerInbox {
     }
 
     static func callID(for id: String) -> String {
-        "call_peer_" + id.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        PeerMessageEnvelope.codexCallPrefix + id.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" }
     }
 
     /// `nil` when the daemon does not hold the thread.

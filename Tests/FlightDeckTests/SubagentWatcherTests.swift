@@ -113,9 +113,95 @@ final class SubagentWatcherTests: XCTestCase {
         w.rescan()
         w.poll()
         XCTAssertLessThanOrEqual(w.statCount, 2, "the live file plus the folder, not 21 files")
+        // A finished agent resumed behind the tick's back: only a full rescan can see it.
+        try append(open, to: "a0000100")
+        w.poll()
+        XCTAssertEqual(w.tree.node("a0000100")?.state, .done, "not noticed by a steady tick")
         clockNow = clockNow.addingTimeInterval(SubagentWatcher.fullRescanInterval + 1)
         w.poll()
-        XCTAssertGreaterThanOrEqual(w.statCount, 21, "a periodic full rescan still runs")
+        XCTAssertEqual(w.tree.node("a0000100")?.state, .running, "a periodic full rescan still runs")
+    }
+
+    private func append(_ record: String, to id: String) throws {
+        let h = try FileHandle(forWritingTo: dir.appendingPathComponent("agent-\(id).jsonl"))
+        try h.seekToEnd(); try h.write(contentsOf: Data((record + "\n").utf8)); try h.close()
+    }
+
+    /// The listing already carries each file's size and mtime: a file older than the process
+    /// start is dropped from it, and an unchanged one reuses its stamp. Neither costs a stat.
+    func testARescanStatsNoFileTheListingCanVouchFor() throws {
+        for i in 0..<20 { try write(String(format: "a%07x", i + 0x100), records: [finished]) }
+        let old = SubagentWatcher(directory: dir, clock: nil, startedAt: { Date().addingTimeInterval(60) },
+                                  keepDoneSince: { nil }, onChange: { _ in })
+        old.rescan()
+        XCTAssertEqual(old.statCount, 1, "the folder only: every file predates the start")
+        XCTAssertTrue(old.tree.nodes.isEmpty)
+
+        let w = makeWatcher { _ in }
+        w.rescan()
+        XCTAssertEqual(w.tree.nodes.count, 20)
+        let reads = w.tailReadCount
+        w.rescan()
+        XCTAssertEqual(w.statCount, 1, "unchanged files reuse their stamps")
+        XCTAssertEqual(w.tailReadCount, reads)
+    }
+
+    /// `poll` stamps a live file with `stat`, `rescan` with the listing: they must agree, or
+    /// every live file would be re-read on the first tick after each rescan.
+    func testAListedStampEqualsAStatStamp() throws {
+        for i in 0..<5 { try write(String(format: "a%07x", i + 0x100), records: [finished, open]) }
+        let listed = DirectoryStamps.list(dir)
+        XCTAssertEqual(listed.count, 10, "five transcripts and five metas")
+        for (name, stamp) in listed {
+            XCTAssertEqual(stamp, TranscriptStamp(of: dir.appendingPathComponent(name)), name)
+        }
+    }
+
+    /// What the listing-based shortcut must not hide: an append, an in-place rewrite and a
+    /// replacement (new inode) of a finished agent's file are each seen by the next rescan.
+    func testARescanStillSeesAnAppendARewriteAndAReplace() throws {
+        try write("a0aaaaaa", records: [finished])
+        try write("a1bbbbbb", records: [finished])
+        try write("a2cccccc", records: [finished])
+        let w = makeWatcher { _ in }
+        w.rescan()
+        XCTAssertEqual(w.tree.node("a0aaaaaa")?.state, .done)
+
+        try append(open, to: "a0aaaaaa")
+        let rewritten = dir.appendingPathComponent("agent-a1bbbbbb.jsonl")
+        let h = try FileHandle(forWritingTo: rewritten)
+        try h.truncate(atOffset: 0); try h.write(contentsOf: Data((open + "\n").utf8)); try h.close()
+        let staged = dir.appendingPathComponent("staged.tmp")
+        try (open + "\n").write(to: staged, atomically: false, encoding: .utf8)
+        _ = try FileManager.default.replaceItemAt(
+            dir.appendingPathComponent("agent-a2cccccc.jsonl"), withItemAt: staged)
+        w.rescan()
+        for id in ["a0aaaaaa", "a1bbbbbb", "a2cccccc"] {
+            XCTAssertEqual(w.tree.node(id)?.state, .running, id)
+        }
+    }
+
+    /// With nothing live the full rescan backs off, but a new file (the folder's stamp) is
+    /// seen at once and a resumed agent within the slow interval.
+    func testAnIdleConversationRescansSlowlyButAFolderChangeBypassesIt() throws {
+        try write("a0aaaaaa", records: [finished])
+        let w = makeWatcher { _ in }
+        w.rescan()
+        try append(open, to: "a0aaaaaa")
+        clockNow = clockNow.addingTimeInterval(SubagentWatcher.fullRescanInterval + 1)
+        w.poll()
+        XCTAssertEqual(w.tree.node("a0aaaaaa")?.state, .done, "no rescan yet: nothing is live")
+        try write("a1bbbbbb", records: [finished])
+        w.poll()
+        XCTAssertNotNil(w.tree.node("a1bbbbbb"), "a folder change rescans at once")
+        XCTAssertEqual(w.tree.node("a0aaaaaa")?.state, .running, "and that rescan saw the resume")
+
+        try append(finished, to: "a0aaaaaa")
+        w.poll()
+        try append(open, to: "a1bbbbbb")
+        clockNow = clockNow.addingTimeInterval(SubagentWatcher.idleRescanInterval + 1)
+        w.poll()
+        XCTAssertEqual(w.tree.node("a1bbbbbb")?.state, .running, "noticed within the idle interval")
     }
 
     func testANewFileIsFoundOnTheNextTick() throws {

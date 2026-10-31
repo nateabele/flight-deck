@@ -31,7 +31,13 @@ final class PlanGateService {
     var makeClient: (Int) -> PlanGateClient = { PlanGateClient(port: $0) }
     /// The `ExitPlanMode` call id for a session, from the transcript. Injected rather than
     /// reached for, so this class needs neither a store nor a pager.
-    var callID: (UUID) -> String?
+    ///
+    /// `async` because the production lookup reads and parses the transcript, which it does
+    /// off the main actor.
+    var callID: (UUID) async -> String?
+    /// A cheap fingerprint of the session's transcript. `callID` is re-asked only when it, or
+    /// the registry entry, changes; `nil` (the default) means "cannot tell" and is never cached.
+    var transcriptStamp: (UUID) -> ClaudeOpenPlanGate.Stamp? = { _ in nil }
     /// The `claude` pid backing a session.
     var pid: (UUID) -> pid_t?
     /// Every session this Mac knows.
@@ -56,8 +62,19 @@ final class PlanGateService {
     /// firing before it returns) must not both decide the same new gate needs fetching. The
     /// second call is dropped rather than queued — the next timer tick will simply try again.
     private var isRefreshing = false
+    /// The last `callID` answer per session, hits and misses alike. A stale registry entry
+    /// (process alive, every `ExitPlanMode` already answered) otherwise re-reads the whole
+    /// transcript on every poll to learn "nothing open" again.
+    private var callMemo: [UUID: CallMemo] = [:]
 
-    init(callID: @escaping (UUID) -> String?,
+    private struct CallMemo {
+        let pid: pid_t
+        let startedAt: String
+        let stamp: ClaudeOpenPlanGate.Stamp
+        let call: String?
+    }
+
+    init(callID: @escaping (UUID) async -> String?,
          pid: @escaping (UUID) -> pid_t?,
          sessions: @escaping () -> [UUID]) {
         self.callID = callID
@@ -89,7 +106,7 @@ final class PlanGateService {
 
         for session in sessions() {
             guard let claudePID = pid(session), let entry = live[claudePID] else { continue }
-            guard let call = callID(session) else { continue }
+            guard let call = await openCall(for: session, entry: entry) else { continue }
             // Resolved and tombstoned: do not resurrect it just because the registry file is
             // still on disk.
             if resolvedCallIDs.contains(call) { continue }
@@ -103,11 +120,17 @@ final class PlanGateService {
             toFetch.append((session, entry, call))
         }
 
-        // Drop gates for sessions no longer live or eligible. This runs before any `await`
-        // below, so it is atomic with the scan above and cannot race a concurrent mutation.
+        // Drop gates for sessions no longer live or eligible. The scan above can suspend in
+        // `openCall`, but only `refresh` (single-flight) ever adds a gate and each session's
+        // `gates[session]` read follows its own await, so a concurrent `resolve` can only have
+        // removed what this would drop anyway.
         let wanted = keep.union(toFetch.map(\.session))
         for session in gates.keys where !wanted.contains(session) {
             gates[session] = nil
+        }
+        let sessionsNow = Set(sessions())
+        for session in callMemo.keys where !sessionsNow.contains(session) || live[pid(session) ?? 0] == nil {
+            callMemo[session] = nil
         }
 
         for (session, entry, call) in toFetch {
@@ -129,6 +152,25 @@ final class PlanGateService {
             gates[session] = Gate(entry: entry, callID: call, plan: plan,
                                  blocks: PlanBlocks.split(plan), annotationCount: 0)
         }
+    }
+
+    /// `callID(session)`, memoized on the registry entry and the transcript's stamp. The stamp is
+    /// read *before* the scan, so an append that lands mid-scan changes it and is rescanned on
+    /// the next poll rather than being papered over.
+    private func openCall(for session: UUID, entry: PlannotatorRegistry.Entry) async -> String? {
+        let stamp = transcriptStamp(session)
+        if let stamp, let memo = callMemo[session], memo.stamp == stamp,
+           memo.pid == entry.pid, memo.startedAt == entry.startedAt {
+            return memo.call
+        }
+        let call = await callID(session)
+        if let stamp {
+            callMemo[session] = CallMemo(pid: entry.pid, startedAt: entry.startedAt,
+                                         stamp: stamp, call: call)
+        } else {
+            callMemo[session] = nil
+        }
+        return call
     }
 
     func gate(for session: UUID) -> WirePlanGate? {

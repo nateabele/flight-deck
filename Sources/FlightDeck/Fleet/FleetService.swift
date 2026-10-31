@@ -175,15 +175,19 @@ final class FleetService: ObservableObject {
                 else { return nil }
                 // Widened, the way `PromptService.openPrompt` widens: a fixed window lost a
                 // live gate to bookkeeping and queued-message lines — see
-                // `ClaudeOpenPlanGate.find(tail:)`.
-                return ClaudeOpenPlanGate.find { limit in
-                    let page = TranscriptPager.page(url: url, anchor: .latest, limit: limit)
-                    return (page?.lines ?? [], page?.hasMore ?? false)
-                }
+                // `ClaudeOpenPlanGate.find(tail:)`. Off the main actor, and memoized by
+                // `PlanGateService` against `transcriptStamp`.
+                return await ClaudeOpenPlanGate.find(url: url)
             },
             pid: { [weak store] session in store?.claudePID(of: session) },
             sessions: { [weak store] in store?.allSessionIDs() ?? [] }
         )
+        planGates.transcriptStamp = { [weak store] session in
+            guard let store,
+                  case .file(.claude, let url) = store.timelineSource(of: session)
+            else { return nil }
+            return ClaudeOpenPlanGate.Stamp(of: url)
+        }
         self.planGates = planGates
         self.replicator = FleetReplicator { [weak store] in
             guard let store else { return .empty }
@@ -848,8 +852,8 @@ final class FleetService: ObservableObject {
                 }
             }
         case .accountList(let session):
-            // Local callers only, like `delegate`: a phone has no tab to move.
-            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            // A read, so a phone may ask too: its session sheet shows the tab's account, usage
+            // and context, and moves the tab by typing `/switch-account <id>` into it.
             guard let choices = store.accountChoices(for: session) else {
                 return reply(.err(cid: cid, code: "unknown_session"))
             }

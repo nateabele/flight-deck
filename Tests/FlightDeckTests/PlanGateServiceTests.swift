@@ -602,3 +602,91 @@ extension PlanGateService {
         }
     }
 }
+
+/// The transcript lookup behind `callID` is memoized against the registry entry and the
+/// transcript's stamp, and runs off the main actor — see `PlanGateService.openCall`.
+extension PlanGateServiceTests {
+
+    private static func exitPlanMode(_ id: String) -> String {
+        """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use",\
+        "id":"\(id)","name":"ExitPlanMode","input":{"plan":"# Plan"}}]}}
+
+        """
+    }
+
+    private static func answer(_ id: String) -> String {
+        """
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result",\
+        "tool_use_id":"\(id)","content":"done"}]}}
+
+        """
+    }
+
+    private func append(_ text: String, to url: URL) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+    }
+
+    /// A `makeService` fixture whose `callID` really scans a transcript file, counting scans.
+    @MainActor
+    private func makeTranscriptService(
+        initial: String
+    ) throws -> (service: PlanGateService, transcript: URL, scans: () -> Int) {
+        let (service, _) = makeService(plan: "# A", callID: "unused")
+        let transcript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlanGateServiceTests-\(UUID().uuidString).jsonl")
+        try Data(initial.utf8).write(to: transcript)
+        addTeardownBlock { try? FileManager.default.removeItem(at: transcript) }
+        var scanCount = 0
+        service.callID = { _ in
+            scanCount += 1
+            return await ClaudeOpenPlanGate.find(url: transcript)
+        }
+        service.transcriptStamp = { _ in ClaudeOpenPlanGate.Stamp(of: transcript) }
+        return (service, transcript, { scanCount })
+    }
+
+    /// A stale registry entry (process alive, every `ExitPlanMode` answered) must cost one
+    /// scan, not one per poll.
+    @MainActor
+    func testAStaleGateDoesNotRescanAnUnchangedTranscript() async throws {
+        let (service, _, scans) = try makeTranscriptService(
+            initial: Self.exitPlanMode("old") + Self.answer("old"))
+        await service.refresh()
+        await service.refresh()
+        await service.refresh()
+        XCTAssertEqual(scans(), 1)
+        XCTAssertNil(service.gate(for: service.knownSession))
+    }
+
+    /// The memo must not hide a gate that opens after the miss.
+    @MainActor
+    func testAnAppendedOpenCallIsPickedUpOnTheNextRefresh() async throws {
+        let (service, transcript, scans) = try makeTranscriptService(
+            initial: Self.exitPlanMode("old") + Self.answer("old"))
+        await service.refresh()
+        XCTAssertNil(service.gate(for: service.knownSession))
+
+        try append(Self.exitPlanMode("new"), to: transcript)
+        await service.refresh()
+        XCTAssertEqual(service.gate(for: service.knownSession)?.callID, "new")
+        XCTAssertEqual(scans(), 2)
+
+        // And a hit is memoized too: unchanged file, no further scan.
+        await service.refresh()
+        XCTAssertEqual(scans(), 2)
+    }
+
+    /// A stamp of `nil` means "cannot tell", so every refresh asks.
+    @MainActor
+    func testAnUnstampableTranscriptIsNeverMemoized() async throws {
+        let (service, _, scans) = try makeTranscriptService(initial: Self.exitPlanMode("c"))
+        service.transcriptStamp = { _ in nil }
+        await service.refresh()
+        await service.refresh()
+        XCTAssertEqual(scans(), 2)
+    }
+}

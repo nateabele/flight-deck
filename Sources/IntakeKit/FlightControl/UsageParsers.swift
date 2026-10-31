@@ -200,6 +200,16 @@ public struct ClaudeUsageFile: Equatable, Sendable {
     /// status lines that record it. It names the login that was billed, which the tab's stamp
     /// does not when a second claude survives in the tab on another account.
     public var home: String? = nil
+    /// How full the conversation's context window is (`context_window` on the status line's
+    /// stdin), from status lines that record it. nil before the conversation's first reply.
+    public var context: Context? = nil
+
+    public struct Context: Equatable, Sendable {
+        /// 0...100.
+        public var usedPercent: Double
+        public var windowSize: Int?
+        public init(usedPercent: Double, windowSize: Int?) { self.usedPercent = usedPercent; self.windowSize = windowSize }
+    }
 
     public var windows: [UsageWindow] {
         rateLimits.map { UsageWindow(name: $0.kind, utilization: $0.percentUsed / 100, resetsAt: $0.resetsAt) }
@@ -225,8 +235,13 @@ public struct ClaudeUsageFile: Equatable, Sendable {
             guard let kind = w["kind"] as? String, let pct = (w["percentUsed"] as? NSNumber)?.doubleValue else { return nil }
             return Window(kind: kind, percentUsed: pct, resetsAt: date(w["resetsAt"]))
         }
+        let context = (obj["context"] as? [String: Any]).flatMap { c -> Context? in
+            guard let used = (c["usedPercent"] as? NSNumber)?.doubleValue else { return nil }
+            return Context(usedPercent: used, windowSize: (c["windowSize"] as? NSNumber)?.intValue)
+        }
         return ClaudeUsageFile(v: v, tab: obj["tab"] as? String, session: obj["session"] as? String, readAt: readAt,
-                               rateLimits: windows, home: (obj["home"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                               rateLimits: windows, home: (obj["home"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                               context: context)
     }
 }
 

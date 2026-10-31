@@ -357,7 +357,7 @@ final class PromptService {
     private func attributingSubagents(
         _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?, polled: Bool
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
-        if let attributed = attributedSubagentPrompt(session) {
+        if let attributed = attributedSubagentPrompt(session, cached: true) {
             attributedAgents[session] = attributed.agent
             return .success(attributed.open)
         }
@@ -373,9 +373,15 @@ final class PromptService {
 
     /// The hook log's subagent dialog, confirmed still unresolved in that subagent's own file.
     /// Nil for a main-agent dialog, no dialog, or one the file has since answered.
-    private func attributedSubagentPrompt(_ session: UUID) -> (agent: String, open: OpenPrompt)? {
+    ///
+    /// `cached` is the scheduled side's, for the reason `derive` has a cache and `answer` must
+    /// not: a tap re-reads the file itself.
+    private func attributedSubagentPrompt(
+        _ session: UUID, cached: Bool = false
+    ) -> (agent: String, open: OpenPrompt)? {
         guard let dialog = pendingDialog(session), let agent = dialog.agentID,
-              let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID
+              let open = subagentOpenPrompt(session, agent: agent, cached: cached),
+              open.callID == dialog.callID
         else { return nil }
         return (agent, open)
     }
@@ -391,11 +397,38 @@ final class PromptService {
     /// One window of the subagent's own file, read as `waiting`. Nil for an invalid id, a tab
     /// that is not waiting, or no transcript. The id is validated here too because it reaches
     /// a path; the wire edge refuses it first, but this is the layer that builds the path.
-    private func subagentOpenPrompt(_ session: UUID, agent: String) -> OpenPrompt? {
+    ///
+    /// **`cached`, an unchanged file is one `stat`, not a re-read.** While a subagent's dialog is
+    /// named by the hook log, every registry tick asked this, and each ask paged the file's tail
+    /// off disk and parsed it on the main actor (measured at ~4 ms per 2 Hz tick, ~1% of a core).
+    /// The answer is a function of the file's bytes alone, and a new dialog or its answer is an
+    /// append, so it is memoized on the file's stamp the way `derive` memoizes the parent's.
+    /// The stamp is taken BEFORE the read, so an append racing the read leaves the entry on the
+    /// older stamp and the next tick re-reads. A stamp that cannot be read is never cached.
+    /// `answer` passes `false` and always reads: a tap is the one place a stale answer is not
+    /// acceptable.
+    private func subagentOpenPrompt(_ session: UUID, agent: String, cached: Bool = false) -> OpenPrompt? {
         guard case .success(let read) = preflight(session),
               let file = read.reader.subagentTranscript(for: read.url, agent: agent) else { return nil }
-        let lines = tail(file, Self.tailRecords).lines
-        return read.reader.openPrompt(inSubagentTail: lines)
+        guard cached, let stamp = TranscriptStamp(of: file) else {
+            subagentTails[session] = nil
+            return read.reader.openPrompt(inSubagentTail: tail(file, Self.tailRecords).lines)
+        }
+        if let hit = subagentTails[session], hit.url == file, hit.stamp == stamp { return hit.open }
+        let open = read.reader.openPrompt(inSubagentTail: tail(file, Self.tailRecords).lines)
+        subagentTails[session] = SubagentTail(url: file, stamp: stamp, open: open)
+        return open
+    }
+
+    /// The last `subagentOpenPrompt` answer per tab, for the one subagent file the hook log is
+    /// naming. One entry per tab: the dialog moves to another subagent's file rarely, and a
+    /// replaced entry is one re-read. Dropped with `derived` when the tab stops waiting.
+    private var subagentTails: [UUID: SubagentTail] = [:]
+
+    private struct SubagentTail {
+        let url: URL
+        let stamp: TranscriptStamp
+        let open: OpenPrompt?
     }
 
     /// The subagent the tab's own derivation took its open call from, if any — grok's reader
@@ -533,6 +566,7 @@ final class PromptService {
         // stale refusal at the start of the tab's next episode.
         derived = derived.filter { store.status(for: $0.key)?.activity == .waiting }
         subagentScans = subagentScans.filter { store.status(for: $0.key)?.activity == .waiting }
+        subagentTails = subagentTails.filter { store.status(for: $0.key)?.activity == .waiting }
         attributedAgents = attributedAgents.filter { store.status(for: $0.key)?.activity == .waiting }
         offers = offers.filter { store.status(for: $0.key)?.activity == .waiting }
         let read: TranscriptRead
@@ -767,6 +801,16 @@ struct TranscriptStamp: Equatable, Sendable {
     let size: Int64
     let mtimeSeconds: Int
     let mtimeNanoseconds: Int
+
+    /// From numbers already in hand, such as a `getattrlistbulk` listing (`DirectoryStamps`),
+    /// which carries the same five a `stat` does and so compares equal to `init?(of:)`.
+    init(device: Int32, inode: UInt64, size: Int64, mtimeSeconds: Int, mtimeNanoseconds: Int) {
+        self.device = device
+        self.inode = inode
+        self.size = size
+        self.mtimeSeconds = mtimeSeconds
+        self.mtimeNanoseconds = mtimeNanoseconds
+    }
 
     init?(of url: URL) {
         var info = stat()

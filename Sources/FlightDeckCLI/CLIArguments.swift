@@ -22,7 +22,9 @@ public enum CLIAnswerChoice: Equatable {
 /// Every shape a `flightdeck` invocation can take, already validated — a `CLICommand` is
 /// always ready to execute, never a partial parse that still needs checking.
 public enum CLICommand: Equatable {
-    case help
+    /// `--help`, `-h` or `help [VERB]`: the overview when `topic` is nil, else that verb's page
+    /// (`CLIHelp.topic(for:)` has already checked it names one).
+    case help(topic: String? = nil)
     case ls(project: String?)
     case tail(session: String?, since: Int?, noSnapshot: Bool)
     case wait(session: String, condition: String, timeout: TimeInterval?)
@@ -94,7 +96,7 @@ public enum CLIArguments {
 
     /// - Parameter args: argv with argv[0] already stripped.
     public static func parse(_ args: [String]) throws -> CLIInvocation {
-        if args.isEmpty { return CLIInvocation(command: .help) }
+        if args.isEmpty { return CLIInvocation(command: .help()) }
 
         // Globals may appear anywhere, so they're stripped in a first pass rather than
         // threaded through every verb's own cursor — each verb below sees only its operands.
@@ -104,9 +106,11 @@ public enum CLIArguments {
         var socket: String?
         var rest: [String] = []
         var literalFrom: Int?
+        var wantsHelp = false
         var cursor = args.makeIterator()
         while let token = cursor.next() {
             switch token {
+            case "--help", "-h": wantsHelp = true
             case "--":
                 literalFrom = rest.count
                 while let literal = cursor.next() { rest.append(literal) }
@@ -120,8 +124,17 @@ public enum CLIArguments {
             }
         }
 
-        if rest.isEmpty || (literalFrom != 0 && ["help", "-h", "--help"].contains(rest[0])) {
-            return CLIInvocation(command: .help, json: json, socket: socket)
+        // `help VERB`, or `--help` anywhere before `--` (`send S --help`, `plan approve --help`):
+        // the page for the verb the leading words name. Past `--` it is the command's own flag.
+        let helpVerb = rest.first == "help" && literalFrom != 0
+        if rest.isEmpty || helpVerb || wantsHelp {
+            // Only words before `--` name the topic: after it they are a command's argv.
+            let words = Array(rest.prefix(literalFrom ?? rest.count).dropFirst(helpVerb ? 1 : 0))
+            guard let first = words.first else { return CLIInvocation(command: .help(), json: json, socket: socket) }
+            guard let topic = CLIHelp.topic(for: words) else {
+                throw CLIUsageError("help: unknown command \"\(first)\"")
+            }
+            return CLIInvocation(command: .help(topic: topic), json: json, socket: socket)
         }
 
         let verb = rest[0]

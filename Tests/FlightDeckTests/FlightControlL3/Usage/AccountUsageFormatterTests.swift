@@ -106,6 +106,25 @@ final class AccountUsageFormatterTests: XCTestCase {
         XCTAssertEqual(model(l).body, .message("No current reading"))
     }
 
+    /// Claude off a subscription reports a reading with no windows: it is current, it just has no
+    /// limits to show, so "No current reading" would be untrue.
+    func testFreshReadingWithNoWindowsSaysNoLimitsReported() {
+        XCTAssertEqual(model(ledger(reading: reading([]))).body, .message("No limits reported"))
+    }
+
+    /// A headless seat reports its refusal as a reading with a `rejected` window. The ledger files
+    /// that reading as the rejection, never as the account's reading, so the row's label stays the
+    /// limit that was hit and the percent column alone says Refused — not "Refused Refused".
+    func testTheRefusalWindowIsNotTheRowsLabel() {
+        let reset = usageISO("2026-10-04T15:40:00Z")
+        let l = ledger(reading: reading([UsageWindow(name: "five_hour", utilization: 0.5, resetsAt: reset)]))
+        l.ingest(reading([UsageWindow(name: "rejected", utilization: 1, resetsAt: reset)], rejection: true))
+        let m = model(l)
+        XCTAssertEqual(lines(m).map(\.label), ["5h"])
+        XCTAssertEqual(lines(m)[0].percentText, "Refused")
+        XCTAssertFalse(m.tooltip.contains("Refused 100%"), m.tooltip)
+    }
+
     func testNoFiveHourFallsBackToFirstByName() {
         let reset = usageISO("2026-10-08T09:00:00Z")
         let l = ledger(reading: reading([

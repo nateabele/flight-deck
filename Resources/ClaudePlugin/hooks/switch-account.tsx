@@ -67,10 +67,12 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, choices)
     if (list === null) return <Text dimColor>Nothing to choose from.</Text>
+    // Flight Deck offers a pooled project its own pool alone, and refuses a target outside it.
+    const pooled = list.pools.find(pool => pool.isAssigned)
 
     return (
       <Box flexDirection="column">
-        <Text bold>Move this conversation to...</Text>
+        <Text bold>{pooled ? `Move this conversation within pool ${pooled.label}...` : 'Move this conversation to...'}</Text>
         {list.pools.map(pool => (
           <Box flexDirection="column" key={`pool-box:${pool.id}`}>
             <Button key={`pool:${pool.id}`} plain onPress={() => choose($, pool.id)}>

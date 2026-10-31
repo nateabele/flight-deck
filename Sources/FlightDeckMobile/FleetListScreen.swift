@@ -151,7 +151,8 @@ struct FleetListScreen: View {
                         .flatMap(\.sessions)
                         .first { $0.id == id },
                     model: model.timelineModel(for: id),
-                    onAbortBlocked: { await model.abortBlockedPrompt(session: $0) }
+                    onAbortBlocked: { await model.abortBlockedPrompt(session: $0) },
+                    loadAccounts: { await model.accountChoices(session: $0) }
                 )
             }
             .navigationDestination(for: IntakeRoute.self) { route in

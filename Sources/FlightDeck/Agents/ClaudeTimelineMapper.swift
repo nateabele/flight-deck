@@ -172,6 +172,14 @@ enum ClaudeTimelineMapper {
         func take(_ open: Wrapper, _ body: Substring) {
             if open.tag == pasteWrapper {
                 userText += body.trimmingCharacters(in: .newlines)
+            } else if open.tag == peerMessageWrapper {
+                // The sender's words and the sender's name, without the transport's notes to
+                // the agent or a relay's second envelope — see `PeerMessageEnvelope`.
+                flushUserText()
+                let message = PeerMessageEnvelope.unwrap(
+                    String(body), sender: attribute("from-name", in: open.attributes)
+                )
+                emit(open.tag, Substring(message.text), sender: message.sender)
             } else {
                 flushUserText()
                 emit(open.tag, body, sender: attribute("from-name", in: open.attributes))

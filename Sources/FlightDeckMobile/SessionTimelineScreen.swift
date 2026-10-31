@@ -34,6 +34,12 @@ struct SessionTimelineScreen: View {
     /// `model` above is deliberately narrowed to the paging/answering protocols, and this one
     /// button's action does not belong on that seam; see `PromptCard.onAbortBlocked`.
     let onAbortBlocked: (UUID) async -> Void
+    /// The session sheet's data — `FleetModel.accountChoices(session:)`, handed in for the
+    /// reason `onAbortBlocked` is. Unwired, the sheet says it is not connected.
+    var loadAccounts: (UUID) async -> Result<WireAccountChoices, FleetRequestError> = { _ in .failure(.disconnected) }
+
+    /// The session sheet (context, account, usage, account switcher) is up.
+    @State private var showsInfo = false
 
     /// The newest item the screen has already scrolled to, so arriving pages move it once each
     /// rather than on every re-evaluation of the body.
@@ -305,6 +311,23 @@ struct SessionTimelineScreen: View {
         }
         .navigationTitle(session?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showsInfo = true } label: {
+                    Image(systemName: "gauge.with.dots.needle.50percent")
+                }
+                .accessibilityLabel("Context and account")
+                .accessibilityIdentifier("session-info-button")
+            }
+        }
+        .sheet(isPresented: $showsInfo) {
+            SessionInfoSheet(
+                session: session,
+                load: { await loadAccounts(model.sessionID) },
+                switchTo: { model.send(SessionInfoStyle.switchCommand($0)) }
+            )
+            .presentationDetents([.medium, .large])
+        }
         .opensFileLinks(session: model.sessionID)
         .navigationDestination(for: TimelineItem.self) { item in
             TimelineItemDetailScreen(

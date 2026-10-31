@@ -25,7 +25,10 @@ struct StatusTransition: Equatable {
 /// creates or frees surfaces.
 @MainActor
 final class SessionStore: ObservableObject {
-    @Published private(set) var repos: [Repo] = []
+    @Published private(set) var repos: [Repo] = [] {
+        // See `accountMismatchedSessionIDs`: every session field it reads lives in here.
+        didSet { accountMismatchCache = nil }
+    }
 
     /// Live activity per session, merged from two sources: the status registry supplies
     /// `activity`/`waitingFor`, the transcript watchers supply `subagentCount`.
@@ -1207,22 +1210,46 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Tab leases follow the agent process
 
-    /// Whether `session`'s agent process is running: a process started as the agent's binary
-    /// under the tab's fd-abduco daemon or its surface's shell, `surfacePID`
-    /// (`AgentProcessProbe`). Settable so tests script it. A SIGSTOP'd (asleep) agent is still a
-    /// process, so it still reads running — which is why `reconcileTabLeases` asks the sleep
+    /// Test seam: when set, answers "is `session`'s agent running" for one tab and replaces the
+    /// production probe (`leaseProbe`) wholesale. A SIGSTOP'd (asleep) agent is still a process,
+    /// so the real probe reads it running — which is why `reconcileTabLeases` asks the sleep
     /// controller first.
+    var agentProcessRunning: ((Session, _ surfacePID: pid_t?) -> Bool)?
+
+    /// argv[0] by process, kept across sweeps so a settled tab costs no `KERN_PROCARGS2`.
+    private let agentArgvCache = ArgvZeroCache()
+
+    /// The production probe: whether each target's agent process is running, a process started
+    /// as the agent's binary under the tab's fd-abduco daemon or its surface's shell
+    /// (`AgentProcessProbe`).
     ///
-    /// **Runs on `processProbeQueue`, so it touches nothing on the store.** The surface's pid is
-    /// read on main and handed in; the daemon's comes from its pidfile, and the walk reads each
-    /// descendant's argv with `KERN_PROCARGS2`. With 65 tabs open that sweep was up to 38% of
-    /// a 5s main-thread sample (2026-10-14), while the fleet server waited behind it.
-    lazy var agentProcessRunning: (Session, _ surfacePID: pid_t?) -> Bool = {
-        [daemonControl, processInspector] session, surfacePID in
-        let roots = [daemonControl.daemonPID(session.id), surfacePID].compactMap { $0 }
-        guard !roots.isEmpty else { return false }
-        return AgentProcessProbe(inspector: processInspector).isRunning(session.agent, under: roots)
+    /// **Runs on `processProbeQueue`, so it touches nothing on the store.** The surface's pid
+    /// (and the claude pid the store follows) are read on main and handed in; the daemon's
+    /// comes from its pidfile. With 65 tabs open the per-tab walks were up to 38% of a 5s
+    /// main-thread sample (2026-10-14) and, moved off main, ~2.7% of a core on the probe
+    /// queue (2026-10-26), so one sweep is one process-table snapshot (`ProcessSnapshot`) shared
+    /// by every tab, argv[0] is cached (`ArgvZeroCache`), and a tab whose claude pid is known
+    /// is confirmed by a lookup instead of a walk. Reads only — nothing signals off this
+    /// snapshot — which is what makes a few-seconds-old view safe here.
+    private func leaseProbe() -> ([LeaseProbeTarget]) -> [UUID: Bool] {
+        let scripted = agentProcessRunning
+        let daemonControl = self.daemonControl, inspector = processInspector, cache = agentArgvCache
+        return { targets in
+            if let scripted { return Self.probe(targets) { scripted($0.session, $0.surfacePID) } }
+            let snapshot = inspector.snapshot()
+            let probe = AgentProcessProbe(
+                inspector: snapshot,
+                argv0: { pid in cache.argv0(of: pid, in: snapshot, read: ProcessArguments.argv0(of:)) })
+            defer { cache.prune(keeping: snapshot) }
+            return Self.probe(targets) { target in
+                let roots = [daemonControl.daemonPID(target.session.id), target.surfacePID].compactMap { $0 }
+                guard !roots.isEmpty else { return false }
+                return probe.isRunning(target.session.agent, under: roots, knownPID: target.claudePID)
+            }
+        }
     }
+
+    typealias LeaseProbeTarget = (session: Session, surfacePID: pid_t?, claudePID: pid_t?)
 
     /// Where the lease sweep's process probes run. Serial and `.utility`: one sweep at a time,
     /// and nothing waits on its answer.
@@ -1252,9 +1279,9 @@ final class SessionStore: ObservableObject {
         lastTabLeaseSweep = t
         guard !targets.isEmpty else { return reconcileTabLeases(running: [:]) }
         tabLeaseSweepInFlight = true
-        let probe = agentProcessRunning
+        let probe = leaseProbe()
         Self.processProbeQueue.async { [weak self] in
-            let running = Self.probe(targets, with: probe)
+            let running = probe(targets)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -1269,25 +1296,26 @@ final class SessionStore: ObservableObject {
     /// `reconcileTabLeasesIfDue`.
     func reconcileTabLeases() {
         guard let targets = tabLeaseProbeTargets() else { return }
-        reconcileTabLeases(running: Self.probe(targets, with: agentProcessRunning))
+        reconcileTabLeases(running: leaseProbe()(targets))
     }
 
     private nonisolated static func probe(
-        _ targets: [(session: Session, surfacePID: pid_t?)],
-        with probe: (Session, pid_t?) -> Bool
+        _ targets: [LeaseProbeTarget], with probe: (LeaseProbeTarget) -> Bool
     ) -> [UUID: Bool] {
-        Dictionary(targets.map { ($0.session.id, probe($0.session, $0.surfacePID)) },
+        Dictionary(targets.map { ($0.session.id, probe($0)) },
                    uniquingKeysWith: { first, _ in first })
     }
 
-    /// The tabs whose agent the sweep must look for, each with its surface's shell pid — read
-    /// here because `processRegistry` lives on main. Nil when leases are not wired at all.
-    private func tabLeaseProbeTargets() -> [(session: Session, surfacePID: pid_t?)]? {
+    /// The tabs whose agent the sweep must look for, each with its surface's shell pid and, for
+    /// an agent with a status registry, the claude pid the store follows — read here because
+    /// `processRegistry` and `anchors` live on main. Nil when leases are not wired at all.
+    private func tabLeaseProbeTargets() -> [LeaseProbeTarget]? {
         guard let preferences, let resolver = accountResolver else { return nil }
         return repos.lazy.flatMap(\.sessions).compactMap { session in
             guard self.needsTabLeaseProbe(session, preferences: preferences, resolver: resolver)
             else { return nil }
-            return (session, self.processRegistry.process(for: session.id)?.identity.pid)
+            return (session, self.processRegistry.process(for: session.id)?.identity.pid,
+                    session.agent.hasStatusRegistry ? self.claudePID(of: session.id) : nil)
         }
     }
 
@@ -1627,11 +1655,17 @@ final class SessionStore: ObservableObject {
     /// and the mod's `command.run` result are a few milliseconds behind the socket reply.
     var accountSwitchDelay: Duration = .milliseconds(800)
 
-    /// What `/switch-account` offers this tab, or why it can't switch at all.
+    /// Where a tab's context-window fill comes from: the usage files its status line writes.
+    var contextUsage: @MainActor (UUID) -> WireContextUsage? = { UsageService.shared.context(for: $0) }
+
+    /// What `/switch-account` offers this tab (and the phone's session sheet shows), or nil for
+    /// a tab that does not exist.
     func accountChoices(for id: UUID) -> WireAccountChoices? {
         guard let session = session(for: id), let resolver = accountResolver else { return nil }
-        return resolver.choices(agent: session.agent, project: session.workingDirectory,
-                                current: accountIsMissing(for: session) ? nil : account(for: session))
+        var choices = resolver.choices(agent: session.agent, project: session.workingDirectory,
+                                       current: accountIsMissing(for: session) ? nil : account(for: session))
+        choices.context = contextUsage(id)
+        return choices
     }
 
     /// The refusals shared by every tab that cannot move right now, or nil when it can.
@@ -1668,7 +1702,8 @@ final class SessionStore: ObservableObject {
         }
         if let refusal = accountSwitchRefusal(for: session) { return WireAccountSwitchResult(ok: false, message: refusal) }
         let current = account(for: session)
-        switch resolver.switchDecision(agent: session.agent, current: current, target: target) {
+        switch resolver.switchDecision(agent: session.agent, project: session.workingDirectory,
+                                       current: current, target: target) {
         case .refuse(let message):
             return WireAccountSwitchResult(ok: false, message: message)
         case .stay(let account):
@@ -2152,6 +2187,14 @@ final class SessionStore: ObservableObject {
     /// banners that edge produces. Pids are machine-wide, so the union is itself a well-formed
     /// registry.
     private var registryRows: [UUID?: [pid_t: ClaudeStatusFile.Entry]] = [:]
+
+    /// Set when any account's watcher has reported since the merged pass last ran; cleared by
+    /// `applyPendingRegistry`. See `recordRegistry`.
+    private var registryApplyPending = false
+
+    /// How many times the full registry pass has run. Test seam: lets a test prove N watchers
+    /// reporting in one beat cost one pass, which no observable state distinguishes from N.
+    private(set) var registryApplyCountForTesting = 0
 
     /// Whether registry polling has been switched on at all. Only the production convenience
     /// init calls `startStatusWatching()`, and watchers are now also built on the tab path —
@@ -3282,6 +3325,9 @@ final class SessionStore: ObservableObject {
         // `intakeChangeForward`, for the same reason. After every stored property above:
         // `[weak self]` still needs `self` fully initialized before it can be captured.
         preferencesChangeForward = preferences?.objectWillChange.sink { [weak self] _ in
+            // `willSet` timing is fine: this only drops the memo, and the next read (a later
+            // render, after the change has landed) recomputes.
+            self?.accountMismatchCache = nil
             self?.objectWillChange.send()
         }
         // Shell records land asynchronously, up to half a second after the tab they belong to
@@ -5729,6 +5775,7 @@ final class SessionStore: ObservableObject {
         // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
         // rather than inheriting one from a session that is over.
         promptQueue.removeValue(forKey: id)
+        promptTypingLogged.removeValue(forKey: id)
         attachedToLiveDaemon.removeValue(forKey: id)
         acceptedPromptTokens.removeValue(forKey: id)
         answeredPromptTokens.removeValue(forKey: id)
@@ -7205,6 +7252,16 @@ final class SessionStore: ObservableObject {
     /// deferred, in the same style as `pendingPrompts`; nothing outside this type writes it.
     private(set) var promptQueue: [UUID: [QueuedPrompt]] = [:]
 
+    /// What `flushPromptQueue(_:)` last wrote to the typing log for each tab's head prompt:
+    /// which token, and the `inject` result once one was logged (nil = only "attempt" so far).
+    ///
+    /// A queued prompt waiting on a non-empty composer retries every tick and gets the same
+    /// refusal every time; logging each retry wrote ~20 lines a second (the log reached 73 MB)
+    /// and read the terminal viewport for each. Only the first attempt for a token and a
+    /// change of outcome are news. Pruned in `flushPromptQueue()` to the tabs that still have a
+    /// queue, and dropped on close, so a retired entry cannot leak or suppress a later one.
+    private var promptTypingLogged: [UUID: (token: UUID, started: Bool?)] = [:]
+
     /// How long a phone-sent prompt stays worth typing.
     ///
     /// Fifteen minutes against `resumePromptWindow`'s two, and the gap is the whole point.
@@ -7366,6 +7423,7 @@ final class SessionStore: ObservableObject {
     /// prompt waits on — a turn ending, a draft being cleared, claude finishing its boot — is
     /// often not a status change at all, so gating the retry on one would strand it.
     private func flushPromptQueue() {
+        promptTypingLogged = promptTypingLogged.filter { promptQueue[$0.key] != nil }
         for id in promptQueue.keys { flushPromptQueue(id) }
     }
 
@@ -7409,7 +7467,12 @@ final class SessionStore: ObservableObject {
         // resume queue holds text that stops making sense in two minutes. This queue has
         // fifteen.
         guard pendingRenames[id] == nil, pendingPrompts[id] == nil else { return }
-        logPromptTyping("attempt", for: id)
+        // Same token, same refusal as last time writes nothing and reads no viewport: see
+        // `promptTypingLogged`. A new head token starts over, so each prompt is still traced.
+        if promptTypingLogged[id]?.token != head.token {
+            promptTypingLogged[id] = (head.token, nil)
+            logPromptTyping("attempt", for: id)
+        }
         let started = inject(
             head.text,
             into: id,
@@ -7426,7 +7489,10 @@ final class SessionStore: ObservableObject {
                 self.emit([.promptTyped(id: id, token: head.token)])
             }
         )
-        logPromptTyping("inject=\(started)", for: id)
+        if promptTypingLogged[id]?.token == head.token, promptTypingLogged[id]?.started != started {
+            promptTypingLogged[id]?.started = started
+            logPromptTyping("inject=\(started)", for: id)
+        }
     }
 
     // MARK: - Answering a dialog from a paired phone
@@ -9496,7 +9562,23 @@ final class SessionStore: ObservableObject {
     /// left open in a personal repo, or the reverse. Empty whenever there is no
     /// `PreferencesStore` to resolve against, same as `conflictedSessionIDs` degrades to
     /// nothing rather than guessing.
+    ///
+    /// Memoized: `SessionSidebar.body` reads this on every render (several per second while
+    /// sessions stream status), and each evaluation resolves preferences for every session in
+    /// every project. Its only inputs are `repos` and `preferences`, so the memo is dropped by
+    /// `repos`' `didSet` and by the `preferences.objectWillChange` forward — the two places
+    /// that can change the answer.
     var accountMismatchedSessionIDs: Set<UUID> {
+        if let accountMismatchCache { return accountMismatchCache }
+        let computed = computeAccountMismatchedSessionIDs()
+        accountMismatchCache = computed
+        return computed
+    }
+
+    /// Backing memo for `accountMismatchedSessionIDs`; nil means "recompute on next read".
+    private var accountMismatchCache: Set<UUID>?
+
+    private func computeAccountMismatchedSessionIDs() -> Set<UUID> {
         guard let preferences else { return [] }
         return Set(repos.flatMap { repo in
             repo.sessions.filter { session in
@@ -9705,8 +9787,11 @@ final class SessionStore: ObservableObject {
             isAlive: statusIsAlive ?? SessionStatusWatcher.processIsAlive,
             clock: clock
         ) { [weak self] entries in
-            self?.applyRegistry(entries, from: account)
+            self?.recordRegistry(entries, from: account)
         }
+        // Idempotent (replaces by owner), so every watcher's creation can say it; the merged
+        // pass then runs once per beat however many accounts there are. See `recordRegistry`.
+        clock.addAfterTick(self) { [weak self] in self?.applyPendingRegistry() }
         watcher.start()
         statusWatchers[account] = watcher
     }
@@ -9824,11 +9909,29 @@ final class SessionStore: ObservableObject {
         registryRows[account] = nil
     }
 
-    /// One account's scan, merged with every other account's before it becomes status. See
-    /// `registryRows` for why the merge is not optional.
-    private func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry], from account: UUID?) {
+    /// One account's scan, parked until the beat ends. See `registryRows` for why the merge is
+    /// not optional, and `applyPendingRegistry` for when it runs.
+    ///
+    /// **Not applied here.** Each account's watcher reports every beat, and applying the merged
+    /// registry from each report ran the whole pass (reconcile, commit, every flush, plan-gate
+    /// poll) once per account per beat — 6 accounts at 2 Hz was 12 Hz, and six
+    /// `flushPromptQueue` attempts per 500 ms. Coalescing at the clock rather than with a
+    /// deferred main-actor hop keeps it synchronous and deterministic: `WatchClock.fire()`
+    /// invokes the barrier right after the last watcher drained.
+    private func recordRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry], from account: UUID?) {
         registryRows[account] = rows
-        guard registryRows.count > 1 else { return applyRegistry(rows) }
+        registryApplyPending = true
+    }
+
+    /// The once-per-beat merged pass, run by `WatchClock`'s after-tick barrier.
+    ///
+    /// Gated on a report having arrived, not on anything having changed: the beat is the
+    /// retry tick for deferred renames and queued prompts (see `maintenanceTick`), so a quiet
+    /// registry must still run it. A beat where no watcher reported (none exist) has nothing
+    /// to merge and `maintenanceTick` already has its own clock registration.
+    private func applyPendingRegistry() {
+        guard registryApplyPending else { return }
+        registryApplyPending = false
         applyRegistry(registryRows.values.reduce(into: [:]) { merged, rows in
             merged.merge(rows) { _, newer in newer }
         })
@@ -9880,6 +9983,7 @@ final class SessionStore: ObservableObject {
         // registry, not a real one — returning before even the `defer` below runs is
         // deliberate, so nothing clears a mark or persists over the state auto-resume wants.
         guard !isTerminating else { return }
+        registryApplyCountForTesting += 1
         // `defer` because this method returns early when nothing changed, and the
         // timer-driven work below must still run regardless — see `maintenanceTick`.
         defer { maintenanceTick() }

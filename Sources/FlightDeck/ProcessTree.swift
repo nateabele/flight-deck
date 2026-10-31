@@ -15,6 +15,18 @@ protocol ProcessInspecting: Sendable {
     /// this rather than trust a previously recorded value — see `SessionStore.reapSession` and
     /// `sweepOrphans` for why that distinction is load-bearing. Nothing records a pgid any more.
     func pgid(of pid: pid_t) -> pid_t?
+    /// A read-once view of the process table for a pass that asks many questions and signals
+    /// nobody (`ProcessSnapshot`). The default is `self`: a scripted inspector is already a
+    /// fixed view, and one with nothing better to offer simply keeps reading.
+    func snapshot() -> ProcessInspecting
+    /// The kernel's `p_comm` for `pid`, when this inspector knows it (a snapshot does).
+    /// `ArgvZeroCache` keys on it; nil keys as empty.
+    func comm(of pid: pid_t) -> String?
+}
+
+extension ProcessInspecting {
+    func snapshot() -> ProcessInspecting { self }
+    func comm(of pid: pid_t) -> String? { nil }
 }
 
 /// The real implementation, over libproc.
@@ -111,4 +123,8 @@ struct ProcessTree: ProcessInspecting {
         let result = getpgid(pid)
         return result > 0 ? result : nil
     }
+
+    /// One `KERN_PROC_ALL` read standing in for every per-process syscall of a probe pass; this
+    /// tree itself when the read fails. See `ProcessSnapshot` for which callers may use it.
+    func snapshot() -> ProcessInspecting { ProcessSnapshot.capture() ?? self }
 }

@@ -430,6 +430,22 @@ final class HostServiceTests: XCTestCase {
         XCTAssertEqual(dialer.browses, 0)
     }
 
+    /// `save` used to publish and rewrite for a record the registry already held; a link that
+    /// flaps made it do so on every state change.
+    func testSavingAnUnchangedRecordPublishesNothing() throws {
+        let registry = HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore())
+        let record = try registry.add(key: .mint(), name: "mini", serviceName: "mini", endpoints: ["10.0.0.5:47410"])
+        let service = HostService(registry: registry, controllerName: "c", dial: dialer, clock: clock)
+        var published = 0
+        let sub = service.objectWillChange.sink { published += 1 }
+        service.setEndpoints(slot: record.slot, ["10.0.0.5:47410"])
+        XCTAssertEqual(published, 0)
+        service.setEndpoints(slot: record.slot, ["10.0.0.7:47410"])
+        XCTAssertEqual(published, 1)
+        XCTAssertEqual(registry.hosts[0].endpoints, ["10.0.0.7:47410"])
+        sub.cancel()
+    }
+
     func testOnlineHostLearnsItsAddressPlatformAndLastSeen() async throws {
         let registry = HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore())
         let record = try registry.add(key: .mint(), name: "mini", serviceName: "mini",

@@ -54,6 +54,17 @@ final class WatchClock {
     /// leave the status scan and the transcript reads racing for position each tick.
     private var subscribers: [Subscriber] = []
 
+    /// Callbacks that run once per beat, after every `subscribers` tick has finished.
+    ///
+    /// **Why a second list rather than "register last".** Insertion order is not a barrier:
+    /// a subscriber added later (a new account's watcher built on the tab path) would land
+    /// after it. `SessionStore` has one watcher per login, each reporting its own scan, and
+    /// the merged registry pass they feed must see every scan from THIS beat exactly once —
+    /// run per watcher it executed N times per beat (6 accounts at 2 Hz was 12 Hz of the full
+    /// pass). Weak-owned and replace-on-re-add, like `subscribers`, and it does not keep the
+    /// timer alive: a beat with no subscribers has nothing for a barrier to follow.
+    private var afterTick: [Subscriber] = []
+
     private var timer: DispatchSourceTimer?
     /// The cadence `timer` was built with, so a redundant activation does not rebuild it.
     private var currentInterval: Duration?
@@ -101,6 +112,18 @@ final class WatchClock {
             subscribers.append(subscriber)
         }
         reschedule()
+    }
+
+    /// Registers `body` to run once at the end of every beat, after all `add`ed ticks. See
+    /// `afterTick` for why this exists. Re-registering the same owner replaces its closure.
+    func addAfterTick(_ owner: AnyObject, _ body: @escaping () -> Void) {
+        let id = ObjectIdentifier(owner)
+        let entry = Subscriber(id: id, owner: owner, tick: body)
+        if let at = afterTick.firstIndex(where: { $0.id == id }) {
+            afterTick[at] = entry
+        } else {
+            afterTick.append(entry)
+        }
     }
 
     /// Test seam: is `owner` currently subscribed? Lets a caller-side test prove an `add(...)`
@@ -156,6 +179,9 @@ final class WatchClock {
         // watcher — a session closing as its own read is applied — cannot invalidate the
         // iteration underneath us. `reschedule()` from inside a tick is likewise safe.
         for subscriber in subscribers { subscriber.tick() }
+
+        afterTick.removeAll { $0.owner == nil }
+        for entry in afterTick { entry.tick() }
 
         if subscribers.isEmpty { reschedule() }
     }

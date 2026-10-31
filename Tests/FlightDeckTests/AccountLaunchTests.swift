@@ -467,6 +467,27 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertTrue(store.accountMismatchedSessionIDs.contains(session.id))
     }
 
+    /// The set is memoized for the sidebar's per-render read, so it must follow both inputs: a
+    /// preferences change (the account the project resolves to) and a repos change.
+    func testMismatchSetFollowsPreferencesAndSessionChangesDespiteMemoization() {
+        let (preferences, top) = configured(.claude)
+        let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
+        preferences.preferences.accounts = [top, other]
+        let store = makeStore(preferences)
+        let session = store.newSession(in: projectURL, account: other.id)
+
+        XCTAssertTrue(store.accountMismatchedSessionIDs.contains(session.id))
+        XCTAssertTrue(store.accountMismatchedSessionIDs.contains(session.id), "second read is the memo")
+
+        // Preferences: assign the project to `other`, so the tab now matches.
+        preferences.setProjectSettings(projectURL.path, ProjectSettings(accounts: [.claude: .account(other.id)]))
+        XCTAssertFalse(store.accountMismatchedSessionIDs.contains(session.id))
+
+        // Repos: a new mismatching tab appears.
+        let second = store.newSession(in: projectURL, account: top.id)
+        XCTAssertTrue(store.accountMismatchedSessionIDs.contains(second.id))
+    }
+
     /// Degrades to nothing rather than guessing, the same as `conflictedSessionIDs` does —
     /// there is nothing to resolve a mismatch against without a `PreferencesStore`.
     func testWithNoPreferencesStoreNothingIsEverMismatched() {
@@ -660,6 +681,41 @@ final class AccountLaunchTests: XCTestCase {
         let spawned = try XCTUnwrap(store.codexTransportHomeForTesting(account: work.id))
         XCTAssertEqual(spawned, work.home)
         XCTAssertEqual(CodexNameWatcher.indexURL(forHome: spawned), store.codexIndexURL(for: work.id))
+    }
+
+    // MARK: - One registry pass per beat
+
+    /// Every account has its own watcher, and each used to run the whole merged registry pass
+    /// (reconcile, commit, every flush) from its own report: three accounts meant three passes
+    /// per beat, six meant twelve a second at the foreground cadence. The pass now runs once
+    /// at the end of the beat, over the union of every account's rows. Driven through
+    /// `WatchClock.fire()`, the seam the beat itself uses, so nothing sleeps.
+    func testAllAccountWatchersInOneBeatProduceOneMergedPass() {
+        let accounts = ["a", "b", "c"].map {
+            AgentAccount(agent: .claude, displayName: $0, home: home($0))
+        }
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.accounts = accounts
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: accounts.map {
+                .init(id: UUID(), title: $0.displayName, workingDirectory: projectURL.path,
+                      pinnedConversationID: UUID(), accountID: $0.id)
+            },
+            sessionCounter: accounts.count
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        store.startStatusWatching()
+        XCTAssertEqual(store.statusWatcherAccountsForTesting.count, accounts.count)
+
+        let before = store.registryApplyCountForTesting
+        store.watchClock.fire()
+        XCTAssertEqual(store.registryApplyCountForTesting - before, 1,
+                       "three watchers drained, one merged pass")
+        store.watchClock.fire()
+        XCTAssertEqual(store.registryApplyCountForTesting - before, 2,
+                       "and a quiet beat still runs it: the beat is the retry tick")
     }
 
     // MARK: - Removing an account out from under a live tab

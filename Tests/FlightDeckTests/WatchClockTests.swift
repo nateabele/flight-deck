@@ -97,4 +97,19 @@ final class WatchClockTests: XCTestCase {
             "background polling is what delivers session notifications; it must not stall"
         )
     }
+
+    /// The barrier runs once per beat, after every subscriber — including one registered
+    /// after it — so a merged pass can rely on seeing the whole beat's reports.
+    func testAfterTickRunsOnceAfterEverySubscriber() {
+        let clock = WatchClock(appIsActive: { true })
+        let owner = NSObject(), early = NSObject(), late = NSObject()
+        var order: [String] = []
+        clock.add(early) { order.append("early") }
+        clock.addAfterTick(owner) { order.append("after") }
+        clock.add(late) { order.append("late") }
+        clock.fire()
+        XCTAssertEqual(order, ["early", "late", "after"])
+        clock.remove(early)
+        clock.remove(late)
+    }
 }

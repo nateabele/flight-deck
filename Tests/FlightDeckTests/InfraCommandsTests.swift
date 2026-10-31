@@ -21,7 +21,7 @@ final class InfraCommandsTests: XCTestCase {
     private var stderr: String { err.joined(separator: "\n") }
 
     private func runner(_ args: String..., transport: FakeTransport, isTTY: Bool = true) -> CLIRunner {
-        let invocation = (try? CLIArguments.parse(args)) ?? CLIInvocation(command: .help)
+        let invocation = (try? CLIArguments.parse(args)) ?? CLIInvocation(command: .help())
         let r = CLIRunner(invocation: invocation, transport: transport,
                           context: CLIContext(selfID: nil, cwd: "/r", json: false, isTTY: isTTY),
                           out: { self.out.append($0) }, err: { self.err.append($0) },

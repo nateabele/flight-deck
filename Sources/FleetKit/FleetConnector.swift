@@ -160,6 +160,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// all sharing the single `cid` space `FleetClient.send` mints from, so a number is filed
     /// in at most one and `apply` tries each in turn.
     private var pendingClosed: [Int: (Result<[WireClosedSession], FleetRequestError>) -> Void] = [:]
+    /// A tab's account choices, usage and context (`account.list`), for the session sheet.
+    /// Same reasoning as the tables above.
+    private var pendingAccounts: [Int: (Result<WireAccountChoices, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     /// The epoch of the snapshot `fleet` descends from, handed back in every `hello` beside
@@ -435,6 +438,20 @@ public final class FleetConnector: @unchecked Sendable {
         pendingClosed[cid] = completion
     }
 
+    /// Ask for tab `session`'s account choices, with each account's usage and the tab's
+    /// context fill. Same contract as `request(_:then:)`. A Mac built before the phone could ask
+    /// answers `out_of_scope`.
+    public func requestAccountChoices(
+        session: UUID,
+        then completion: @escaping (Result<WireAccountChoices, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.accountList(session: session))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingAccounts[cid] = completion
+    }
+
     /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
     /// front when the Mac still claims it.
     private func adoptEndpoints(_ list: [String]) {
@@ -528,6 +545,14 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingClosed.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveAccounts(
+        _ cid: Int, with result: Result<WireAccountChoices, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingAccounts.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -739,6 +764,10 @@ public final class FleetConnector: @unchecked Sendable {
             adoptEndpoints(list)
             resolveEndpoints(cid, with: .success(list))
             return
+        case .accountChoices(let cid, let choices):
+            // Unsequenced, same reason as `newSessionOptions`.
+            resolveAccounts(cid, with: .success(choices))
+            return
         case .recentlyClosed(let cid, let closed):
             // Unsequenced, exactly like `page` and `newSessionOptions` and for the same
             // reason — a reopen list is not fleet state and must not move the resume point.
@@ -800,6 +829,10 @@ public final class FleetConnector: @unchecked Sendable {
                 resolveClosed(cid, with: .failure(.server(code: code)))
                 return
             }
+            if pendingAccounts[cid] != nil {
+                resolveAccounts(cid, with: .failure(.server(code: code)))
+                return
+            }
             resolve(cid, with: .failure(.server(code: code)))
             return
         case .ack(let cid):
@@ -843,9 +876,9 @@ public final class FleetConnector: @unchecked Sendable {
             return
         case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
              .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,
-             .accountChoices, .accountSwitched:
-            // Delegated execution's and `account.*` replies, which answer only requests the
-            // phone never sends (`delegate.*`, `recipe.*`, `account.*`), and go only to the
+             .accountSwitched:
+            // Delegated execution's and `account.switch` replies, which answer only requests the
+            // phone never sends (`delegate.*`, `recipe.*`, `account.switch`), and go only to the
             // connection that asked. A
             // stray is dropped like the host replies above: never folded, never moving the
             // resume point. (An installed phone from before these tags cannot decode them at
@@ -1073,6 +1106,9 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingClosed = pendingClosed
         pendingClosed.removeAll()
         for completion in outstandingClosed.values { completion(.failure(.disconnected)) }
+        let outstandingAccounts = pendingAccounts
+        pendingAccounts.removeAll()
+        for completion in outstandingAccounts.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }

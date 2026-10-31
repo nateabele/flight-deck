@@ -159,6 +159,21 @@ final class TimelineStyleTests: XCTestCase {
         XCTAssertEqual(TimelineStyle.rowCopyText(for: short), short.body.text)
     }
 
+    /// A message this session sent (`TimelinePeerSend`) is the same prose going the other way,
+    /// headed with who it went to so the two halves of an exchange read as one conversation.
+    func testASentPeerMessageIsProseHeadedByItsRecipient() {
+        let sent = TimelineItem(
+            id: "9#2", kind: .systemNotice, status: .complete,
+            body: .init(text: "1. Ready\n2. `make`", tool: TimelinePeerSend.tool, sender: "Publish")
+        )
+        XCTAssertEqual(TimelineStyle.heading(for: sent), "To Publish")
+        XCTAssertEqual(TimelineStyle.symbol(for: sent), "paperplane.fill")
+        XCTAssertTrue(TimelineStyle.rendersMarkdown(sent))
+        XCTAssertFalse(TimelineStyle.opensDetail(sent))
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "The Plan Part 3",
+                       "a received message is still headed by its sender")
+    }
+
     /// Every other notice stays machine text: a `bash-stdout` must not be reflowed.
     func testOtherNoticesAreStillMachineText() {
         let stdout = TimelineItem(

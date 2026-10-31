@@ -518,7 +518,9 @@ final class SessionTimelineModel {
     /// exists only in this array — never written into `TimelineFeed`, so a page reset or a
     /// reconcile cannot find it.
     static func rendered(from items: [TimelineItem], delivered: [PromptOutboxEntry]) -> [TimelineEntry] {
-        var entries = TimelineRender.entries(from: items)
+        // A send to another session reads as the message it sent, not the tool that sent it
+        // — after the fold, because whether it failed is in the result the fold attaches.
+        var entries = TimelineRender.entries(from: items).map(TimelinePeerSend.rewritten)
         entries.append(contentsOf: delivered.map { entry in
             TimelineEntry(
                 item: TimelineItem(

@@ -117,8 +117,11 @@ final class UsageService: ObservableObject {
     static let statusLineSilenceMessage = "No usage reading from Claude's status line in this account's tabs for 15 minutes. Flight Deck's status line may not have run (untrusted folder, disableAllHooks, or managed settings), or no tab has had a reply yet."
 
     let ledger: CapacityLedger
-    /// Bumped on every change and every tick: freshness and window resets move with the clock
-    /// even when no new reading arrives, so the meters must redraw anyway.
+    /// Bumped when something a meter draws changed (`ingest`, `reconfigure`, `restoreReadings`)
+    /// and once per tick: freshness and window resets move with the clock even when no new
+    /// reading arrives, so the meters must redraw every 30 s anyway. A reading that only
+    /// re-stamps what the ledger already holds does not bump: codex pushes ~2.5 a second and the
+    /// status line files are re-read every second, and each bump re-rendered every observer.
     @Published private(set) var revision = 0
     private(set) var isAttached = false
     private(set) var environment: UsageEnvironment
@@ -132,6 +135,8 @@ final class UsageService: ObservableObject {
     private var readingsChanged = false
 
     private var usageFiles: ClaudeUsageFileSource
+    /// Each claude tab's context-window fill, by tab id, from the same files.
+    private var contexts: [UUID: WireContextUsage] = [:]
     private let headless = HeadlessClaudeUsageSource()
     private var codexSources: [UUID: CodexRateLimitSource] = [:]
     private var lastCodexPoll: [UUID: Date] = [:]
@@ -218,11 +223,31 @@ final class UsageService: ObservableObject {
     }
 
     func ingest(_ reading: UsageReading) {
+        let before = observableState(of: reading.account.id)
         ledger.ingest(reading)
         readingsChanged = true
         taps.removeAll { $0.tap == nil }
         for box in taps where box.tap?.accountID == reading.account.id { box.tap?.send(reading) }
-        revision += 1
+        if observableState(of: reading.account.id) != before { revision += 1 }
+    }
+
+    /// What a meter can draw for an account that a reading can change: its windows, the source
+    /// named in the tooltip, a standing refusal, and the source error a reading clears. `readAt`
+    /// is left out on purpose: a reading that only moves it (codex stamps every push with the
+    /// clock) changes nothing on screen until the next tick's bump re-ages the freshness label.
+    private func observableState(of account: UUID?) -> ObservableAccountState? {
+        guard let account else { return nil }
+        let latest = ledger.latestReading(account: account)
+        return ObservableAccountState(windows: latest?.windows, source: latest?.source,
+                                      rejection: ledger.rejection(account: account),
+                                      error: ledger.sourceError(account: account))
+    }
+
+    private struct ObservableAccountState: Equatable {
+        var windows: [UsageWindow]?
+        var source: String?
+        var rejection: Rejection?
+        var error: String?
     }
 
     /// How a source that is a stream (the OpenCode adapter's, say) joins the funnel.
@@ -320,6 +345,10 @@ final class UsageService: ObservableObject {
         }
     }
 
+    /// Tab `id`'s context-window fill, from its status line's newest usage file; nil until one
+    /// recorded it.
+    func context(for id: UUID) -> WireContextUsage? { contexts[id] }
+
     /// Over hard in any hosted pool that holds it. The strictest pool decides, so a manual tab is
     /// warned at the earliest threshold anyone configured for its account.
     func isOverHard(account id: UUID) -> Bool {
@@ -378,7 +407,15 @@ final class UsageService: ObservableObject {
 
     private func ingestUsageFiles(_ sessions: [Session]) {
         for (stem, file) in usageFiles.scan() {
-            guard let tab = sessions.first(where: { $0.agent == .claude && ($0.id == stem || $0.pinnedConversationID == stem) }),
+            guard let tab = sessions.first(where: { $0.agent == .claude && ($0.id == stem || $0.pinnedConversationID == stem) })
+            else { continue }
+            if let context = file.context, (contexts[tab.id]?.readAt ?? .distantPast) <= file.readAt {
+                contexts[tab.id] = WireContextUsage(usedPercent: context.usedPercent, windowSize: context.windowSize,
+                                                    readAt: file.readAt)
+            }
+            // A file that carries only the context (an API-key login has no rate limits) is no
+            // usage reading.
+            guard !file.rateLimits.isEmpty,
                   let ref = file.home.map(claudeAccountRef(home:)) ?? accountRef(for: tab) else { continue }
             reported.insert(tab.id)
             ingest(UsageReading(account: ref, windows: file.windows, readAt: file.readAt, source: "claude status line", hardRejection: false))

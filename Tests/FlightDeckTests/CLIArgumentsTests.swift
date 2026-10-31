@@ -8,7 +8,52 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(try parse("ls", "--json"), CLIInvocation(command: .ls(project: nil), json: true, socket: nil))
         XCTAssertEqual(try parse("--socket", "/s", "ls").socket, "/s")
     }
-    func testNoArgumentsIsHelp() throws { XCTAssertEqual(try CLIArguments.parse([]).command, .help) }
+    func testNoArgumentsIsHelp() throws { XCTAssertEqual(try CLIArguments.parse([]).command, .help()) }
+    func testHelpForms() throws {
+        XCTAssertEqual(try parse("--help").command, .help())
+        XCTAssertEqual(try parse("help").command, .help())
+        XCTAssertEqual(try parse("help", "send").command, .help(topic: "send"))
+        XCTAssertEqual(try parse("send", "--help").command, .help(topic: "send"))
+        XCTAssertEqual(try parse("send", "S", "-h").command, .help(topic: "send"))
+        XCTAssertEqual(try parse("plan", "approve", "S", "--help").command, .help(topic: "plan approve"))
+        XCTAssertEqual(try parse("plan", "--help").command, .help(topic: "plan"))
+        XCTAssertEqual(try parse("help", "account", "ls").command, .help(topic: "account list"))
+        XCTAssertEqual(try parse("run", "--on", "mini", "--help").command, .help(topic: "run"))
+        XCTAssertThrowsError(try parse("help", "bogus"))
+        XCTAssertThrowsError(try parse("bogus", "--help"))
+    }
+    /// Past `--`, `--help` is the delegated command's own flag, not a request for ours.
+    func testHelpAfterLiteralIsArgv() throws {
+        guard case .delegate(.run(let run)) = try parse("run", "--on", "mini", "--", "make", "--help").command else {
+            return XCTFail("not a run")
+        }
+        XCTAssertEqual(run.command, ["make", "--help"])
+        XCTAssertEqual(try parse("send", "S", "--", "-h").command, .send(session: "S", text: "-h"))
+    }
+    /// Every verb the parser takes has a page, and every page renders within 80 columns.
+    func testEveryVerbHasAPage() {
+        let verbs = ["ls", "tail", "wait", "send", "peer", "new", "close", "reopen", "rename", "read", "unread",
+                     "collapse", "prompt", "answer", "abort", "plan approve", "plan reject", "plan annotate",
+                     "timeline", "search", "open", "closed", "options", "raw", "intake run", "host ls",
+                     "host info", "host prune", "infra up", "infra down", "infra ls", "infra doctor",
+                     "infra extend", "account list", "account switch", "run", "exec", "up", "down", "restart",
+                     "sync", "ps", "logs", "stop", "diff", "apply", "recipe ls", "recipe check", "recipe add",
+                     "plan", "host", "infra", "account", "recipe", "intake"]
+        for verb in verbs {
+            XCTAssertEqual(CLIHelp.topic(for: verb.components(separatedBy: " ")), verb)
+            let text = CLIHelp.text(for: verb)
+            XCTAssertTrue(text.hasPrefix("flightdeck \(verb) — "), verb)
+            for line in text.components(separatedBy: "\n") where !line.hasPrefix("  flightdeck") {
+                XCTAssertLessThanOrEqual(line.count, 80, "\(verb): \(line)")
+            }
+        }
+        XCTAssertTrue(CLIHelp.text(for: nil).contains("Delegated runs:"))
+    }
+    func testUsageHintNamesTheVerb() {
+        XCTAssertEqual(CLIHelp.hint(for: ["send", "S"]),
+                       ["usage:", "  flightdeck send S TEXT [--wait [--timeout D]]", "Run flightdeck help send for details."])
+        XCTAssertEqual(CLIHelp.hint(for: ["bogus"]), ["Run flightdeck --help to see every command."])
+    }
     func testTail() throws {
         XCTAssertEqual(try parse("tail", "--session", "self", "--since", "12", "--no-snapshot").command,
                        .tail(session: "self", since: 12, noSnapshot: true))

@@ -111,6 +111,35 @@ enum CodexTimelineMapper {
                 return []
             }
 
+        case ("response_item", "function_call")
+            where isPeerDelivery(payload) && payload["name"] as? String == "ReceiveMessages":
+            // The half of a peer delivery the agent never made: `CodexPeerInbox` writes a
+            // `ReceiveMessages` call so the message reads as data the agent fetched. The
+            // message is the output, below; a tool card for the call says nothing.
+            return []
+
+        case ("response_item", "function_call_output") where isPeerDelivery(payload):
+            // Another session's message, drawn the way a claude tab draws one: a named notice
+            // in prose. As a tool result it was a `ReceiveMessages` card full of envelope
+            // markup — 514 of them across this Mac's rollouts on 2026-10-31.
+            let text = outputText(payload["output"])
+            if let notice = PeerMessageEnvelope.transportNotice(in: text) {
+                return [
+                    item(id, .systemNotice, TimelineItem.Body(
+                        text: notice, tool: PeerMessageEnvelope.transportNoticeTag
+                    ), at)
+                ]
+            }
+            let message = PeerMessageEnvelope.message(in: text)
+                ?? PeerMessageEnvelope.legacyBatch(in: text)
+                ?? PeerMessageEnvelope.Message(sender: nil, text: text)
+            guard !message.text.isEmpty else { return [] }
+            return [
+                item(id, .systemNotice, TimelineItem.Body(
+                    text: message.text, tool: PeerMessageEnvelope.tag, sender: message.sender
+                ), at)
+            ]
+
         case ("response_item", "function_call"):
             // `arguments` is a JSON **string**, not an object — the one shape difference from
             // claude's `input`. Parsed so the detail screen shows structure rather than one
@@ -168,6 +197,10 @@ enum CodexTimelineMapper {
             // a failed codex tool renders as a result whose text says it failed.
             return []
         }
+    }
+
+    private static func isPeerDelivery(_ payload: [String: Any]) -> Bool {
+        (payload["call_id"] as? String)?.hasPrefix(PeerMessageEnvelope.codexCallPrefix) == true
     }
 
     private static func item(
