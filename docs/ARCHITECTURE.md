@@ -1535,6 +1535,22 @@ field is optional and additive. `WireIntakeDetail.choose == true` is the phone's
 `intake.choose`, because an older Mac drops the socket on an unknown op; without it the phone keeps
 "choose on your Mac". A send nobody answers ends at `IntakeCommandModel`'s deadline with a message.
 
+**Clarifying questions are choices.** Triage may return `structured` questions beside the plain
+`questions` strings (`StructuredQuestion` in IntakeKit: `single`, `multi`, `toggle` or `text`, with
+options, `recommended` ids and `allowOther`). An agent that returns only strings, and every intake
+saved before this, still shows as text questions (`TriageExchange.presentedQuestions`). The Mac form
+(`StructuredQuestionView`) preselects the recommended options, and ⌘↩ sends. `IntakeService.answer(_:structured:)`
+turns the answers back into the plain `answers: [String]` that later rounds always read.
+**The phone answers over `intake.answer`** (`FleetCommand.intakeAnswer`: `id`, `token`, `round`,
+`answers: [WireStructuredAnswer]`). `WireQuestions` carries `round` and `structured`, and
+`WireIntakeDetail.structuredQuestions == true` is the phone's licence to send it: an older Mac drops
+the socket on an unknown op, so without the flag the phone keeps "Answer on your Mac for now". The
+Mac refuses with `stale_questions` (the round was replaced or answered; the phone says "These
+questions changed. Here are the new ones." and reloads), `unknown_intake`, `not_awaiting_answers`,
+`unknown_question` or `invalid_answer`. The phone's Send rules (`WireStructuredQuestion.isComplete`
+and `initialAnswer` in FleetKit) mirror IntakeKit's; the Mac stays authoritative. The form
+(`StructuredQuestionForm`) shows "Sending…" until the intake leaves `needsAnswers` or its round changes.
+
 **The phone edits rounds.** The inspector is the editor (`RoundEditorView`, over `RoundEditor`) when the
 detail has `editRounds == true`, `steer`, and the menus: `roundsMenu` (`WireRoundsMenu`: every agent
 the Mac's model menu lists in its order, usable ones with models, per-model effort levels, the account

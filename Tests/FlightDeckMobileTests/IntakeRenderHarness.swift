@@ -279,6 +279,16 @@ final class IntakeRenderHarness: XCTestCase {
         try draw(intake: running, style: .light, size: .accessibility5, to: "steer-running-ax5.png", height: 2600)
     }
 
+    /// The clarifying questions as choices: radio, checkbox, toggle and text, the recommended
+    /// option marked, and "Other…" open on the last single question.
+    func testDrawStructuredQuestions() throws {
+        try begin()
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            try draw(intake: Fixture.structuredQuestions, style: style, size: nil,
+                     to: "structured-questions-\(Self.styleName(style)).png", height: 1900)
+        }
+    }
+
     /// `NoteSheet` on its own, full height: a phrase note (quote, all six kinds) and a plan-wide
     /// one (no quote, no Highlight). The keyboard is not drawn offscreen.
     func testDrawNoteSheet() throws {
@@ -609,6 +619,36 @@ private enum Fixture {
             answered: [WireExchange(questions: ["Which worker — the push or the pull side?", "Is backoff jittered today?"],
                                     answers: ["Pull.", "No, fixed 2 s."])]),
         servedAt: t)
+
+    static let structuredQuestions: WireIntakeDetail = {
+        var d = needsAnswers
+        d.steer = true
+        d.structuredQuestions = true
+        d.summary.questionCount = 5
+        d.questions = WireQuestions(
+            open: [], answered: [WireExchange(questions: ["Which worker?"], answers: ["Pull."])], round: 1,
+            structured: [
+                WireStructuredQuestion(
+                    id: "q1", text: "Should a retry reuse the original request id?", kind: "single",
+                    options: [WireOption(id: "reuse", label: "Reuse it", detail: "The server can dedupe."),
+                              WireOption(id: "mint", label: "Mint a new one", detail: "Logs tell attempts apart.")],
+                    recommended: ["reuse"], allowOther: true),
+                WireStructuredQuestion(
+                    id: "q2", text: "Which errors are retryable?", kind: "multi",
+                    options: [WireOption(id: "timeout", label: "Timeouts"), WireOption(id: "409", label: "409 Conflict"),
+                              WireOption(id: "5xx", label: "5xx responses")],
+                    recommended: ["timeout", "5xx"], allowOther: true),
+                WireStructuredQuestion(
+                    id: "q3", text: "Add jitter to the backoff?", kind: "toggle",
+                    options: [WireOption(id: "jitter", label: "Yes, add jitter")], recommended: ["jitter"]),
+                WireStructuredQuestion(id: "q4", text: "What is the ceiling on attempts?", kind: "text"),
+                WireStructuredQuestion(
+                    id: "q5", text: "Where should failures be reported?", kind: "single",
+                    options: [WireOption(id: "log", label: "The log"), WireOption(id: "pager", label: "The pager")],
+                    allowOther: true),
+            ])
+        return d
+    }()
 
     /// A Feature plan with everything the editor draws: a rotating reviewer, integrator and polisher,
     /// fallbacks, a cross-check agent on a model with no effort levels, and a role billing its own

@@ -14,7 +14,7 @@ protocol IntakeCommanding: AnyObject {
 
 /// One thing a person can ask of an intake; identifies a send for the in-flight set.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds, answer
 }
 
 enum CommandCopy {
@@ -29,6 +29,7 @@ enum CommandCopy {
                              : "Not connected to your Mac, so this wasn't sent."
         case .server(let code)?:
             switch code {
+            case "stale_questions": return "These questions changed. Here are the new ones."
             case "intake_moved_on": return "This intake has moved on."
             case "not_allowed": return "That isn't possible right now."
             case "note_consumed": return "A round has already read that note."

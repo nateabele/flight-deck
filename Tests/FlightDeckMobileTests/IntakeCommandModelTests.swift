@@ -79,6 +79,23 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertEqual(acked, 0)
     }
 
+    /// An answer sent against a replaced round says so in words, and sends the answers and round
+    /// it was given; any other refusal shows the code.
+    func testAnswerSendsRoundAndStaleQuestionsReadsAsChanged() {
+        let c = StubCommander(), m = model(c)
+        let id = intake
+        let answers = [WireStructuredAnswer(questionID: "q1", selected: ["a"])]
+        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, answers: answers) }, onAck: {})
+        guard case .intakeAnswer(_, _, let round, let sent)? = c.commands.first else { return XCTFail("not sent") }
+        XCTAssertEqual(round, 2)
+        XCTAssertEqual(sent, answers)
+        c.answer(.failure(.server(code: "stale_questions")))
+        XCTAssertEqual(m.message, "These questions changed. Here are the new ones.")
+        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, answers: answers) }, onAck: {})
+        c.answer(.failure(.server(code: "invalid_answer")))
+        XCTAssertEqual(m.message, "Your Mac wouldn't do that (invalid_answer).")
+    }
+
     func testErrSetsMappedMessageAndClears() {
         let c = StubCommander(), m = model(c)
         var acked = 0

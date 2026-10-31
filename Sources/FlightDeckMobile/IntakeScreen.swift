@@ -9,6 +9,11 @@ struct IntakeScreen: View {
     @State private var confirmingStop = false
     /// The fidelity a tap picked, held until the confirmation answers: it starts paid rounds.
     @State private var confirmingFidelity: FidelityOption?
+    /// The round whose answer was sent and not yet replaced: the form stays "Sending…" until the
+    /// projection leaves `needsAnswers` or its round changes.
+    @State private var answeredRound: Int?
+    /// Bumped when the Mac says the questions changed, so the form starts again from the new ones.
+    @State private var formEpoch = 0
     private var commands: IntakeCommandModel { fleet.flightControl.commands(for: id) }
     private var frozenAt: Date? { if case .lost = fleet.state { return fleet.lastLive }; return nil }
 
@@ -144,6 +149,16 @@ struct IntakeScreen: View {
         .buttonStyle(.borderless)
     }
 
+    private func answer(_ answers: [WireStructuredAnswer], round: Int) {
+        answeredRound = round
+        commands.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: round, answers: answers) },
+                      onAck: { model.refresh() },
+                      onFailure: { error in
+                          answeredRound = nil
+                          if case .server(code: "stale_questions")? = error { formEpoch += 1; model.refresh() }
+                      })
+    }
+
     private func tape(_ command: String, stage: String? = nil) {
         commands.send(.tape(command), command: { .intakeTape(id: id, token: $0, command: command, stage: stage) },
                       onAck: { model.refresh() })
@@ -173,7 +188,15 @@ struct IntakeScreen: View {
     }
 
     @ViewBuilder private func sections(for d: WireIntakeDetail, now: Date) -> some View {
-        if let open = d.questions?.open {
+        if d.structuredQuestions == true, d.summary.state == "needsAnswers", let q = d.questions,
+           let structured = q.structured, !structured.isEmpty, let round = q.round {
+            StructuredQuestionForm(
+                title: "Round \(q.answered.count + 1) · \(structured.count) question\(structured.count == 1 ? "" : "s")",
+                questions: structured, sending: commands.inFlight.contains(.answer) || answeredRound == round,
+                enabled: frozenAt == nil
+            ) { answers in answer(answers, round: round) }
+            .id("\(round)-\(formEpoch)")
+        } else if let open = d.questions?.open {
             Section("Round \(d.questions!.answered.count + 1) · \(open.count) question\(open.count == 1 ? "" : "s")") {
                 ForEach(Array(open.enumerated()), id: \.offset) { i, q in
                     Text("\(i + 1). \(q)").font(.subheadline)
