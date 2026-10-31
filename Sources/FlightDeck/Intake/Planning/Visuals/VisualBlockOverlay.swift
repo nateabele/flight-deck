@@ -249,6 +249,8 @@ final class VisualLivePool {
             other.goSnapshot()
         }
         block.goLive()
+        // A block that could not go live (no store, comparing) must not keep the slot.
+        if !block.isLive { release(block) }
     }
 
     /// Marks a live block as just used; a block that is not live is left alone.
