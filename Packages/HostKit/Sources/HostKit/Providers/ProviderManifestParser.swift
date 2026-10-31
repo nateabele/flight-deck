@@ -28,6 +28,17 @@ public enum ProviderManifestParser {
             var reader = TOMLReader(text)
             document = try reader.read()
         } catch let issue as DelegateConfigIssue {
+            // A newer contract may use syntax this reader lacks (dates, say). Its `contract`
+            // line is still plain, so say "newer Flight Deck" instead of a misleading parse error.
+            for (number, text) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let words = text.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if words.count == 2, words[0] == "contract",
+                   let n = Int(words[1].prefix { $0.isNumber }), n > supportedContract {
+                    throw ProviderManifestIssue(
+                        .error, line: number + 1, needsNewerFlightDeck: true,
+                        "needs a newer Flight Deck (this provider is contract \(n); this build reads up to \(supportedContract))")
+                }
+            }
             throw ProviderManifestIssue(issue.severity, line: issue.line, issue.message)
         }
         var warnings: [ProviderManifestIssue] = []
@@ -57,9 +68,19 @@ public enum ProviderManifestParser {
                 "needs a newer Flight Deck (this provider is contract \(contract); this build reads up to \(supportedContract))")
         }
 
-        let id = try required(root, "id", in: "provider.toml") { try string($0, "id") }
-        let name = try required(root, "name", in: "provider.toml") { try string($0, "name") }
-        let version = try required(root, "version", in: "provider.toml") { try string($0, "version") }
+        // `id` is the key the trust file records approvals under and may become a path
+        // component, so it is held to a filename-safe shape here, not at each use.
+        let id = try required(root, "id", in: "provider.toml") { node in
+            let value = try string(node, "id")
+            let safe = value.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]*$", options: .regularExpression) != nil
+            guard safe, !value.contains("..") else {
+                throw ProviderManifestIssue(.error, line: node.line,
+                    "id \"\(value)\" must be letters, digits, \".\", \"_\" or \"-\", start with a letter or digit, and not contain \"..\"")
+            }
+            return value
+        }
+        let name = try required(root, "name", in: "provider.toml") { try nonEmpty($0, "name") }
+        let version = try required(root, "version", in: "provider.toml") { try nonEmpty($0, "version") }
 
         for (key, node) in root.ordered where !topKeys.contains(key) {
             let what = if case .value = node { "key" } else { "table" }
@@ -213,22 +234,24 @@ public enum ProviderManifestParser {
         guard !parts.isEmpty else { throw refuse("must name a file inside the provider folder") }
         let relative = parts.joined(separator: "/")
 
-        let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
-        // Foundation leaves a path alone when its last component does not exist, so a link to
-        // outside followed by a missing file would pass. Resolve the deepest ancestor that does
-        // exist and put the rest back on.
-        var existing = folder.appendingPathComponent(relative)
-        var missing: [String] = []
-        while !FileManager.default.fileExists(atPath: existing.path),
-              existing.pathComponents.count > folder.pathComponents.count {
-            missing.insert(existing.lastPathComponent, at: 0)
-            existing.deleteLastPathComponent()
-        }
-        let resolved = missing.reduce(existing.resolvingSymlinksInPath().standardizedFileURL) {
-            $0.appendingPathComponent($1)
-        }.path
-        guard resolved.hasPrefix(root.hasSuffix("/") ? root : root + "/") else {
-            throw refuse("resolves outside the provider folder through a symlink")
+        let root = folder.resolvingSymlinksInPath().standardizedFileURL
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        // Walk the components one at a time and read each link itself. `fileExists` and
+        // `resolvingSymlinksInPath` both follow a link, so a dangling `link -> /outside/missing`
+        // looked like a missing file and passed.
+        var current = root
+        for part in parts {
+            current.appendPathComponent(String(part))
+            guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else {
+                continue
+            }
+            let target = destination.hasPrefix("/")
+                ? URL(fileURLWithPath: destination)
+                : current.deletingLastPathComponent().appendingPathComponent(destination)
+            current = target.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+            guard (current.path + "/").hasPrefix(prefix) else {
+                throw refuse("resolves outside the provider folder through a symlink")
+            }
         }
         return relative
     }
@@ -246,6 +269,14 @@ public enum ProviderManifestParser {
     private static func string(_ node: TOMLNode, _ field: String) throws -> String {
         guard case .value(.string(let value), _) = node else {
             throw ProviderManifestIssue(.error, line: node.line, "\(field) must be a string")
+        }
+        return value
+    }
+
+    private static func nonEmpty(_ node: TOMLNode, _ field: String) throws -> String {
+        let value = try string(node, field)
+        guard !value.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw ProviderManifestIssue(.error, line: node.line, "\(field) must not be empty")
         }
         return value
     }

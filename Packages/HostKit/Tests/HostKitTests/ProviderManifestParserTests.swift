@@ -150,4 +150,33 @@ final class ProviderManifestParserTests: XCTestCase {
         try Self.specExample.write(to: folder.appendingPathComponent("provider.toml"), atomically: true, encoding: .utf8)
         XCTAssertEqual(try ProviderManifestParser.load(folder: folder).manifest.id, "fd.diagram.mermaid")
     }
+
+    func testEmptyOrUnsafeIdIsRefused() {
+        for bad in ["", "../x", "a/b", "a b", ".hidden", "a..b"] {
+            let found = issue(head.replacingOccurrences(of: "id = \"p\"", with: "id = \"\(bad)\"") + kind())
+            XCTAssertEqual(found?.line, 1, "id \"\(bad)\" must be refused at its line")
+        }
+        XCTAssertNil(issue(head.replacingOccurrences(of: "id = \"p\"", with: "id = \"fd.a_b-1\"") + kind()))
+        XCTAssertEqual(issue(head.replacingOccurrences(of: "name = \"P\"", with: "name = \"\"") + kind())?.line, 2)
+        XCTAssertEqual(issue(head.replacingOccurrences(of: "version = \"1\"", with: "version = \"\"") + kind())?.line, 3)
+    }
+
+    func testDanglingSymlinkPointingOutsideIsRefused() throws {
+        let missing = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nowhere-\(UUID().uuidString)/missing")
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("link"), withDestinationURL: missing)
+        let found = issue(head + kind().replacingOccurrences(of: "i.md", with: "link"))
+        XCTAssertEqual(found?.line, 10)
+        XCTAssertTrue(found?.message.contains("symlink") == true)
+        // A dangling link that stays inside is only a missing file, which `check` reports.
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("inner").path, withDestinationPath: "nothing.md")
+        XCTAssertNil(issue(head + kind().replacingOccurrences(of: "i.md", with: "inner")))
+    }
+
+    func testNewerContractWithUnknownSyntaxSaysNeedsNewer() {
+        let found = issue("contract = 3\nstamp = 2026-10-31T10:00:00Z\n[[[weird\n")
+        XCTAssertEqual(found?.needsNewerFlightDeck, true)
+        XCTAssertNil(issue("contract = 1\n[[[weird\n")?.needsNewerFlightDeck.nilIfFalse)
+    }
 }
+
+private extension Bool { var nilIfFalse: Bool? { self ? true : nil } }
