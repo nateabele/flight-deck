@@ -13,7 +13,12 @@ public struct PlanExportPreview: Equatable, Sendable {
     /// Repo-relative, sorted.
     public var paths: [String]
     public var commitMessage: String
-    public init(paths: [String], commitMessage: String) { self.paths = paths; self.commitMessage = commitMessage }
+    /// Repo-relative files already committed there that this release deletes (the new export no
+    /// longer has them), sorted.
+    public var removed: [String]
+    public init(paths: [String], commitMessage: String, removed: [String] = []) {
+        self.paths = paths; self.commitMessage = commitMessage; self.removed = removed
+    }
 }
 
 /// Everything release will put in the repo for one intake: `docs/plans/<slug>/`, as bytes, with

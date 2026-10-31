@@ -419,7 +419,7 @@ struct ReleaseReviewView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 90)
+                .frame(maxHeight: 150)
                 Text(tail).font(.caption2).foregroundStyle(.secondary)
             }
             .accessibilityIdentifier("release-review-export")

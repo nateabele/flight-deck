@@ -38,6 +38,8 @@ struct ReleaseSheetModel {
         guard let export, !export.paths.isEmpty else { return [] }
         return ["Writes \(export.paths.count) \(export.paths.count == 1 ? "file" : "files") to the repo"]
             + export.paths
+            // A re-release replaces the folder whole; what it drops is deleted in the same commit.
+            + export.removed.map { "Removes \($0)" }
             + ["Commits only those paths: \(export.commitMessage)"]
     }
 

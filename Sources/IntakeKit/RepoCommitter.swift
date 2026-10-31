@@ -19,23 +19,32 @@ public struct RepoCommitter: Sendable {
         case badSlug(String)
         case notRepoRoot(String)
         case timeout(step: String)
+        /// A file operation failed.
+        case io(String)
     }
 
     public struct Result: Equatable, Sendable {
         public var sha: String
         public var paths: [String]
         public var noChange = false
+        /// The subset of `paths` the commit deleted.
+        public var removed: [String] = []
     }
 
     private let runner: CommandRunner
     private let environment: [String: String]
     private let gitTimeout: TimeInterval
 
+    /// Where a test can act between steps, to prove a swap in that gap changes nothing outside.
+    enum Stage { case checked, written }
+    var onStage: (@Sendable (Stage) -> Void)?
+
     /// `environment` is the complete child environment; the default is this process's. Either way
     /// `GIT_TERMINAL_PROMPT=0` is set, so a credential prompt fails instead of hanging release,
     /// and the variables that re-aim git at another repo are dropped: `-C <repo>` must mean the
     /// repo it says. `GIT_LITERAL_PATHSPECS` is deliberately not set (hooks inherit the
-    /// environment); the pathspec carries `:(literal)` itself.
+    /// environment); the pathspec carries `:(literal)` itself, so an inherited pathspec-magic
+    /// variable or injected config must not change what a pathspec means.
     ///
     /// `gitTimeout` bounds each git call, so a hook that never returns fails the release.
     public init(runner: CommandRunner = SystemCommandRunner(),
@@ -43,7 +52,9 @@ public struct RepoCommitter: Sendable {
                 gitTimeout: TimeInterval = 120) {
         self.runner = runner
         var env = environment
-        for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] { env[k] = nil }
+        for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+                  "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+                  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"] { env[k] = nil }
         env["GIT_TERMINAL_PROMPT"] = "0"
         self.environment = env
         self.gitTimeout = gitTimeout
@@ -60,6 +71,15 @@ public struct RepoCommitter: Sendable {
         return id.isEmpty ? .unmarked : .intake(id)
     }
 
+    /// What a release of `export` would do to the repo: the files it writes, and the files already
+    /// committed under the folder that the new export no longer has.
+    public func preview(_ export: PlanExport, repo: URL) async throws -> PlanExportPreview {
+        let tracked = try await git(repo, "-c", "core.quotePath=false", "ls-files", "--", ":(literal)\(export.directory)")
+        let keep = Set(export.preview.paths)
+        let removed = tracked.split(separator: "\n").map(String.init).filter { !keep.contains($0) }.sorted()
+        return PlanExportPreview(paths: export.preview.paths, commitMessage: export.commitMessage, removed: removed)
+    }
+
     public func commit(_ export: PlanExport, repo: URL) async throws -> Result {
         // Everything below up to the first write is a check; a refusal changes nothing. They are
         // here, not only in `resolveSlug`, because the folder can change between choosing a slug
@@ -73,14 +93,35 @@ public struct RepoCommitter: Sendable {
         let top = try await git(repo, "rev-parse", "--show-toplevel").trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.realpath(top) == repoReal else { throw Failure.notRepoRoot(top) }
 
-        try Self.checkNoSymlinks(repoReal: repoReal, dir: dir)
-        let root = repo.appendingPathComponent(dir, isDirectory: true)
-        let existed = FileManager.default.fileExists(atPath: root.path)
+        // From here every delete, write and rollback goes through these descriptors, opened one
+        // component at a time without following links. A path would be looked up again at each
+        // use, and a swap in between could point it outside the repo.
+        let rootDir: SafeTree.Dir
+        var docsDir: SafeTree.Dir?, plansDir: SafeTree.Dir?, slugDir: SafeTree.Dir?
+        do {
+            rootDir = try SafeTree.openRoot(repoReal)
+            let a = SafeTree.identity(rootDir), b = SafeTree.identity(ofPath: top)
+            guard let a, let b, a.dev == b.dev, a.ino == b.ino else { throw Failure.notRepoRoot(top) }
+            docsDir = try SafeTree.openChild(rootDir, "docs")
+            plansDir = try docsDir.flatMap { try SafeTree.openChild($0, "plans") }
+            slugDir = try plansDir.flatMap { try SafeTree.openChild($0, export.slug) }
+        } catch let e as SafeTree.Fail {
+            throw e.notPlain ? Failure.symlink(Self.relativeName(e.name, dir: dir)) : Failure.io(e.detail)
+        }
+        let existed = slugDir != nil
         if existed {
             let mine = export.file(PlanExporter.markerName).map {
                 String(decoding: $0.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             } ?? ""
             guard !mine.isEmpty, Self.owner(of: export.slug, repo: repo) == .intake(mine) else { throw Failure.notOwned(dir) }
+        }
+
+        // `assume-unchanged` and `skip-worktree` hide edits from status, and the replace below
+        // would destroy them. Lowercase flags and `S` mark them.
+        let flags = try await git(repo, "-c", "core.quotePath=false", "ls-files", "-v", "--", spec)
+        for line in flags.split(separator: "\n") {
+            guard let f = line.first, f.isLowercase || f == "S" else { continue }
+            throw Failure.dirty(path: String(line.dropFirst(2)), status: String(line))
         }
 
         // `--ignored` as well: a `.DS_Store` or a swap file is invisible to plain status, and the
@@ -93,42 +134,55 @@ public struct RepoCommitter: Sendable {
         let ignored = try await ignoredPaths(repo, export.files.map { "\(dir)/\($0.path)" })
         if !ignored.isEmpty { throw Failure.ignored(ignored) }
 
-        let fm = FileManager.default
+        onStage?(.checked)
+        var plansForRollback = plansDir
         do {
-            // The folder is clean and this intake's own, so it is replaced whole: a file the new
-            // export no longer has leaves with it, and `git add` stages that deletion too.
-            if existed { try fm.removeItem(at: root) }
-            for f in export.files {
-                let url = root.appendingPathComponent(f.path)
-                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try f.data.write(to: url)
+            do {
+                let docs = try docsDir ?? SafeTree.openOrMake(rootDir, "docs")
+                let plans = try plansDir ?? SafeTree.openOrMake(docs, "plans")
+                plansForRollback = plans
+                // The folder is clean and this intake's own, so it is replaced whole: a file the new
+                // export no longer has leaves with it, and `git add` stages that deletion too.
+                if existed { try SafeTree.removeTree(plans, export.slug) }
+                let slugNow = try SafeTree.openOrMake(plans, export.slug)
+                for f in export.files { try SafeTree.write(f.data, to: f.path, under: slugNow) }
+            } catch let e as SafeTree.Fail {
+                throw e.notPlain ? Failure.symlink(Self.relativeName(e.name, dir: dir)) : Failure.io(e.detail)
             }
+            onStage?(.written)
             try await git(repo, "add", "--", spec)
-            let diff = try await run(repo, ["diff", "--cached", "--quiet", "--", spec])
-            if diff.exitCode == 0 {
+            let staged = try await git(repo, "-c", "core.quotePath=false", "diff", "--cached", "--name-status", "--no-renames", "--", spec)
+            if staged.isEmpty {
                 // Identical to what HEAD has: nothing to commit, and not a failure.
                 let head = try await git(repo, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
                 return Result(sha: head, paths: export.preview.paths, noChange: true)
             }
-            guard diff.exitCode == 1 else { throw Failure.git(step: "diff", stderr: diff.stderr) }
+            var paths: [String] = [], removed: [String] = []
+            for line in staged.split(separator: "\n") {
+                let cols = line.split(separator: "\t", maxSplits: 1).map(String.init)
+                guard cols.count == 2 else { continue }
+                paths.append(cols[1])
+                if cols[0] == "D" { removed.append(cols[1]) }
+            }
             try await git(repo, "commit", "-m", export.commitMessage, "--", spec)
+            let sha = try await git(repo, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
+            return Result(sha: sha, paths: paths, noChange: false, removed: removed)
         } catch {
-            await rollback(repo: repo, spec: spec, root: root, existed: existed)
+            await rollback(repo: repo, spec: spec, plans: plansForRollback, slug: export.slug, existed: existed)
             throw error
         }
-        let sha = try await git(repo, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
-        return Result(sha: sha, paths: export.preview.paths)
     }
 
     /// Puts the folder back as HEAD has it. Only this folder, and only with `restore`/`clean`/`reset`
-    /// scoped to it; failures here are swallowed because the original error is the one to report.
-    private func rollback(repo: URL, spec: String, root: URL, existed: Bool) async {
+    /// scoped to it, or a delete through the descriptor opened at the start; failures here are
+    /// swallowed because the original error is the one to report.
+    private func rollback(repo: URL, spec: String, plans: SafeTree.Dir?, slug: String, existed: Bool) async {
         _ = try? await git(repo, "reset", "-q", "--", spec)
         if existed {
             _ = try? await git(repo, "restore", "--source=HEAD", "--worktree", "--", spec)
             _ = try? await git(repo, "clean", "-fdq", "--", spec)
-        } else {
-            try? FileManager.default.removeItem(at: root)
+        } else if let plans {
+            try? SafeTree.removeTree(plans, slug)
         }
     }
 
@@ -196,25 +250,12 @@ public struct RepoCommitter: Sendable {
         return String(cString: p)
     }
 
-    /// Every component from the repo down to the export folder must be a real directory (or not
-    /// exist yet). A symlink anywhere would make `removeItem` delete what it points at, outside
-    /// the repo, while git says the folder is clean.
-    private static func checkNoSymlinks(repoReal: String, dir: String) throws {
-        var current = repoReal
-        var rel = ""
-        for comp in dir.split(separator: "/") {
-            current += "/" + comp
-            rel += (rel.isEmpty ? "" : "/") + comp
-            var st = stat()
-            if lstat(current, &st) != 0 {
-                guard errno == ENOENT else { throw Failure.unsafePath(rel) }
-                break
-            }
-            if (st.st_mode & S_IFMT) == S_IFLNK { throw Failure.symlink(rel) }
-            if (st.st_mode & S_IFMT) != S_IFDIR { throw Failure.unsafePath(rel) }
-            guard let real = realpath(current), real == repoReal || real.hasPrefix(repoReal + "/") else {
-                throw Failure.symlink(rel)
-            }
+    /// The repo-relative name for the component a refusal was on.
+    private static func relativeName(_ name: String, dir: String) -> String {
+        switch name {
+        case "docs": "docs"
+        case "plans": "docs/plans"
+        default: dir
         }
     }
 

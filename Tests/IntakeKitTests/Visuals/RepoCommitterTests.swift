@@ -136,7 +136,11 @@ final class RepoCommitterTests: XCTestCase {
         let rec = RecordingRunner()
         rec.top = repo.path
         _ = try? await RepoCommitter(runner: rec, environment: ["GIT_DIR": "/elsewhere", "GIT_WORK_TREE": "/elsewhere",
-                                                               "GIT_INDEX_FILE": "/x", "GIT_OBJECT_DIRECTORY": "/x", "PATH": "/usr/bin"])
+                                                               "GIT_INDEX_FILE": "/x", "GIT_OBJECT_DIRECTORY": "/x", "PATH": "/usr/bin",
+                                                               "GIT_LITERAL_PATHSPECS": "1", "GIT_GLOB_PATHSPECS": "1",
+                                                               "GIT_NOGLOB_PATHSPECS": "1", "GIT_ICASE_PATHSPECS": "1",
+                                                               "GIT_COMMON_DIR": "/x", "GIT_CONFIG_PARAMETERS": "'a.b=c'",
+                                                               "GIT_CONFIG_COUNT": "1"])
             .commit(sample(), repo: repo)
         XCTAssertFalse(rec.calls.isEmpty)
         XCTAssertTrue(rec.calls.contains { $0.arguments.contains(":(literal)docs/plans/demo") }, "one literal pathspec")
@@ -144,8 +148,9 @@ final class RepoCommitterTests: XCTestCase {
             XCTAssertEqual(Array(c.arguments.prefix(2)), ["-C", repo.path])
             XCTAssertFalse(c.arguments.contains("stash") || c.arguments.contains("checkout") || c.arguments.contains("--no-verify"))
             XCTAssertEqual(c.environment["GIT_TERMINAL_PROMPT"], "0")
-            for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] { XCTAssertNil(c.environment[k], k) }
-            XCTAssertNil(c.environment["GIT_LITERAL_PATHSPECS"], "hooks would inherit it")
+            for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_LITERAL_PATHSPECS",
+                      "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_COMMON_DIR",
+                      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"] { XCTAssertNil(c.environment[k], k) }
         }
     }
 
@@ -270,6 +275,72 @@ final class RepoCommitterTests: XCTestCase {
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 15)
         XCTAssertFalse(exists("docs/plans/demo"), "rolled back")
+    }
+
+    // MARK: Safety review, fix round 2
+
+    /// A swap in the gap between the checks and the act must not reach outside the repo.
+    private func swapDocsForALink(to o: URL) {
+        let docs = repo.appendingPathComponent("docs")
+        try? FileManager.default.moveItem(at: docs, to: repo.appendingPathComponent("docs-moved"))
+        try? FileManager.default.createSymbolicLink(at: docs, withDestinationURL: o)
+    }
+    private func assertOutsideUntouched(_ o: URL, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(try? String(contentsOf: o.appendingPathComponent("plans/demo/keep.txt")), "precious", file: file, line: line)
+        XCTAssertEqual(try? String(contentsOf: o.appendingPathComponent("plans/demo/plan.md")), "outside plan", file: file, line: line)
+    }
+
+    func testASwapBetweenCheckAndDeleteTouchesNothingOutside() async throws {
+        let o = try makeOutside()
+        try "outside plan".write(to: o.appendingPathComponent("plans/demo/plan.md"), atomically: true, encoding: .utf8)
+        _ = try await committer().commit(sample(), repo: repo)
+        var c = committer()
+        c.onStage = { [self] stage in if stage == .checked { swapDocsForALink(to: o) } }
+        _ = try? await c.commit(sample("plan v2"), repo: repo)
+        assertOutsideUntouched(o)
+    }
+
+    func testASwapBeforeARollbackTouchesNothingOutside() async throws {
+        let o = try makeOutside()
+        try "outside plan".write(to: o.appendingPathComponent("plans/demo/plan.md"), atomically: true, encoding: .utf8)
+        var c = committer()
+        c.onStage = { [self] stage in if stage == .written { swapDocsForALink(to: o) } }
+        // The new folder is written, then `add` fails because docs is now a link: the rollback runs.
+        _ = try? await c.commit(sample(), repo: repo)
+        assertOutsideUntouched(o)
+    }
+
+    func testAssumeUnchangedAndSkipWorktreeEditsAreRefused() async throws {
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            _ = try await committer().commit(sample(flag), repo: repo)
+            try await git("update-index", flag, "docs/plans/demo/plan.md")
+            try write("docs/plans/demo/plan.md", "my edit \(flag)")
+            do { _ = try await committer().commit(sample("other"), repo: repo); XCTFail("should refuse \(flag)") }
+            catch let RepoCommitter.Failure.dirty(path, _) { XCTAssertEqual(path, "docs/plans/demo/plan.md") }
+            XCTAssertEqual(read("docs/plans/demo/plan.md"), "my edit \(flag)")
+            try await git("update-index", flag == "--assume-unchanged" ? "--no-assume-unchanged" : "--no-skip-worktree",
+                          "docs/plans/demo/plan.md")
+            try await git("checkout-index", "-f", "docs/plans/demo/plan.md")
+        }
+    }
+
+    func testTheResultNamesWhatGitCommittedIncludingDeletions() async throws {
+        _ = try await committer().commit(sample(), repo: repo)
+        let v2 = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("plan v2".utf8)),
+            ExportedFile(path: PlanExporter.markerName, data: Data("intake-1\n".utf8))], warnings: [])
+        let r = try await committer().commit(v2, repo: repo)
+        XCTAssertEqual(r.paths.sorted(), ["docs/plans/demo/plan.md", "docs/plans/demo/visuals/a/x.txt"])
+        XCTAssertEqual(r.removed, ["docs/plans/demo/visuals/a/x.txt"])
+    }
+
+    func testThePreviewListsWhatAReReleaseWillRemove() async throws {
+        _ = try await committer().commit(sample(), repo: repo)
+        let v2 = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("v2".utf8))], warnings: [])
+        let p = try await committer().preview(v2, repo: repo)
+        XCTAssertEqual(p.removed, ["docs/plans/demo/.flightdeck-intake", "docs/plans/demo/visuals/a/x.txt"])
+        XCTAssertEqual(p.paths, ["docs/plans/demo/plan.md"])
+        let fresh = try await committer().preview(PlanExport(slug: "fresh", files: [], warnings: []), repo: repo)
+        XCTAssertEqual(fresh.removed, [])
     }
 
     func testSlugOwnerReadsTheMarker() async throws {

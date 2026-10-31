@@ -109,5 +109,10 @@ final class ReleaseSheetExportLinesTests: XCTestCase {
                                            "docs/plans/p/visuals/a/README.md",
                                            "Commits only those paths: docs: plan p for release"])
         XCTAssertEqual(ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:]).exportLines, [])
+        let withRemoval = PlanExportPreview(paths: ["docs/plans/p/plan.md"], commitMessage: "docs: plan p for release",
+                                            removed: ["docs/plans/p/visuals/old/a.txt"])
+        XCTAssertEqual(ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:], export: withRemoval).exportLines,
+                       ["Writes 1 file to the repo", "docs/plans/p/plan.md",
+                        "Removes docs/plans/p/visuals/old/a.txt", "Commits only those paths: docs: plan p for release"])
     }
 }

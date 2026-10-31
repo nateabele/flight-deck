@@ -271,7 +271,8 @@ final class PlanningRenderTests: XCTestCase {
             "visuals/dispatch-board/snapshot@default-1x.png", "visuals/dispatch-board/snapshot@empty-1x.png",
             "visuals/dispatch-board/_unused-alternates/1/README.md",
             "visuals/check-in/README.md", "visuals/check-in/export/index.html",
-        ].map { "docs/plans/\(slug)/\($0)" }, commitMessage: "docs: plan \(slug) for release")
+        ].map { "docs/plans/\(slug)/\($0)" }, commitMessage: "docs: plan \(slug) for release",
+           removed: ["docs/plans/\(slug)/visuals/old-board/diagram.mmd"])
         let view = ReleaseReviewView(store: store, intakeID: intake.id, onClose: {}, previewReview: review,
                                      exportPreview: preview)
         try PlanningRender.write(view, size: NSSize(width: 680, height: 620),
