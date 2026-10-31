@@ -124,6 +124,24 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: work.appendingPathComponent("graph.json").path))
     }
 
+    /// A seat's CLI never acts as anyone on Flight Deck's control socket: the runner's own token
+    /// (in the runner's environment) stays the runner's, and an absent token would read as the
+    /// unscoped human, so every seat carries the value the socket refuses as invalid, the one a
+    /// thread's agent carries.
+    func testEverySeatCarriesAFailClosedControlCallerNeverTheRunnerToken() async throws {
+        let runnerToken = "intake-runner:\(UUID().uuidString).abc123"
+        let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# From \(call.model!)"))) }
+        var i = inputs(config(drafters: [Slot(codexA), Slot(claudeB)]))
+        i.environment["FLIGHT_DECK_CALLER"] = runnerToken
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), i))
+        let seats = runner.calls("drafter")
+        XCTAssertEqual(seats.count, 2)
+        for seat in seats {
+            XCTAssertEqual(seat.environment["FLIGHT_DECK_CALLER"], ThreadTurnExecutor.agentCaller, seat.executable)
+            XCTAssertFalse(seat.environment.values.contains(runnerToken))
+        }
+    }
+
     /// `--restricted` drops the user settings' `env`; the executor puts it back for
     /// claude children only, under the explicit environment, and before the unsets.
     func testClaudeChildrenGetTheUserSettingsEnvUnderneathTheProcessEnv() async throws {

@@ -694,7 +694,13 @@ public struct RoundExecutor: Sendable {
                                      action: "Switch this slot to another agent."), sessionID: nil)
         }
         // The project's account for the seat's agent (`billing`): nil is the built-in home.
-        let environment = HeadlessCommand.environment(for: command, base: inputs.environment, home: userHome,
+        // The seat's CLI is no one on the control socket: the runner's environment carries the
+        // runner's own token, and no token at all would read as the unscoped human (a codex
+        // shell can reach the socket). So it carries the value the socket refuses as invalid,
+        // as a thread's agent does (`ThreadTurnExecutor.agentCaller`).
+        var base = inputs.environment
+        base[ThreadTurnExecutor.callerVariable] = ThreadTurnExecutor.agentCaller
+        let environment = HeadlessCommand.environment(for: command, base: base, home: userHome,
                                                      account: request.account)
         let profile = AgentProfiles.profile(for: choice.agent)
         if profile.headlessSignInPreflight, let signedOut = await signedOutDiagnosis(profile, cwd: cwd, environment: environment) {
