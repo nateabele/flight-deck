@@ -1,0 +1,387 @@
+[
+  {
+    "edit": "xi phi chi kappa nu mu psi theta mu iota kappa theta mu lambda tau gamma upsilon lambda eta beta",
+    "rationale": "kappa epsilon theta kappa mu sigma chi kappa nu omega lambda lambda",
+    "section": "Phase 1 \u2014 item 4"
+  },
+  {
+    "edit": "tau omicron pi sigma sigma beta beta iota nu omega chi alpha xi iota theta sigma sigma zeta phi upsilon",
+    "rationale": "beta chi pi delta psi nu nu zeta chi phi kappa phi",
+    "section": "Dependency order"
+  },
+  {
+    "edit": "tau omicron phi tau kappa mu rho alpha beta rho tau iota alpha psi sigma kappa gamma xi pi alpha",
+    "rationale": "mu eta omega chi psi kappa omicron pi nu kappa sigma alpha",
+    "section": "Phase 2 \u2014 item 6"
+  },
+  {
+    "edit": "xi alpha delta sigma beta phi gamma tau kappa tau mu nu nu alpha tau sigma delta nu phi delta",
+    "rationale": "beta xi gamma omega nu epsilon beta iota eta omega psi phi",
+    "section": "Opening paragraph"
+  },
+  {
+    "edit": "tau omicron phi chi upsilon mu mu phi alpha kappa gamma theta xi sigma gamma psi iota psi chi rho",
+    "rationale": "mu iota kappa pi zeta theta omicron mu theta delta rho lambda",
+    "section": "Phase 6 \u2014 item 8"
+  },
+  {
+    "edit": "tau omicron phi omega tau phi alpha alpha psi mu epsilon zeta tau theta kappa rho eta xi zeta tau",
+    "rationale": "chi lambda lambda iota eta omicron pi omicron delta rho zeta zeta",
+    "section": "Phase 0 \u2014 item 3"
+  },
+  {
+    "edit": "tau omicron phi omicron phi upsilon psi sigma eta pi upsilon gamma xi psi omega omicron epsilon sigma gamma beta",
+    "rationale": "phi upsilon upsilon theta sigma phi iota alpha theta phi zeta kappa",
+    "section": "Phase 3 \u2014 item 5"
+  },
+  {
+    "edit": "xi alpha pi epsilon theta iota zeta sigma nu epsilon delta mu gamma omicron omicron omicron omicron lambda omega lambda",
+    "rationale": "iota kappa lambda phi pi xi lambda kappa phi chi lambda mu",
+    "section": "Phase 5: workstream 5"
+  },
+  {
+    "edit": "xi rho mu phi tau tau nu iota gamma alpha rho kappa tau alpha gamma chi xi omicron rho mu",
+    "rationale": "nu delta phi lambda mu sigma mu mu omicron nu omega xi",
+    "section": "Phase 0 \u2014 item 7"
+  },
+  {
+    "edit": "tau omicron phi tau zeta theta lambda upsilon sigma theta delta omega pi iota iota upsilon alpha xi alpha kappa",
+    "rationale": "mu mu iota nu phi iota theta alpha beta rho rho xi",
+    "section": "Phase 1 \u2014 item 6"
+  },
+  {
+    "edit": "tau omicron phi eta epsilon mu iota psi alpha alpha iota omega nu pi delta pi upsilon delta psi sigma",
+    "rationale": "beta nu nu lambda omega tau kappa epsilon epsilon delta sigma omega",
+    "section": "Phase 0 \u2014 item 4"
+  },
+  {
+    "edit": "tau omicron phi eta lambda upsilon epsilon alpha rho gamma pi omega psi rho lambda nu sigma alpha alpha beta",
+    "rationale": "psi psi omicron psi delta phi upsilon omega zeta iota pi omega",
+    "section": "Phase 3 \u2014 item 4"
+  },
+  {
+    "edit": "xi nu epsilon omicron chi theta gamma tau tau tau sigma alpha xi zeta sigma nu omega tau theta epsilon",
+    "rationale": "epsilon delta sigma kappa omega sigma rho eta lambda beta xi upsilon",
+    "section": "Phase 7: workstream 7"
+  },
+  {
+    "edit": "xi nu epsilon omicron chi theta lambda tau tau tau theta omega chi zeta beta nu pi iota beta epsilon",
+    "rationale": "omega delta epsilon sigma gamma zeta omega alpha theta epsilon delta psi",
+    "section": "Phase 1: workstream 1"
+  },
+  {
+    "edit": "xi nu theta iota eta theta lambda tau tau tau eta alpha tau zeta rho phi upsilon tau pi gamma",
+    "rationale": "alpha delta gamma rho alpha tau beta gamma epsilon pi zeta beta",
+    "section": "Phase 0: workstream 0"
+  },
+  {
+    "edit": "xi rho mu phi theta kappa sigma chi delta delta eta delta nu beta beta delta phi phi gamma sigma",
+    "rationale": "eta psi upsilon sigma phi omicron upsilon iota alpha beta theta phi",
+    "section": "Phase 3 \u2014 item 7"
+  },
+  {
+    "edit": "xi rho lambda phi mu rho zeta theta zeta pi zeta pi xi eta chi tau chi lambda nu xi",
+    "rationale": "tau gamma chi gamma rho theta theta mu theta gamma rho chi",
+    "section": "Phase 6 \u2014 items 2 and 3"
+  },
+  {
+    "edit": "xi rho omega phi lambda rho tau kappa mu rho delta psi upsilon rho beta iota zeta upsilon rho rho",
+    "rationale": "psi theta psi lambda omicron theta chi delta epsilon upsilon lambda eta",
+    "section": "Phase 0 \u2014 item 2"
+  },
+  {
+    "edit": "xi sigma omega beta kappa mu omega zeta upsilon alpha delta nu tau iota gamma delta omicron phi gamma delta",
+    "rationale": "beta epsilon kappa phi zeta rho iota alpha tau omega eta alpha",
+    "section": "Product decisions \u2014 mu gamma"
+  },
+  {
+    "edit": "tau omicron phi zeta chi rho mu eta mu chi kappa epsilon xi alpha theta gamma rho rho beta epsilon",
+    "rationale": "beta epsilon chi kappa upsilon nu omicron kappa omega zeta mu delta",
+    "section": "Phase 1 \u2014 item 1"
+  },
+  {
+    "edit": "tau omicron phi omicron nu zeta sigma alpha upsilon phi kappa rho omega zeta tau mu omega kappa lambda zeta",
+    "rationale": "sigma rho omicron omega rho pi iota epsilon alpha omicron lambda eta",
+    "section": "Phase 2 \u2014 item 5"
+  },
+  {
+    "edit": "tau omicron phi delta omicron theta gamma rho epsilon tau rho omicron kappa theta eta gamma alpha xi lambda gamma",
+    "rationale": "mu kappa gamma pi zeta eta alpha eta iota chi psi omicron",
+    "section": "Phase 7 \u2014 items 5 through 7"
+  },
+  {
+    "edit": "tau omicron phi zeta nu mu lambda gamma zeta alpha chi mu beta theta sigma iota chi epsilon alpha beta",
+    "rationale": "lambda omega alpha omicron mu xi beta lambda nu",
+    "section": "Phase 0 \u2014 item 1"
+  },
+  {
+    "edit": "xi nu epsilon zeta omega theta gamma tau tau tau eta delta upsilon sigma delta iota phi iota mu delta",
+    "rationale": "alpha delta alpha tau chi alpha phi chi epsilon pi epsilon theta",
+    "section": "Phase 3: workstream 3"
+  },
+  {
+    "edit": "tau omicron phi beta psi upsilon mu alpha zeta gamma eta delta upsilon theta nu rho epsilon nu beta psi",
+    "rationale": "mu eta omega alpha tau lambda nu kappa nu zeta",
+    "section": "Phase 2 \u2014 item 2"
+  },
+  {
+    "edit": "xi nu pi rho kappa beta omega upsilon psi delta iota theta xi lambda xi alpha rho lambda xi tau",
+    "rationale": "rho lambda rho phi eta theta delta gamma theta rho sigma nu",
+    "section": "Phase 3 \u2014 item 3"
+  },
+  {
+    "edit": "xi psi phi alpha theta gamma delta xi omicron gamma zeta kappa xi epsilon xi xi tau delta delta beta",
+    "rationale": "beta iota theta eta gamma iota gamma tau theta nu eta psi",
+    "section": "Release verification \u2014 item 4"
+  },
+  {
+    "edit": "tau omicron phi tau eta sigma iota delta alpha phi zeta psi omicron iota alpha pi omicron upsilon gamma mu",
+    "rationale": "rho rho lambda rho psi gamma alpha omicron lambda omega eta alpha",
+    "section": "Phase 4 \u2014 item 6"
+  },
+  {
+    "edit": "xi rho mu phi omicron upsilon beta iota theta sigma alpha xi rho zeta chi rho kappa mu nu tau",
+    "rationale": "epsilon omicron omega pi theta sigma omicron sigma iota delta lambda tau",
+    "section": "System architecture \u2014 item 7"
+  },
+  {
+    "edit": "tau omicron phi eta epsilon upsilon alpha alpha omega iota rho zeta mu kappa sigma mu omicron mu psi beta",
+    "rationale": "mu theta mu gamma nu beta omicron nu delta zeta sigma kappa",
+    "section": "Phase 5 \u2014 item 4"
+  },
+  {
+    "edit": "chi delta upsilon alpha chi psi upsilon sigma delta sigma omicron phi rho zeta sigma eta omicron delta mu xi",
+    "rationale": "beta epsilon psi lambda gamma iota omicron delta eta omicron kappa delta",
+    "section": "Phase 1 \u2014 delta rho alpha alpha"
+  },
+  {
+    "edit": "xi rho alpha phi upsilon xi sigma upsilon alpha rho delta psi zeta theta beta epsilon alpha epsilon zeta theta",
+    "rationale": "gamma omega omega epsilon gamma sigma lambda eta lambda delta tau psi",
+    "section": "Release verification \u2014 item 8"
+  },
+  {
+    "edit": "tau omicron phi eta delta lambda gamma gamma xi omicron omega psi epsilon chi kappa xi delta rho zeta omicron",
+    "rationale": "beta delta kappa xi sigma mu sigma mu psi sigma theta tau",
+    "section": "System architecture \u2014 item 4"
+  },
+  {
+    "edit": "xi rho theta phi zeta psi eta epsilon sigma rho phi zeta zeta mu chi pi beta tau phi omega",
+    "rationale": "beta chi phi zeta xi omicron kappa iota lambda gamma psi omega",
+    "section": "Phase 0 \u2014 item 6"
+  },
+  {
+    "edit": "xi alpha beta sigma delta phi upsilon kappa psi rho mu kappa beta omicron gamma nu lambda iota eta upsilon",
+    "rationale": "omega lambda sigma theta chi sigma lambda pi alpha theta beta beta",
+    "section": "Product decisions"
+  },
+  {
+    "edit": "xi sigma kappa omicron zeta theta delta gamma alpha gamma xi omega delta tau psi chi kappa lambda mu mu",
+    "rationale": "mu pi kappa eta zeta eta epsilon alpha alpha iota omega phi",
+    "section": "System architecture \u2014 item 6"
+  },
+  {
+    "edit": "chi sigma tau beta phi upsilon omicron delta omega sigma chi omicron xi kappa rho upsilon omega lambda gamma mu",
+    "rationale": "beta epsilon upsilon zeta iota sigma alpha mu alpha omega gamma eta",
+    "section": "Opening paragraph"
+  },
+  {
+    "edit": "xi alpha pi kappa delta xi theta phi theta zeta eta delta beta nu phi pi nu beta mu phi",
+    "rationale": "mu omicron phi omega kappa nu gamma alpha phi alpha eta phi",
+    "section": "Product decisions \u2014 sigma"
+  },
+  {
+    "edit": "tau omicron phi zeta lambda theta beta mu rho phi rho lambda xi psi tau xi theta phi sigma psi",
+    "rationale": "mu theta nu lambda delta nu zeta rho alpha omega kappa theta",
+    "section": "Phase 2 \u2014 item 1"
+  },
+  {
+    "edit": "tau omicron phi beta iota upsilon iota gamma rho delta omicron mu omega upsilon iota epsilon nu kappa mu lambda",
+    "rationale": "delta upsilon chi omicron psi mu iota eta theta eta epsilon upsilon",
+    "section": "Phase 1 \u2014 item 2"
+  },
+  {
+    "edit": "xi nu epsilon omicron theta epsilon upsilon kappa beta delta iota mu xi rho pi gamma upsilon xi epsilon pi",
+    "rationale": "omega epsilon delta beta alpha gamma beta omicron lambda nu kappa rho",
+    "section": "Phase 2: workstream 2"
+  },
+  {
+    "edit": "tau omicron phi beta omega theta upsilon phi omicron delta gamma zeta nu lambda rho rho iota upsilon theta psi",
+    "rationale": "beta pi kappa omicron psi sigma tau epsilon chi rho nu omicron",
+    "section": "System architecture \u2014 item 2"
+  },
+  {
+    "edit": "tau omicron phi eta omicron epsilon chi tau theta gamma sigma tau alpha kappa delta nu gamma alpha theta tau",
+    "rationale": "gamma alpha rho mu omicron omega alpha mu alpha upsilon omega pi",
+    "section": "Phase 4 \u2014 item 4"
+  },
+  {
+    "edit": "tau pi pi epsilon sigma psi sigma mu alpha delta theta beta zeta pi beta epsilon mu kappa alpha upsilon",
+    "rationale": "beta eta upsilon epsilon phi kappa alpha mu nu beta iota tau",
+    "section": "Phase 5 \u2014 gamma eta pi"
+  },
+  {
+    "edit": "tau omicron phi zeta kappa omicron alpha phi alpha zeta omega tau upsilon chi delta mu theta xi sigma tau",
+    "rationale": "mu gamma gamma iota lambda phi alpha psi theta mu xi sigma",
+    "section": "Phase 4 \u2014 item 1"
+  },
+  {
+    "edit": "xi nu epsilon zeta mu alpha delta pi psi gamma epsilon beta lambda psi upsilon sigma omicron omega gamma phi",
+    "rationale": "xi delta kappa lambda xi rho pi chi lambda delta zeta psi",
+    "section": "Phase 6: workstream 6"
+  },
+  {
+    "edit": "tau omicron phi delta mu theta kappa kappa xi beta chi beta eta iota iota beta upsilon psi beta lambda",
+    "rationale": "epsilon eta upsilon beta beta lambda pi sigma beta xi",
+    "section": "Phase 2 \u2014 item 7"
+  },
+  {
+    "edit": "tau omicron phi eta eta nu tau upsilon chi omega epsilon omega beta rho lambda delta tau xi epsilon psi",
+    "rationale": "theta chi epsilon gamma rho lambda beta kappa beta mu omicron nu",
+    "section": "Phase 2 \u2014 item 4"
+  },
+  {
+    "edit": "tau omicron phi zeta zeta phi iota omega epsilon eta chi lambda lambda zeta delta psi pi sigma xi phi",
+    "rationale": "kappa pi eta iota xi kappa alpha theta epsilon xi phi upsilon",
+    "section": "Phase 3 \u2014 item 1"
+  },
+  {
+    "edit": "xi alpha chi kappa xi theta epsilon sigma alpha eta theta theta iota nu sigma beta epsilon iota iota pi",
+    "rationale": "xi lambda delta epsilon alpha xi tau zeta alpha xi omega nu",
+    "section": "System architecture"
+  },
+  {
+    "edit": "tau omicron phi omicron upsilon tau upsilon kappa kappa gamma lambda psi xi omega lambda beta rho zeta pi nu",
+    "rationale": "mu xi delta gamma phi nu omicron eta rho tau gamma nu",
+    "section": "Phase 0 \u2014 item 5"
+  },
+  {
+    "edit": "tau omicron phi omega zeta pi eta xi zeta phi kappa phi tau phi beta delta xi iota iota psi",
+    "rationale": "omega zeta beta alpha zeta omega epsilon kappa epsilon rho sigma mu",
+    "section": "System architecture \u2014 item 3"
+  },
+  {
+    "edit": "tau omicron phi omega gamma rho sigma phi nu nu iota phi eta zeta iota eta omicron kappa delta sigma",
+    "rationale": "omicron theta eta iota chi kappa gamma sigma gamma phi eta omega",
+    "section": "Phase 1 \u2014 item 3"
+  },
+  {
+    "edit": "xi omega tau theta beta upsilon pi sigma omicron iota iota psi omega theta pi xi nu upsilon omicron eta",
+    "rationale": "beta rho iota phi iota omega pi xi alpha theta eta upsilon",
+    "section": "Release verification \u2014 item 7"
+  },
+  {
+    "edit": "tau omicron phi delta eta sigma phi sigma theta tau eta tau gamma chi psi sigma omicron eta phi beta",
+    "rationale": "phi beta kappa gamma phi tau nu kappa omega zeta lambda phi",
+    "section": "Phase 6 \u2014 item 7"
+  },
+  {
+    "edit": "tau omicron phi chi kappa pi upsilon beta zeta omega xi tau xi psi mu beta omicron sigma omicron epsilon",
+    "rationale": "nu gamma gamma omicron kappa psi beta xi delta rho delta phi",
+    "section": "Phase 4 \u2014 item 8"
+  },
+  {
+    "edit": "tau omicron pi alpha zeta mu theta tau rho omega xi lambda tau kappa iota omega chi rho lambda beta",
+    "rationale": "lambda rho kappa theta zeta eta kappa theta rho eta alpha psi",
+    "section": "Product decisions \u2014 xi"
+  },
+  {
+    "edit": "tau omicron phi omega lambda zeta chi sigma eta rho chi beta omega mu xi rho beta omega upsilon beta",
+    "rationale": "tau sigma mu gamma beta zeta chi sigma theta phi xi zeta",
+    "section": "Phase 7 \u2014 item 10"
+  },
+  {
+    "edit": "tau omicron phi chi omicron upsilon gamma theta tau kappa upsilon eta xi epsilon phi gamma upsilon gamma delta theta",
+    "rationale": "beta alpha omicron iota lambda omicron beta theta delta tau gamma tau",
+    "section": "Phase 0 \u2014 item 8"
+  },
+  {
+    "edit": "xi alpha tau upsilon xi pi zeta sigma iota phi nu alpha tau nu beta nu theta chi alpha psi",
+    "rationale": "omega epsilon gamma beta alpha sigma upsilon iota phi beta iota pi",
+    "section": "Dependency order"
+  },
+  {
+    "edit": "xi phi epsilon iota delta omega pi gamma epsilon alpha tau tau iota theta kappa alpha pi xi beta nu",
+    "rationale": "beta phi omega mu beta pi beta delta xi omicron chi eta",
+    "section": "Phase 6 \u2014 item 4"
+  },
+  {
+    "edit": "xi theta zeta lambda xi zeta psi kappa nu rho nu rho beta omega pi mu alpha omega pi beta",
+    "rationale": "mu omicron gamma zeta epsilon upsilon phi iota zeta tau beta psi",
+    "section": "Phase 4 \u2014 item 5"
+  },
+  {
+    "edit": "tau omicron phi omega phi omicron omega sigma pi phi eta nu iota kappa nu pi alpha beta gamma psi",
+    "rationale": "theta xi nu phi rho lambda lambda gamma alpha omicron lambda rho",
+    "section": "Phase 2 \u2014 item 3"
+  },
+  {
+    "edit": "xi alpha nu kappa zeta omega gamma theta lambda rho pi mu gamma phi tau epsilon mu upsilon gamma sigma",
+    "rationale": "mu mu iota upsilon nu lambda omega mu gamma gamma upsilon gamma",
+    "section": "Product decisions \u2014 alpha"
+  },
+  {
+    "edit": "xi mu rho nu nu phi theta xi theta tau gamma iota omega gamma psi rho omicron xi epsilon upsilon",
+    "rationale": "beta pi phi nu nu mu omega rho upsilon theta sigma pi",
+    "section": "Phase 4 \u2014 item 10"
+  },
+  {
+    "edit": "tau omicron phi omega rho beta alpha lambda tau delta gamma eta eta tau sigma gamma alpha sigma theta sigma",
+    "rationale": "mu zeta xi beta theta nu kappa iota omicron sigma eta phi",
+    "section": "Phase 7 \u2014 item 3"
+  },
+  {
+    "edit": "xi nu mu eta upsilon theta eta tau tau tau phi lambda omega zeta xi psi upsilon kappa xi theta",
+    "rationale": "alpha delta phi sigma beta theta omega upsilon theta chi theta tau",
+    "section": "Phase 4: workstream 4"
+  },
+  {
+    "edit": "xi phi mu mu omega theta mu mu tau psi lambda theta lambda zeta xi beta tau delta pi nu",
+    "rationale": "beta nu tau mu delta epsilon omega beta upsilon theta eta rho",
+    "section": "Product decisions \u2014 nu"
+  },
+  {
+    "edit": "tau omicron phi omicron pi upsilon omicron sigma omicron beta iota tau sigma lambda nu gamma gamma sigma omicron zeta",
+    "rationale": "mu xi omega eta phi eta psi iota psi tau zeta phi",
+    "section": "System architecture \u2014 item 5"
+  },
+  {
+    "edit": "xi alpha beta sigma beta rho gamma eta upsilon upsilon tau tau xi tau omega rho beta pi nu mu",
+    "rationale": "beta epsilon sigma mu zeta eta xi nu theta gamma lambda upsilon",
+    "section": "Opening paragraph"
+  },
+  {
+    "edit": "tau omicron phi omicron phi zeta gamma zeta phi phi sigma epsilon eta sigma delta chi gamma epsilon nu nu",
+    "rationale": "rho eta mu upsilon rho omicron iota iota alpha alpha nu psi",
+    "section": "Phase 6 \u2014 item 5"
+  },
+  {
+    "edit": "tau pi phi zeta kappa lambda upsilon phi epsilon alpha sigma theta omicron chi delta omicron zeta eta zeta zeta",
+    "rationale": "mu pi xi sigma pi mu theta mu kappa rho lambda upsilon",
+    "section": "System architecture \u2014 item 1"
+  },
+  {
+    "edit": "xi nu epsilon omicron omega tau delta omega psi gamma mu gamma xi iota phi upsilon epsilon iota mu pi",
+    "rationale": "gamma mu xi gamma alpha rho xi rho epsilon zeta zeta eta",
+    "section": "Release verification and definition of done"
+  },
+  {
+    "edit": "xi upsilon zeta kappa chi alpha pi lambda omega gamma gamma psi zeta omicron mu xi epsilon xi omega phi",
+    "rationale": "beta delta epsilon iota zeta tau gamma sigma zeta eta",
+    "section": "Phase 7 \u2014 item 9"
+  },
+  {
+    "edit": "tau omicron phi tau omicron rho phi lambda delta rho omicron xi tau theta beta omicron omicron xi gamma sigma",
+    "rationale": "beta zeta iota psi psi sigma delta nu psi omega pi delta",
+    "section": "Phase 6 \u2014 item 6"
+  },
+  {
+    "edit": "xi mu upsilon omega zeta rho xi gamma zeta nu eta omega nu tau lambda zeta omega upsilon mu xi",
+    "rationale": "beta pi xi chi phi zeta zeta sigma tau mu sigma gamma",
+    "section": "Phase 6 \u2014 item 6"
+  },
+  {
+    "edit": "tau omicron phi beta kappa delta delta tau psi rho psi tau rho zeta xi sigma rho sigma alpha zeta",
+    "rationale": "beta omicron kappa upsilon mu pi gamma psi psi xi pi omega",
+    "section": "Phase 3 \u2014 item 2"
+  }
+]

@@ -1,0 +1,151 @@
+{
+  "ackedCommandSeq": 0,
+  "checkpoints": [
+    {
+      "createdAt": "2026-10-14T18:27:32.320Z",
+      "id": 1,
+      "major": true,
+      "record": {
+        "annotations": [],
+        "linesAdded": 0,
+        "linesRemoved": 0,
+        "sectionsChanged": [],
+        "slots": []
+      },
+      "round": 0,
+      "stage": "draft"
+    },
+    {
+      "createdAt": "2026-10-15T19:55:40.099Z",
+      "id": 2,
+      "major": true,
+      "parent": 1,
+      "record": {
+        "annotations": [
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "kappa phi omega mu omega sigma gamma kappa",
+              "section": "## Product decisions",
+              "suffix": ""
+            },
+            "id": "03589E52-6777-4109-B398-E066B71543F0",
+            "kind": "comment",
+            "note": "omicron sigma rho xi rho theta eta iota eta tau psi alpha"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "omega alpha mu chi theta omega eta theta",
+              "section": "## Product decisions",
+              "suffix": ""
+            },
+            "id": "D79D6008-621D-4364-BCC1-E011F3757C42",
+            "kind": "comment",
+            "note": "beta phi pi iota beta rho sigma chi theta gamma nu beta"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "xi upsilon lambda iota omicron",
+              "section": "## Product decisions",
+              "suffix": ""
+            },
+            "id": "47263764-6C33-459F-AEF8-8D4828AFA385",
+            "kind": "comment",
+            "note": "tau upsilon alpha iota zeta omega xi mu kappa epsilon pi sigma"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "theta tau rho omicron lambda nu delta psi",
+              "section": "## System architecture",
+              "suffix": ""
+            },
+            "id": "BA5C5CB3-5A61-460D-8F0A-EB616968423E",
+            "kind": "comment",
+            "note": "beta upsilon chi iota phi alpha omega psi gamma sigma rho epsilon"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "lambda sigma delta epsilon xi omicron upsilon alpha",
+              "section": "## System architecture",
+              "suffix": ""
+            },
+            "id": "5C876E23-5275-4D50-93C5-3F2354A8FA1E",
+            "kind": "question",
+            "note": "theta tau eta kappa theta lambda zeta omega omicron rho xi omicron"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "lambda xi phi alpha chi xi phi",
+              "section": "## System architecture",
+              "suffix": ""
+            },
+            "id": "F074AA7A-F240-446D-BACB-777F34672A09",
+            "kind": "comment",
+            "note": "psi eta phi iota gamma theta pi tau tau upsilon eta mu"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "sigma",
+              "section": "## Phase 3: workstream 3",
+              "suffix": ""
+            },
+            "id": "4E11E916-FE08-4228-A968-DF872EAB860F",
+            "kind": "comment",
+            "note": "sigma nu pi omicron phi rho iota chi nu tau sigma xi"
+          },
+          {
+            "anchor": {
+              "checkpoint": 1,
+              "prefix": "",
+              "quote": "mu eta",
+              "section": "## Phase 6: workstream 6",
+              "suffix": ""
+            },
+            "id": "E769A138-AD51-45DA-8D5A-CB9581A129C6",
+            "kind": "comment",
+            "note": "epsilon tau epsilon phi delta nu"
+          }
+        ],
+        "linesAdded": 49,
+        "linesRemoved": 47,
+        "sectionsChanged": [],
+        "slots": []
+      },
+      "round": 0,
+      "stage": "synthesis"
+    },
+    {
+      "createdAt": "2026-10-15T21:04:22.842Z",
+      "id": 3,
+      "major": false,
+      "parent": 2,
+      "record": {
+        "annotations": [],
+        "linesAdded": 71,
+        "linesRemoved": 66,
+        "sectionsChanged": [],
+        "slots": []
+      },
+      "round": 1,
+      "stage": "refine"
+    }
+  ],
+  "extraPolish": 0,
+  "extraRefinement": 0,
+  "pendingNotes": [],
+  "status": "paused",
+  "target": "none"
+}
