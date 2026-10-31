@@ -52,6 +52,9 @@ struct StructuredQuestionView: View {
                         .labelsHidden()
                         .lineLimit(1...4)
                         .textFieldStyle(.roundedBorder)
+                        // Every answer field took dropped files as paths before choices existed;
+                        // Other is typed text too, and losing it here dropped nothing at all.
+                        .dropsFilePaths(into: otherText, projectPath: projectPath)
                         .padding(.leading, 24)
                 }
             }
