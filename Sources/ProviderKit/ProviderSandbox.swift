@@ -18,6 +18,8 @@ public enum ProviderSandboxError: Error, Equatable, CustomStringConvertible {
     /// providers, to the folder as it stood when the run began).
     case providerChanged(expected: String, actual: String)
     case snapshotFailed(String)
+    /// `command[0]` names a file in the provider folder (`./gen.sh`) that is not there.
+    case programMissing(String)
     /// A link, FIFO or device in the output folder, by relative path. Copying it out would let
     /// a generator hand the caller a pointer to any file on the Mac.
     case outputNotRegularFile(String)
@@ -31,6 +33,7 @@ public enum ProviderSandboxError: Error, Equatable, CustomStringConvertible {
         case .providerChanged(let expected, let actual):
             return "the provider folder changed since it was approved (expected \(expected), found \(actual))"
         case .snapshotFailed(let why): return "could not make a private copy of the provider: \(why)"
+        case .programMissing(let name): return "the generator \(name) is not in the provider folder"
         case .outputNotRegularFile(let path): return "the generator's output \(path) is not a regular file"
         }
     }
@@ -55,11 +58,22 @@ public struct ProviderSandbox: Sendable {
     /// Seconds between SIGTERM and SIGKILL once the timeout expires.
     public let killGrace: TimeInterval
 
-    public static let environmentPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+    /// The system's directories first, then Homebrew's (Apple silicon, then Intel), so
+    /// `#!/usr/bin/env node` works without a provider shadowing a system tool.
+    public static let environmentPath = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 
-    /// Read at run time with `-D`, not spliced into the text, so no path can break out of a
-    /// string literal and add a rule. `(deny file-write*)` then a narrower allow: in SBPL the
-    /// later matching rule wins. `/dev/null` is allowed because `2>/dev/null` is in every script.
+    /// Paths are read at run time with `-D`, not spliced into the text, so no path can break
+    /// out of a string literal and add a rule. In SBPL the later matching rule wins, so each
+    /// deny is followed by its narrower allow. `/dev/null` is writable because `2>/dev/null` is
+    /// in every script.
+    ///
+    /// `(allow default)` alone left three ways out, all shown live by review:
+    /// - `lsopen`: `open Probe.app` had LaunchServices launch an app OUTSIDE the sandbox, which
+    ///   then wrote anywhere and reached the network;
+    /// - `mach-lookup` and `appleevent-send`: any system service that acts for its caller (the
+    ///   pasteboard server answered `pbpaste`);
+    /// - reads of the home folder: `~/.ssh` and the login keychain, copyable into `out/`.
+    /// Home stays readable only where the run itself lives and where its input is.
     public static let profile = """
         (version 1)
         (allow default)
@@ -69,6 +83,13 @@ public struct ProviderSandbox: Sendable {
           (subpath (param "OUTPUT_DIR"))
           (subpath (param "TEMP_DIR"))
           (literal "/dev/null"))
+        (deny file-read* (subpath (param "HOME_DIR")))
+        (allow file-read*
+          (subpath (param "RUN_ROOT"))
+          (subpath (param "INPUT_DIR")))
+        (deny lsopen)
+        (deny appleevent-send)
+        (deny mach-lookup)
         """
 
     public init(sandboxExecPath: String = "/usr/bin/sandbox-exec", runner: any CommandRunner = SystemCommandRunner(),
@@ -83,7 +104,8 @@ public struct ProviderSandbox: Sendable {
     /// `outputDirectory`. `{out}` in the arguments is the generator's output folder; each
     /// `placeholders` key `k` replaces `{k}`. `onSpawn` gets the pid, which is also the process
     /// group id.
-    public func run(_ provider: ResolvedProvider, outputDirectory: URL, placeholders: [String: String] = [:],
+    public func run(_ provider: ResolvedProvider, outputDirectory: URL, inputDirectory: URL? = nil,
+                    placeholders: [String: String] = [:],
                     onSpawn: (@Sendable (Int32) -> Void)? = nil) async throws -> ProviderSandboxResult {
         // Every refusal that needs no file system comes first, so a refused run touches nothing.
         guard let generator = provider.manifest?.generator, !generator.command.isEmpty else {
@@ -108,13 +130,17 @@ public struct ProviderSandbox: Sendable {
         // `subpath` against the resolved path, so the unresolved one would allow nothing.
         let outPath = try Self.realPath(run.output)
         let tempPath = try Self.realPath(run.temp)
+        let rootPath = try Self.realPath(run.root)
+        let inputPath = try inputDirectory.map { try Self.realPath($0) } ?? rootPath
+        let homePath = try Self.realPath(Self.userHome)
         let cwd = run.snapshot
 
         var values = placeholders
         values["out"] = outPath
-        let program = Self.program(generator.command[0], in: cwd)
+        let program = try Self.program(generator, in: cwd)
         let args = generator.command.dropFirst().map { Self.substitute($0, values) }
         let arguments = ["-D", "OUTPUT_DIR=\(outPath)", "-D", "TEMP_DIR=\(tempPath)",
+                         "-D", "HOME_DIR=\(homePath)", "-D", "RUN_ROOT=\(rootPath)", "-D", "INPUT_DIR=\(inputPath)",
                          "-f", profileURL.path, program] + args
         // Nothing inherited: the app's environment holds tokens and socket paths a generator
         // has no business reading.
@@ -160,22 +186,46 @@ public struct ProviderSandbox: Sendable {
         guard actual == expected else { throw ProviderSandboxError.providerChanged(expected: expected, actual: actual) }
     }
 
-    /// The parser stores `./bin/render` as `bin/render` and `./gen.sh` as `gen.sh`, which
-    /// leaves a bare name ambiguous. A name that is a file in the copy is the provider's own;
-    /// anything else is left for `sandbox-exec`'s PATH lookup.
-    static func program(_ name: String, in snapshot: URL) -> String {
-        if name.hasPrefix("/") { return name }
+    /// A provider-relative program runs from the copy and must be a file there: a missing one
+    /// is refused, never turned into a PATH lookup of the same name. Anything else (absolute, or
+    /// a bare name) is left for `sandbox-exec`'s own lookup on `environmentPath`.
+    static func program(_ generator: ProviderGenerator, in snapshot: URL) throws -> String {
+        let name = generator.command[0]
+        guard generator.providerRelative else { return name }
         let candidate = snapshot.appendingPathComponent(name)
         var isDirectory: ObjCBool = false
-        if name.contains("/") || (FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory)
-                                  && !isDirectory.boolValue) {
-            return candidate.path
+        guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            throw ProviderSandboxError.programMissing(name)
         }
-        return name
+        return candidate.path
     }
 
+    /// One pass, left to right: a substituted value is never scanned again, so a `{source}`
+    /// whose value contains `{out}` stays literal. An unknown `{name}` is left as written.
     static func substitute(_ arg: String, _ values: [String: String]) -> String {
-        values.reduce(arg) { $0.replacingOccurrences(of: "{\($1.key)}", with: $1.value) }
+        var result = ""
+        var rest = Substring(arg)
+        while let open = rest.firstIndex(of: "{") {
+            result += rest[..<open]
+            let afterOpen = rest.index(after: open)
+            if let close = rest[afterOpen...].firstIndex(of: "}"), let value = values[String(rest[afterOpen..<close])] {
+                result += value
+                rest = rest[rest.index(after: close)...]
+            } else {
+                result.append("{")
+                rest = rest[afterOpen...]
+            }
+        }
+        return result + rest
+    }
+
+    /// The account's home from the user database, not `$HOME`, which the app's environment
+    /// could have pointed anywhere.
+    static var userHome: URL {
+        if let entry = getpwuid(getuid()), let dir = entry.pointee.pw_dir {
+            return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
     }
 
     static func realPath(_ url: URL) throws -> String {

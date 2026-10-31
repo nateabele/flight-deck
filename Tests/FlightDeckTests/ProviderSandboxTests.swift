@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import HostKit
 import IntakeKit
@@ -165,6 +166,9 @@ final class ProviderSandboxTests: XCTestCase {
             $0.split(separator: "=", maxSplits: 1).first.map(String.init)
         })
         XCTAssertEqual(keys, ["PATH", "HOME", "TMPDIR"])
+        // Homebrew's prefixes too, after the system's, so `#!/usr/bin/env node` finds node.
+        XCTAssertTrue(String(decoding: stdout, as: UTF8.self)
+            .contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin\n"))
     }
 
     /// The sandbox checks paths when a file is opened. A descriptor that was already open in
@@ -209,6 +213,156 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertEqual(result, .timedOut)
         XCTAssertLessThan(Date().timeIntervalSince(start), 10)
         XCTAssertEqual(killpg(try XCTUnwrap(pgid.value), 0), -1)
+    }
+
+    // MARK: - Containment beyond files and network
+
+    /// The user's real home folder, resolved, as the sandbox sees it.
+    private var realHome: URL {
+        URL(fileURLWithPath: String(cString: getpwuid(getuid())!.pointee.pw_dir)).resolvingSymlinksInPath()
+    }
+
+    /// `open` hands an app to LaunchServices, which launches it OUTSIDE the sandbox: the
+    /// reviewer's probe app wrote anywhere and reached the network. The control proves the probe
+    /// launches when nothing stands in the way, so "it did not launch" means the sandbox.
+    func testOpenCannotLaunchAnApp() async throws {
+        let app = tmp.appendingPathComponent("Probe.app")
+        let marker = tmp.appendingPathComponent("launched")
+        let macOS = app.appendingPathComponent("Contents/MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        let plist: [String: Any] = ["CFBundleExecutable": "probe", "CFBundlePackageType": "APPL",
+                                    "CFBundleIdentifier": "dev.flightdeck.tests.probe-\(UUID().uuidString)",
+                                    "LSBackgroundOnly": true]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let script = macOS.appendingPathComponent("probe")
+        try Data("#!/bin/sh\necho launched > '\(marker.path)'\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        defer { Self.unregister(app) }
+
+        let control = try await SystemCommandRunner().run(
+            executable: "/usr/bin/open", arguments: ["-g", "-j", "-n", app.path], cwd: tmp, environment: ["PATH": "/usr/bin:/bin"])
+        XCTAssertEqual(control.exitCode, 0, control.stderr)
+        let launched = try await Self.appears(marker, within: 10)
+        XCTAssertTrue(launched, "the probe app never launched, so the test proves nothing")
+        try FileManager.default.removeItem(at: marker)
+
+        let result = try await sandbox().run(try provider(["/usr/bin/open", "-g", "-j", "-n", app.path]),
+                                             outputDirectory: try output())
+        XCTAssertNotEqual(exited(result).code, 0)
+        let escaped = try await Self.appears(marker, within: 3)
+        XCTAssertFalse(escaped, "open launched an app from inside the sandbox")
+    }
+
+    func testHomeIsUnreadable() async throws {
+        let secret = "secret-\(UUID().uuidString)"
+        let planted = realHome.appendingPathComponent(".fd-sandbox-probe-\(UUID().uuidString)")
+        try Data(secret.utf8).write(to: planted)
+        defer { try? FileManager.default.removeItem(at: planted) }
+        let result = try await sandbox().run(try provider(["/bin/cat", planted.path]), outputDirectory: try output())
+        guard case .exited(let code, let stdout, let stderr, _) = result else { return XCTFail("\(result)") }
+        XCTAssertNotEqual(code, 0)
+        XCTAssertFalse(String(decoding: stdout, as: UTF8.self).contains(secret))
+        XCTAssertTrue(stderr.contains("Operation not permitted"), stderr)
+
+        let ssh = realHome.appendingPathComponent(".ssh")
+        if FileManager.default.fileExists(atPath: ssh.path) {
+            let listing = try await sandbox().run(try provider(["/bin/ls", ssh.path]), outputDirectory: try output())
+            XCTAssertNotEqual(exited(listing).code, 0, "~/.ssh is listable from the sandbox")
+        }
+    }
+
+    /// The one part of home a generator may read is the input folder it is handed.
+    func testInputDirectoryInsideHomeIsReadable() async throws {
+        let input = realHome.appendingPathComponent(".fd-sandbox-input-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: input) }
+        try Data("source text".utf8).write(to: input.appendingPathComponent("src.txt"))
+        let result = try await sandbox().run(try provider(["/bin/cat", "{source}"]), outputDirectory: try output(),
+                                             inputDirectory: input,
+                                             placeholders: ["source": input.appendingPathComponent("src.txt").path])
+        guard case .exited(0, let stdout, _, _) = result else { return XCTFail("\(result)") }
+        XCTAssertEqual(String(decoding: stdout, as: UTF8.self), "source text")
+    }
+
+    /// The find pasteboard rather than the general one, so the user's clipboard is untouched;
+    /// the pasteboard server is reached the same way for both.
+    @MainActor
+    func testClipboardIsUnreadable() async throws {
+        let board = NSPasteboard(name: .find)
+        let previous = board.string(forType: .string)
+        defer {
+            board.clearContents()
+            if let previous { board.setString(previous, forType: .string) }
+        }
+        let secret = "pasteboard-\(UUID().uuidString)"
+        board.clearContents()
+        board.setString(secret, forType: .string)
+
+        let control = try await SystemCommandRunner().run(
+            executable: "/usr/bin/pbpaste", arguments: ["-pboard", "find"], cwd: tmp, environment: ["PATH": "/usr/bin:/bin"])
+        XCTAssertEqual(String(decoding: control.stdout, as: UTF8.self), secret, "the control could not read the pasteboard")
+
+        let result = try await sandbox().run(try provider(["/usr/bin/pbpaste", "-pboard", "find"]),
+                                             outputDirectory: try output())
+        guard case .exited(_, let stdout, _, _) = result else { return XCTFail("\(result)") }
+        XCTAssertFalse(String(decoding: stdout, as: UTF8.self).contains(secret), "the sandbox read the pasteboard")
+    }
+
+    func testPlaceholdersExpandInOnePass() {
+        XCTAssertEqual(ProviderSandbox.substitute("{source}|{out}|{x}|{", ["source": "{out}", "out": "/o"]),
+                       "{out}|/o|{x}|{")
+    }
+
+    /// `./gen.sh` that is not in the folder is an error, never a PATH lookup for `gen.sh`.
+    func testMissingProviderProgramIsRefused() async throws {
+        var p = try provider(["missing.sh"])
+        p.manifest?.generator?.providerRelative = true
+        let runner = SpawnCountingRunner()
+        do {
+            _ = try await sandbox(runner: runner).run(p, outputDirectory: try output())
+            XCTFail("expected programMissing")
+        } catch {
+            XCTAssertEqual(error as? ProviderSandboxError, .programMissing("missing.sh"))
+        }
+        XCTAssertEqual(runner.calls, 0)
+    }
+
+    /// A double fork into `setsid` leaves the group, so the timeout's group kill misses it, and
+    /// it keeps stdout open. The run still ends on time, cleans up, and the holder is dead.
+    func testEscapedPipeHolderIsKilledAndTheRunEndsOnTime() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { CommandRunnerTests.pkill(marker) }
+        let rescue = Task { try await Task.sleep(nanoseconds: 20_000_000_000); CommandRunnerTests.pkill(marker) }
+        defer { rescue.cancel() }
+        let perl = "exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec '/bin/sleep', '\(marker)'"
+        let start = Date()
+        let result = try await sandbox().run(
+            try provider(["/bin/sh", "-c", "/usr/bin/perl -MPOSIX -e \"\(perl)\"; exec /bin/sleep 300"], timeout: 1),
+            outputDirectory: try output())
+        XCTAssertEqual(result, .timedOut)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1 + 3)
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("runs").path)) ?? [], [])
+        XCTAssertFalse(CommandRunnerTests.alive(marker), "the escaped holder outlived the run")
+    }
+
+    private static func appears(_ url: URL, within seconds: Double) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// The probe was registered with LaunchServices by the control launch; leave no record of it.
+    private static func unregister(_ app: URL) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+        p.arguments = ["-u", app.path]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run(); p.waitUntilExit()
     }
 
     // MARK: - Refusals
@@ -294,6 +448,7 @@ final class ProviderSandboxTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755],
                                               ofItemAtPath: p.folder.appendingPathComponent("gen.sh").path)
         p.manifest?.generator?.command[0] = "gen.sh"
+        p.manifest?.generator?.providerRelative = true
         p.source = .repo
         p.trust = .repoApproved
         p.digest = try ProviderTrust.digest(folder: p.folder)
