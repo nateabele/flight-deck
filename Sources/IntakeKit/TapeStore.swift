@@ -91,7 +91,27 @@ public struct TapeStore: Sendable {
         try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
         // The seq is the highest on file plus one, so reading it and writing the line must be one
         // step across processes: the app, the phone path and the runner all append here.
+        return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) { try appendUnlocked(c) }
+    }
+
+    /// Reads, composes and appends in ONE critical section, under the same lock as
+    /// `appendCommand`: `compose` gets every command on file and returns the one to append, or
+    /// nil to append nothing. For a command built from what is already queued — an
+    /// auto-accepted thread diff carries the whole plan, so it must be composed on the newest
+    /// queued edit, and no edit may land between that read and this append, or it is lost.
+    /// `compose` runs holding the lock: it must not append itself, or it waits on itself.
+    @discardableResult
+    public func appendCommand(composing compose: (_ current: [CommandEnvelope]) throws -> TapeCommand?) throws -> Int? {
+        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
         return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
+            guard let command = try compose(readCommandLines()) else { return nil }
+            return try appendUnlocked(command)
+        }
+    }
+
+    /// The append itself; the caller holds the commands lock.
+    private func appendUnlocked(_ c: TapeCommand) throws -> Int {
+        do {
             let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
             var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
             line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.

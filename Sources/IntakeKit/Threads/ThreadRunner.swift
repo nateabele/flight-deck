@@ -27,8 +27,9 @@ public struct ThreadRunner: Sendable {
     private let mergeRunner: CommandRunner
     private let hooks: Hooks
 
-    /// Test seams, internal on purpose: the instant between composing an auto-accepted plan
-    /// and appending it, where a human edit could land unseen.
+    /// Test seams, internal on purpose: the last instant before auto-accept takes the commands
+    /// lock to compose and append, where a human edit lands just ahead of it. It runs outside
+    /// the lock, so it may append.
     struct Hooks: Sendable {
         var beforeAutoAcceptAppend: @Sendable () -> Void = {}
     }
@@ -65,6 +66,9 @@ public struct ThreadRunner: Sendable {
         let keeper = ThreadKeeper(store: store, tapeStore: TapeStore(intakeDirectory: directory),
                                   commands: ThreadCommandStore(intakeDirectory: directory), now: now)
         let context = TurnContext(intake: intake, executor: executor, mergeRunner: mergeRunner, now: now, hooks: hooks)
+        // Under the lock, so no other runner has a turn running: an `answering` thread now is
+        // one a dead runner left behind.
+        await keeper.settleStrandedThreads()
         while true {
             await drive(keeper, context)
             lock.release()
@@ -134,36 +138,42 @@ actor ThreadKeeper {
 
     // MARK: Commands
 
-    /// Folds every command after the cursor into `threads/`, then moves the cursor past them.
-    /// Turns are written before the cursor moves, so a crash between the two refolds the
-    /// commands — and the `messageID` check makes a refolded message queue nothing twice.
+    /// Folds the commands after the cursor into `threads/`, in order, and moves the cursor past
+    /// the ones that landed. Each command's writes come before the cursor moves, so a crash
+    /// between the two refolds it — and the `messageID` check makes a refolded message queue
+    /// nothing twice. A command whose write fails (a full disk, a folder it can't write) stops
+    /// the fold there: the cursor stays before it and the next poll tries it again, since a
+    /// message read past without its turn saved would be lost for good.
     func fold() {
         let fresh = commands.commands(after: store.cursor())
-        guard !fresh.isEmpty else { return }
-        for envelope in fresh { apply(envelope) }
-        try? store.saveCursor(fresh.last!.seq)
+        var landed: Int?
+        for envelope in fresh {
+            do { try apply(envelope) } catch { break }
+            landed = envelope.seq
+        }
+        if let landed { try? store.saveCursor(landed) }
     }
 
-    private func apply(_ envelope: ThreadCommandEnvelope) {
+    private func apply(_ envelope: ThreadCommandEnvelope) throws {
         let id = envelope.command.thread
         switch envelope.command {
         case .open(_, let anchor, let title, let agent, let model, let effort):
             guard store.thread(id) == nil else { return }
             let head = tapeStore.headPlanCheckpoint(in: tapeStore.loadTape()) ?? 0
-            try? store.save(ThreadRecord(id: id, title: title, anchor: anchor, agent: agent, model: model, effort: effort,
-                                         followsCheckpoint: head, createdAt: now()))
+            try store.save(ThreadRecord(id: id, title: title, anchor: anchor, agent: agent, model: model, effort: effort,
+                                        followsCheckpoint: head, createdAt: now()))
         case .message(_, let text, let messageID, _, _, _):
-            queue(id, messageID: messageID, you: text, answers: nil)
+            try queue(id, messageID: messageID, you: text, answers: nil)
         case .answer(_, let answers, let messageID):
-            queue(id, messageID: messageID, you: nil, answers: answers)
+            try queue(id, messageID: messageID, you: nil, answers: answers)
         case .repropose(_, let diff):
             // One turn per repropose command: its seq names it, so a refold queues it once.
-            queue(id, messageID: ThreadTurn.reproposePrefix + "\(diff.uuidString):\(envelope.seq)",
-                  you: "Propose this change again against the current version.", answers: nil)
+            try queue(id, messageID: ThreadTurn.reproposePrefix + "\(diff.uuidString):\(envelope.seq)",
+                      you: "Propose this change again against the current version.", answers: nil)
         case .setAutoAccept(_, let on):
-            update(id) { $0.autoAccept = on }
+            try mutate(id) { $0.autoAccept = on }
         case .setAgent(_, let agent, let model, let effort):
-            update(id) { record in
+            try mutate(id) { record in
                 // A session belongs to one CLI; another agent starts its own.
                 if record.agent != agent { record.sessionID = nil }
                 record.agent = agent
@@ -171,17 +181,17 @@ actor ThreadKeeper {
                 record.effort = effort
             }
         case .resolve:
-            update(id) { $0.status = .resolved }
+            try mutate(id) { $0.status = .resolved }
         case .reopen:
-            update(id) { [store] record in
+            try mutate(id) { [store] record in
                 guard record.status == .resolved else { return }
                 record.status = Self.restingStatus(store.turns(id), store.diffs(id))
             }
         case .decideDiff(_, let diffID, let accept):
             guard var diff = store.diff(id, diffID), diff.state == .pending || diff.state == .stale else { return }
             diff.state = accept ? .accepted : .rejected
-            try? store.save(diff)
-            update(id) { [store] record in
+            try store.save(diff)
+            try mutate(id) { [store] record in
                 guard record.status != .resolved, !self.running.contains(id) else { return }
                 record.status = Self.restingStatus(store.turns(id), store.diffs(id))
             }
@@ -191,13 +201,22 @@ actor ThreadKeeper {
     /// A resolved thread takes no turns until it is reopened (spec §5), so a message to it is
     /// dropped rather than queued to run on reopening. A thread this build never saw opened
     /// can't run a turn either.
-    private func queue(_ id: ThreadID, messageID: String, you: String?, answers: [StructuredAnswer]?) {
+    private func queue(_ id: ThreadID, messageID: String, you: String?, answers: [StructuredAnswer]?) throws {
         guard let record = store.thread(id), record.status != .resolved else { return }
         var turns = store.turns(id)
         guard !turns.contains(where: { $0.messageID == messageID }) else { return }
         turns.append(ThreadTurn(seq: (turns.map(\.seq).max() ?? 0) + 1, messageID: messageID, you: you, answers: answers,
                                 checkpoint: record.followsCheckpoint, startedAt: now()))
-        try? store.save(turns: turns, of: id)
+        try store.save(turns: turns, of: id)
+    }
+
+    /// A runner that died mid-turn left its thread `answering` with nothing running. At start,
+    /// before any turn is claimed, each such thread goes back to where it rests; one with a
+    /// queued turn is claimed again (and marked `answering`) by the scheduler as usual.
+    func settleStrandedThreads() {
+        for record in store.threads() where record.status == .answering && !running.contains(record.id) {
+            update(record.id) { [store] r in r.status = Self.restingStatus(store.turns(r.id), store.diffs(r.id)) }
+        }
     }
 
     // MARK: Scheduling
@@ -246,10 +265,17 @@ actor ThreadKeeper {
     func turns(_ id: ThreadID) -> [ThreadTurn] { store.turns(id) }
     func diffs(_ id: ThreadID) -> [ThreadDiff] { store.diffs(id) }
 
+    /// Best effort, for a turn's own bookkeeping: a failed save shows as stale status, which
+    /// the next write repairs.
     func update(_ id: ThreadID, _ change: (inout ThreadRecord) -> Void) {
+        try? mutate(id, change)
+    }
+
+    /// The same, for the fold, which must know a command didn't land.
+    private func mutate(_ id: ThreadID, _ change: (inout ThreadRecord) -> Void) throws {
         guard var record = store.thread(id) else { return }
         change(&record)
-        try? store.save(record)
+        try store.save(record)
     }
 
     func updateTurns(_ id: ThreadID, _ change: (inout [ThreadTurn]) -> Void) {
@@ -313,21 +339,25 @@ private struct TurnContext: Sendable {
 
         // A round landed since this thread last read the plan: draw the divider, carry the
         // pending diffs onto the new version, and follow it.
-        var seq = initialSeq
+        // A turn keeps the seq it was queued with, for good (C1): the ids of its notes and
+        // diffs come from it, so a turn rerun after a crash must have the same one, or what it
+        // already landed lands again. So the divider never takes its place: it gets the next
+        // free seq, once per head (a rerun that dies before `followsCheckpoint` moves draws
+        // none twice), and the turn's own `checkpoint` says which version it read.
+        let seq = initialSeq
         var moved = false
         if record.followsCheckpoint != head {
             moved = true
             let label = tape.checkpoints.first { $0.id == head }.map(ThreadWorkspace.label) ?? "checkpoint \(head)"
+            let divider = ThreadTurn.dividerPrefix + "\(head)"
             let hadTurns = await keeper.turns(id).contains { $0.endedAt != nil && !$0.isDivider }
             if hadTurns {
+                let at = now()
                 await keeper.updateTurns(id) { turns in
-                    // The divider takes this turn's place; it and every queued turn after it
-                    // move down one. None of them has run, so nothing refers to their seqs yet.
-                    for i in turns.indices where turns[i].seq >= seq && turns[i].endedAt == nil { turns[i].seq += 1 }
-                    turns.append(ThreadTurn(seq: seq, messageID: ThreadTurn.dividerPrefix + "\(head)",
-                                            reply: "Now reading \(label)", checkpoint: head, startedAt: now(), endedAt: now()))
+                    guard !turns.contains(where: { $0.messageID == divider }) else { return }
+                    turns.append(ThreadTurn(seq: (turns.map(\.seq).max() ?? 0) + 1, messageID: divider,
+                                            reply: "Now reading \(label)", checkpoint: head, startedAt: at, endedAt: at))
                 }
-                seq += 1
             }
             for diff in await keeper.diffs(id) where diff.state == .pending && diff.checkpoint != head {
                 await keeper.save(await rebase(diff, onto: head, headPlan: plan, tapeStore))
@@ -366,7 +396,15 @@ private struct TurnContext: Sendable {
                                             accountID: account?.accountID)
             let outcome: ThreadTurnOutcome
             do { outcome = try await executor.run(request) }
-            catch { return } // Cancelled: the turn stays queued for the next runner.
+            catch is CancellationError { return } // Shut down: the turn stays queued for the next runner.
+            catch {
+                // Anything else (a run directory it couldn't make, a stream it couldn't open)
+                // ends the turn. Left queued, the scheduler would claim it again at once and
+                // spin on the same error forever.
+                let why = "\(error)"
+                await end(id, seq: seq, keeper) { $0.errors = ["couldn't run: \(why)"] }
+                return
+            }
 
             switch outcome {
             case .failed(let diagnosis, let sessionID):
@@ -508,54 +546,63 @@ private struct TurnContext: Sendable {
 
     /// Auto-accept (spec §5): ThreadRunner appends `applyThreadDiff` itself, always against the
     /// newest checkpoint. `applyThreadDiff` carries the WHOLE plan and replaces `plan.user.md`,
-    /// so the plan it carries is built on the newest version there is, read just before the
-    /// append: the last edit still queued on the tape for the head (one IntakeRunner hasn't
-    /// folded yet), else the head's effective plan. The lock around the append (Stream B) can't
-    /// also cover this read, so after appending it checks whether an edit to the head slipped in
-    /// between; if one did, the diff is applied onto that edit and appended again, so the
-    /// human's edit is never the one lost.
+    /// so the plan it carries must be built on the newest version there is: the last edit still
+    /// queued on the tape for the head (one IntakeRunner hasn't folded yet), else the head's
+    /// effective plan. The read of that version, the composing and the append are one critical
+    /// section under the commands lock (`TapeStore.appendCommand(composing:)`, I2), so no edit
+    /// can land between them and be overwritten.
+    ///
+    /// Composing can't await, and a rebase runs `git`. So when the diff no longer applies to
+    /// what the lock shows (another round, or an edit over its passage), nothing is appended:
+    /// the diff is rebased onto that version outside the lock and composed again. Nothing ever
+    /// reaches the tape that wasn't built on the version current at its append, and a diff
+    /// that gives up is stale with nothing of it on the tape.
     private func autoAcceptDiff(_ diff: ThreadDiff, _ keeper: ThreadKeeper) async -> ThreadDiff {
         let tapeStore = keeper.tapeStore
-        let all = tapeStore.commands(after: 0)
-        // A crash after the append: it is on the tape already.
-        if all.contains(where: { if case .applyThreadDiff(_, diff.id, _, _) = $0.command { true } else { false } }) {
-            var d = diff
-            d.state = .accepted
-            return d
-        }
+        enum Compose { case appended, already, noPlan, rebase(head: Int, onto: String) }
         var current = diff
-        var onto: (seq: Int, markdown: String)?
         for _ in 0..<3 {
-            let tape = tapeStore.loadTape()
-            guard let head = tapeStore.headPlanCheckpoint(in: tape),
-                  let effective = tapeStore.effectivePlan(checkpoint: head) else { return stale(current) }
-            let seen = tapeStore.commands(after: 0).last?.seq ?? 0
-            let latest = onto?.markdown ?? Self.queuedEdit(for: head, after: tape.ackedCommandSeq, in: tapeStore)?.markdown
-                ?? effective
-            if current.checkpoint != head || onto != nil || latest != effective {
-                let base = tapeStore.effectivePlan(checkpoint: current.checkpoint) ?? effective
-                current = await rebase(current, base: base, onto: head, headPlan: latest)
-                guard current.state == .pending else { return current }
-            }
-            guard let markdown = ActionValidator.apply(old: current.old, anchor: current.anchor, new: current.new, to: latest)
-            else { return stale(current) }
             hooks.beforeAutoAcceptAppend()
-            guard let seq = try? tapeStore.appendCommand(.applyThreadDiff(thread: current.thread, diff: current.id,
-                                                                          checkpoint: head, markdown: markdown))
-            else { return current }
-            current.state = .accepted
-            guard let slipped = tapeStore.commands(after: seen).last(where: { envelope in
-                envelope.seq < seq && Self.edit(envelope.command, for: head) != nil
-            }) else { return current }
-            onto = (slipped.seq, Self.edit(slipped.command, for: head)!)
-            current.state = .pending
+            var result = Compose.noPlan
+            let candidate = current
+            do {
+                try tapeStore.appendCommand(composing: { commands in
+                    // A crash after the append: it is on the tape already.
+                    if commands.contains(where: { if case .applyThreadDiff(_, diff.id, _, _) = $0.command { true } else { false } }) {
+                        result = .already
+                        return nil
+                    }
+                    let tape = tapeStore.loadTape()
+                    guard let head = tapeStore.headPlanCheckpoint(in: tape),
+                          let effective = tapeStore.effectivePlan(checkpoint: head) else { return nil }
+                    let latest = commands.filter { $0.seq > tape.ackedCommandSeq }
+                        .compactMap { Self.edit($0.command, for: head) }.last ?? effective
+                    guard candidate.checkpoint == head,
+                          let markdown = ActionValidator.apply(old: candidate.old, anchor: candidate.anchor,
+                                                               new: candidate.new, to: latest) else {
+                        result = .rebase(head: head, onto: latest)
+                        return nil
+                    }
+                    result = .appended
+                    return .applyThreadDiff(thread: candidate.thread, diff: candidate.id, checkpoint: head, markdown: markdown)
+                })
+            } catch {
+                return current // the tape can't be written: left pending, for the human to accept
+            }
+            switch result {
+            case .appended, .already:
+                current.state = .accepted
+                return current
+            case .noPlan:
+                return stale(current)
+            case .rebase(let head, let latest):
+                let base = tapeStore.effectivePlan(checkpoint: current.checkpoint) ?? latest
+                let rebased = await rebase(current, base: base, onto: head, headPlan: latest)
+                guard rebased.state == .pending, rebased != current else { return stale(current) }
+                current = rebased
+            }
         }
         return stale(current)
-    }
-
-    /// The last plan edit for `checkpoint` still queued on the tape after `acked`.
-    private static func queuedEdit(for checkpoint: Int, after acked: Int, in tapeStore: TapeStore) -> (seq: Int, markdown: String)? {
-        tapeStore.commands(after: acked).compactMap { e in edit(e.command, for: checkpoint).map { (e.seq, $0) } }.last
     }
 
     private static func edit(_ command: TapeCommand, for checkpoint: Int) -> String? {

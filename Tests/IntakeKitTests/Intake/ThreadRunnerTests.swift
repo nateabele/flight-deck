@@ -28,7 +28,11 @@ private final class ScriptedAgent: ThreadTurnExecuting, @unchecked Sendable {
     var requests: [ThreadTurnRequest] { lock.withLock { _requests } }
     var maxActive: Int { lock.withLock { _maxActive } }
 
-    static let keywords = ["PROPOSE_STORAGE", "PROPOSE_SYNC", "PROPOSE_AMBIGUOUS", "AMBIGUOUS_ONCE", "ADD_NOTE", "ASK", "GATED"]
+    static let keywords = ["PROPOSE_STORAGE", "PROPOSE_SYNC", "PROPOSE_AMBIGUOUS", "AMBIGUOUS_ONCE", "NOTE_AND_STORAGE",
+                           "ADD_NOTE", "ASK", "GATED", "THROW"]
+    /// Thrown for THROW: a file error, the kind the real executor throws when it can't set up
+    /// a run's directory — not a cancellation.
+    struct DiskFull: Error {}
 
     func run(_ r: ThreadTurnRequest) async throws -> ThreadTurnOutcome {
         let (word, attempt): (String?, Int) = lock.withLock {
@@ -49,6 +53,7 @@ private final class ScriptedAgent: ThreadTurnExecuting, @unchecked Sendable {
         }
         defer { lock.withLock { active -= 1 } }
         if word == "GATED" || r.prompt.contains("GATED") { try await gate.wait() }
+        if word == "THROW" { throw DiskFull() }
         let session = "sess-\(r.thread.raw.uuidString.prefix(8))"
         func diff(_ quote: String, _ replacement: String) -> ThreadAction {
             .proposeDiff(ProposedThreadDiff(checkpoint: Self.checkpoint(in: r.prompt) ?? 1, quote: quote, replacement: replacement))
@@ -64,6 +69,9 @@ private final class ScriptedAgent: ThreadTurnExecuting, @unchecked Sendable {
         case "ADD_NOTE":
             actions = [.addNote(PlanNote(kind: .mustChange, note: "Name the queue's owner.",
                                          anchor: NoteAnchor(checkpoint: 1, quote: "Use SQLite for the queue.")))]
+        case "NOTE_AND_STORAGE":
+            actions = [.addNote(PlanNote(kind: .comment, note: "Owner?", anchor: nil)),
+                       diff("Use SQLite for the queue.", "Use a file queue.")]
         case "ASK":
             actions = [.askQuestion(StructuredQuestion(id: "q1", text: "Which store?", kind: .single,
                                                        options: [.init(id: "a", label: "SQLite"), .init(id: "b", label: "Files")]))]
@@ -356,11 +364,14 @@ final class ThreadRunnerTests: XCTestCase {
         try send(id, "Still racing?")
         await runner(agent).run()
 
+        // C1: the queued turn keeps the seq it was given; the divider takes the next free one,
+        // and the turn's own checkpoint marks the version it read.
         let turns = store.turns(id)
         XCTAssertEqual(turns.map(\.seq), [1, 2, 3])
-        XCTAssertTrue(turns[1].isDivider)
-        XCTAssertEqual(turns[1].reply, "Now reading Refine 2")
-        XCTAssertEqual(turns[2].you, "Still racing?")
+        XCTAssertEqual(turns[1].you, "Still racing?")
+        XCTAssertEqual(turns[1].checkpoint, 2)
+        XCTAssertTrue(turns[2].isDivider)
+        XCTAssertEqual(turns[2].reply, "Now reading Refine 2")
         XCTAssertEqual(turns[2].checkpoint, 2)
         XCTAssertEqual(store.diffs(id).first?.state, .stale)
         XCTAssertEqual(store.thread(id)?.followsCheckpoint, 2)
@@ -392,9 +403,9 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertEqual(store.thread(id)?.status, .open)
     }
 
-    /// An edit that lands between reading the plan and appending is caught after the append, and
-    /// the diff is appended again on top of it — so the last plan on the tape has both.
-    func testAutoAcceptReappliesOntoAnEditThatSlipsIn() async throws {
+    /// I2: an edit X that lands just before auto-accept appends is read, composed on and
+    /// appended after in one critical section — exactly one `applyThreadDiff`, built on X.
+    func testAutoAcceptComposesOnAnEditLandingJustBeforeIt() async throws {
         let agent = ScriptedAgent()
         let id = try open(autoAccept: true)
         let humanEdit = Self.plan.replacingOccurrences(of: "The client races", with: "The client (edited) races")
@@ -407,12 +418,31 @@ final class ThreadRunnerTests: XCTestCase {
         await runner(agent, hooks: hooks).run()
 
         let applied = applyThreadDiffs()
-        XCTAssertEqual(applied.count, 2)
-        let last = try XCTUnwrap(applied.last)
-        XCTAssertTrue(last.markdown.contains("Use a file queue."))
-        XCTAssertTrue(last.markdown.contains("The client (edited) races"), "the edit that slipped in survives")
-        XCTAssertEqual(tapeStore.commands(after: 0).last.map { if case .applyThreadDiff = $0.command { true } else { false } },
-                       true, "the plan with both is the last word")
+        XCTAssertEqual(applied.count, 1, "one append, never a second to repair the first")
+        XCTAssertTrue(applied[0].markdown.contains("Use a file queue."))
+        XCTAssertTrue(applied[0].markdown.contains("The client (edited) races"), "built on X")
+        XCTAssertEqual(store.diffs(id).first?.state, .accepted)
+    }
+
+    /// I2: however many human edits keep landing, the last word on the tape keeps the newest —
+    /// no edit is lost, and the accept is never left on the tape behind a "stale" diff.
+    func testNoHumanEditIsLostWhenEditsKeepLanding() async throws {
+        let agent = ScriptedAgent()
+        let id = try open(autoAccept: true)
+        let tapeStore = self.tapeStore
+        let counter = Counter()
+        let hooks = ThreadRunner.Hooks(beforeAutoAcceptAppend: {
+            let n = counter.next()
+            _ = try? tapeStore.appendCommand(.editPlan(checkpoint: 1, markdown: ThreadRunnerTests.plan
+                .replacingOccurrences(of: "The client races", with: "The client (edited \(n)) races")))
+        })
+        try send(id, "PROPOSE_STORAGE")
+        await runner(agent, hooks: hooks).run()
+
+        let last = try XCTUnwrap(tapeStore.commands(after: 0).last)
+        guard case .applyThreadDiff(_, _, _, let markdown) = last.command else { return XCTFail("last is \(last.command)") }
+        XCTAssertTrue(markdown.contains("(edited \(counter.value))"), "the newest human edit survives: \(markdown)")
+        XCTAssertTrue(markdown.contains("Use a file queue."))
         XCTAssertEqual(store.diffs(id).first?.state, .accepted)
     }
 
@@ -559,6 +589,116 @@ final class ThreadRunnerTests: XCTestCase {
         await first.value
     }
 
+    // MARK: - Fix round 1
+
+    /// C1: a turn lands its note and its auto-accept, then the runner dies before the turn's
+    /// end is saved; a round lands; the rerun keeps the turn's seq, so its note and diff keep
+    /// their ids and land once. A divider is drawn once per head, however often it is retried.
+    func testACrashedTurnRerunAfterARoundLandsNothingTwice() async throws {
+        let agent = ScriptedAgent()
+        let id = try open(autoAccept: true)
+        try send(id, "Hi")
+        await runner(agent).run()
+        try send(id, "NOTE_AND_STORAGE")
+        await runner(agent).run()
+        XCTAssertEqual(notesOnTape().count, 1)
+        XCTAssertEqual(applyThreadDiffs().count, 1)
+
+        func crash(rewindTo checkpoint: Int? = nil) throws {
+            var turns = store.turns(id)
+            let i = try XCTUnwrap(turns.firstIndex { $0.messageID != "" && $0.actions.count == 2 })
+            turns[i].endedAt = nil
+            try store.save(turns: turns, of: id)
+            if let checkpoint, var record = store.thread(id) {
+                record.followsCheckpoint = checkpoint
+                try store.save(record)
+            }
+        }
+        try crash()
+        try landRound()
+        await runner(agent).run()
+        // And the worst case: dying after the divider was drawn but before the thread recorded
+        // the version it follows, so the rerun sees the round as new again.
+        try crash(rewindTo: 1)
+        await runner(agent).run()
+
+        XCTAssertEqual(notesOnTape().count, 1, "no second note")
+        XCTAssertEqual(applyThreadDiffs().count, 1, "no second applyThreadDiff")
+        let turns = store.turns(id)
+        XCTAssertEqual(turns.filter(\.isDivider).count, 1, "one divider per head")
+        XCTAssertEqual(turns.first { $0.actions.count == 2 }?.seq, 2, "the turn kept its seq")
+        XCTAssertEqual(store.diffs(id).count, 1)
+        XCTAssertEqual(store.diffs(id).first?.state, .accepted)
+    }
+
+    /// I1: an executor that throws something other than a cancellation (a file it couldn't
+    /// write) ends the turn as failed, and the runner goes idle instead of re-claiming it forever.
+    func testAnExecutorErrorEndsTheTurnAsFailed() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try send(id, "THROW")
+        let finished = try await runWithin(seconds: 5, runner(agent))
+        XCTAssertTrue(finished, "the runner went idle")
+        XCTAssertLessThanOrEqual(agent.requests.count, 1, "claimed once, not in a loop")
+        let turn = try XCTUnwrap(store.turns(id).first)
+        XCTAssertNotNil(turn.endedAt)
+        XCTAssertTrue(turn.errors.first?.hasPrefix("couldn't run:") ?? false, "\(turn.errors)")
+        XCTAssertEqual(store.thread(id)?.status, .open)
+    }
+
+    /// A runner that died mid-turn left its thread `answering` with nothing running. The next
+    /// runner puts it back to where it rests.
+    func testAStuckAnsweringThreadIsResetAtStart() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try send(id, "Hi")
+        await runner(agent).run()
+        var record = try XCTUnwrap(store.thread(id))
+        record.status = .answering
+        try store.save(record)
+        await runner(agent).run()
+        XCTAssertEqual(store.thread(id)?.status, .open)
+        XCTAssertEqual(agent.requests.count, 1, "nothing ran")
+    }
+
+    /// The cursor never moves past a command whose turn couldn't be saved: the message is
+    /// folded again once the disk lets it, and its turn runs.
+    func testTheCursorStaysOnACommandWhoseSaveFailed() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        await runner(agent).run()
+        XCTAssertEqual(store.cursor(), 1)
+        let dir = store.directory(id)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+        try send(id, "Hi")
+        let run = Task { await runner(agent).run() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.cursor(), 1, "not past the message whose turn didn't save")
+        XCTAssertTrue(store.turns(id).isEmpty)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+        try await until("the turn ran") { store.turns(id).first?.endedAt != nil }
+        await run.value
+        XCTAssertEqual(store.cursor(), 2)
+        XCTAssertEqual(agent.requests.count, 1)
+    }
+
+    private func notesOnTape() -> [PlanNote] {
+        tapeStore.commands(after: 0).compactMap { if case .note(let n) = $0.command { n } else { nil } }
+    }
+
+    /// Runs `runner` and reports whether it returned within the time; a runner still going is
+    /// cancelled, so a hot loop fails the test rather than hanging it.
+    private func runWithin(seconds: TimeInterval, _ runner: ThreadRunner) async throws -> Bool {
+        let done = Flag()
+        let task = Task { await runner.run(); done.set() }
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done.value && Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        if !done.value { task.cancel() }
+        await task.value
+        return Date() < deadline
+    }
+
     /// R2: the live line reads the running turn's activity, and nothing once no turn runs.
     func testActivityShowsOnlyWhileATurnRuns() throws {
         let id = try open()
@@ -570,6 +710,21 @@ final class ThreadRunnerTests: XCTestCase {
         try store.save(turns: [ThreadTurn(seq: 1, messageID: "m", you: "x", checkpoint: 1, startedAt: created)], of: id)
         XCTAssertEqual(store.activity(id), "running rg queue")
     }
+}
+
+/// Counts up from 1 on each `next()`.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func next() -> Int { lock.withLock { n += 1; return n } }
+    var value: Int { lock.withLock { n } }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on = false
+    func set() { lock.withLock { on = true } }
+    var value: Bool { lock.withLock { on } }
 }
 
 /// True exactly once.
