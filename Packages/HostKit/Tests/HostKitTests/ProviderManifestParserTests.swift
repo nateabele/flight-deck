@@ -152,7 +152,7 @@ final class ProviderManifestParserTests: XCTestCase {
     }
 
     func testEmptyOrUnsafeIdIsRefused() {
-        for bad in ["", "../x", "a/b", "a b", ".hidden", "a..b"] {
+        for bad in ["", "../x", "a/b", "a b", ".hidden", "a..b", "fd.x\\n", "fd.x\\r\\n"] {
             let found = issue(head.replacingOccurrences(of: "id = \"p\"", with: "id = \"\(bad)\"") + kind())
             XCTAssertEqual(found?.line, 1, "id \"\(bad)\" must be refused at its line")
         }
@@ -175,8 +175,37 @@ final class ProviderManifestParserTests: XCTestCase {
     func testNewerContractWithUnknownSyntaxSaysNeedsNewer() {
         let found = issue("contract = 3\nstamp = 2026-10-31T10:00:00Z\n[[[weird\n")
         XCTAssertEqual(found?.needsNewerFlightDeck, true)
-        XCTAssertNil(issue("contract = 1\n[[[weird\n")?.needsNewerFlightDeck.nilIfFalse)
+        // Contract 1 with the same bad syntax is a plain parse error, not "newer".
+        let plain = issue("contract = 1\n[[[weird\n")
+        XCTAssertNotNil(plain)
+        XCTAssertEqual(plain?.needsNewerFlightDeck, false)
+    }
+
+    func testNewerContractInCRLFFileReportsRightLine() {
+        let found = issue("id = \"p\"\r\nname = \"P\"\r\ncontract = 4\r\n[[[weird\r\n")
+        XCTAssertEqual(found?.needsNewerFlightDeck, true)
+        XCTAssertEqual(found?.line, 3)
+    }
+
+    func testNestedContractKeyDoesNotTriggerFallback() {
+        let found = issue("contract = 1\n[[kind]]\ncontract = 9\n[[[weird\n")
+        XCTAssertNotNil(found)
+        XCTAssertEqual(found?.needsNewerFlightDeck, false)
+    }
+
+    func testNewlineOnlyOrTabOnlyNameAndVersionAreRefused() {
+        for bad in ["\\n", "\\t", " \\r\\n"] {
+            XCTAssertEqual(issue(head.replacingOccurrences(of: "name = \"P\"", with: "name = \"\(bad)\"") + kind())?.line, 2, "name \(bad)")
+            XCTAssertEqual(issue(head.replacingOccurrences(of: "version = \"1\"", with: "version = \"\(bad)\"") + kind())?.line, 3, "version \(bad)")
+        }
+    }
+
+    func testDanglingIntermediateLinkPointingOutsideIsRefused() throws {
+        let missing = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nowhere-\(UUID().uuidString)/missing")
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("d"), withDestinationURL: missing)
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("x").path, withDestinationPath: "d/file")
+        let found = issue(head + kind().replacingOccurrences(of: "i.md", with: "x"))
+        XCTAssertEqual(found?.line, 10)
+        XCTAssertTrue(found?.message.contains("symlink") == true)
     }
 }
-
-private extension Bool { var nilIfFalse: Bool? { self ? true : nil } }

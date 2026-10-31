@@ -30,8 +30,13 @@ public enum ProviderManifestParser {
         } catch let issue as DelegateConfigIssue {
             // A newer contract may use syntax this reader lacks (dates, say). Its `contract`
             // line is still plain, so say "newer Flight Deck" instead of a misleading parse error.
-            for (number, text) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-                let words = text.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            // Only top-level lines count: a `contract` key under a table header belongs to that
+            // table. a split on `isNewline` Characters, because "\r\n" is one Character that a split
+            // on "\n" never sees, and `components(separatedBy: .newlines)` counts it as two lines.
+            for (number, line) in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).enumerated() {
+                let trimmed = String(line).trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("[") { break }
+                let words = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
                 if words.count == 2, words[0] == "contract",
                    let n = Int(words[1].prefix { $0.isNumber }), n > supportedContract {
                     throw ProviderManifestIssue(
@@ -72,7 +77,9 @@ public enum ProviderManifestParser {
         // component, so it is held to a filename-safe shape here, not at each use.
         let id = try required(root, "id", in: "provider.toml") { node in
             let value = try string(node, "id")
-            let safe = value.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]*$", options: .regularExpression) != nil
+            // \A…\z, not ^…$: ICU lets `$` match before a trailing newline, and a newline in a
+            // trust key or path component is the thing this check exists to stop.
+            let safe = value.range(of: "\\A[A-Za-z0-9][A-Za-z0-9._-]*\\z", options: .regularExpression) != nil
             guard safe, !value.contains("..") else {
                 throw ProviderManifestIssue(.error, line: node.line,
                     "id \"\(value)\" must be letters, digits, \".\", \"_\" or \"-\", start with a letter or digit, and not contain \"..\"")
@@ -236,22 +243,29 @@ public enum ProviderManifestParser {
 
         let root = folder.resolvingSymlinksInPath().standardizedFileURL
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        // Walk the components one at a time and read each link itself. `fileExists` and
-        // `resolvingSymlinksInPath` both follow a link, so a dangling `link -> /outside/missing`
-        // looked like a missing file and passed.
-        var current = root
-        for part in parts {
-            current.appendPathComponent(String(part))
-            guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else {
+        // Follow every link hop by hop with `destinationOfSymbolicLink`, which reads the link
+        // itself. `fileExists` and `resolvingSymlinksInPath` both follow a link, so a dangling
+        // `link -> /outside/missing` looked like a missing file, and so did `x -> d/file` when
+        // `d` was the dangling one. The hop limit stops a link loop.
+        var resolved = root
+        var queue = parts.map(String.init)
+        var hops = 0
+        while !queue.isEmpty {
+            let part = queue.removeFirst()
+            if part == "." || part.isEmpty { continue }
+            if part == ".." { resolved.deleteLastPathComponent(); continue }
+            let next = resolved.appendingPathComponent(part)
+            guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: next.path) else {
+                resolved = next
                 continue
             }
-            let target = destination.hasPrefix("/")
-                ? URL(fileURLWithPath: destination)
-                : current.deletingLastPathComponent().appendingPathComponent(destination)
-            current = target.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
-            guard (current.path + "/").hasPrefix(prefix) else {
-                throw refuse("resolves outside the provider folder through a symlink")
-            }
+            hops += 1
+            guard hops <= 40 else { throw refuse("goes through too many symlinks") }
+            if destination.hasPrefix("/") { resolved = URL(fileURLWithPath: "/") }
+            queue = destination.split(separator: "/").map(String.init) + queue
+        }
+        guard (resolved.standardizedFileURL.path + "/").hasPrefix(prefix) else {
+            throw refuse("resolves outside the provider folder through a symlink")
         }
         return relative
     }
@@ -275,7 +289,7 @@ public enum ProviderManifestParser {
 
     private static func nonEmpty(_ node: TOMLNode, _ field: String) throws -> String {
         let value = try string(node, field)
-        guard !value.trimmingCharacters(in: .whitespaces).isEmpty else {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ProviderManifestIssue(.error, line: node.line, "\(field) must not be empty")
         }
         return value
