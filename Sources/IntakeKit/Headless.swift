@@ -431,11 +431,13 @@ public enum HeadlessCommand {
     /// `base` (`--restricted` drops the file that carries it), the account's home bound, and the
     /// child-session scrub — and then `build`'s unsets run, so nothing can re-introduce a
     /// variable `build` removed. `account` nil is the built-in account. `home` is injectable so
-    /// a test never reads the operator's own settings.
+    /// a test never reads the operator's own settings. `readable` is a thread turn's workspace:
+    /// the only place outside the repo an OpenCode thread agent may read (I3). It is handed in,
+    /// not read back off the argv, because no flag in the argv names it.
     public static func environment(
         for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser,
-        account: AgentAccountRef? = nil
+        account: AgentAccountRef? = nil, readable: [URL] = []
     ) -> [String: String] {
         var environment: [String: String]
         switch command.executable {
@@ -449,7 +451,8 @@ public enum HeadlessCommand {
         // The seat's permission set is environment (`OPENCODE_CONFIG_CONTENT`), not argv — so,
         // like grok's isolation, every opencode child must come through here.
         case OpenCodeProfile().binaryName:
-            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments)
+            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments,
+                                                        readable: readable)
         default: environment = base
         }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }

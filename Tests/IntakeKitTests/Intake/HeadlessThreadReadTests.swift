@@ -56,11 +56,88 @@ final class HeadlessThreadReadTests: XCTestCase {
         XCTAssertEqual(value(after: "--resume", in: args), "sess-1")
     }
 
-    func testClaudeReadOnlyIsUnchanged() throws {
-        let args = try argv(req(.claude, .readOnly))
-        XCTAssertEqual(value(after: "--allowedTools", in: args), HeadlessCommand.claudeReadOnlyTools)
-        XCTAssertEqual(value(after: "--disallowedTools", in: args), HeadlessCommand.claudeDeniedTools)
-        XCTAssertEqual(value(after: "--tools", in: args), HeadlessCommand.claudeReadOnlyBuiltins)
+    /// The round seats' argv, pinned as literals rather than as the constants that build them:
+    /// a change to a constant would move the argv and its check together, and this test exists
+    /// to fail exactly then. Captured from the build before `threadRead` existed.
+    func testReadOnlyAndWriteArgvArePinnedLiterally() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("fd-thread-pin-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        func pinned(_ agent: AgentID, _ access: HeadlessAccess) throws -> [String] {
+            let cwd = URL(fileURLWithPath: access == .readOnly ? "/repo" : "/work")
+            let r = HeadlessRequest(agent: agent, model: agent == .gemini ? "gemini-3-pro" : "m", effort: "high", cwd: cwd,
+                                    readableDirs: [URL(fileURLWithPath: "/intake/threads/t/workspace")], prompt: "P",
+                                    schemaFile: URL(fileURLWithPath: "/intake/threads/t/run/schema.json"), schemaJSON: "{}",
+                                    resumeSessionID: nil, access: access)
+            let c = try HeadlessCommand.build(r, home: tmp)
+            var args = [c.executable] + c.arguments
+            if let i = args.firstIndex(of: "--session-id") { args[i + 1] = "<minted>" }
+            return args
+        }
+        let write = HeadlessAccess.writeInWork(URL(fileURLWithPath: "/work"))
+        let codexHead = ["codex", "exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high", "--ignore-user-config",
+                         "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed"]
+        let codexTail = ["--skip-git-repo-check", "--output-schema", "/intake/threads/t/run/schema.json", "P"]
+        let claudeHead = ["claude", "-p", "P", "--model", "m", "--effort", "high", "--output-format", "stream-json",
+                          "--verbose", "--json-schema", "{}"]
+        let grokHead = ["grok", "-p", "P", "--json-schema", "{}", "-m", "m", "--reasoning-effort", "high"]
+        let grokCommon = ["--output-format", "streaming-messages-json", "--disable-web-search", "--no-subagents", "--no-plan",
+                          "--disallowed-tools", "Agent", "--permission-mode", "dontAsk"]
+        let schemaLine = "P\n\nReply with ONLY one JSON object that validates against this JSON Schema — no prose, no code fence:\n{}"
+
+        XCTAssertEqual(try pinned(.claude, .readOnly), claudeHead + [
+            "--permission-mode", "dontAsk", "--tools", "Read Grep Glob Bash",
+            "--allowedTools", "Read Grep Glob Bash(br list *) Bash(br show *) Bash(br graph *) Bash(br ready *)",
+            "--disallowedTools", "Bash(br create *) Bash(br update *) Bash(br close *) Bash(br reopen *) Bash(br delete *) Bash(br dep *) Bash(br label *) Bash(br comments *) Bash(br sync *) Bash(br defer *) Bash(br undefer *) Bash(br q *) Bash(br init *)",
+            "--add-dir", "/intake/threads/t/workspace", "--restricted", "--strict-mcp-config"])
+        XCTAssertEqual(try pinned(.claude, write), claudeHead + [
+            "--permission-mode", "acceptEdits", "--tools", "Read Edit Write", "--allowedTools", "Read Edit Write",
+            "--disallowedTools", "Bash WebFetch WebSearch Task NotebookEdit", "--add-dir", "/work",
+            "--restricted", "--strict-mcp-config"])
+        XCTAssertEqual(try pinned(.codex, .readOnly), codexHead + ["-s", "read-only"] + codexTail)
+        XCTAssertEqual(try pinned(.codex, write), codexHead + [
+            "-s", "workspace-write", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.writable_roots=[]"]
+            + codexTail)
+        XCTAssertEqual(try pinned(.gemini, .readOnly), [
+            "agy", "-p", "P" + HeadlessCommand.geminiReadOnlyNote, "--output-format", "stream-json", "--json-schema", "{}",
+            "--model", "gemini-3-pro", "--disable-slash-commands", "--project", "flight-deck-planning",
+            "--add-dir", "/intake/threads/t/workspace"])
+        XCTAssertTrue(HeadlessCommand.geminiReadOnlyNote.hasPrefix("\n\n(This run is read-only. Writing or editing files"))
+        XCTAssertEqual(try pinned(.gemini, write), [
+            "agy", "-p", "P", "--output-format", "stream-json", "--json-schema", "{}", "--model", "gemini-3-pro",
+            "--disable-slash-commands", "--mode", "accept-edits", "--sandbox"])
+        XCTAssertEqual(try pinned(.grok, .readOnly), grokHead + ["--cwd", "/repo"] + grokCommon + [
+            "--tools", "read_file,grep,list_dir", "--deny", "Edit", "--deny", "Write", "--deny", "Bash", "--deny", "WebFetch",
+            "--deny", "WebSearch", "--deny", "MCPTool", "--deny", "Read(**/.git/**)", "--deny", "Read(**/.beads/**)",
+            "--session-id", "<minted>"])
+        XCTAssertEqual(try pinned(.grok, write), grokHead + ["--cwd", "/work"] + grokCommon + [
+            "--tools", "read_file,grep,list_dir,search_replace,write", "--allow", "Edit(/work/**)", "--deny", "Bash",
+            "--deny", "WebFetch", "--deny", "WebSearch", "--deny", "MCPTool", "--deny", "Read(**/.git/**)",
+            "--deny", "Read(**/.beads/**)", "--session-id", "<minted>"])
+        XCTAssertEqual(try pinned(.opencode, .readOnly), [
+            "opencode", "run", "--format", "json", "--agent", "flightdeck-readonly", "--dir", "/repo", "-m", "m",
+            "--variant", "high", "--", schemaLine])
+        XCTAssertEqual(try pinned(.opencode, write), [
+            "opencode", "run", "--format", "json", "--agent", "flightdeck-integrator", "--dir", "/work", "-m", "m",
+            "--variant", "high", "--", schemaLine])
+    }
+
+    /// The read-only and integrator OpenCode configs, byte for byte as before threads.
+    func testOpenCodeRoundConfigsArePinnedLiterally() throws {
+        func config(_ access: HeadlessAccess, cwd: String) throws -> String? {
+            let r = HeadlessRequest(agent: .opencode, model: "m", effort: "high", cwd: URL(fileURLWithPath: cwd),
+                                    readableDirs: [URL(fileURLWithPath: "/intake/threads/t/workspace")], prompt: "P",
+                                    schemaFile: URL(fileURLWithPath: "/s.json"), schemaJSON: "{}", resumeSessionID: nil,
+                                    access: access)
+            return HeadlessCommand.environment(for: try HeadlessCommand.build(r, home: Self.noHome), base: [:],
+                                               home: Self.noHome)["OPENCODE_CONFIG_CONTENT"]
+        }
+        let readOnlyAgent = #""flightdeck-readonly":{"description":"Flight Deck planning agent","mode":"primary","permission":{"*":"deny","glob":"allow","grep":"allow","list":"allow","read":"allow"}}"#
+        XCTAssertEqual(try config(.readOnly, cwd: "/repo"),
+                       #"{"agent":{"# + readOnlyAgent + #"},"autoupdate":false,"share":"disabled"}"#)
+        XCTAssertEqual(try config(.writeInWork(URL(fileURLWithPath: "/work")), cwd: "/work"),
+                       #"{"agent":{"flightdeck-integrator":{"description":"Flight Deck planning agent","mode":"primary","permission":{"*":"deny","edit":{"*":"deny","work\/*":"allow"},"glob":"allow","grep":"allow","list":"allow","read":"allow"}},"#
+                       + readOnlyAgent + #"},"autoupdate":false,"share":"disabled"}"#)
     }
 
     // MARK: codex
@@ -100,11 +177,6 @@ final class HeadlessThreadReadTests: XCTestCase {
         }
     }
 
-    func testGrokReadOnlyIsUnchanged() throws {
-        // The minted session id differs per build; everything before it must match.
-        let thread = try argv(req(.grok, .threadRead)), readOnly = try argv(req(.grok, .readOnly))
-        XCTAssertEqual(Array(thread.dropLast()), Array(readOnly.dropLast()))
-    }
 
     // MARK: opencode
 
@@ -141,12 +213,18 @@ final class HeadlessThreadReadTests: XCTestCase {
         }
     }
 
-    func testOpenCodeReadOnlyConfigIsUnchanged() throws {
-        let command = try HeadlessCommand.build(req(.opencode, .readOnly), home: Self.noHome)
-        let env = HeadlessCommand.environment(for: command, base: [:], home: Self.noHome)
-        XCTAssertEqual(env["OPENCODE_CONFIG_CONTENT"],
-                       OpenCodeProfile.configContent(writeDir: nil, fileExists: { FileManager.default.fileExists(atPath: $0) }))
-        XCTAssertEqual(value(after: "--agent", in: command.arguments), OpenCodeProfile.readOnlyAgent)
+    /// I3: the thread agent may read outside the repo only inside the workspace it is handed —
+    /// never the whole disk, which `external_directory: allow` let it do (proven live).
+    func testOpenCodeThreadReadsOutsideTheRepoOnlyInItsWorkspace() throws {
+        let command = try HeadlessCommand.build(req(.opencode, .threadRead), home: Self.noHome)
+        let workspace = URL(fileURLWithPath: "/intake/threads/t/workspace")
+        let env = HeadlessCommand.environment(for: command, base: [:], home: Self.noHome, readable: [workspace])
+        let config = try XCTUnwrap(env["OPENCODE_CONFIG_CONTENT"])
+        XCTAssertTrue(config.contains(#""external_directory":{"*":"deny","\/intake\/threads\/t\/workspace\/*":"allow"}"#), config)
+
+        let unscoped = try XCTUnwrap(HeadlessCommand.environment(for: command, base: [:], home: Self.noHome)["OPENCODE_CONFIG_CONTENT"])
+        XCTAssertTrue(unscoped.contains(#""external_directory":{"*":"deny"}"#), "no workspace named, nothing outside the repo")
+        XCTAssertFalse(unscoped.contains(#""external_directory":"allow""#))
     }
 
     /// A thread turn never writes, so it is never a write-mode request.

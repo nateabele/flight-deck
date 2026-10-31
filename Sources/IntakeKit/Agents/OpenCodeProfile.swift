@@ -109,11 +109,13 @@ public struct OpenCodeProfile: AgentProfile {
     /// command is allowed bare and with arguments; its writing flags are denied by patterns
     /// that start with the command, so they sort after its allow (`threadDeniedPatterns`).
     ///
-    /// `external_directory` is allowed because the thread's workspace lives under the intake,
-    /// outside the repo the run is rooted in, and the agent must read it. No tool that writes
-    /// exists here (`*: deny` removes `edit`), so the wider reach is reads only. Not yet probed
-    /// live on OpenCode; the `thread.turn` cell in `scripts/test-adapters.sh` pins the config.
-    static var threadPermission: [String: Any] {
+    /// `external_directory` opens only the thread's workspace (`readable`), which lives under
+    /// the intake, outside the repo the run is rooted in: `{"*": "deny", "<workspace>/*":
+    /// "allow"}`. A bare `allow` let the agent read the whole disk (the review read a planted
+    /// secret from another directory, live); this shape was verified live to read the workspace
+    /// and refuse anything else. Each directory is named as given and, where it differs, as
+    /// `realpath(3)` resolves it, since OpenCode reports `/tmp/…` as `/private/tmp/…`.
+    static func threadPermission(readable: [URL]) -> [String: Any] {
         var permission = readOnlyPermission
         var bash: [String: String] = ["*": "deny"]
         for command in HeadlessCommand.threadReadCommands {
@@ -122,7 +124,16 @@ public struct OpenCodeProfile: AgentProfile {
         }
         for pattern in HeadlessCommand.threadDeniedPatterns { bash[pattern] = "deny" }
         permission["bash"] = bash
-        permission["external_directory"] = "allow"
+        var outside: [String: String] = ["*": "deny"]
+        for dir in readable {
+            let path = dir.standardizedFileURL.path
+            outside["\(path)/*"] = "allow"
+            if let resolved = realpath(path, nil) {
+                defer { free(resolved) }
+                outside["\(String(cString: resolved))/*"] = "allow"
+            }
+        }
+        permission["external_directory"] = outside
         return permission
     }
 
@@ -151,14 +162,15 @@ public struct OpenCodeProfile: AgentProfile {
     }
 
     /// The `OPENCODE_CONFIG_CONTENT` a headless run carries: the read-only agent, plus the
-    /// integrator when `writeDir` is given, and the thread agent when `thread` is set.
-    public static func configContent(writeDir: URL?, thread: Bool = false, fileExists: (String) -> Bool) -> String {
+    /// integrator when `writeDir` is given, and the thread agent, reading outside the repo only
+    /// in `threadReadable`, when that is non-nil.
+    public static func configContent(writeDir: URL?, threadReadable: [URL]? = nil, fileExists: (String) -> Bool) -> String {
         func agent(_ permission: [String: Any]) -> [String: Any] {
             ["mode": "primary", "description": "Flight Deck planning agent", "permission": permission]
         }
         var agents: [String: Any] = [readOnlyAgent: agent(readOnlyPermission)]
         if let writeDir { agents[integratorAgent] = agent(writePermission(workDir: writeDir, fileExists: fileExists)) }
-        if thread { agents[threadAgent] = agent(threadPermission) }
+        if let threadReadable { agents[threadAgent] = agent(threadPermission(readable: threadReadable)) }
         // A seat never shares its session to opencode.ai or swaps its own binary mid-round.
         let config: [String: Any] = ["agent": agents, "share": "disabled", "autoupdate": false]
         let data = (try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])) ?? Data("{}".utf8)
@@ -187,8 +199,10 @@ public struct OpenCodeProfile: AgentProfile {
     /// `HeadlessCommand.build` produced: the integrator is defined only for a run that asks for
     /// it, with its edit rule rooted at that run's `--dir`. Read from the argv because
     /// `HeadlessCommand.environment` receives the built command, not the request — and the argv
-    /// is exactly what the child will run, so the two cannot disagree.
+    /// is exactly what the child will run, so the two cannot disagree. The thread agent's
+    /// workspace is the exception: no flag names it, so it is handed in as `readable`.
     public func environment(base: [String: String], account: AgentAccountRef?, arguments: [String],
+                            readable: [URL] = [],
                             fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String: String] {
         var env = environment(base: base, account: account)
         func value(after flag: String) -> String? {
@@ -198,7 +212,8 @@ public struct OpenCodeProfile: AgentProfile {
         let writeDir = value(after: "--agent") == Self.integratorAgent
             ? value(after: "--dir").map { URL(fileURLWithPath: $0, isDirectory: true) } : nil
         env["OPENCODE_CONFIG_CONTENT"] = Self.configContent(writeDir: writeDir,
-                                                            thread: value(after: "--agent") == Self.threadAgent,
+                                                            threadReadable: value(after: "--agent") == Self.threadAgent
+                                                                ? readable : nil,
                                                             fileExists: fileExists)
         return env
     }
