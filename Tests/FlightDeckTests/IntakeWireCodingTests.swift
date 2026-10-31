@@ -109,11 +109,52 @@ final class IntakeWireCodingTests: XCTestCase {
                                sectionsChanged: ["7. Model-credential paths"],
                                agents: [WireRoundAgent(role: "reviewer", ran: "codex · gpt-6-sol · high", status: "ok", detail: nil)],
                                notesConsumed: [note])],
-            questions: WireQuestions(open: nil, answered: [WireExchange(questions: ["Both?"], answers: ["Both"])]),
+            questions: WireQuestions(
+                open: ["Pick one", "Anything else?"],
+                answered: [WireExchange(questions: ["Both?"], answers: ["Both"])],
+                round: 1,
+                structured: [
+                    WireStructuredQuestion(id: "q1", text: "Pick one", kind: "single",
+                                           options: [WireOption(id: "a", label: "A", detail: "the first"), WireOption(id: "b", label: "B")],
+                                           recommended: ["a"], allowOther: true),
+                    WireStructuredQuestion(id: "q2", text: "Anything else?", kind: "text")]),
             choice: nil, failure: nil, pendingNotes: 1, halt: nil, headCheckpoint: 3,
-            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200))
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200), structuredQuestions: true)
         let data = try JSONEncoder().encode(detail)
         XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
+    }
+
+    func testAnOldMacPayloadWithoutStructuredFieldsDecodes() throws {
+        let json = #"{"open":["Who?"],"answered":[{"questions":["Both?"],"answers":["Both"]}]}"#
+        let q = try JSONDecoder().decode(WireQuestions.self, from: Data(json.utf8))
+        XCTAssertEqual(q.open, ["Who?"])
+        XCTAssertNil(q.round)
+        XCTAssertNil(q.structured)
+        let option = try JSONDecoder().decode(WireOption.self, from: Data(#"{"id":"a","label":"A"}"#.utf8))
+        XCTAssertNil(option.detail)
+        // The whole detail from a Mac that predates the flag: nil is what keeps the phone from
+        // sending an op that Mac would drop the socket on.
+        let detail = WireIntakeDetail(etag: "e", project: UUID(), summary: Self.summary, intent: "x",
+                                      servedAt: Date(timeIntervalSinceReferenceDate: 1))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(detail)) as? [String: Any])
+        XCTAssertNil(object["structuredQuestions"])
+        object.removeValue(forKey: "structuredQuestions")
+        let old = try JSONDecoder().decode(WireIntakeDetail.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(old.structuredQuestions)
+    }
+
+    func testIntakeAnswerCommandRoundTrips() throws {
+        let command = FleetCommand.intakeAnswer(
+            id: UUID(), token: UUID(), round: 2,
+            answers: [WireStructuredAnswer(questionID: "q1", selected: ["a"], other: nil),
+                      WireStructuredAnswer(questionID: "q2", selected: [], other: "typed")])
+        let data = try JSONEncoder().encode(command)
+        XCTAssertEqual(try JSONDecoder().decode(FleetCommand.self, from: data), command)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["op"] as? String, "intake.answer")
+        XCTAssertNotNil(json["id"])
+        XCTAssertNil(json["intakeID"])
+        XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(UUID())))
     }
 
     // MARK: phone fidelity + round inspector

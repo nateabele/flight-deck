@@ -1443,6 +1443,10 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneChoose(id, token: token, preset: preset) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeAnswer(let id, let token, let round, let answers):
+            if let code = store.intakeService.phoneAnswer(id, round: round, answers: answers, token: token) {
+                return .err(cid: cid, code: code)
+            }
         case .intakeStart(let id, let token, let preset, let config, let base):
             if let code = store.intakeService.phoneStart(id, token: token, preset: preset, config: config, base: base) {
                 return .err(cid: cid, code: code)

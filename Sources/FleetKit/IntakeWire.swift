@@ -94,6 +94,11 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     public var roundsMenu: WireRoundsMenu?
     /// What shaping has already run, so the inspector shows those roles locked; shaping only.
     public var roundsLock: WireRoundsLock?
+    /// true from a Mac that accepts `intake.answer` — the phone's licence to answer clarifying
+    /// questions by choosing. Separate from `steer` for the same reason `choose` is: an older Mac
+    /// drops the socket on an op it does not know. nil from such a Mac, and the phone says to
+    /// answer on the Mac.
+    public var structuredQuestions: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -102,7 +107,8 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
         headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
         roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
-        roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil
+        roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil,
+        structuredQuestions: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -111,6 +117,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.servedAt = servedAt; self.steer = steer; self.choose = choose; self.noteKind = noteKind
         self.roundConfig = roundConfig
         self.editRounds = editRounds; self.roundsMenu = roundsMenu; self.roundsLock = roundsLock
+        self.structuredQuestions = structuredQuestions
     }
 }
 
@@ -342,9 +349,55 @@ public struct WireNote: Codable, Equatable, Sendable, Identifiable {
 public struct WireQuestions: Codable, Equatable, Sendable {
     public var open: [String]?
     public var answered: [WireExchange]
+    /// Index of the open exchange: an answer names it so one typed against an earlier round is
+    /// refused (`stale_questions`) instead of landing on this round's different questions. nil
+    /// from a Mac that predates structured questions.
+    public var round: Int?
+    /// The open round as choices (a legacy string round arrives as text questions), so the phone
+    /// has one shape to render. `open` stays for a phone that predates this field.
+    public var structured: [WireStructuredQuestion]?
 
-    public init(open: [String]? = nil, answered: [WireExchange] = []) {
-        self.open = open; self.answered = answered
+    public init(open: [String]? = nil, answered: [WireExchange] = [],
+                round: Int? = nil, structured: [WireStructuredQuestion]? = nil) {
+        self.open = open; self.answered = answered; self.round = round; self.structured = structured
+    }
+}
+
+/// A clarifying question the person answers by choosing. `kind` stays a string (single, multi,
+/// toggle, text today) so a kind added later never breaks an old phone's decode.
+public struct WireStructuredQuestion: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+    public var kind: String
+    public var options: [WireOption]
+    public var recommended: [String]
+    public var allowOther: Bool
+
+    public init(id: String, text: String, kind: String, options: [WireOption] = [],
+                recommended: [String] = [], allowOther: Bool = false) {
+        self.id = id; self.text = text; self.kind = kind; self.options = options
+        self.recommended = recommended; self.allowOther = allowOther
+    }
+}
+
+public struct WireOption: Codable, Equatable, Sendable {
+    public var id: String
+    public var label: String
+    public var detail: String?
+
+    public init(id: String, label: String, detail: String? = nil) {
+        self.id = id; self.label = label; self.detail = detail
+    }
+}
+
+/// `selected` holds option ids; a text question's typed answer lives in `other`.
+public struct WireStructuredAnswer: Codable, Equatable, Sendable {
+    public var questionID: String
+    public var selected: [String]
+    public var other: String?
+
+    public init(questionID: String, selected: [String] = [], other: String? = nil) {
+        self.questionID = questionID; self.selected = selected; self.other = other
     }
 }
 

@@ -1472,6 +1472,20 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone answering the open clarifying round (`intake.answer`). `stale_questions` is the one
+    /// code for "the round you answered is gone": the Mac moved past it, answered it itself, or the
+    /// intake no longer waits. Every other refusal is `answer(_:structured:)`'s own code.
+    func phoneAnswer(_ id: UUID, round: Int, answers: [WireStructuredAnswer], token: UUID) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        guard i.state == .needsAnswers, round == i.exchanges.count - 1, i.exchanges.last?.answers == nil
+        else { return refuse("stale_questions", id) }
+        let mapped = answers.map { StructuredAnswer(questionID: $0.questionID, selected: $0.selected, other: $0.other) }
+        if let refusal = answer(id, structured: mapped) { return refuse(refusal.rawValue, id) }
+        accept(token, for: id)
+        return nil
+    }
+
     /// `id`'s notes no round has read yet: the tape's pending notes with the queued note commands
     /// no runner has acked folded on top. `TapeOverlay` does not fold notes, so a note sent a
     /// moment ago is only a line in `commands.jsonl` until a runner reads it — and withdrawing it

@@ -443,4 +443,71 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: UUID(), kind: "question"), "note_consumed",
                        "no pending note by that id: a round has read it")
     }
+
+    // MARK: structured answers
+
+    private func seedAsking(rounds: Int, answeredFirst: Bool = false) throws -> Intake {
+        var i = Intake(projectPath: "/p", intent: "Plan the thing")
+        i.state = .needsAnswers
+        i.exchanges = (0..<rounds).map { n in
+            TriageExchange(questions: ["Q\(n)?"], answers: n < rounds - 1 || answeredFirst ? ["done"] : nil)
+        }
+        try IntakeStore(root: root).save(i)
+        return i
+    }
+
+    func testPhoneAnswerAnswersTheOpenRound() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", selected: [], other: "the README")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()))
+        let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
+        XCTAssertEqual(after.exchanges[0].answers, ["the README"])
+        XCTAssertEqual(after.exchanges[0].structuredAnswers, [StructuredAnswer(questionID: "q1", selected: [], other: "the README")])
+    }
+
+    func testPhoneAnswerPassesOnTheServicesRefusal() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "zz", other: "x")], token: UUID()),
+                       "unknown_question")
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "q1", other: " ")], token: UUID()),
+                       "invalid_answer")
+        XCTAssertEqual(svc.phoneAnswer(UUID(), round: 0, answers: [], token: UUID()), "unknown_intake")
+    }
+
+    func testPhoneAnswerForAnEarlierRoundIsRefusedAsStale() async throws {
+        // Round 0 answered on the Mac, round 1 now open: a phone still showing round 0 must not
+        // have its answers land on round 1's different questions.
+        let i = try seedAsking(rounds: 2)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "old")]
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()), "stale_questions")
+        let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
+        XCTAssertNil(after.exchanges[1].answers)
+        XCTAssertEqual(after.state, .needsAnswers)
+    }
+
+    func testPhoneAnswerForAnAlreadyAnsweredRoundIsStale() async throws {
+        // Answered, no new round yet, and the intake still reads needsAnswers (as before triage
+        // moves it): a second phone with a fresh token gets the one "your round is gone" code.
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "first")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: UUID()))
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, answers: [WireStructuredAnswer(questionID: "q1", other: "second")],
+                                       token: UUID()), "stale_questions")
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["first"])
+    }
+
+    func testPhoneAnswerTokenIsIdempotent() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let token = UUID()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "once")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: token))
+        // The retry meets a state its first delivery changed; it must be acked, not refused stale.
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, answers: answers, token: token))
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["once"])
+    }
 }
