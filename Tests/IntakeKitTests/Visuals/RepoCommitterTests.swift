@@ -343,6 +343,64 @@ final class RepoCommitterTests: XCTestCase {
         XCTAssertEqual(fresh.removed, [])
     }
 
+    // MARK: Fix round 3
+
+    func testAnUntrackedFileIsSeenEvenWhenGitIsToldToHideUntrackedFiles() async throws {
+        try await git("config", "status.showUntrackedFiles", "no")
+        _ = try await committer().commit(sample(), repo: repo)
+        try write("docs/plans/demo/my-notes.txt", "mine")
+        do { _ = try await committer().commit(sample("plan v2"), repo: repo); XCTFail("should refuse") }
+        catch RepoCommitter.Failure.dirty {}
+        XCTAssertEqual(read("docs/plans/demo/my-notes.txt"), "mine")
+    }
+
+    func testAFileIsNeverCreatedThroughAHardLink() throws {
+        let o = try makeOutside()
+        let target = o.appendingPathComponent("plans/demo/keep.txt")
+        let dirURL = repo.appendingPathComponent("d", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        XCTAssertEqual(link(target.path, dirURL.appendingPathComponent("a.txt").path), 0)
+        let dir = try SafeTree.openRoot(dirURL.path)
+        XCTAssertThrowsError(try SafeTree.write(Data("EVIL".utf8), to: "a.txt", under: dir))
+        XCTAssertEqual(try String(contentsOf: target), "precious")
+    }
+
+    private static let odd = ["a\"q\tb.txt", "n\nl.txt"]
+    private func oddExport(_ body: String = "v1") -> PlanExport {
+        PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data(body.utf8)),
+            ExportedFile(path: PlanExporter.markerName, data: Data("intake-1\n".utf8))]
+            + Self.odd.map { ExportedFile(path: "visuals/\($0)", data: Data("x".utf8)) }, warnings: [])
+    }
+
+    func testNamesWithQuotesTabsAndNewlinesComeBackExactly() async throws {
+        let first = try await committer().commit(oddExport(), repo: repo)
+        for n in Self.odd { XCTAssertTrue(first.paths.contains("docs/plans/demo/visuals/\(n)"), "\(first.paths)") }
+        // A kept file is not "removed", and a dropped one is named as it is on disk.
+        let p = try await committer().preview(oddExport("v2"), repo: repo)
+        XCTAssertEqual(p.removed, [])
+        let v2 = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("v2".utf8)),
+            ExportedFile(path: PlanExporter.markerName, data: Data("intake-1\n".utf8))], warnings: [])
+        let r = try await committer().commit(v2, repo: repo)
+        XCTAssertEqual(r.removed.sorted(), Self.odd.map { "docs/plans/demo/visuals/\($0)" }.sorted())
+    }
+
+    func testAHiddenEditToAnOddlyNamedFileNamesItExactly() async throws {
+        _ = try await committer().commit(oddExport(), repo: repo)
+        let name = "docs/plans/demo/visuals/\(Self.odd[0])"
+        try await git("update-index", "--assume-unchanged", name)
+        do { _ = try await committer().commit(oddExport("v2"), repo: repo); XCTFail() }
+        catch let RepoCommitter.Failure.dirty(path, _) { XCTAssertEqual(path, name) }
+    }
+
+    func testAnIgnoredOddlyNamedExportPathIsNamedExactly() async throws {
+        try write(".gitignore", "*.png\n")
+        try await commitAll("ignore")
+        let name = "visuals/a\"q\nb.png"
+        let e = PlanExport(slug: "demo", files: [ExportedFile(path: "plan.md", data: Data("p".utf8)),
+                                                 ExportedFile(path: name, data: Data("x".utf8))], warnings: [])
+        await assertFails(.ignored(["docs/plans/demo/\(name)"])) { _ = try await committer().commit(e, repo: repo) }
+    }
+
     func testSlugOwnerReadsTheMarker() async throws {
         XCTAssertEqual(RepoCommitter.owner(of: "demo", repo: repo), .free)
         try write("docs/plans/demo/x", "x")

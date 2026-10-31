@@ -73,7 +73,12 @@ struct SafeTree {
 
     private static func emptyDirectory(_ dir: Dir) throws {
         let dupFD = dup(dir.fd)
-        guard dupFD >= 0, let stream = fdopendir(dupFD) else { throw fail("fdopendir") }
+        guard dupFD >= 0 else { throw fail("dup") }
+        guard let stream = fdopendir(dupFD) else {
+            let f = fail("fdopendir")
+            close(dupFD)   // fdopendir owns it only on success
+            throw f
+        }
         defer { closedir(stream) }
         var names: [String] = []
         while let e = readdir(stream) {
@@ -97,12 +102,13 @@ struct SafeTree {
     }
 
     /// Writes `data` to `relPath` under `dir`, making the folders on the way, never following a link.
+    /// `O_EXCL`: the file must be new, so nothing is ever written through a hard link planted at the name.
     static func write(_ data: Data, to relPath: String, under dir: Dir) throws {
         var parts = relPath.split(separator: "/").map(String.init)
         guard let file = parts.popLast() else { throw Fail(notPlain: false, detail: "empty path") }
         var current = dir
         for p in parts { current = try openOrMake(current, p) }
-        let fd = openat(current.fd, file, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)
+        let fd = openat(current.fd, file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
         guard fd >= 0 else { throw fail(file) }
         defer { close(fd) }
         try data.withUnsafeBytes { raw in

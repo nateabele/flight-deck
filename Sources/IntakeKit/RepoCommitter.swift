@@ -74,9 +74,9 @@ public struct RepoCommitter: Sendable {
     /// What a release of `export` would do to the repo: the files it writes, and the files already
     /// committed under the folder that the new export no longer has.
     public func preview(_ export: PlanExport, repo: URL) async throws -> PlanExportPreview {
-        let tracked = try await git(repo, "-c", "core.quotePath=false", "ls-files", "--", ":(literal)\(export.directory)")
+        let tracked = try await git(repo, "ls-files", "-z", "--", ":(literal)\(export.directory)")
         let keep = Set(export.preview.paths)
-        let removed = tracked.split(separator: "\n").map(String.init).filter { !keep.contains($0) }.sorted()
+        let removed = Self.nul(tracked).filter { !keep.contains($0) }.sorted()
         return PlanExportPreview(paths: export.preview.paths, commitMessage: export.commitMessage, removed: removed)
     }
 
@@ -118,16 +118,18 @@ public struct RepoCommitter: Sendable {
 
         // `assume-unchanged` and `skip-worktree` hide edits from status, and the replace below
         // would destroy them. Lowercase flags and `S` mark them.
-        let flags = try await git(repo, "-c", "core.quotePath=false", "ls-files", "-v", "--", spec)
-        for line in flags.split(separator: "\n") {
+        let flags = try await git(repo, "ls-files", "-v", "-z", "--", spec)
+        for line in Self.nul(flags) {
             guard let f = line.first, f.isLowercase || f == "S" else { continue }
             throw Failure.dirty(path: String(line.dropFirst(2)), status: String(line))
         }
 
         // `--ignored` as well: a `.DS_Store` or a swap file is invisible to plain status, and the
         // replace below would delete it for good.
-        let status = try await git(repo, "status", "--porcelain", "--ignored", "--", spec)
-        if !status.isEmpty { throw Failure.dirty(path: dir, status: status) }
+        // `--untracked-files=all` overrides a `status.showUntrackedFiles=no` in the user's config,
+        // which would otherwise hide exactly the files the replace deletes.
+        let status = try await git(repo, "status", "--porcelain", "-z", "--untracked-files=all", "--ignored", "--", spec)
+        if !status.isEmpty { throw Failure.dirty(path: dir, status: Self.nul(status).joined(separator: "\n")) }
 
         // An exported file git would ignore would be written but never committed: a plan with
         // silently missing snapshots. Refuse instead.
@@ -151,18 +153,20 @@ public struct RepoCommitter: Sendable {
             }
             onStage?(.written)
             try await git(repo, "add", "--", spec)
-            let staged = try await git(repo, "-c", "core.quotePath=false", "diff", "--cached", "--name-status", "--no-renames", "--", spec)
+            let staged = try await git(repo, "diff", "--cached", "--name-status", "-z", "--no-renames", "--", spec)
             if staged.isEmpty {
                 // Identical to what HEAD has: nothing to commit, and not a failure.
                 let head = try await git(repo, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
                 return Result(sha: head, paths: export.preview.paths, noChange: true)
             }
             var paths: [String] = [], removed: [String] = []
-            for line in staged.split(separator: "\n") {
-                let cols = line.split(separator: "\t", maxSplits: 1).map(String.init)
-                guard cols.count == 2 else { continue }
-                paths.append(cols[1])
-                if cols[0] == "D" { removed.append(cols[1]) }
+            // `-z`: "<status>\0<path>\0" pairs, with names exactly as on disk.
+            let fields = Self.nul(staged)
+            var k = 0
+            while k + 1 < fields.count {
+                paths.append(fields[k + 1])
+                if fields[k] == "D" { removed.append(fields[k + 1]) }
+                k += 2
             }
             try await git(repo, "commit", "-m", export.commitMessage, "--", spec)
             let sha = try await git(repo, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -186,17 +190,23 @@ public struct RepoCommitter: Sendable {
         }
     }
 
+    /// `check-ignore` cannot print names unquoted without `--stdin` (which this runner lacks), so
+    /// output is never parsed: a batch's exit status says whether anything in it is ignored, and
+    /// only then is each path in that batch asked about alone.
     private func ignoredPaths(_ repo: URL, _ paths: [String]) async throws -> [String] {
         var out: [String] = []
         var i = 0
         while i < paths.count {
             let batch = Array(paths[i..<min(i + 200, paths.count)])
             i += 200
-            let r = try await run(repo, ["-c", "core.quotePath=false", "check-ignore", "--"] + batch)
-            switch r.exitCode {
-            case 0: out += String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").map(String.init)
+            switch try await run(repo, ["check-ignore", "--"] + batch).exitCode {
+            case 0:
+                for p in batch {
+                    let r = try await run(repo, ["check-ignore", "-q", "--", p])
+                    if r.exitCode == 0 { out.append(p) } else if r.exitCode != 1 { throw Failure.git(step: "check-ignore", stderr: r.stderr) }
+                }
             case 1: break
-            default: throw Failure.git(step: "check-ignore", stderr: r.stderr)
+            default: throw Failure.git(step: "check-ignore", stderr: "")
             }
         }
         return out
@@ -235,6 +245,9 @@ public struct RepoCommitter: Sendable {
     }
 
     // MARK: Path checks
+
+    /// NUL-separated git output as strings (`-z`), with no trailing empty entry.
+    static func nul(_ s: String) -> [String] { s.split(separator: "\0", omittingEmptySubsequences: true).map(String.init) }
 
     /// `^[a-z0-9]+(-[a-z0-9]+)*$`
     static func isValidSlug(_ s: String) -> Bool {
