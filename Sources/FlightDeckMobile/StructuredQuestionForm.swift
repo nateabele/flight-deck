@@ -8,17 +8,24 @@ struct StructuredQuestionForm: View {
     let questions: [WireStructuredQuestion]
     let sending: Bool
     let enabled: Bool
+    /// Hears every change, so what was chosen can be kept across a relaunch.
+    let onChange: ([WireStructuredAnswer]) -> Void
     let onSend: ([WireStructuredAnswer]) -> Void
     @State private var answers: [WireStructuredAnswer]
 
-    init(title: String, questions: [WireStructuredQuestion], sending: Bool, enabled: Bool = true,
+    /// `initial` must hold one answer per question, in order; anything else starts from the
+    /// recommended options.
+    init(title: String, questions: [WireStructuredQuestion], initial: [WireStructuredAnswer]? = nil,
+         sending: Bool, enabled: Bool = true, onChange: @escaping ([WireStructuredAnswer]) -> Void = { _ in },
          onSend: @escaping ([WireStructuredAnswer]) -> Void) {
         self.title = title
         self.questions = questions
         self.sending = sending
         self.enabled = enabled
+        self.onChange = onChange
         self.onSend = onSend
-        _answers = State(initialValue: questions.map(\.initialAnswer))
+        let fits = initial?.map(\.questionID) == questions.map(\.id)
+        _answers = State(initialValue: fits ? initial! : questions.map(\.initialAnswer))
     }
 
     private var complete: Bool {
@@ -44,6 +51,7 @@ struct StructuredQuestionForm: View {
             }
             .disabled(sending || !enabled || !complete)
         }
+        .onChange(of: answers) { _, now in onChange(now) }
     }
 
     /// Blank `other` is no `other`, so the Mac never reads whitespace as an answer.

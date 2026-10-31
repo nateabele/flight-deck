@@ -12,9 +12,13 @@ protocol IntakeCommanding: AnyObject {
     )
 }
 
-/// One thing a person can ask of an intake; identifies a send for the in-flight set.
+/// One thing a person can ask of an intake; identifies a send for the in-flight set and for the
+/// kept retry token. `answer` carries the round's digest: one shared action let the next round's
+/// answer reuse a token kept from a timed-out send of the last, which the Mac acks as a
+/// duplicate and drops without a word.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds, answer
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
+    case answer(String)
 }
 
 enum CommandCopy {

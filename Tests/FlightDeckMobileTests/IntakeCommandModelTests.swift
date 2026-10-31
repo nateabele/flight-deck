@@ -79,22 +79,46 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertEqual(acked, 0)
     }
 
-    /// An answer sent against a replaced round says so in words, and sends the answers and round
-    /// it was given; any other refusal shows the code.
+    /// An answer sent against a replaced round says so in words, and sends the answers, round
+    /// and digest it was given; any other refusal shows the code.
     func testAnswerSendsRoundAndStaleQuestionsReadsAsChanged() {
         let c = StubCommander(), m = model(c)
         let id = intake
         let answers = [WireStructuredAnswer(questionID: "q1", selected: ["a"])]
-        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
+        m.send(.answer("d2"), command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
         guard case .intakeAnswer(_, _, let round, let digest, let sent)? = c.commands.first else { return XCTFail("not sent") }
         XCTAssertEqual(round, 2)
         XCTAssertEqual(digest, "d2")
         XCTAssertEqual(sent, answers)
         c.answer(.failure(.server(code: "stale_questions")))
         XCTAssertEqual(m.message, "These questions changed. Here are the new ones.")
-        m.send(.answer, command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
+        m.send(.answer("d2"), command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
         c.answer(.failure(.server(code: "invalid_answer")))
         XCTAssertEqual(m.message, "Your Mac wouldn't do that (invalid_answer).")
+    }
+
+    /// A kept token retries one round's answer, never the next round's: the Mac would ack that
+    /// token as a duplicate of the first and drop the new round's answers without a word.
+    func testANewRoundsAnswerNeverReusesTheLastRoundsKeptToken() async {
+        let c = StubCommander()
+        let m = model(c, timeout: .milliseconds(50))
+        let id = intake
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "x")]
+        func answer(_ digest: String) {
+            m.send(.answer(digest), command: { .intakeAnswer(id: id, token: $0, round: 0, digest: digest, answers: answers) },
+                   onAck: {})
+        }
+        answer("round-one")
+        try? await Task.sleep(for: .milliseconds(150))  // timed out: its token is kept
+        answer("round-two")
+        let tokens = c.commands.compactMap { if case .intakeAnswer(_, let t, _, _, _) = $0 { return t } else { return nil } }
+        XCTAssertEqual(tokens.count, 2)
+        XCTAssertNotEqual(tokens[1], tokens[0], "the next round must get a fresh token")
+        // While a retry of the same round still reuses its token, which is what makes it safe.
+        try? await Task.sleep(for: .milliseconds(150))
+        answer("round-two")
+        let all = c.commands.compactMap { if case .intakeAnswer(_, let t, _, _, _) = $0 { return t } else { return nil } }
+        XCTAssertEqual(all[2], all[1])
     }
 
     func testErrSetsMappedMessageAndClears() {

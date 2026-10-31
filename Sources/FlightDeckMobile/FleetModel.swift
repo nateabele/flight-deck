@@ -109,13 +109,13 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
 
     init(
         store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil,
-        drafts: DraftStore? = nil
+        drafts: DraftStore? = nil, answerDrafts: AnswerDraftStore? = nil
     ) {
         self.store = store
         self.cache = cache
         self.drafts = drafts
         self.mac = store.load()
-        self.flightControl = FlightControlModel(fetcher: self, commander: self)
+        self.flightControl = FlightControlModel(fetcher: self, commander: self, answerDrafts: answerDrafts)
         // A cold launch resumes from the fleet cached on disk, or asks for EVERYTHING.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
@@ -1089,6 +1089,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         cache?.purgeAll()
         // What was typed for the old pairing's sessions is that pairing's too.
         drafts?.purgeAll()
+        flightControl.purgeAnswerDrafts()
     }
 
     /// One short, structural word per state — never the Mac's name, which is a user-chosen
