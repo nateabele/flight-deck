@@ -2646,6 +2646,18 @@ as built: ARCHITECTURE.md, "Delegated execution"). Built in parallel tracks C0â€
 below comes from unit tests, the end-to-end `DelegationLoopbackTests` and the Linux hostd in a local
 container; **nothing has run against a real second machine.**
 
+### Multi-word commands and EXTRA_ARGS are quoted for POSIX, and break on a fish host (open, 2026-10-27)
+
+`DelegationService.shellQuote` quotes each word with POSIX single quotes, and hostd runs the
+joined string as `$SHELL -lc`. Inside single quotes, fish treats `\\` and `\'` as escapes. So on a
+fish host such as m3, `a\\b` arrives as `a\b`, and `a\'b` is a parse error (measured, fish 4.8.0).
+There is also no real argv mode: one word after `--` is shell text, and recipe EXTRA_ARGS are
+joined into the string. Clients like testq therefore quote everything themselves and inline
+their helpers. The fix shape is positional argv through the login shell (`-lc 'exec "$@"'`, or
+`exec $argv` for fish), behind a hello capability. The analysis, the limits (128 KiB per string
+on Linux) and a `--file` helper-shipping design are in
+[run argv without shell quoting](superpowers/notes/2026-10-27-run-argv-without-shell-quoting.md).
+
 ### Unverified live, and the maintainer's
 
 - **P3: does an XCTest UI suite run from the hostd LaunchAgent, and fail from a plain SSH child?**
