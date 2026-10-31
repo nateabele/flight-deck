@@ -10,9 +10,10 @@ final class FakeThreadStore: ThreadStoreReading {
     var diffsByThread: [ThreadID: [ThreadDiff]] = [:]
     var live: [ThreadID: String] = [:]
     private(set) var reads = 0
+    private(set) var turnReads = 0
 
     func threads() -> [ThreadRecord] { reads += 1; return records }
-    func turns(_ id: ThreadID) -> [ThreadTurn] { turnsByThread[id] ?? [] }
+    func turns(_ id: ThreadID) -> [ThreadTurn] { turnReads += 1; return turnsByThread[id] ?? [] }
     func diffs(_ id: ThreadID) -> [ThreadDiff] { diffsByThread[id] ?? [] }
     func activity(_ id: ThreadID) -> String? { live[id] }
 
@@ -378,7 +379,7 @@ final class ThreadPanelModelTests: XCTestCase {
         let diff = ThreadDiff(thread: t.id, checkpoint: 2, anchor: NoteAnchor(checkpoint: 2, quote: "x"), old: "x", new: "y")
         var decided: [(UUID, Bool)] = []
         var reproposed: [UUID] = []
-        let m = model(.init(decide: { _, d, accept in decided.append((d, accept)); return nil },
+        let m = model(.init(decide: { _, d, accept, _ in decided.append((d, accept)); return nil },
                             repropose: { _, d in reproposed.append(d); return nil }))
         m.decide(diff, accept: true)
         m.decide(diff, accept: false)
@@ -386,6 +387,104 @@ final class ThreadPanelModelTests: XCTestCase {
         XCTAssertEqual(decided.map(\.1), [true, false])
         XCTAssertEqual(decided.first?.0, diff.id)
         XCTAssertEqual(reproposed, [diff.id])
+    }
+
+    // MARK: Edit, then Accept (fix round 1)
+
+    func testAcceptEditedSendsTheEditedPlanAsAnAccept() {
+        let t = store.add("Why?")
+        let diff = ThreadDiff(thread: t.id, checkpoint: 2, anchor: NoteAnchor(checkpoint: 2, quote: "x"), old: "x", new: "y")
+        var seen: [(Bool, String?)] = []
+        let m = model(.init(decide: { _, _, accept, edited in seen.append((accept, edited)); return nil }))
+        m.decide(diff, accept: true, editedMarkdown: "# Plan\n\nthe words as the human changed them")
+        m.decide(diff, accept: true)
+        XCTAssertEqual(seen.count, 2)
+        XCTAssertEqual(seen[0].0, true, "an edited accept is recorded as an accept, never a rejection")
+        XCTAssertEqual(seen[0].1, "# Plan\n\nthe words as the human changed them")
+        XCTAssertNil(seen[1].1)
+    }
+
+    // MARK: Agent defaults and menu (D8)
+
+    func testANewThreadAsksWhatTheDefaultsProviderSays() {
+        var asked: [ThreadDefaults] = []
+        let chosen = ThreadDefaults(agent: .codex, model: "gpt-x", effort: "xhigh")
+        let m = ThreadPanelModel(intakeID: intake, reader: store,
+                                 actions: .init(open: { _, _, _, d in asked.append(d); return .success(ThreadID()) }),
+                                 defaultsProvider: { chosen })
+        m.beginThread(on: .wholePlan)
+        m.composer = "hello"
+        m.send()
+        XCTAssertEqual(asked, [chosen])
+    }
+
+    func testTheHeaderMenuComesFromTheModelMenuAndMovesTheThread() {
+        let t = store.add("Why?")
+        let menu = [ThreadAgentChoice(agent: .claude, model: "opus", modelName: "Opus", effort: "high"),
+                    ThreadAgentChoice(agent: .grok, model: "grok-4", modelName: "Grok 4", effort: "high")]
+        var moved: [ThreadAgentChoice] = []
+        let m = ThreadPanelModel(intakeID: intake, reader: store, actions: .init(setAgent: { _, c in moved.append(c); return nil }),
+                                 modelMenu: { menu })
+        XCTAssertEqual(m.agentChoices, menu)
+        m.setAgent(t.id, menu[1])
+        XCTAssertEqual(moved, [menu[1]])
+        XCTAssertFalse(menu[0].readsFilesOnly)
+        XCTAssertTrue(menu[1].readsFilesOnly)
+        XCTAssertTrue(ThreadAgentChoice(agent: .opencode, model: "", modelName: "", effort: "").readsFilesOnly)
+    }
+
+    func testTheHeaderSaysWhenTheAgentOnlyReadsFiles() {
+        let t = store.add("Why?")
+        store.records[0].agent = .grok
+        let m = model()
+        m.refresh()
+        XCTAssertEqual(m.header(for: t.id)?.readsFilesOnly, true)
+    }
+
+    // MARK: Keys, polling lifecycle, refusals
+
+    func testBracketKeysSwitchThreadsOnlyWithCommand() {
+        XCTAssertEqual(ThreadPanelModel.switchStep(key: "[", command: true), -1)
+        XCTAssertEqual(ThreadPanelModel.switchStep(key: "]", command: true), 1)
+        XCTAssertNil(ThreadPanelModel.switchStep(key: "[", command: false))
+        XCTAssertNil(ThreadPanelModel.switchStep(key: "a", command: true))
+    }
+
+    func testSwappingTheRailForThePanelDoesNotStopThePolling() {
+        let m = model()
+        let clock = WatchClock(appIsActive: { true })
+        m.start(on: clock)           // the rail appears
+        m.start(on: clock)           // the panel appears
+        m.stop()                     // the rail goes
+        XCTAssertTrue(clock.isRegistered(m), "the panel is still on screen")
+        m.stop()
+        XCTAssertFalse(clock.isRegistered(m))
+        m.stop()                     // an extra stop does not go negative
+        m.start(on: clock)
+        XCTAssertTrue(clock.isRegistered(m))
+        m.stop()
+    }
+
+    func testQuestionsAreWorkedOutOncePerRefresh() {
+        let asked = store.add("Pairing failure copy")
+        store.addTurn(asked.id, you: "?", reply: "Which?", actions: [question()])
+        let m = model()
+        m.refresh()
+        let reads = store.turnReads
+        for _ in 0..<5 { _ = m.openQuestions(asked.id); _ = m.index; _ = m.card(for: asked.id) }
+        XCTAssertEqual(store.turnReads, reads, "asking again must not read the store again")
+        XCTAssertEqual(m.openQuestions(asked.id).count, 1)
+    }
+
+    func testRefusalsReadAsWordsNotCodes() {
+        for code in ["unknown_thread", "unknown_diff", "diff_stale", "empty_message", "not_allowed", "no_agents"] {
+            let words = ThreadPanelModel.words(for: ThreadRefusal(code: code))
+            XCTAssertFalse(words.contains("_"), "\(code) leaked into \(words)")
+            XCTAssertTrue(words.hasSuffix("."))
+        }
+        XCTAssertEqual(ThreadPanelModel.words(for: ThreadRefusal(code: "threads_unavailable")), ThreadPanelModel.unavailableNotice)
+        XCTAssertTrue(ThreadPanelModel.words(for: ThreadRefusal(code: "weird_new_code")).contains("weird_new_code"),
+                      "an unknown code keeps its code, for whoever is diagnosing")
     }
 }
 

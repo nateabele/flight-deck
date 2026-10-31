@@ -542,7 +542,8 @@ final class PlanNotesController: ObservableObject {
         if threadPanel?.intakeID == threads.intakeID { return }
         threadPanel?.stop()
         let model = ThreadPanelModel(intakeID: threads.intakeID, reader: threads.reader, actions: .init(threads),
-                                     headings: { [weak self] in self?.planHeadings() ?? [] })
+                                     headings: { [weak self] in self?.planHeadings() ?? [] },
+                                     defaultsProvider: { threads.defaults() }, modelMenu: { threads.menu() })
         model.versionLabel = { [weak self] in self?.versionLabel($0) }
         threadPanel = model
         threadWatch = model.$snapshot.dropFirst().sink { [weak self] _ in

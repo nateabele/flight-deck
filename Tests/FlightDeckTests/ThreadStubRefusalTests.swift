@@ -67,6 +67,38 @@ final class ThreadStubRefusalTests: XCTestCase {
         return svc
     }
 
+    // MARK: - Agent defaults and menu (Stream C, D8)
+
+    @MainActor
+    func testTheThreadBindingDefaultsToTheIntakesIntegrator() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let integrator = try XCTUnwrap(i.roundConfig).integrator
+        let defaults = svc.threadBinding(for: i.id).defaults()
+        XCTAssertEqual(defaults, ThreadDefaults(agent: integrator.agent, model: integrator.model, effort: integrator.effort))
+    }
+
+    @MainActor
+    func testTheThreadMenuListsEveryRunnableAgentOnce() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let menu = svc.threadBinding(for: i.id).menu()
+        XCTAssertFalse(menu.isEmpty)
+        XCTAssertEqual(Set(menu.map(\.agent)), Set(svc.availableModels().choices.keys))
+        XCTAssertEqual(Set(menu.map(\.id)).count, menu.count)
+        let unbound = IntakeThreadBinding(intakeID: UUID(), reader: EmptyThreadStore(), service: nil)
+        XCTAssertTrue(unbound.menu().isEmpty)
+        XCTAssertEqual(unbound.defaults(), ThreadDefaults())
+    }
+
+    @MainActor
+    func testAnEditedAcceptStillRefusesWhileThreadsAreUnavailable() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let refusal = svc.threadBinding(for: i.id).decideDiff(ThreadID(), diff: UUID(), accept: true, editedMarkdown: "# edited")
+        XCTAssertEqual(refusal, IntakeService.unavailable)
+    }
+
     // MARK: - Scope
 
     /// An intake is a project's, not the asking agent's: fleet-wide, like the sibling intake ops.

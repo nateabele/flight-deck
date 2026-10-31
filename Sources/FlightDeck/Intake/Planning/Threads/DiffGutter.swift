@@ -58,7 +58,47 @@ final class DiffGutterView: NSView {
     }
 }
 
-/// The hover card: the old text struck through above the new, and the compact toolbar.
+/// ✓ Accept, ✗, Edit and ✦: the compact toolbar both hover forms carry.
+struct DiffToolbar: View {
+    let accept: () -> Void
+    let reject: () -> Void
+    let edit: () -> Void
+    let openThread: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button(action: accept) { Text("✓ Accept").fontWeight(.semibold).foregroundStyle(.green) }
+                .help("Apply this edit to the plan")
+            Button(action: reject) { Text("✗").foregroundStyle(.red) }
+                .help("Reject this edit")
+            Button(action: edit) { Text("Edit").foregroundStyle(.tint) }
+                .help("Put the new text in the plan to change by hand")
+            Button(action: openThread) { Text("✦").foregroundStyle(.tint) }
+                .help("Open the thread that proposed this")
+        }
+        .buttonStyle(ToolbarButtonStyle())
+        .font(.system(size: 12))
+        .padding(2)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)))
+        .fixedSize()
+        .accessibilityIdentifier("diff-toolbar")
+    }
+
+    private struct ToolbarButtonStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(configuration.isPressed ? Color.primary.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+    }
+}
+
+/// The hover card for a diff the editor cannot draw in place (a table, a code fence, a passage
+/// across blocks): the old text struck through above the new, in the plan's serif, and the toolbar.
+/// A paragraph's diff needs none of this: its old text opens above the proposed text itself.
 struct DiffHoverCard: View {
     let diff: ThreadDiff
     let accept: () -> Void
@@ -73,40 +113,23 @@ struct DiffHoverCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 2) {
-                Spacer(minLength: 0)
-                Button(action: accept) { Text("✓ Accept").fontWeight(.semibold).foregroundStyle(.green) }
-                    .help("Apply this edit to the plan")
-                Button(action: reject) { Text("✗").foregroundStyle(.red) }
-                    .help("Reject this edit")
-                Button(action: edit) { Text("Edit").foregroundStyle(.tint) }
-                    .help("Put the new text in the plan to change by hand")
-                Button(action: openThread) { Text("✦").foregroundStyle(.tint) }
-                    .help("Open the thread that proposed this")
-            }
-            .buttonStyle(ToolbarButtonStyle())
-            .font(.system(size: 12))
-            .padding(2)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)))
-            .fixedSize()
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            DiffToolbar(accept: accept, reject: reject, edit: edit, openThread: openThread)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             if !diff.old.isEmpty {
                 Text(diff.old)
                     .strikethrough(true, color: .red.opacity(0.6))
                     .foregroundStyle(.red.opacity(0.85))
-                    .opacity(0.8)
-                    .font(.system(size: 13))
+                    .font(Font(PlanTheme.standard.body))
             }
             Text(diff.new)
-                .font(.system(size: 14))
+                .font(Font(PlanTheme.standard.body))
                 .foregroundStyle(.primary)
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(.vertical, 6)
         .padding(.leading, textInset)
-        // Opaque, in SwiftUI so it follows the window's appearance (a layer colour is resolved once).
         .background(Color.primary.opacity(0.045))
+        // Opaque, in SwiftUI so it follows the window's appearance (a layer colour is resolved once).
         .background(Color(nsColor: .windowBackgroundColor))
         // The passage's bar, redrawn: the card hides the gutter's own beneath it.
         .overlay(alignment: .leading) { Rectangle().fill(Color.green).frame(width: DiffGutterStyle.barWidth).padding(.leading, 6).padding(.vertical, 4) }
@@ -114,20 +137,40 @@ struct DiffHoverCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("diff-hover-card")
     }
+}
 
-    private struct ToolbarButtonStyle: ButtonStyle {
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(configuration.isPressed ? Color.primary.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
+/// "Accept edited / Cancel": the strip over a passage the human took a proposal into to change by
+/// hand (Edit). Accept edited records the plan as it now stands; Cancel undoes the insert.
+struct DiffEditStrip: View {
+    let accept: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Text("Editing proposal").font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 6)
+            Button(action: cancel) { Text("Cancel").foregroundStyle(.red) }
+                .help("Undo the insert and leave the proposal pending")
+            Button(action: accept) { Text("Accept edited").fontWeight(.semibold).foregroundStyle(.green) }
+                .help("Apply the plan as it reads now")
         }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 3)
+        .font(.system(size: 12))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)))
+        .fixedSize()
+        .accessibilityIdentifier("diff-edit-strip")
     }
 }
 
-/// The editor's side of proposed edits: finds each pending diff's passage, keeps the bars drawn,
-/// and shows the hover card. Owned by `PlanNotesBridge`, which hands it the text view's geometry.
+/// The editor's side of proposed edits: finds each pending diff's passage, keeps the bars drawn for
+/// the ones the editor cannot draw in place, and runs the hover and the Edit flow. Owned by
+/// `PlanNotesBridge`, which hands it the text view's geometry and the coordinator's proposals.
+///
+/// A paragraph or list item's diff is drawn by the editor itself (`PlanProposal`): the controller
+/// then only opens the room above it under the pointer and floats the toolbar there. Any other
+/// diff gets the bar in the margin and a card.
 @MainActor
 final class DiffGutterController {
     private weak var textView: PlanNSTextView?
@@ -135,21 +178,40 @@ final class DiffGutterController {
     private var diffs: [ThreadDiff] = []
     private(set) var located: [UUID: NSRange] = [:]
     private(set) var shownCard: UUID?
+    private var shownInline = false
     private var host: NSHostingView<DiffHoverCard>?
+    private var toolbarHost: NSHostingView<DiffToolbar>?
     private var overCard = false
     private var hideWork: DispatchWorkItem?
+
+    /// The diff being changed by hand, until Accept edited or Cancel.
+    private(set) var editing: ThreadDiff?
+    private var stripHost: NSHostingView<DiffEditStrip>?
 
     /// A range's line rects in the text view's coordinates, from the bridge.
     var segments: (NSRange) -> [CGRect] = { _ in [] }
     var viewport: () -> NSRange? = { nil }
-    var onDecide: (ThreadDiff, Bool) -> Void = { _, _ in }
+    /// The plan's text as it stands: what Accept edited records.
+    var currentText: () -> String = { "" }
+    /// The block a diff is drawn in place of, and whether it is drawn now (`PlanTextView.Coordinator`).
+    var inlineBlock: (UUID) -> (range: NSRange, drawn: Bool)? = { _ in nil }
+    var onHoverProposal: (UUID?) -> Void = { _ in }
+    var onDecide: (ThreadDiff, Bool, String?) -> Void = { _, _, _ in }
+    /// Puts the proposed words into the plan over `range`, selected.
     var onEdit: (ThreadDiff, NSRange) -> Void = { _, _ in }
+    /// Undoes `onEdit`'s insert.
+    var onCancelEdit: () -> Void = {}
     var onOpenThread: (ThreadID) -> Void = { _ in }
 
     /// How long the card outlives the pointer leaving the passage: time to cross the gap to it.
     static let linger: TimeInterval = 0.25
 
     var diffCount: Int { diffs.count }
+
+    /// The diffs found in the text, with where: what the editor is asked to draw in place.
+    var locatedDiffs: [(diff: ThreadDiff, range: NSRange)] {
+        diffs.compactMap { diff in located[diff.id].map { (diff, $0) } }
+    }
 
     func attach(_ textView: PlanNSTextView) {
         self.textView = textView
@@ -160,6 +222,7 @@ final class DiffGutterController {
 
     func detach() {
         hideCard()
+        finishEdit()
         view.removeFromSuperview()
         view.marks = []
         diffs = []
@@ -169,31 +232,47 @@ final class DiffGutterController {
     /// The pending diffs to draw, found in `text`. A diff whose passage is no longer there is not
     /// drawn: it is stale, and the thread's card says so.
     func update(_ next: [ThreadDiff], in text: String) {
-        guard let textView else { return }
         diffs = next
         located = Dictionary(uniqueKeysWithValues: next.compactMap { diff in
             diff.anchor.locate(in: text).map { (diff.id, NSRange($0, in: text)) }
         })
         if let shownCard, located[shownCard] == nil { hideCard() }
-        if view.superview !== textView { textView.addSubview(view, positioned: .below, relativeTo: nil) }
-        if view.frame != textView.bounds { view.frame = textView.bounds }
+        if let textView {
+            if view.superview !== textView { textView.addSubview(view, positioned: .below, relativeTo: nil) }
+            if view.frame != textView.bounds { view.frame = textView.bounds }
+        }
         redraw()
     }
 
+    /// Whether the editor draws `id`'s proposal itself right now.
+    func isInline(_ id: UUID) -> Bool { inlineBlock(id)?.drawn ?? false }
+
     func redraw() {
         if let textView, view.superview === textView, view.frame != textView.bounds { view.frame = textView.bounds }
-        let marks = diffs.compactMap { diff in located[diff.id].map { DiffGutterView.Mark(range: $0, hovered: diff.id == shownCard) } }
+        // Only the diffs the editor does not draw: a proposal drawn in place brings its own bar.
+        let marks = diffs.compactMap { diff in
+            located[diff.id].flatMap { isInline(diff.id) ? nil : DiffGutterView.Mark(range: $0, hovered: diff.id == shownCard) }
+        }
         if marks != view.marks { view.marks = marks }
         view.setNeedsDisplay(view.visibleRect)
+        placeToolbar()
+        placeStrip()
     }
 
     // MARK: Hover
 
-    /// Where the pointer can rest to ask for a diff's card: its lines, widened left to the bar and
-    /// right past the spark.
+    /// Where the pointer can rest to ask for a diff's hover. Drawn in place: the whole block, from
+    /// the bar to the trailing edge (its source is hidden, so its lines say only where it is). Else the
+    /// passage's lines, widened left to the bar and right past the spark.
     private func region(of id: UUID) -> [CGRect] {
-        guard let range = located[id] else { return [] }
         let barX = view.barX()
+        if let block = inlineBlock(id), block.drawn {
+            let lines = segments(block.range)
+            guard let top = lines.map(\.minY).min(), let bottom = lines.map(\.maxY).max() else { return [] }
+            let right = textView?.bounds.width ?? 10_000
+            return [CGRect(x: barX - 4, y: top, width: right - barX + 4, height: bottom - top)]
+        }
+        guard let range = located[id] else { return [] }
         return segments(range).map { line in
             CGRect(x: min(barX - 4, line.minX), y: line.minY, width: max(line.maxX + 24, line.maxX) - min(barX - 4, line.minX), height: line.height)
         }
@@ -203,7 +282,7 @@ final class DiffGutterController {
     func hover(at point: NSPoint?) {
         if let point, let hit = diffs.first(where: { region(of: $0.id).contains { $0.contains(point) } }) {
             hideWork?.cancel()
-            if shownCard != hit.id { showCard(for: hit) }
+            if shownCard != hit.id { show(hit) }
         } else if shownCard != nil, !overCard {
             scheduleHide()
         }
@@ -218,9 +297,51 @@ final class DiffGutterController {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.linger, execute: work)
     }
 
-    func showCard(for diff: ThreadDiff) {
-        guard let textView, let range = located[diff.id], let first = segments(range).first else { return }
+    func show(_ diff: ThreadDiff) {
         hideCard()
+        shownCard = diff.id
+        if isInline(diff.id) {
+            shownInline = true
+            onHoverProposal(diff.id)
+            showToolbar(for: diff)
+        } else {
+            showCard(for: diff)
+        }
+        redraw()
+    }
+
+    private func toolbar(for diff: ThreadDiff) -> DiffToolbar {
+        DiffToolbar(accept: { [weak self] in self?.decide(diff, accept: true) },
+                    reject: { [weak self] in self?.decide(diff, accept: false) },
+                    edit: { [weak self] in self?.edit(diff) },
+                    openThread: { [weak self] in
+                        self?.hideCard()
+                        self?.onOpenThread(diff.thread)
+                    })
+    }
+
+    private func showToolbar(for diff: ThreadDiff) {
+        guard let textView else { return }
+        let host = NSHostingView(rootView: toolbar(for: diff))
+        host.setFrameSize(host.fittingSize)
+        textView.addSubview(host, positioned: .above, relativeTo: nil)
+        toolbarHost = host
+        placeToolbar()
+        // The room above the block opens on the next layout: place again once it has.
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.placeToolbar() } }
+    }
+
+    /// Top-right of the shown block, in the row the proposal keeps for it.
+    private func placeToolbar() {
+        guard let textView, let toolbarHost, let id = shownCard, let block = inlineBlock(id),
+              let first = segments(block.range).first else { return }
+        let x = textView.bounds.width - PlanGutter.trailingMargin / 2 - toolbarHost.frame.width
+        let origin = NSPoint(x: x, y: first.minY + 2)
+        if toolbarHost.frame.origin != origin { toolbarHost.setFrameOrigin(origin) }
+    }
+
+    private func showCard(for diff: ThreadDiff) {
+        guard let textView, let range = located[diff.id], let first = segments(range).first else { return }
         // The text column: from the bar to the trailing margin. The card is as tall as it needs.
         let x = view.barX() - 6
         let width = max(textView.bounds.width - x - PlanGutter.trailingMargin / 2, 160)
@@ -243,35 +364,84 @@ final class DiffGutterController {
         let height = NSHostingController(rootView: card).sizeThatFits(in: CGSize(width: width, height: 2000)).height
         host.frame = NSRect(x: x, y: first.minY - 2, width: width, height: height)
         host.wantsLayer = true
-        // Opaque, over the passage it stands in for: the old text is drawn again inside the card,
-        // struck, so showing the editor's own beneath it would print every word twice. The plan's
-        // page is the window colour under a faint wash, which the card's SwiftUI side adds.
         host.layer?.cornerRadius = 6
         textView.addSubview(host, positioned: .above, relativeTo: nil)
         self.host = host
-        shownCard = diff.id
-        redraw()
     }
 
     func hideCard() {
         hideWork?.cancel()
         host?.removeFromSuperview()
         host = nil
+        toolbarHost?.removeFromSuperview()
+        toolbarHost = nil
         overCard = false
+        if shownInline {
+            shownInline = false
+            onHoverProposal(nil)
+        }
         if shownCard != nil {
             shownCard = nil
             redraw()
         }
     }
 
-    private func decide(_ diff: ThreadDiff, accept: Bool) {
+    // MARK: Deciding and editing
+
+    func decide(_ diff: ThreadDiff, accept: Bool) {
         hideCard()
-        onDecide(diff, accept)
+        onDecide(diff, accept, nil)
     }
 
-    private func edit(_ diff: ThreadDiff) {
+    /// Edit: the proposed words go into the plan, selected, and the strip asks whether to keep them.
+    func edit(_ diff: ThreadDiff) {
         let range = located[diff.id]
         hideCard()
-        if let range { onEdit(diff, range) }
+        guard let range else { return }
+        finishEdit()
+        editing = diff
+        onEdit(diff, range)
+        showStrip()
+    }
+
+    /// Accept edited: the plan as it reads now is the accepted edit.
+    func acceptEdited() {
+        guard let diff = editing else { return }
+        finishEdit()
+        onDecide(diff, true, currentText())
+    }
+
+    /// Cancel: the insert is undone and the proposal stays pending.
+    func cancelEdit() {
+        guard editing != nil else { return }
+        finishEdit()
+        onCancelEdit()
+    }
+
+    private func finishEdit() {
+        editing = nil
+        stripHost?.removeFromSuperview()
+        stripHost = nil
+    }
+
+    private func showStrip() {
+        guard let textView else { return }
+        let host = NSHostingView(rootView: DiffEditStrip(accept: { [weak self] in self?.acceptEdited() },
+                                                        cancel: { [weak self] in self?.cancelEdit() }))
+        host.setFrameSize(host.fittingSize)
+        textView.addSubview(host, positioned: .above, relativeTo: nil)
+        stripHost = host
+        placeStrip()
+    }
+
+    /// Above the edited passage, at the trailing edge: over the gap, not over the words.
+    private func placeStrip() {
+        guard let textView, let stripHost, let diff = editing else { return }
+        let text = currentText() as NSString
+        let found = text.range(of: diff.new)
+        guard found.location != NSNotFound, let first = segments(found).first else { return }
+        let origin = NSPoint(x: textView.bounds.width - PlanGutter.trailingMargin / 2 - stripHost.frame.width,
+                             y: max(first.minY - stripHost.frame.height - 2, 0))
+        if stripHost.frame.origin != origin { stripHost.setFrameOrigin(origin) }
     }
 }

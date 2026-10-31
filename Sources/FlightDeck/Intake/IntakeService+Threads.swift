@@ -51,12 +51,33 @@ extension IntakeService {
     func reopenThread(_ id: UUID, thread: ThreadID) -> ThreadRefusal? { Self.unavailable }
 
     /// ✓ or ✗ on a pending diff. An accept also puts `TapeCommand.applyThreadDiff` on the tape.
-    func decideDiff(_ id: UUID, thread: ThreadID, diff: UUID, accept: Bool) -> ThreadRefusal? { Self.unavailable }
+    ///
+    /// A non-nil `editedMarkdown` is the plan the human changed the proposal into (Edit, then
+    /// Accept edited): it is the `applyThreadDiff` markdown, recorded as an accept. Without it an
+    /// accept applies the diff's own replacement.
+    func decideDiff(_ id: UUID, thread: ThreadID, diff: UUID, accept: Bool, editedMarkdown: String? = nil) -> ThreadRefusal? {
+        Self.unavailable
+    }
 
     /// One turn against the newest checkpoint for a stale diff.
     func reproposeDiff(_ id: UUID, thread: ThreadID, diff: UUID) -> ThreadRefusal? { Self.unavailable }
 
     static var unavailable: ThreadRefusal { ThreadRefusal(code: threadsUnavailable) }
+}
+
+/// One entry of the thread header's agent menu.
+struct ThreadAgentChoice: Equatable, Identifiable {
+    let agent: AgentID
+    let model: String
+    let modelName: String
+    let effort: String
+
+    var id: String { "\(agent.rawValue)/\(model)" }
+
+    /// Grok and OpenCode answer from the files alone: they have no read-command allow-list the
+    /// runner can hold them to (brief R1), and the header says so rather than let a thread seem able
+    /// to run `git log` there.
+    var readsFilesOnly: Bool { agent == .grok || agent == .opencode }
 }
 
 /// One intake's ask threads as the Mac UI holds them: what to read, and where each send goes —
@@ -99,8 +120,37 @@ struct IntakeThreadBinding {
         service?.reopenThread(intakeID, thread: thread) ?? IntakeService.unavailable
     }
 
-    func decideDiff(_ thread: ThreadID, diff: UUID, accept: Bool) -> ThreadRefusal? {
-        service?.decideDiff(intakeID, thread: thread, diff: diff, accept: accept) ?? IntakeService.unavailable
+    func decideDiff(_ thread: ThreadID, diff: UUID, accept: Bool, editedMarkdown: String? = nil) -> ThreadRefusal? {
+        service?.decideDiff(intakeID, thread: thread, diff: diff, accept: accept, editedMarkdown: editedMarkdown)
+            ?? IntakeService.unavailable
+    }
+
+    /// What a new thread asks: the integrator's choice for this intake when it has a round config,
+    /// else the first agent this machine can run, at that agent's detected model. The integrator is
+    /// the seat that rewrites the plan, so it is the one whose answers the plan can take.
+    func defaults() -> ThreadDefaults {
+        guard let service else { return ThreadDefaults() }
+        if let chosen = service.intake(intakeID)?.roundConfig?.integrator {
+            return ThreadDefaults(agent: chosen.agent, model: chosen.model, effort: chosen.effort)
+        }
+        let available = service.availableModels()
+        if let chosen = AgentID.allCases.compactMap({ available.choices[$0] }).first {
+            return ThreadDefaults(agent: chosen.agent, model: chosen.model, effort: chosen.effort)
+        }
+        return ThreadDefaults()
+    }
+
+    /// Every agent and model the thread header's menu offers, as the Rounds editor's menus list them
+    /// for this intake's project.
+    func menu() -> [ThreadAgentChoice] {
+        guard let service else { return [] }
+        let available = service.availableModels(project: service.intake(intakeID)?.projectPath)
+        return AgentID.allCases.flatMap { agent -> [ThreadAgentChoice] in
+            guard let base = available.choices[agent] else { return [] }
+            return available.menuOptions(for: agent).map {
+                ThreadAgentChoice(agent: agent, model: $0.id, modelName: $0.name, effort: base.effort)
+            }
+        }
     }
 
     func repropose(_ thread: ThreadID, diff: UUID) -> ThreadRefusal? {

@@ -1,6 +1,7 @@
 import AppKit
 import IntakeKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import FlightDeck
 
@@ -22,7 +23,7 @@ final class ThreadRenderTests: XCTestCase {
 
     ## 3. Revocation
 
-    Tokens never expire; the Mac revokes them explicitly from Settings → Phones.
+    Revoked tokens keep working until the phone next connects, then stop.
 
     Revoking a phone removes its key from `controllers.json` and closes any live socket within one second.
 
@@ -32,6 +33,11 @@ final class ThreadRenderTests: XCTestCase {
     """
 
     private let date = Date(timeIntervalSince1970: 1_790_000_000)
+    static let sessionSentence = "Tokens never expire; the Mac revokes them explicitly from Settings → Phones."
+    /// §3's sentence, and what the diff would make of it: each unique in the plan, so a render can
+    /// be read for whether the old words are on screen.
+    static let oldSentence = "Revoked tokens keep working until the phone next connects, then stop."
+    static let newSentence = "Revoked tokens stop working within one second, and the Mac closes the phone's socket."
 
     private func dir() throws -> URL {
         guard let path = ProcessInfo.processInfo.environment["FD_INTAKE_RENDER_DIR"] else {
@@ -58,9 +64,8 @@ final class ThreadRenderTests: XCTestCase {
     private func scene() -> Scene {
         let store = FakeThreadStore()
         let why = store.add("Why do tokens never expire?", section: "## 2. Session lifetime",
-                            quote: "Tokens never expire; the Mac revokes them explicitly from Settings → Phones.", status: .answering)
-        store.records[0].anchor = ThreadAnchor(note: anchor("Tokens never expire; the Mac revokes them explicitly from Settings → Phones. This keeps"))
-        store.records[0].anchor.note?.quote = "Tokens never expire; the Mac revokes them explicitly from Settings → Phones."
+                            quote: Self.sessionSentence, status: .answering)
+        store.records[0].anchor = ThreadAnchor(note: anchor(Self.sessionSentence))
         store.addTurn(why.id, you: "Why do tokens never expire? That feels risky for a lost phone.",
                       reply: "Because the intake requires the phone to \"keep working after weeks offline\" [cite:intake]. The Draft · R0 codex agent proposed a 7-day expiry [cite:ckpt:1], and Synthesis dropped expiry entirely. Revocation already exists: `ControllerStore.revoke` [cite:HostKit/ControllerStore.swift:88].",
                       actions: [.askQuestion(StructuredQuestion(
@@ -75,15 +80,8 @@ final class ThreadRenderTests: XCTestCase {
                       actions: [.proposeDiff(ProposedThreadDiff(checkpoint: 2, quote: "x", replacement: "y")),
                                 .addNote(PlanNote(kind: .mustChange, note: "Log every revocation so support can see it.",
                                                   source: .thread(why.id)))])
-        let diff = ThreadDiff(thread: why.id, turn: 3, checkpoint: 2, anchor: anchor("Tokens never expire; the Mac revokes them explicitly from Settings → Phones.", checkpoint: 2),
-                              old: "Tokens never expire; the Mac revokes them explicitly from Settings → Phones.",
-                              new: "Tokens expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time from Settings → Phones.")
-        // The quote above occurs twice (§2 and §3); the diff is for §3, so give it §3's context.
-        var diffAnchor = diff.anchor
-        diffAnchor.section = "## 3. Revocation"
-        diffAnchor.prefix = "## 3. Revocation\n\n"
-        diffAnchor.suffix = "\n\nRevoking a phone removes its"
-        store.diffsByThread[why.id] = [ThreadDiff(id: diff.id, thread: why.id, turn: 3, checkpoint: 2, anchor: diffAnchor, old: diff.old, new: diff.new)]
+        store.diffsByThread[why.id] = [ThreadDiff(thread: why.id, turn: 3, checkpoint: 2, anchor: anchor(Self.oldSentence),
+                                                  old: Self.oldSentence, new: Self.newSentence)]
         store.live[why.id] = "reading §3 Revocation"
 
         let stale = store.add("Is CGNAT-first right for a home LAN?", section: "## 2. Session lifetime",
@@ -165,6 +163,16 @@ final class ThreadRenderTests: XCTestCase {
             .padding(.horizontal, 30).padding(.vertical, 20)
     }
 
+    /// Reads the words in a rendered PNG (Vision), lower-cased: the way to say "the old words are not
+    /// on screen" about a drawing, where the text storage still holds them.
+    static func words(in png: URL) throws -> String {
+        let image = try XCTUnwrap(NSImage(contentsOf: png)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ").lowercased()
+    }
+
     func testRenderAProposedEditAtRestAndUnderThePointer() throws {
         let out = try dir()
         ThreadPanelModel.forgetSession()
@@ -173,20 +181,31 @@ final class ThreadRenderTests: XCTestCase {
         s.controller.threadPanel?.refresh()
         let size = NSSize(width: 820, height: 560)
         var point: NSPoint?
-        try PlanningRender.write(editorView(s), size: size, to: out.appendingPathComponent("diff-rest.png"), appearance: .aqua) { host in
+        let rest = out.appendingPathComponent("diff-rest.png")
+        try PlanningRender.write(editorView(s), size: size, to: rest, appearance: .aqua) { host in
             guard let textView = Self.find(PlanNSTextView.self, in: host) else { return XCTFail("no editor") }
-            let range = (textView.string as NSString).range(of: "Tokens never expire; the Mac revokes them explicitly from Settings → Phones.",
-                                                             options: .backwards)
+            let range = (textView.string as NSString).range(of: Self.oldSentence)
             var actual = NSRange()
             let screen = textView.firstRect(forCharacterRange: range, actualRange: &actual)
             let inWindow = textView.window!.convertFromScreen(screen)
             point = textView.convert(NSPoint(x: inWindow.midX, y: inWindow.midY), from: nil)
+            // D17: the editor still holds the old words, and has hidden them.
+            XCTAssertNotNil(textView.string.range(of: Self.oldSentence))
+            let at = range.location
+            XCTAssertNotNil(textView.textStorage?.attribute(.planProposal, at: at, effectiveRange: nil), "the paragraph is drawn as the proposal")
         }
+        let atRest = try Self.words(in: rest)
+        XCTAssertTrue(atRest.contains("one second"), "the proposed words are on screen at rest: \(atRest)")
+        XCTAssertFalse(atRest.contains("keep working"), "the old words are NOT on screen at rest: \(atRest)")
         let hover = try XCTUnwrap(point)
-        try PlanningRender.write(editorView(s), size: size, to: out.appendingPathComponent("diff-hover.png"), appearance: .aqua) { host in
+        let hovered = out.appendingPathComponent("diff-hover.png")
+        try PlanningRender.write(editorView(s), size: size, to: hovered, appearance: .aqua) { host in
             guard let textView = Self.find(PlanNSTextView.self, in: host) else { return XCTFail("no editor") }
             textView.onHover?(hover)
         }
+        let underPointer = try Self.words(in: hovered)
+        XCTAssertTrue(underPointer.contains("keep working"), "the old text shows struck through under the pointer: \(underPointer)")
+        XCTAssertTrue(underPointer.contains("one second"))
         try PlanningRender.write(editorView(s), size: size, to: out.appendingPathComponent("diff-hover-dark.png")) { host in
             guard let textView = Self.find(PlanNSTextView.self, in: host) else { return XCTFail("no editor") }
             textView.onHover?(hover)

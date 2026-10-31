@@ -518,20 +518,82 @@ struct PlanTextView: NSViewRepresentable {
             textView.layOutWholePlan()
         }
 
+        // MARK: Proposed edits
+
+        /// The proposed edits drawn in place of their paragraphs (`PlanProposal`).
+        private(set) var proposals: [PlanProposal] = []
+
+        /// One diff's passage and its replacement, for `layProposals`.
+        struct ProposalRequest {
+            let id: UUID
+            let range: NSRange
+            let replacement: String
+        }
+
+        /// Draws each request in place of the paragraph or list item holding it, and returns the ones
+        /// it could. A passage in a table or a code fence, or across blocks, is left to the gutter's bar
+        /// and card. Restyles only the blocks whose proposal changed.
+        @discardableResult
+        func layProposals(_ requests: [ProposalRequest]) -> Set<UUID> {
+            guard let storage = textView?.textStorage else { return [] }
+            let ns = storage.string as NSString
+            var next: [PlanProposal] = []
+            for request in requests {
+                guard let block = blocks.first(where: { block in
+                    switch block.kind {
+                    case .paragraph, .listItem:
+                        block.range.location <= request.range.location && NSMaxRange(request.range) <= NSMaxRange(block.range)
+                    default: false
+                    }
+                }) else { continue }
+                let old = ns.substring(with: block.range)
+                let inside = NSRange(location: request.range.location - block.range.location, length: request.range.length)
+                let source = (old as NSString).replacingCharacters(in: inside, with: request.replacement)
+                let hovered = proposals.first { $0.diff == request.id }?.hovered ?? false
+                next.append(PlanProposal(diff: request.id, block: block.range, source: source, old: old, hovered: hovered))
+            }
+            if next != proposals {
+                let touched = Set((proposals + next).map(\.block))
+                proposals = next
+                let indices = blocks.indices.filter { touched.contains(blocks[$0].range) }
+                if !indices.isEmpty { style(storage, indices: indices, reveal: revealed) }
+            }
+            return Set(next.map(\.diff))
+        }
+
+        /// Opens (or closes, for nil) the room above a proposal for the struck old text and the toolbar.
+        func hoverProposal(_ id: UUID?) {
+            guard let storage = textView?.textStorage else { return }
+            var changed: [NSRange] = []
+            for i in proposals.indices {
+                let on = proposals[i].diff == id
+                if proposals[i].hovered != on { proposals[i].hovered = on; changed.append(proposals[i].block) }
+            }
+            let indices = blocks.indices.filter { changed.contains(blocks[$0].range) }
+            if !indices.isEmpty { style(storage, indices: indices, reveal: revealed) }
+        }
+
+        /// The block a proposal stands in for, and whether it is drawn now (the caret is not in it).
+        func proposalBlock(_ id: UUID) -> (range: NSRange, drawn: Bool)? {
+            guard let proposal = proposals.first(where: { $0.diff == id }) else { return nil }
+            let at = blocks.firstIndex { $0.range == proposal.block }
+            return (proposal.block, at != nil && at != revealed)
+        }
+
         /// Every styler pass goes through here, so the edit layer is laid back over exactly
         /// the blocks the styler just reset (`EditLayer.apply`'s contract).
         private func style(_ storage: NSTextStorage, indices: [Int]?, reveal: Int?) {
             let theme = styleTheme
             tableWidth = theme.contentWidth
             if let indices {
-                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, edits: marks, theme: theme)
+                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, edits: marks, proposals: proposals, theme: theme)
                 let ranges = Set(indices).filter(blocks.indices.contains).map { i -> NSRange in
                     let r = blocks[i].range
                     return NSRange(location: r.location, length: min(r.length + 1, storage.length - r.location))
                 }
                 EditLayer.apply(marks, to: storage, within: ranges, theme: theme)
             } else {
-                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, theme: theme)
+                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, proposals: proposals, theme: theme)
                 EditLayer.apply(marks, to: storage, within: nil, theme: theme)
             }
         }

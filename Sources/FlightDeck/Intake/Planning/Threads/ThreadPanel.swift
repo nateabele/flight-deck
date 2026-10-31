@@ -44,7 +44,18 @@ struct ThreadPanel: View {
             .onAppear { model.width = geo.size.width }
             .onChange(of: geo.size.width) { _, width in model.width = width }
         }
-        .background(shortcuts)
+        // Spec §6: ⌘[ and ⌘] move between threads "while the panel has focus": key presses that
+        // reach the panel from whatever inside it is focused (the composer included), and not a
+        // window-wide shortcut that would also fire from the plan.
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [KeyEquivalent("["), KeyEquivalent("]")]) { press in
+            guard let step = ThreadPanelModel.switchStep(key: press.characters, command: press.modifiers.contains(.command)) else {
+                return .ignored
+            }
+            model.switchThread(by: step)
+            return .handled
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread-panel")
     }
@@ -83,17 +94,6 @@ struct ThreadPanel: View {
         } else {
             InspectorPlaceholder(title: "No thread open", message: "Pick one from the list, or select text in the plan and press ✦ Ask.")
         }
-    }
-
-    /// ⌘[ and ⌘] while the panel is up. Hidden buttons: a menu command would work in every window.
-    private var shortcuts: some View {
-        ZStack {
-            Button("Previous thread") { model.switchThread(by: -1) }.keyboardShortcut("[", modifiers: .command)
-            Button("Next thread") { model.switchThread(by: 1) }.keyboardShortcut("]", modifiers: .command)
-        }
-        .opacity(0)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 
@@ -232,6 +232,27 @@ private struct ThreadHeaderView: View {
     let id: ThreadID
     let header: ThreadHeaderModel
 
+    private var agentMenu: some View {
+        let choices = model.agentChoices
+        return Menu {
+            ForEach(choices) { choice in
+                Button { model.setAgent(id, choice) } label: {
+                    Text("\(choice.agent.displayName) · \(choice.modelName)")
+                }
+            }
+        } label: {
+            Text("\(header.agent) ▾")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(choices.isEmpty)
+        .help("The agent that answers this thread")
+        .accessibilityLabel("Agent")
+        .accessibilityValue(header.agent)
+        .accessibilityIdentifier("thread-agent-menu")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -245,8 +266,10 @@ private struct ThreadHeaderView: View {
             }
             // Wraps: at the inspector's 300 pt minimum the three facts don't share a line.
             FlowRow(spacing: 10) {
-                // Who answers, and with what reach: Grok and OpenCode read files only (R1).
-                Text(header.agent).foregroundStyle(.secondary)
+                // Who answers: a menu of the agents and models this Mac can run. Grok and OpenCode
+                // read files only (R1), and the header says so.
+                agentMenu
+                if header.readsFilesOnly { Text("reads files only").foregroundStyle(.secondary).font(.system(size: 11)) }
                 Toggle("Auto-accept diffs", isOn: Binding(get: { model.autoAccept(id) }, set: { model.setAutoAccept(id, $0) }))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -522,18 +545,21 @@ struct RailOrPanel<Rail: View>: View {
     var focusesComposer = true
 
     var body: some View {
-        if model.isOpen {
-            ThreadPanel(model: model, withdraw: { controller.withdrawNote($0) },
-                        openCitation: { ThreadCitationRouter.open($0, controller: controller) },
-                        reveal: { controller.reveal(thread: $0) }, projectPath: controller.projectPath,
-                        focusesComposer: focusesComposer)
-                .onAppear { model.start() }
-                .onDisappear { model.stop() }
-        } else {
-            rail
-                .onAppear { model.start() }
-                .onDisappear { model.stop() }
+        // One container for both: its appearing and disappearing are the rail or the panel being on
+        // screen, and a swap between them is neither. (Modifiers on each branch fired a stop for the
+        // one leaving and a start for the one arriving, in an order the swap does not promise.)
+        VStack(spacing: 0) {
+            if model.isOpen {
+                ThreadPanel(model: model, withdraw: { controller.withdrawNote($0) },
+                            openCitation: { ThreadCitationRouter.open($0, controller: controller) },
+                            reveal: { controller.reveal(thread: $0) }, projectPath: controller.projectPath,
+                            focusesComposer: focusesComposer)
+            } else {
+                rail
+            }
         }
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
     }
 }
 

@@ -242,33 +242,46 @@ final class PlanNotesBridge {
         }
     }
 
+    private var coordinator: PlanTextView.Coordinator? { textView?.delegate as? PlanTextView.Coordinator }
+
     /// The pending diffs of the open threads that target the version on screen, found afresh in
-    /// the text. A diff for another version is the thread's card's business, not the plan's.
+    /// the text. A diff for another version is the thread's card's business, not the plan's. Each one
+    /// the editor can draw in place of its paragraph is handed to it (`layProposals`); the rest keep
+    /// the gutter's bar and card.
     private func refreshDiffs() {
         guard let textView, let controller else { return }
         let pending = controller.threadPanel?.pendingDiffsInPlan.filter { $0.checkpoint == controller.checkpoint } ?? []
         diffGutter.update(pending, in: textView.string)
+        coordinator?.layProposals(diffGutter.locatedDiffs.map {
+            PlanTextView.Coordinator.ProposalRequest(id: $0.diff.id, range: $0.range, replacement: $0.diff.new)
+        })
+        diffGutter.redraw()
     }
 
     private func wireDiffGutter(_ controller: PlanNotesController, _ textView: PlanNSTextView) {
         diffGutter.attach(textView)
         diffGutter.segments = { [weak self] in self?.segmentRects($0, ensuringLayout: false) ?? [] }
         diffGutter.viewport = { [weak self] in self?.viewportRange() }
-        diffGutter.onDecide = { [weak controller] diff, accept in controller?.threadPanel?.decide(diff, accept: accept) }
+        diffGutter.currentText = { [weak self] in self?.textView?.string ?? "" }
+        diffGutter.inlineBlock = { [weak self] in self?.coordinator?.proposalBlock($0) }
+        diffGutter.onHoverProposal = { [weak self] in self?.coordinator?.hoverProposal($0) }
+        diffGutter.onDecide = { [weak controller] diff, accept, edited in
+            controller?.threadPanel?.decide(diff, accept: accept, editedMarkdown: edited)
+        }
         diffGutter.onOpenThread = { [weak controller] thread in
             controller?.threadPanel?.open(thread)
             controller?.showRail()
         }
-        diffGutter.onEdit = { [weak self, weak controller] diff, range in
+        diffGutter.onEdit = { [weak self] diff, range in
             guard let textView = self?.textView else { return }
             // The proposed words go into the plan as the human's own edit, selected so they can be
-            // changed at once. The diff is then withdrawn (✗): the edit is the human's now, and an
-            // accept on top of it would apply the same words twice. (No op carries edited text.)
+            // changed at once. The strip over them then asks: Accept edited records the plan as it
+            // reads, Cancel undoes this insert.
             textView.insertText(diff.new, replacementRange: range)
             textView.setSelectedRange(NSRange(location: range.location, length: (diff.new as NSString).length))
             textView.window?.makeFirstResponder(textView)
-            controller?.threadPanel?.decide(diff, accept: false)
         }
+        diffGutter.onCancelEdit = { [weak self] in self?.textView?.undoManager?.undo() }
     }
 
     /// The quote "Show in that version" is taking the editor to, found in `text` — the text just

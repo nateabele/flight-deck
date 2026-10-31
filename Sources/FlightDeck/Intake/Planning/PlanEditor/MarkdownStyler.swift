@@ -579,22 +579,23 @@ enum MarkdownStyler {
     ///
     /// `edits` are the edit layer's marks: a table's grid takes room for the words and rows they
     /// removed (`PlanTableMarks`).
-    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, edits: [EditMark] = [], theme: PlanTheme) {
+    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, edits: [EditMark] = [],
+                      proposals: [PlanProposal] = [], theme: PlanTheme) {
         storage.beginEditing()
         storage.setAttributes(baseAttributes(theme.body, theme), range: NSRange(location: 0, length: storage.length))
-        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, edits: edits, theme) }
+        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, edits: edits, proposals: proposals, theme) }
         storage.endEditing()
     }
 
     /// Restyles only `indices` — a caret move touches the block it left and the one it
     /// entered, never the rest of the plan.
     static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, edits: [EditMark] = [],
-                        theme: PlanTheme) {
+                        proposals: [PlanProposal] = [], theme: PlanTheme) {
         storage.beginEditing()
         for i in Set(indices) where blocks.indices.contains(i) {
             let block = blocks[i]
             storage.setAttributes(baseAttributes(theme.font(for: block.kind), theme), range: paragraphRange(block, storage))
-            style(storage, block, revealed: i == revealBlock, edits: edits, theme)
+            style(storage, block, revealed: i == revealBlock, edits: edits, proposals: proposals, theme)
         }
         storage.endEditing()
     }
@@ -611,7 +612,8 @@ enum MarkdownStyler {
         [.font: font, .foregroundColor: theme.text]
     }
 
-    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
+    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark],
+                              proposals: [PlanProposal] = [], _ theme: PlanTheme) {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
@@ -662,6 +664,15 @@ enum MarkdownStyler {
             } else {
                 storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear], range: range)
             }
+        }
+        // A proposed edit stands in for a paragraph or item, except while the caret is in it: then
+        // the source shows, as a table's does.
+        switch block.kind {
+        case .paragraph, .listItem:
+            if !revealed, let proposal = proposals.first(where: { $0.block == block.range }) {
+                styleProposal(storage, block, whole: whole, proposal: proposal, theme)
+            }
+        default: break
         }
     }
 

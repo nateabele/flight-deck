@@ -62,6 +62,8 @@ struct ThreadHeaderModel: Equatable {
     let quote: String?
     let section: String?
     let status: ThreadStatus
+    /// The agent answers from the files alone (Grok, OpenCode): said in the header.
+    let readsFilesOnly: Bool
 }
 
 /// What the store held at one poll. Equatable so a poll that finds nothing new publishes nothing.
@@ -70,6 +72,9 @@ struct ThreadSnapshot: Equatable {
     var turns: [ThreadID: [ThreadTurn]] = [:]
     var diffs: [ThreadID: [ThreadDiff]] = [:]
     var activity: [ThreadID: String] = [:]
+    /// The questions each thread asked that no later turn answered, worked out once per poll: the
+    /// index, the cards and the pills all ask, several times a body.
+    var questions: [ThreadID: [StructuredQuestion]] = [:]
 }
 
 /// The agent a new thread asks until the human picks another.
@@ -98,7 +103,8 @@ final class ThreadPanelModel: ObservableObject {
         var setAutoAccept: @MainActor (ThreadID, Bool) -> ThreadRefusal?
         var resolve: @MainActor (ThreadID) -> ThreadRefusal?
         var reopen: @MainActor (ThreadID) -> ThreadRefusal?
-        var decide: @MainActor (ThreadID, UUID, Bool) -> ThreadRefusal?
+        var decide: @MainActor (ThreadID, UUID, Bool, String?) -> ThreadRefusal?
+        var setAgent: @MainActor (ThreadID, ThreadAgentChoice) -> ThreadRefusal?
         var repropose: @MainActor (ThreadID, UUID) -> ThreadRefusal?
 
         init(open: @escaping @MainActor (ThreadAnchor, String, String, ThreadDefaults) -> Result<ThreadID, ThreadRefusal> = { _, _, _, _ in .failure(ThreadPanelModel.unavailable) },
@@ -107,7 +113,8 @@ final class ThreadPanelModel: ObservableObject {
              setAutoAccept: @escaping @MainActor (ThreadID, Bool) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable },
              resolve: @escaping @MainActor (ThreadID) -> ThreadRefusal? = { _ in ThreadPanelModel.unavailable },
              reopen: @escaping @MainActor (ThreadID) -> ThreadRefusal? = { _ in ThreadPanelModel.unavailable },
-             decide: @escaping @MainActor (ThreadID, UUID, Bool) -> ThreadRefusal? = { _, _, _ in ThreadPanelModel.unavailable },
+             decide: @escaping @MainActor (ThreadID, UUID, Bool, String?) -> ThreadRefusal? = { _, _, _, _ in ThreadPanelModel.unavailable },
+             setAgent: @escaping @MainActor (ThreadID, ThreadAgentChoice) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable },
              repropose: @escaping @MainActor (ThreadID, UUID) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable }) {
             self.open = open
             self.send = send
@@ -116,6 +123,7 @@ final class ThreadPanelModel: ObservableObject {
             self.resolve = resolve
             self.reopen = reopen
             self.decide = decide
+            self.setAgent = setAgent
             self.repropose = repropose
         }
 
@@ -130,7 +138,8 @@ final class ThreadPanelModel: ObservableObject {
                 setAutoAccept: { binding.setAutoAccept($0, $1) },
                 resolve: { binding.resolve($0) },
                 reopen: { binding.reopen($0) },
-                decide: { binding.decideDiff($0, diff: $1, accept: $2) },
+                decide: { binding.decideDiff($0, diff: $1, accept: $2, editedMarkdown: $3) },
+                setAgent: { binding.setAgent($0, agent: $1.agent, model: $1.model, effort: $1.effort) },
                 repropose: { binding.repropose($0, diff: $1) })
         }
     }
@@ -162,7 +171,6 @@ final class ThreadPanelModel: ObservableObject {
     private let headings: () -> [String]
     /// The name the rail gives a checkpoint ("Refine 2"); bound by the notes controller.
     var versionLabel: (Int) -> String? = { _ in nil }
-    var defaults = ThreadDefaults()
 
     @Published private(set) var snapshot = ThreadSnapshot()
     @Published private(set) var index = ThreadIndex()
@@ -191,8 +199,17 @@ final class ThreadPanelModel: ObservableObject {
     /// only runs while a rail or panel is on screen, and sleeps otherwise.
     static let sharedClock = WatchClock()
 
+    /// What a new thread asks, and the agents the header menu offers: the intake's own
+    /// (`IntakeThreadBinding.defaults`, `.menu`), read when needed so a settings change shows.
+    private let defaultsProvider: @MainActor () -> ThreadDefaults
+    private let modelMenu: @MainActor () -> [ThreadAgentChoice]
+
     init(intakeID: UUID, reader: any ThreadStoreReading, actions: Actions = Actions(),
-         headings: @escaping () -> [String] = { [] }) {
+         headings: @escaping () -> [String] = { [] },
+         defaultsProvider: @escaping @MainActor () -> ThreadDefaults = { ThreadDefaults() },
+         modelMenu: @escaping @MainActor () -> [ThreadAgentChoice] = { [] }) {
+        self.defaultsProvider = defaultsProvider
+        self.modelMenu = modelMenu
         self.intakeID = intakeID
         self.reader = reader
         self.actions = actions
@@ -210,8 +227,12 @@ final class ThreadPanelModel: ObservableObject {
 
     // MARK: Polling
 
-    /// Reads the store now and on every beat of `clock` until `stop()`.
-    func start(on clock: WatchClock = ThreadPanelModel.sharedClock) {
+    /// Reads the store now and on every beat of `clock` until the matching `stop()`. Counted: the
+    /// rail and the panel each start it when they appear, and swapping one for the other must not
+    /// stop the polling while either is still on screen.
+    func start(on given: WatchClock? = nil) {
+        let clock = given ?? Self.sharedClock
+        watchers += 1
         if let current = self.clock, current !== clock { current.remove(self) }
         self.clock = clock
         clock.add(self) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
@@ -219,9 +240,14 @@ final class ThreadPanelModel: ObservableObject {
     }
 
     func stop() {
+        watchers = max(watchers - 1, 0)
+        guard watchers == 0 else { return }
         clock?.remove(self)
         clock = nil
     }
+
+    /// How many views have asked for the polling and not yet let go of it.
+    private var watchers = 0
 
     func refresh() {
         let records = reader.threads()
@@ -231,6 +257,7 @@ final class ThreadPanelModel: ObservableObject {
             next.diffs[record.id] = reader.diffs(record.id)
             if let live = reader.activity(record.id) { next.activity[record.id] = live }
         }
+        for record in records { next.questions[record.id] = Self.unansweredQuestions(next.turns[record.id] ?? []) }
         if next != snapshot { snapshot = next }
         settleOverrides()
         rebuildIndex()
@@ -253,9 +280,10 @@ final class ThreadPanelModel: ObservableObject {
     func diffs(_ id: ThreadID) -> [ThreadDiff] { snapshot.diffs[id] ?? [] }
     func record(_ id: ThreadID) -> ThreadRecord? { snapshot.threads.first { $0.id == id } }
 
-    /// The questions the agent asked that no later turn answered.
-    func openQuestions(_ id: ThreadID) -> [StructuredQuestion] {
-        let all = turns(id)
+    /// The questions the agent asked that no later turn answered (worked out once per poll).
+    func openQuestions(_ id: ThreadID) -> [StructuredQuestion] { snapshot.questions[id] ?? [] }
+
+    private static func unansweredQuestions(_ all: [ThreadTurn]) -> [StructuredQuestion] {
         guard let at = all.lastIndex(where: { turn in turn.actions.contains { if case .askQuestion = $0 { true } else { false } } }),
               !all[(at + 1)...].contains(where: { $0.answers != nil }) else { return [] }
         return all[at].actions.compactMap { if case .askQuestion(let q) = $0 { q } else { nil } }
@@ -300,8 +328,15 @@ final class ThreadPanelModel: ObservableObject {
         let quote = record.anchor.note?.quote
         return ThreadHeaderModel(title: record.title, agent: "\(record.agent.rawValue) · \(record.model) · \(record.effort)",
                                  follows: "on \(follows)", quote: quote?.isEmpty == false ? quote : nil,
-                                 section: record.anchor.note?.section.map(Self.sectionLabel), status: record.status)
+                                 section: record.anchor.note?.section.map(Self.sectionLabel), status: record.status,
+                                 readsFilesOnly: record.agent == .grok || record.agent == .opencode)
     }
+
+    /// The agents and models the header menu offers.
+    var agentChoices: [ThreadAgentChoice] { modelMenu() }
+
+    /// Moves a thread to another agent or model; the runner answers its next turn with it.
+    func setAgent(_ id: ThreadID, _ choice: ThreadAgentChoice) { run(actions.setAgent(id, choice)) }
 
     func autoAccept(_ id: ThreadID) -> Bool {
         autoAcceptOverrides[id]?.value ?? record(id)?.autoAccept ?? false
@@ -383,6 +418,16 @@ final class ThreadPanelModel: ObservableObject {
         isOpen = false
     }
 
+    /// What ⌘[ and ⌘] mean: -1 and +1, only with ⌘ held.
+    static func switchStep(key: String, command: Bool) -> Int? {
+        guard command else { return nil }
+        switch key {
+        case "[": return -1
+        case "]": return 1
+        default: return nil
+        }
+    }
+
     /// ⌘[ and ⌘]: the neighbour in display order, wrapping.
     func switchThread(by step: Int) {
         let rows = index.all
@@ -412,7 +457,7 @@ final class ThreadPanelModel: ObservableObject {
         guard !text.isEmpty else { return }
         let thread: ThreadID
         if let anchor = newThreadAnchor {
-            switch actions.open(anchor, Self.title(from: text), text, defaults) {
+            switch actions.open(anchor, Self.title(from: text), text, defaultsProvider()) {
             case .failure(let refusal): return fail(refusal)
             case .success(let id):
                 thread = id
@@ -435,7 +480,10 @@ final class ThreadPanelModel: ObservableObject {
 
     func resolve(_ id: ThreadID) { run(actions.resolve(id)) }
     func reopen(_ id: ThreadID) { run(actions.reopen(id)) }
-    func decide(_ diff: ThreadDiff, accept: Bool) { run(actions.decide(diff.thread, diff.id, accept)) }
+    /// ✓ or ✗. `editedMarkdown` is the plan as the human changed the proposal into (Accept edited).
+    func decide(_ diff: ThreadDiff, accept: Bool, editedMarkdown: String? = nil) {
+        run(actions.decide(diff.thread, diff.id, accept, editedMarkdown))
+    }
     func repropose(_ diff: ThreadDiff) { run(actions.repropose(diff.thread, diff.id)) }
 
     func setAutoAccept(_ id: ThreadID, _ on: Bool) {
@@ -458,7 +506,21 @@ final class ThreadPanelModel: ObservableObject {
         refresh()
     }
 
-    private func fail(_ refusal: ThreadRefusal) {
-        notice = refusal.code == IntakeService.threadsUnavailable ? Self.unavailableNotice : "Couldn't do that (\(refusal.code))."
+    private func fail(_ refusal: ThreadRefusal) { notice = Self.words(for: refusal) }
+
+    /// A refusal in plain words, as `CommandCopy` words the phone's: the code is the contract, not
+    /// something to read out. An unknown code keeps its code in brackets, for whoever is diagnosing.
+    static func words(for refusal: ThreadRefusal) -> String {
+        switch refusal.code {
+        case IntakeService.threadsUnavailable: unavailableNotice
+        case "unknown_thread": "That thread is gone."
+        case "unknown_diff", "diff_not_pending": "That edit is no longer waiting for an answer."
+        case "diff_stale", "stale_diff": "A round rewrote that passage, so the edit no longer applies. Ask the thread to propose it again."
+        case "empty_message", "empty_note": "Write something first."
+        case "not_allowed": "That isn't possible right now."
+        case "unknown_intake", "intake_moved_on": "This intake has moved on."
+        case "no_agents": "No agent is available on this Mac to answer."
+        default: "Flight Deck couldn't do that (\(refusal.code))."
+        }
     }
 }

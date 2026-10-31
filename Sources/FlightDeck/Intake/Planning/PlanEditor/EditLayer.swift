@@ -501,6 +501,12 @@ final class EditLayerFragment: NSTextLayoutFragment {
         return text.attribute(.planTableRow, at: 0, effectiveRange: nil) as? PlanTableRowRef
     }
 
+    /// This line's place in a proposed edit drawn in place of its block (`MarkdownStyler.styleProposal`).
+    private var proposal: PlanProposalRef? {
+        guard let text = paragraphText, text.length > 0 else { return nil }
+        return text.attribute(.planProposal, at: 0, effectiveRange: nil) as? PlanProposalRef
+    }
+
     /// Where a grid row's top-left corner is, in this fragment's coordinates: the text
     /// container's leading edge, inside its line padding, and the row's line — below the space
     /// the first row keeps above the grid.
@@ -537,6 +543,10 @@ final class EditLayerFragment: NSTextLayoutFragment {
         if let ref = tableRow {
             bounds = bounds.union(CGRect(x: tableOrigin.x - 1, y: tableOrigin.y, width: ref.layout.width + 2, height: ref.layout.rows[ref.row].height))
         }
+        // The proposal's words are drawn across the text's width, where its (hidden) source has none.
+        if let ref = proposal, ref.lead {
+            bounds = bounds.union(CGRect(x: tableOrigin.x - 1, y: tableOrigin.y, width: ref.layout.width + 2, height: ref.layout.height(hovered: ref.hovered)))
+        }
         let gutterX = PlanGutter.offset(.edit) - layoutFragmentFrame.minX - 1
         bounds = bounds.union(CGRect(x: gutterX, y: bounds.minY, width: 1, height: bounds.height))
         for (_, ghost) in ghosts where ghost.placement == .above || ghost.placement == .below {
@@ -549,6 +559,10 @@ final class EditLayerFragment: NSTextLayoutFragment {
 
     override func draw(at point: CGPoint, in context: CGContext) {
         drawBlockDecoration(at: point, in: context)
+        if let ref = proposal {
+            if ref.lead { drawProposal(ref, at: point, in: context) }
+            return
+        }
         if let ref = tableRow {
             drawTableRow(ref, at: point, in: context)
             drawTableBars(ref, at: point, in: context)
@@ -619,6 +633,23 @@ final class EditLayerFragment: NSTextLayoutFragment {
             case (true, false): bar(b.minY, b.maxY, EditLayer.barColor)
             default: bar(b.minY, b.maxY, EditLayer.deletedColor)
             }
+        }
+    }
+
+    /// The proposed text in the plan's typography, the green bar in the edit lane beside it and a
+    /// ✦ after its last word. Under the pointer the old text is struck through above it.
+    private func drawProposal(_ ref: PlanProposalRef, at point: CGPoint, in context: CGContext) {
+        let appearance = textLayoutManager?.textContainer?.textView?.effectiveAppearance ?? NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            let drawn = ref.layout.draw(at: CGPoint(x: point.x + tableOrigin.x, y: point.y + tableOrigin.y), hovered: ref.hovered,
+                                        context: context)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            drawBar(drawn.bar.lowerBound - point.y, drawn.bar.upperBound - point.y, DiffGutterStyle.green, at: point)
+            (DiffGutterStyle.spark as NSString).draw(at: drawn.spark, withAttributes: [
+                .font: NSFont.systemFont(ofSize: 10), .foregroundColor: DiffGutterStyle.sparkColor,
+            ])
         }
     }
 
