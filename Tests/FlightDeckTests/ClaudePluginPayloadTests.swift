@@ -190,11 +190,14 @@ final class ClaudePluginPayloadTests: XCTestCase {
     /// manifest names is `/switch-account`'s, and it must be a file that ships: a stale `modules`
     /// entry would make claude load a file that no longer ships, and a mod the engine switched
     /// off would blank every claude meter with nothing here to notice.
-    func testHooksManifestLoadsOnlyTheSwitchAccountModuleAndTheStatusLineShips() throws {
+    func testHooksManifestLoadsOnlyTheEntryModuleAndTheStatusLineShips() throws {
         let root = try pluginRoot()
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("hooks/hooks.json"))) as? [String: Any])
-        XCTAssertEqual(obj["modules"] as? [String], ["./switch-account.tsx"])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/switch-account.tsx").path))
+        // One module: a module hooks `session.start` once, so flight-deck.tsx registers every command.
+        XCTAssertEqual(obj["modules"] as? [String], ["./flight-deck.tsx"])
+        for module in ["flight-deck.tsx", "switch-account.tsx", "budget.tsx", "cli.ts"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/\(module)").path), module)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/register.ts").path))
         let script = try String(contentsOf: root.appendingPathComponent(ClaudeStatusLine.scriptPath), encoding: .utf8)
         XCTAssertTrue(script.contains("FLIGHT_DECK_USAGE_DIR"))
