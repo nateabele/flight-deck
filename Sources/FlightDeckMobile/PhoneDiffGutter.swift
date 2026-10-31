@@ -63,6 +63,13 @@ struct DiffText: View {
     let text: String
     var old = false
 
+    /// `text` as it should be read aloud: inline Markdown interpreted and its markers dropped.
+    static func spoken(_ text: String) -> String {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        guard let parsed = try? AttributedString(markdown: text, options: options) else { return text }
+        return String(parsed.characters)
+    }
+
     var body: some View {
         let rendered = Markdown(text).markdownTheme(TimelineMarkdown.theme)
         if old { rendered.strikethrough().foregroundStyle(.secondary) } else { rendered }
@@ -105,12 +112,12 @@ struct PhoneDiffSheet: View {
                 Text("Proposed change").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                 if !diff.old.isEmpty {
                     DiffText(text: diff.old, old: true)
-                        .accessibilityLabel("Old text: \(diff.old)")
+                        .accessibilityLabel("Old text: \(DiffText.spoken(diff.old))")
                 }
                 HStack(alignment: .top, spacing: 8) {
                     Capsule().fill(Color.green).frame(width: 3)
                     DiffText(text: diff.new)
-                        .accessibilityLabel("New text: \(diff.new)")
+                        .accessibilityLabel("New text: \(DiffText.spoken(diff.new))")
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 if diff.state == "stale" {

@@ -171,7 +171,7 @@ struct ThreadScreen: View {
             .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(state)): \(d.new)")
+        .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(state)): \(DiffText.spoken(d.new))")
     }
 
     private func bubble(_ text: String, mine: Bool) -> some View {

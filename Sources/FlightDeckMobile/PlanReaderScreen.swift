@@ -455,7 +455,7 @@ struct PlanReaderScreen: View {
             .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(d.state)): \(d.new)")
+        .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(d.state)): \(DiffText.spoken(d.new))")
     }
 
     /// Asks this reader composed that the Mac has not acked: in flight, or failed with a Retry.

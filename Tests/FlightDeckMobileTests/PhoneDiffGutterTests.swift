@@ -69,6 +69,13 @@ final class PhoneDiffGutterTests: XCTestCase {
         XCTAssertFalse(PhoneDiffGutter.canDecide(diff(), detail: detail(threads: true, state: "review")))
     }
 
+    /// VoiceOver reads the label, so it gets the words and not the markup.
+    func testSpokenTextHasNoMarkdownMarkup() {
+        XCTAssertEqual(DiffText.spoken("wait until **every producer** has `paused`, see [docs](https://x.y)"),
+                       "wait until every producer has paused, see docs")
+        XCTAssertEqual(DiffText.spoken("plain text"), "plain text")
+    }
+
     // MARK: - Needs you
 
     private func summary(attention: Bool = false, threads: Int? = nil) -> WireIntakeSummary {
