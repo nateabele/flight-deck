@@ -994,6 +994,9 @@ struct PlanTextView: NSViewRepresentable {
                 if let edit = single {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
+                    // Moved with the text in this same pass: left at the old ranges they would match no
+                    // block, and the proposal would show its source until the async refresh.
+                    proposals = PlanProposal.moved(proposals, by: TextEdit(range: edit.range, delta: edit.delta))
                     let layered = diffEditLayer(base: layerBase, text: textView.string,
                                                 shift: (edit.range.location + max(edit.range.length - edit.delta, 0), edit.delta),
                                                 edit: TextEdit(range: edit.range, delta: edit.delta))

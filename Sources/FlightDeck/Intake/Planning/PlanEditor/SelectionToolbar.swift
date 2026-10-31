@@ -156,6 +156,7 @@ final class PlanNotesBridge {
         controller.onMarksChanged = { [weak self] in self?.marksChanged() }
         controller.revealPending = { [weak self] in self?.revealNow() }
         controller.onThreadsChanged = { [weak self] in self?.refreshDiffs() }
+        controller.onThreadSwitched = { [weak self] in self?.diffGutter.panelSwitchedThread() }
         wireDiffGutter(controller, textView)
         controller.undoManager = textView.undoManager
         let center = NotificationCenter.default
@@ -170,7 +171,10 @@ final class PlanNotesBridge {
             },
         ]
         if let storage = textView.textStorage {
-            observers.append(TextEdit.observe(storage) { [weak self] edit in self?.edits?.append(edit) })
+            observers.append(TextEdit.observe(storage) { [weak self] edit in
+                self?.edits?.append(edit)
+                self?.diffGutter.textEdited(edit)
+            })
         }
         edits = nil
         textChanged()
@@ -186,6 +190,7 @@ final class PlanNotesBridge {
         controller?.onMarksChanged = nil
         controller?.revealPending = {}
         controller?.onThreadsChanged = nil
+        controller?.onThreadSwitched = nil
         diffGutter.detach()
         controller = nil
         bands.removeFromSuperview()
@@ -251,7 +256,7 @@ final class PlanNotesBridge {
     private func refreshDiffs() {
         guard let textView, let controller else { return }
         let pending = controller.threadPanel?.pendingDiffsInPlan.filter { $0.checkpoint == controller.checkpoint } ?? []
-        diffGutter.update(pending, in: textView.string)
+        diffGutter.update(pending, in: textView.string, checkpoint: controller.checkpoint)
         coordinator?.layProposals(diffGutter.locatedDiffs.map {
             PlanTextView.Coordinator.ProposalRequest(id: $0.diff.id, range: $0.range, replacement: $0.diff.new)
         })
@@ -281,7 +286,12 @@ final class PlanNotesBridge {
             textView.setSelectedRange(NSRange(location: range.location, length: (diff.new as NSString).length))
             textView.window?.makeFirstResponder(textView)
         }
-        diffGutter.onCancelEdit = { [weak self] in self?.textView?.undoManager?.undo() }
+        diffGutter.onRestore = { [weak self] range, original in
+            guard let textView = self?.textView else { return }
+            // One replacement, so one undo step if the person wants the proposal back.
+            textView.insertText(original, replacementRange: range)
+            textView.setSelectedRange(NSRange(location: range.location, length: (original as NSString).length))
+        }
     }
 
     /// The quote "Show in that version" is taking the editor to, found in `text` — the text just

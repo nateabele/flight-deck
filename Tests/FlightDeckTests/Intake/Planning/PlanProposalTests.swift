@@ -90,4 +90,31 @@ final class PlanProposalTests: XCTestCase {
         MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: nil, proposals: [p], theme: theme())
         XCTAssertNil(storage.attribute(.planProposal, at: 0, effectiveRange: nil), "tables keep the bar and the card")
     }
+
+    func testTheCacheKeyFollowsTheThemesTypeface() {
+        var big = theme()
+        big.body = PlanTheme.serif(22)
+        var sans = theme()
+        sans.body = NSFont.systemFont(ofSize: 16)
+        let base = PlanProposalLayout.cacheKey(source: "s", old: "o", theme: theme(), width: 320)
+        XCTAssertNotEqual(base, PlanProposalLayout.cacheKey(source: "s", old: "o", theme: big, width: 320), "font size")
+        XCTAssertNotEqual(base, PlanProposalLayout.cacheKey(source: "s", old: "o", theme: sans, width: 320), "font family")
+        XCTAssertNotEqual(base, PlanProposalLayout.cacheKey(source: "s", old: "o", theme: theme(), width: 400), "width")
+        XCTAssertEqual(base, PlanProposalLayout.cacheKey(source: "s", old: "o", theme: theme(), width: 320))
+        let a = PlanProposalLayout.cached(source: "A longer line of words to wrap across the width.", old: "o", theme: theme(), width: 320)
+        let b = PlanProposalLayout.cached(source: "A longer line of words to wrap across the width.", old: "o", theme: big, width: 320)
+        XCTAssertGreaterThan(b.restHeight, a.restHeight, "a bigger type must not get the smaller type's cached height")
+    }
+
+    func testProposalsMoveWithAnEditAboveThemAndDropWhenTheEditIsInside() {
+        let p = PlanProposal(diff: UUID(), block: NSRange(location: 40, length: 20), source: "s", old: "o", hovered: true)
+        let above = PlanProposal.moved([p], by: TextEdit(range: NSRange(location: 5, length: 3), delta: 3))
+        XCTAssertEqual(above.map(\.block), [NSRange(location: 43, length: 20)])
+        XCTAssertEqual(above.first?.diff, p.diff)
+        XCTAssertEqual(above.first?.hovered, true)
+        let below = PlanProposal.moved([p], by: TextEdit(range: NSRange(location: 100, length: 1), delta: 1))
+        XCTAssertEqual(below.map(\.block), [p.block])
+        let inside = PlanProposal.moved([p], by: TextEdit(range: NSRange(location: 45, length: 1), delta: 1))
+        XCTAssertTrue(inside.isEmpty, "an edit inside the block reveals its source; the refresh lays the proposal again")
+    }
 }

@@ -15,6 +15,16 @@ struct PlanProposal: Equatable {
     let old: String
     /// The pointer is on it: the room for the old text and the toolbar is open above.
     var hovered = false
+
+    /// `proposals` after one character edit: a block the edit is above moves with the text, one
+    /// the edit is inside is dropped (its source shows, the caret being there, and the refresh
+    /// lays the proposal again). Done in the same pass as the restyle, so typing above a proposal
+    /// does not flash it back to source for a run-loop turn.
+    static func moved(_ proposals: [PlanProposal], by edit: TextEdit) -> [PlanProposal] {
+        proposals.compactMap { p in
+            edit.shift(p.block).map { PlanProposal(diff: p.diff, block: $0, source: p.source, old: p.old, hovered: p.hovered) }
+        }
+    }
 }
 
 /// The proposed block and the old one, each laid out on a scratch text system with the plan's
@@ -106,8 +116,14 @@ final class PlanProposalLayout: NSObject {
         return cache
     }()
 
+    /// Width, the body face (family and size, as `PlanTableLayout.cached` keys its own) and both
+    /// texts: a layout made for another type size must not answer for this one.
+    static func cacheKey(source: String, old: String, theme: PlanTheme, width: CGFloat) -> String {
+        "\(Int(width.rounded()))|\(theme.body.familyName ?? theme.body.fontName)|\(theme.body.pointSize)|\(source)|\(old)"
+    }
+
     static func cached(source: String, old: String, theme: PlanTheme, width: CGFloat) -> PlanProposalLayout {
-        let key = "\(Int(width))|\(source)|\(old)" as NSString
+        let key = cacheKey(source: source, old: old, theme: theme, width: width) as NSString
         if let hit = cache.object(forKey: key) { return hit }
         let made = PlanProposalLayout(source: source, old: old, theme: theme, width: width)
         cache.setObject(made, forKey: key)

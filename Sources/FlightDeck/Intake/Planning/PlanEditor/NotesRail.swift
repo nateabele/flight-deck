@@ -285,6 +285,9 @@ final class PlanNotesController: ObservableObject {
     private var threadWatch: AnyCancellable?
     /// The editor redraws the proposed edits' bars when the threads change.
     var onThreadsChanged: (() -> Void)?
+    /// The panel moved to another thread: a half-made Edit on the last one is let go.
+    var onThreadSwitched: (() -> Void)?
+    private var switchWatch: AnyCancellable?
     private var threadRanges: [ThreadID: NSRange?] = [:]
     /// Opens the inspector in Notes mode so a draft started from the toolbar has somewhere to be
     /// written. An explicit switch, and the only one the rail makes: focus in the plan used to
@@ -535,6 +538,7 @@ final class PlanNotesController: ObservableObject {
             threadPanel?.stop()
             threadPanel = nil
             threadWatch = nil
+            switchWatch = nil
             return
         }
         // The detail pane binds on every update; the same intake keeps its model, whose polling
@@ -549,6 +553,9 @@ final class PlanNotesController: ObservableObject {
         threadWatch = model.$snapshot.dropFirst().sink { [weak self] _ in
             // `$snapshot` publishes before the value lands; the rail reads it on the next turn.
             DispatchQueue.main.async { self?.threadsChanged() }
+        }
+        switchWatch = model.$selected.dropFirst().removeDuplicates().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.onThreadSwitched?() }
         }
         model.refresh()
     }

@@ -84,7 +84,7 @@ final class DiffGutterControllerTests: XCTestCase {
         c.onDecide = { _, accept, markdown in decided.append((accept, markdown)) }
         c.edit(a)
         XCTAssertEqual(edited, [(plan as NSString).range(of: "Alpha beta gamma.")])
-        XCTAssertEqual(c.editing?.id, a.id)
+        XCTAssertEqual(c.editing?.diff.id, a.id)
         c.acceptEdited()
         XCTAssertEqual(decided.count, 1)
         XCTAssertEqual(decided.first?.0, true, "recorded as an accept")
@@ -92,20 +92,101 @@ final class DiffGutterControllerTests: XCTestCase {
         XCTAssertNil(c.editing)
     }
 
-    func testCancelUndoesTheInsertAndDecidesNothing() {
+    /// A controller wired to a real text storage, as the bridge wires it: edits reach `textEdited`,
+    /// Edit replaces the passage, Cancel replaces it back.
+    private func wired(_ plan: String) -> (DiffGutterController, NSTextStorage, NSObjectProtocol) {
+        let storage = NSTextStorage(string: plan)
+        let c = DiffGutterController()
+        c.segments = { _ in [CGRect(x: 40, y: 0, width: 200, height: 20)] }
+        c.currentText = { storage.string }
+        c.onEdit = { diff, range in storage.replaceCharacters(in: range, with: diff.new) }
+        c.onRestore = { range, original in storage.replaceCharacters(in: range, with: original) }
+        let observer = TextEdit.observe(storage) { c.textEdited($0) }
+        return (c, storage, observer)
+    }
+
+    func testCancelAfterTypingRestoresTheOriginalPassage() {
+        let (c, storage, observer) = wired(plan)
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let a = diff("Alpha beta gamma.", new: "Alpha beta gamma, changed.")
+        c.update([a], in: plan)
+        c.edit(a)
+        XCTAssertEqual(storage.string, plan.replacingOccurrences(of: "Alpha beta gamma.", with: "Alpha beta gamma, changed."))
+        // The person types inside the inserted words, at their end, and above them.
+        let at = (storage.string as NSString).range(of: "changed").location
+        storage.replaceCharacters(in: NSRange(location: at, length: 0), with: "VERY ")
+        let end = (storage.string as NSString).range(of: "changed.").upperBound
+        storage.replaceCharacters(in: NSRange(location: end, length: 0), with: " More.")
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Intro line.\n")
+        var decided = 0
+        c.onDecide = { _, _, _ in decided += 1 }
+        c.cancelEdit()
+        XCTAssertEqual(storage.string, "Intro line.\n" + plan, "the original passage is back, and the typing elsewhere is kept")
+        XCTAssertEqual(decided, 0)
+        XCTAssertNil(c.editing)
+    }
+
+    func testCancelRestoresByRangeNotByUndoingTheLastGroup() {
+        let (c, storage, observer) = wired(plan)
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let a = diff("Alpha beta gamma.", new: "Alpha beta gamma, changed.")
+        c.update([a], in: plan)
+        c.edit(a)
+        // An unrelated edit after Edit, far from the passage: Cancel must leave it alone.
+        storage.replaceCharacters(in: NSRange(location: storage.length, length: 0), with: "Tail note.\n")
+        c.cancelEdit()
+        XCTAssertEqual(storage.string, plan + "Tail note.\n")
+    }
+
+    func testTheStripFollowsTheEditedPassageNotAnEarlierOccurrence() {
+        let text = "# Plan\n\nreplacement\n\nAlpha beta gamma.\n"
+        let (c, storage, observer) = wired(text)
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let range = (text as NSString).range(of: "Alpha beta gamma.")
+        let a = ThreadDiff(thread: ThreadID(), checkpoint: 2,
+                           anchor: NoteAnchor(checkpoint: 2, selecting: text.range(of: "Alpha beta gamma.")!, in: text),
+                           old: "Alpha beta gamma.", new: "replacement")
+        c.update([a], in: text)
+        c.edit(a)
+        let expected = NSRange(location: range.location, length: ("replacement" as NSString).length)
+        XCTAssertEqual(c.editing?.anchor, expected, "the inserted words, not the first \"replacement\" in the plan")
+        // Typing above moves the anchor with the text; typing inside grows it.
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "ab")
+        XCTAssertEqual(c.editing?.anchor, NSRange(location: expected.location + 2, length: expected.length))
+        storage.replaceCharacters(in: NSRange(location: expected.location + 2 + 3, length: 0), with: "XX")
+        XCTAssertEqual(c.editing?.anchor, NSRange(location: expected.location + 2, length: expected.length + 2))
+    }
+
+    func testEditingEndsWhenTheDiffGoesAway() {
         let c = controller()
         let a = diff("Alpha beta gamma.")
-        c.update([a], in: plan)
-        var undone = 0
-        var decided = 0
+        c.update([a], in: plan, checkpoint: 2)
         c.onEdit = { _, _ in }
-        c.onCancelEdit = { undone += 1 }
-        c.onDecide = { _, _, _ in decided += 1 }
         c.edit(a)
-        c.cancelEdit()
-        c.cancelEdit()
-        XCTAssertEqual(undone, 1)
-        XCTAssertEqual(decided, 0)
+        XCTAssertNotNil(c.editing)
+        c.update([a], in: plan, checkpoint: 2)
+        XCTAssertNotNil(c.editing, "still pending: the strip stays")
+        c.update([], in: plan, checkpoint: 2)   // resolved, accepted elsewhere, or withdrawn
+        XCTAssertNil(c.editing)
+    }
+
+    func testEditingEndsWhenTheCheckpointChanges() {
+        let c = controller()
+        let a = diff("Alpha beta gamma.")
+        c.update([a], in: plan, checkpoint: 2)
+        c.onEdit = { _, _ in }
+        c.edit(a)
+        c.update([a], in: plan, checkpoint: 3)
+        XCTAssertNil(c.editing)
+    }
+
+    func testEditingEndsWhenThePanelSwitchesThread() {
+        let c = controller()
+        let a = diff("Alpha beta gamma.")
+        c.update([a], in: plan, checkpoint: 2)
+        c.onEdit = { _, _ in }
+        c.edit(a)
+        c.panelSwitchedThread()
         XCTAssertNil(c.editing)
     }
 }

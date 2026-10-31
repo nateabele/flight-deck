@@ -212,6 +212,38 @@ final class ThreadRenderTests: XCTestCase {
         }
     }
 
+    /// Real TextKit layout, not only the style attributes: the proposal's paragraph is laid out
+    /// exactly as tall as the room the styler reserved for what is drawn there.
+    func testTheProposalsLaidOutLineIsAsTallAsItsReservedHeight() throws {
+        ThreadPanelModel.forgetSession()
+        let s = scene()
+        s.controller.threadPanel?.refresh()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("proposal-height-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        var checked = false
+        try PlanningRender.write(editorView(s), size: NSSize(width: 820, height: 560), to: tmp, appearance: .aqua) { host in
+            guard let textView = Self.find(PlanNSTextView.self, in: host), let layout = textView.textLayoutManager,
+                  let storage = textView.textStorage else { return XCTFail("no editor") }
+            let at = (storage.string as NSString).range(of: Self.oldSentence).location
+            guard let ref = storage.attribute(.planProposal, at: at, effectiveRange: nil) as? PlanProposalRef else {
+                return XCTFail("the sentence is not drawn as a proposal")
+            }
+            layout.ensureLayout(for: layout.documentRange)
+            var found: NSTextLayoutFragment?
+            layout.enumerateTextLayoutFragments(from: layout.documentRange.location, options: [.ensuresLayout]) { fragment in
+                let start = layout.offset(from: layout.documentRange.location, to: fragment.rangeInElement.location)
+                if start == at { found = fragment; return false }
+                return true
+            }
+            let fragment = try? XCTUnwrap(found, "no layout fragment starts at the paragraph")
+            guard let line = fragment?.textLineFragments.first else { return XCTFail("no line") }
+            XCTAssertEqual(line.typographicBounds.height, ref.layout.restHeight, accuracy: 0.5,
+                           "the laid-out line is as tall as the proposal the editor draws in it")
+            checked = true
+        }
+        XCTAssertTrue(checked)
+    }
+
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let match = view as? T { return match }
         for sub in view.subviews { if let match = find(type, in: sub) { return match } }

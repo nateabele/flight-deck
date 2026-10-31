@@ -184,8 +184,19 @@ final class DiffGutterController {
     private var overCard = false
     private var hideWork: DispatchWorkItem?
 
-    /// The diff being changed by hand, until Accept edited or Cancel.
-    private(set) var editing: ThreadDiff?
+    /// The diff being changed by hand, until Accept edited or Cancel (or it goes away).
+    ///
+    /// `original` is what the passage said before Edit replaced it, and `anchor` is where the
+    /// inserted words are now: moved by every edit since (`textEdited`), so Cancel can put the
+    /// original back by range, whatever was typed in between, and the strip can sit over the words.
+    struct EditSession {
+        let diff: ThreadDiff
+        let original: String
+        var anchor: NSRange
+        let checkpoint: Int?
+    }
+    private(set) var editing: EditSession?
+    private var checkpoint: Int?
     private var stripHost: NSHostingView<DiffEditStrip>?
 
     /// A range's line rects in the text view's coordinates, from the bridge.
@@ -199,8 +210,8 @@ final class DiffGutterController {
     var onDecide: (ThreadDiff, Bool, String?) -> Void = { _, _, _ in }
     /// Puts the proposed words into the plan over `range`, selected.
     var onEdit: (ThreadDiff, NSRange) -> Void = { _, _ in }
-    /// Undoes `onEdit`'s insert.
-    var onCancelEdit: () -> Void = {}
+    /// Puts `original` back over `range` as one replacement (Cancel).
+    var onRestore: (NSRange, String) -> Void = { _, _ in }
     var onOpenThread: (ThreadID) -> Void = { _ in }
 
     /// How long the card outlives the pointer leaving the passage: time to cross the gap to it.
@@ -231,8 +242,15 @@ final class DiffGutterController {
 
     /// The pending diffs to draw, found in `text`. A diff whose passage is no longer there is not
     /// drawn: it is stale, and the thread's card says so.
-    func update(_ next: [ThreadDiff], in text: String) {
+    func update(_ next: [ThreadDiff], in text: String, checkpoint: Int? = nil) {
+        self.checkpoint = checkpoint
         diffs = next
+        // The Edit is let go when the plan moved on under it (a round landed), or its diff is no
+        // longer pending (resolved, decided elsewhere, withdrawn): its strip would offer to accept
+        // something that is no longer there.
+        if let session = editing, session.checkpoint != checkpoint || !next.contains(where: { $0.id == session.diff.id }) {
+            finishEdit()
+        }
         located = Dictionary(uniqueKeysWithValues: next.compactMap { diff in
             diff.anchor.locate(in: text).map { (diff.id, NSRange($0, in: text)) }
         })
@@ -399,24 +417,51 @@ final class DiffGutterController {
         hideCard()
         guard let range else { return }
         finishEdit()
-        editing = diff
+        let text = currentText() as NSString
+        guard NSMaxRange(range) <= text.length else { return }
+        let original = text.substring(with: range)
         onEdit(diff, range)
+        // After the insert, so the insert's own edit notification does not move the anchor.
+        editing = EditSession(diff: diff, original: original,
+                              anchor: NSRange(location: range.location, length: (diff.new as NSString).length), checkpoint: checkpoint)
         showStrip()
+    }
+
+    /// Keeps the edited range on the inserted words as the plan changes (the bridge feeds every
+    /// character edit here): an edit above moves it, one inside or touching either end grows it.
+    func textEdited(_ edit: TextEdit) {
+        guard var session = editing else { return }
+        let a = session.anchor
+        if edit.range.location >= a.location, edit.oldEnd <= NSMaxRange(a) {
+            session.anchor = NSRange(location: a.location, length: max(a.length + edit.delta, 0))
+        } else if let moved = edit.shift(a) {
+            session.anchor = moved
+        } else {
+            session.anchor = edit.stretch(a)
+        }
+        editing = session
+        placeStrip()
     }
 
     /// Accept edited: the plan as it reads now is the accepted edit.
     func acceptEdited() {
-        guard let diff = editing else { return }
+        guard let session = editing else { return }
         finishEdit()
-        onDecide(diff, true, currentText())
+        onDecide(session.diff, true, currentText())
     }
 
-    /// Cancel: the insert is undone and the proposal stays pending.
+    /// Cancel: the passage is put back as it was, by range, as one replacement — however much was
+    /// typed since, and without touching whatever else the undo stack holds.
     func cancelEdit() {
-        guard editing != nil else { return }
+        guard let session = editing else { return }
         finishEdit()
-        onCancelEdit()
+        let length = (currentText() as NSString).length
+        guard NSMaxRange(session.anchor) <= length else { return }
+        onRestore(session.anchor, session.original)
     }
+
+    /// The panel moved to another thread: the Edit on the last one is let go, its words left as typed.
+    func panelSwitchedThread() { finishEdit() }
 
     private func finishEdit() {
         editing = nil
@@ -436,10 +481,9 @@ final class DiffGutterController {
 
     /// Above the edited passage, at the trailing edge: over the gap, not over the words.
     private func placeStrip() {
-        guard let textView, let stripHost, let diff = editing else { return }
-        let text = currentText() as NSString
-        let found = text.range(of: diff.new)
-        guard found.location != NSNotFound, let first = segments(found).first else { return }
+        guard let textView, let stripHost, let session = editing else { return }
+        let length = (currentText() as NSString).length
+        guard NSMaxRange(session.anchor) <= length, let first = segments(session.anchor).first else { return }
         let origin = NSPoint(x: textView.bounds.width - PlanGutter.trailingMargin / 2 - stripHost.frame.width,
                              y: max(first.minY - stripHost.frame.height - 2, 0))
         if stripHost.frame.origin != origin { stripHost.setFrameOrigin(origin) }
