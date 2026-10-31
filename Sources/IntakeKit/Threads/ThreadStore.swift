@@ -64,14 +64,29 @@ public struct ThreadStore: ThreadStoreReading, Sendable {
         } ?? nil
     }
 
-    /// In seq order. A line that doesn't decode is skipped.
+    /// In reading order (`readingOrder`). A line that doesn't decode is skipped.
     public func turns(_ id: ThreadID) -> [ThreadTurn] {
         let url = turnsURL(id)
         return cache.cached(url, as: [ThreadTurn].self) {
             guard let data = try? Data(contentsOf: url) else { return [] }
-            return LockedAppend.lines(of: data).compactMap { try? Self.decoder.decode(ThreadTurn.self, from: $0) }
-                .sorted { $0.seq < $1.seq }
+            return Self.readingOrder(LockedAppend.lines(of: data).compactMap { try? Self.decoder.decode(ThreadTurn.self, from: $0) })
         } ?? []
+    }
+
+    /// Seq order, except that each divider sits just before the first turn that read its
+    /// version (`checkpoint` at or past the divider's head), or last when none has yet. A
+    /// divider's stored seq is the next free one when it is drawn (C1: a queued turn never
+    /// changes seq), so by seq alone "Now reading Refine 2" would follow the very answer that
+    /// read Refine 2. Stored seqs are untouched; this is display order only, and a phone reading
+    /// `since:` a seq still gets every turn after it.
+    static func readingOrder(_ turns: [ThreadTurn]) -> [ThreadTurn] {
+        let bySeq = turns.sorted { $0.seq < $1.seq }
+        var out = bySeq.filter { !$0.isDivider }
+        for divider in bySeq.filter(\.isDivider).sorted(by: { ($0.checkpoint, $0.seq) < ($1.checkpoint, $1.seq) }) {
+            let at = out.firstIndex { !$0.isDivider && $0.checkpoint >= divider.checkpoint } ?? out.endIndex
+            out.insert(divider, at: at)
+        }
+        return out
     }
 
     /// In the order their turns proposed them. The directory's own stamp moves whenever a diff

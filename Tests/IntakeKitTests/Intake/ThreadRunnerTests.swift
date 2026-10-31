@@ -364,14 +364,15 @@ final class ThreadRunnerTests: XCTestCase {
         try send(id, "Still racing?")
         await runner(agent).run()
 
-        // C1: the queued turn keeps the seq it was given; the divider takes the next free one,
-        // and the turn's own checkpoint marks the version it read.
+        // C1: the queued turn keeps the seq it was given and the divider takes the next free
+        // one, but the reader shows the divider just before the first turn that read its
+        // version — the switch came before that answer, not after it.
         let turns = store.turns(id)
-        XCTAssertEqual(turns.map(\.seq), [1, 2, 3])
-        XCTAssertEqual(turns[1].you, "Still racing?")
+        XCTAssertEqual(turns.map(\.seq), [1, 3, 2], "stored seqs unchanged, shown in reading order")
+        XCTAssertTrue(turns[1].isDivider)
+        XCTAssertEqual(turns[1].reply, "Now reading Refine 2")
         XCTAssertEqual(turns[1].checkpoint, 2)
-        XCTAssertTrue(turns[2].isDivider)
-        XCTAssertEqual(turns[2].reply, "Now reading Refine 2")
+        XCTAssertEqual(turns[2].you, "Still racing?")
         XCTAssertEqual(turns[2].checkpoint, 2)
         XCTAssertEqual(store.diffs(id).first?.state, .stale)
         XCTAssertEqual(store.thread(id)?.followsCheckpoint, 2)
