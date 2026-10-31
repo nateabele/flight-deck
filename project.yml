@@ -118,6 +118,13 @@ targets:
       - path: Resources/Infra
         type: folder
         buildPhase: resources
+      # The vendored web assets the plan's visual blocks draw with (planning v2 V-R5): today one
+      # pinned `mermaid/mermaid.min.js`, with its SHA-256 in `mermaid/manifest.json`, which
+      # `MermaidLibrary` checks every time it loads the file. A folder reference, so the
+      # `mermaid/` folder and its LICENSE and NOTICE land together at `Contents/Resources/Visuals/`.
+      - path: Resources/Visuals
+        type: folder
+        buildPhase: resources
       # The hostd's LaunchAgent, where `SMAppService.agent(plistName:)` looks for it:
       # `Contents/Library/LaunchAgents`. Its `BundleProgram` names the embedded binary below.
       - path: Sources/HostDaemon/dev.flightdeck.hostd.plist
@@ -133,6 +140,9 @@ targets:
       - target: IntakeKit
         embed: true
       - sdk: libsqlite3.tbd
+      # The visual blocks' web views (`VisualBlockView`, `VisualRenderHost`). Named, not left to
+      # Swift's autolinking, so the dependency is visible here with the other frameworks.
+      - sdk: WebKit.framework
       # Embeds the `flightdeck` CLI tool (xcodegen target `FlightDeckCLI`, defined below next
       # to `FleetKit` — see its comment for why the target name and product name differ) at
       # `Contents/MacOS/flightdeck`, next to the app's own binary — `destination: executables`
@@ -263,6 +273,10 @@ targets:
       # is this test bundle, not "Flight Deck.app", so ClaudePluginPayloadTests needs its
       # own copy of the folder reference rather than reaching the app target's.
       - path: Resources/ClaudePlugin
+        type: folder
+        buildPhase: resources
+      # Same reason again: the Mermaid tests load the vendored library from this bundle.
+      - path: Resources/Visuals
         type: folder
         buildPhase: resources
     dependencies:

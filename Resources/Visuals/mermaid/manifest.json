@@ -1,0 +1,12 @@
+{
+  "name": "mermaid",
+  "version": "12.2.0",
+  "source": "https://registry.npmjs.org/mermaid/-/mermaid-12.2.0.tgz",
+  "tarballIntegrity": "sha512-w7nr/SFrLO7BaVTs3dQTvYSV6nYSBj0Yy9DjBhsIJtAcHqRzXSq4Pg32ujHZ/AdWsAMNEvvhbm5dt9E2tOiHzw==",
+  "files": {
+    "mermaid.min.js": {
+      "sha256": "a8a6a6f805b074a8261a2825c86f99c8054acb3b35f50bb7e24a4f9f2c3c3b9f",
+      "size": 5494801
+    }
+  }
+}
