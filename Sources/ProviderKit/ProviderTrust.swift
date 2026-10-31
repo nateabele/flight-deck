@@ -10,17 +10,19 @@ public enum ProviderTrust {
         /// after approval without a single byte of the folder changing.
         case symlink(String)
         case unreadable(String)
+        case notRegularFile(String)
 
         public var description: String {
             switch self {
             case .symlink(let path): return "\(path) is a symbolic link; providers may not contain links"
+            case .notRegularFile(let path): return "\(path) is not a regular file"
             case .unreadable(let path): return "could not read \(path) to check the provider"
             }
         }
     }
 
     /// SHA-256 over every file in `folder`, in sorted relative-path order. Each entry is the
-    /// path, a NUL, the length as 8 big-endian bytes, then the bytes. The NUL and the length
+    /// path, a NUL, the length as 8 big-endian bytes, one byte for the executable bit, then the bytes. The NUL and the length
     /// make the stream unambiguous, so moving bytes from one file's tail to the next file's
     /// head cannot give the same digest.
     public static func digest(folder: URL) throws -> String {
@@ -36,13 +38,16 @@ public enum ProviderTrust {
             hasher.update(data: Data([0]))
             var length = UInt64(data.count).bigEndian
             withUnsafeBytes(of: &length) { hasher.update(bufferPointer: $0) }
+            // The executable bit, so a generator made runnable after approval asks again.
+            let mode = (try? FileManager.default.attributesOfItem(atPath: file.url.path)[.posixPermissions]) as? Int ?? 0
+            hasher.update(data: Data([mode & 0o111 != 0 ? 1 : 0]))
             hasher.update(data: data)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func collect(_ dir: URL, prefix: String, into files: inout [(path: String, url: URL)]) throws {
-        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey]
+        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]
         let names: [URL]
         do {
             names = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)
@@ -51,16 +56,19 @@ public enum ProviderTrust {
         }
         for url in names {
             let name = url.lastPathComponent
-            // Finder writes this on its own; counting it would ask the user to re-approve a
-            // provider they never touched.
-            if name == ".DS_Store" { continue }
+            // No file is skipped, not even .DS_Store: the manifest can name any file as the
+            // generator, so a skipped name is code the approval would not cover.
             let relative = prefix.isEmpty ? name : "\(prefix)/\(name)"
             let values = try? url.resourceValues(forKeys: Set(keys))
             if values?.isSymbolicLink == true { throw DigestError.symlink(relative) }
             if values?.isDirectory == true {
                 try collect(url, prefix: relative, into: &files)
-            } else {
+            } else if values?.isRegularFile == true {
                 files.append((relative, url))
+            } else {
+                // A FIFO, socket or device: reading one can block forever, and it is no file a
+                // provider has a reason to ship.
+                throw DigestError.notRegularFile(relative)
             }
         }
     }
@@ -84,6 +92,8 @@ public struct ProviderApproval: Codable, Equatable, Sendable {
 /// `provider-trust.json`, a plain list of approvals. The directory is a parameter so tests never
 /// touch the real one.
 public struct ProviderTrustStore: Sendable {
+    public enum StoreError: Error, Equatable { case trustFileUnreadable }
+
     public static let fileName = "provider-trust.json"
 
     public static var defaultDirectory: URL {
@@ -102,10 +112,19 @@ public struct ProviderTrustStore: Sendable {
     /// An unreadable or corrupt file reads as no approvals. Failing closed asks the user again,
     /// where failing open would run a generator nobody approved.
     public func approvals() -> [ProviderApproval] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        (try? load()) ?? []
+    }
+
+    /// Throws for a file that exists but cannot be decoded; a missing file is simply empty.
+    private func load() throws -> [ProviderApproval] {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard let data = try? Data(contentsOf: fileURL) else { throw StoreError.trustFileUnreadable }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([ProviderApproval].self, from: data)) ?? []
+        guard let all = try? decoder.decode([ProviderApproval].self, from: data) else {
+            throw StoreError.trustFileUnreadable
+        }
+        return all
     }
 
     public func isApproved(repoPath: String, providerID: String, digest: String) -> Bool {
@@ -115,13 +134,14 @@ public struct ProviderTrustStore: Sendable {
     /// Replaces any earlier approval of the same provider in the same repo, so the file holds
     /// one digest per pair and an old version stays unapproved.
     public func approve(repoPath: String, providerID: String, digest: String, now: Date = Date()) throws {
-        var all = approvals().filter { !($0.repoPath == repoPath && $0.providerID == providerID) }
+        // Refuses a corrupt file instead of overwriting it, which would drop every other approval.
+        var all = try load().filter { !($0.repoPath == repoPath && $0.providerID == providerID) }
         all.append(ProviderApproval(repoPath: repoPath, providerID: providerID, digest: digest, approvedAt: now))
         try write(all)
     }
 
     public func revoke(repoPath: String, providerID: String) throws {
-        try write(approvals().filter { !($0.repoPath == repoPath && $0.providerID == providerID) })
+        try write(try load().filter { !($0.repoPath == repoPath && $0.providerID == providerID) })
     }
 
     private func write(_ all: [ProviderApproval]) throws {

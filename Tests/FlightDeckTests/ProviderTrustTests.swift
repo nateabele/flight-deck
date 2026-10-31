@@ -1,3 +1,4 @@
+import Darwin
 import HostKit
 import XCTest
 @testable import FlightDeck
@@ -97,5 +98,39 @@ final class ProviderTrustTests: XCTestCase {
         try store.approve(repoPath: "/r", providerID: "p", digest: "d")
         try store.revoke(repoPath: "/r", providerID: "p")
         XCTAssertFalse(store.isApproved(repoPath: "/r", providerID: "p", digest: "d"))
+    }
+
+    func testHiddenFilesAreDigested() throws {
+        // The manifest can name .DS_Store as the generator, so skipping it would leave code uncovered.
+        let dir = try folder("p", files: [("provider.toml", "x"), (".DS_Store", "one")])
+        let before = try ProviderTrust.digest(folder: dir)
+        try Data("two".utf8).write(to: dir.appendingPathComponent(".DS_Store"))
+        XCTAssertNotEqual(before, try ProviderTrust.digest(folder: dir))
+    }
+
+    func testExecutableBitChangesDigest() throws {
+        let dir = try folder("p", files: [("gen.sh", "echo")])
+        let before = try ProviderTrust.digest(folder: dir)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.appendingPathComponent("gen.sh").path)
+        XCTAssertNotEqual(before, try ProviderTrust.digest(folder: dir))
+    }
+
+    func testFifoIsRefused() throws {
+        let dir = try folder("p", files: [("provider.toml", "x")])
+        XCTAssertEqual(mkfifo(dir.appendingPathComponent("pipe").path, 0o644), 0)
+        XCTAssertThrowsError(try ProviderTrust.digest(folder: dir)) { error in
+            XCTAssertEqual(error as? ProviderTrust.DigestError, .notRegularFile("pipe"))
+        }
+    }
+
+    func testApproveRefusesToOverwriteACorruptTrustFile() throws {
+        let dir = tmp.appendingPathComponent("store")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("provider-trust.json")
+        try Data("not json".utf8).write(to: file)
+        XCTAssertThrowsError(try ProviderTrustStore(directory: dir).approve(repoPath: "/r", providerID: "p", digest: "d")) {
+            XCTAssertEqual($0 as? ProviderTrustStore.StoreError, .trustFileUnreadable)
+        }
+        XCTAssertEqual(try Data(contentsOf: file), Data("not json".utf8))
     }
 }

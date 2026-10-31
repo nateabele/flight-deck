@@ -122,9 +122,16 @@ public struct ProviderRegistry: Sendable {
         }
     }
 
-    /// Records the user's approval of a repo provider as it is on disk right now.
-    public func approve(_ provider: ResolvedProvider, repo: URL) throws {
-        let digest = try ProviderTrust.digest(folder: provider.folder)
-        try trustStore.approve(repoPath: repo.standardizedFileURL.path, providerID: provider.id, digest: digest)
+    public enum ApprovalError: Error, Equatable {
+        case changedSinceShown
+    }
+
+    /// Records the approval of the digest the person was shown. Refuses when the folder has
+    /// changed since, so an edit between the prompt and the click cannot ride in on the approval.
+    public func approve(_ provider: ResolvedProvider, shownDigest: String, repo: URL) throws {
+        guard try ProviderTrust.digest(folder: provider.folder) == shownDigest else {
+            throw ApprovalError.changedSinceShown
+        }
+        try trustStore.approve(repoPath: repo.standardizedFileURL.path, providerID: provider.id, digest: shownDigest)
     }
 }

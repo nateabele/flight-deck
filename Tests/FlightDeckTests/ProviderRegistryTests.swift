@@ -106,7 +106,7 @@ final class ProviderRegistryTests: XCTestCase {
         var p = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
         XCTAssertEqual(p.trust, .repoNeedsApproval)
         XCTAssertFalse(p.isUsable)
-        try registry.approve(p, repo: repo)
+        try registry.approve(p, shownDigest: try XCTUnwrap(p.digest), repo: repo)
         p = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
         XCTAssertEqual(p.trust, .repoApproved)
         XCTAssertTrue(p.isUsable)
@@ -114,7 +114,8 @@ final class ProviderRegistryTests: XCTestCase {
 
     func testOneChangedByteAfterApprovalNeedsApprovalAgain() throws {
         let dir = try write(repoRoot, folder: "g", id: "g", generator: true)
-        try registry.approve(try XCTUnwrap(find(registry.resolve(repo: repo), "g")), repo: repo)
+        let shown = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
+        try registry.approve(shown, shownDigest: try XCTUnwrap(shown.digest), repo: repo)
         XCTAssertEqual(find(registry.resolve(repo: repo), "g")?.trust, .repoApproved)
         try Data("print(2)".utf8).write(to: dir.appendingPathComponent("gen.py"))
         XCTAssertEqual(find(registry.resolve(repo: repo), "g")?.trust, .repoNeedsApproval)
@@ -122,7 +123,8 @@ final class ProviderRegistryTests: XCTestCase {
 
     func testApprovalInOneRepoDoesNotApproveTheSameFolderInAnother() throws {
         try write(repoRoot, folder: "g", id: "g", generator: true)
-        try registry.approve(try XCTUnwrap(find(registry.resolve(repo: repo), "g")), repo: repo)
+        let shown = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
+        try registry.approve(shown, shownDigest: try XCTUnwrap(shown.digest), repo: repo)
         let other = tmp.appendingPathComponent("other")
         try write(other.appendingPathComponent(ProviderRegistry.repoSubpath), folder: "g", id: "g", generator: true)
         XCTAssertEqual(find(registry.resolve(repo: other), "g")?.trust, .repoNeedsApproval)
@@ -163,5 +165,15 @@ final class ProviderRegistryTests: XCTestCase {
         let p = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
         XCTAssertEqual(p.trust, .unusable)
         XCTAssertTrue(p.problems.contains { $0.message.contains("link") })
+    }
+
+    func testApproveRefusesWhenFolderChangedSinceShown() throws {
+        let dir = try write(repoRoot, folder: "g", id: "g", generator: true)
+        let shown = try XCTUnwrap(find(registry.resolve(repo: repo), "g"))
+        try Data("print(666)".utf8).write(to: dir.appendingPathComponent("gen.py"))
+        XCTAssertThrowsError(try registry.approve(shown, shownDigest: try XCTUnwrap(shown.digest), repo: repo)) {
+            XCTAssertEqual($0 as? ProviderRegistry.ApprovalError, .changedSinceShown)
+        }
+        XCTAssertEqual(find(registry.resolve(repo: repo), "g")?.trust, .repoNeedsApproval)
     }
 }
