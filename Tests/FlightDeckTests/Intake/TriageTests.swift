@@ -146,6 +146,43 @@ final class TriageTests: XCTestCase {
         XCTAssertEqual(qs[0].recommended, [])
         XCTAssertTrue(qs[0].allowOther, "single always allows Other")
     }
+    func testUnknownKindDecodesAsText() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"q1","text":"Pick?","kind":"choice","options":[{"id":"a","label":"A","detail":null},{"id":"b","label":"B","detail":null}],"recommended":[],"allowOther":false}]
+        """#)
+        XCTAssertEqual(qs.count, 1)
+        XCTAssertEqual(qs[0].kind, .text)
+    }
+    func testMissingOptionsAndIdStillDecode() throws {
+        let qs = try decodeQuestions(#"[{"text":"Which?","kind":"single"},{"text":"Why?","kind":"text","options":"oops"}]"#)
+        XCTAssertEqual(qs.map(\.id), ["q1", "q2"])
+        XCTAssertEqual(qs.map(\.kind), [.text, .text])
+        XCTAssertTrue(qs.allSatisfy { $0.options.isEmpty })
+    }
+    func testItemWithoutTextIsDropped() throws {
+        let qs = try decodeQuestions(#"[{"id":"q1","kind":"text"},{"id":"q2","text":"  ","kind":"text"},"Real?"]"#)
+        XCTAssertEqual(qs, [.text(id: "q1", "Real?")])
+        let d = Data(#"{"kind":"questions","questions":[{"id":"q1","kind":"text"}],"preset":null,"reason":null,"changeSet":null}"#.utf8)
+        XCTAssertThrowsError(try Triage.decode(d))
+    }
+    func testEmptyIdsAreRenumbered() throws {
+        let qs = try decodeQuestions(#"""
+        [{"id":"","text":"One?","kind":"single","options":[{"id":"","label":"A","detail":null},{"id":"","label":"B","detail":null}],"recommended":[],"allowOther":false},
+         {"id":"","text":"Two?","kind":"text","options":[],"recommended":[],"allowOther":false}]
+        """#)
+        XCTAssertEqual(qs.map(\.id), ["q1", "q2"])
+        XCTAssertEqual(qs[0].options.map(\.id), ["o1", "o2"])
+    }
+    func testRenumberingSkipsIdsAlreadyTaken() throws {
+        let qs = try decodeQuestions(#"["a","b","c"]"#)
+        XCTAssertEqual(qs.count, 3)
+        let raw = ["q2", "", "q2"].map { StructuredQuestion.text(id: $0, "T") }
+        let ids = Triage.normalize(raw).map(\.id)
+        XCTAssertEqual(Set(ids).count, 3, "\(ids)")
+        let kept = Triage.normalize(["q2", "q3", ""].map { StructuredQuestion.text(id: $0, "T") }).map(\.id)
+        XCTAssertEqual(Set(kept).count, 3, "\(kept)")
+        XCTAssertEqual(Array(kept.prefix(2)), ["q2", "q3"])
+    }
     func testToggleNeedsExactlyOneOption() throws {
         let qs = try decodeQuestions(#"""
         [{"id":"q1","text":"Ok?","kind":"toggle","options":[{"id":"y","label":"Yes","detail":null},{"id":"n","label":"No","detail":null}],"recommended":[],"allowOther":false}]

@@ -69,16 +69,49 @@ public enum Triage {
 
     /// A question item as the agent sends it: an object, or a bare string from an older prompt
     /// or a stored fixture. Ids of a bare string are assigned by `normalize`, by position.
+    /// The object path is lenient on purpose: strict decoding would turn one off-schema field
+    /// (an invented kind, a missing list) into `Malformed` and stall triage, when the person
+    /// could still have answered the question as text. Only an item with no text is dropped,
+    /// since there is nothing to ask.
     private struct WireQuestion: Decodable {
-        let question: StructuredQuestion
+        let question: StructuredQuestion?
+
+        private enum Keys: String, CodingKey { case id, text, kind, options, recommended, allowOther }
+        private struct Opt: Decodable {
+            let id: String?
+            let label: String?
+            let detail: String?
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: Keys2.self)
+                id = try? c.decodeIfPresent(String.self, forKey: .id)
+                label = try? c.decodeIfPresent(String.self, forKey: .label)
+                detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+            }
+            enum Keys2: String, CodingKey { case id, label, detail }
+        }
 
         init(from decoder: Decoder) throws {
-            let c = try decoder.singleValueContainer()
-            if let s = try? c.decode(String.self) {
-                question = .text(id: "", s)
-            } else {
-                question = try c.decode(StructuredQuestion.self)
+            let single = try decoder.singleValueContainer()
+            if let s = try? single.decode(String.self) {
+                question = s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(id: "", s)
+                return
             }
+            let c = try decoder.container(keyedBy: Keys.self)
+            let text = ((try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil) ?? ""
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { question = nil; return }
+            let kindRaw = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil) ?? ""
+            let opts = ((try? c.decodeIfPresent([Opt].self, forKey: .options)) ?? nil) ?? []
+            question = StructuredQuestion(
+                id: ((try? c.decodeIfPresent(String.self, forKey: .id)) ?? nil) ?? "",
+                text: text,
+                kind: StructuredQuestion.Kind(rawValue: kindRaw) ?? .text,
+                // An option with no label has nothing to show, so it is dropped, not shown blank.
+                options: opts.compactMap { o in
+                    guard let label = o.label, !label.isEmpty else { return nil }
+                    return .init(id: o.id ?? "", label: label, detail: o.detail)
+                },
+                recommended: ((try? c.decodeIfPresent([String].self, forKey: .recommended)) ?? nil) ?? [],
+                allowOther: ((try? c.decodeIfPresent(Bool.self, forKey: .allowOther)) ?? nil) ?? false)
         }
     }
 
@@ -97,7 +130,9 @@ public enum Triage {
         switch w.kind {
         case "questions":
             guard let q = w.questions, !q.isEmpty else { throw Malformed(why: "questions kind with no questions") }
-            return .questions(normalize(q.map(\.question)))
+            let kept = q.compactMap(\.question)
+            guard !kept.isEmpty else { throw Malformed(why: "questions kind with no usable questions") }
+            return .questions(normalize(kept))
         case "recommendation":
             guard let p = w.preset, let r = w.reason else { throw Malformed(why: "recommendation without preset/reason") }
             return .recommendation(preset: p, reason: r, changeSet: w.changeSet)
