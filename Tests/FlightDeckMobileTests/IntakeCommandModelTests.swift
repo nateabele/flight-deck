@@ -80,7 +80,7 @@ final class IntakeCommandModelTests: XCTestCase {
     }
 
     /// An answer sent against a replaced round says so in words, and sends the answers, round
-    /// and digest it was given; any other refusal shows the code.
+    /// and digest it was given; the other answer refusals have words of their own too.
     func testAnswerSendsRoundAndStaleQuestionsReadsAsChanged() {
         let c = StubCommander(), m = model(c)
         let id = intake
@@ -91,10 +91,15 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertEqual(digest, "d2")
         XCTAssertEqual(sent, answers)
         c.answer(.failure(.server(code: "stale_questions")))
-        XCTAssertEqual(m.message, "These questions changed. Here are the new ones.")
+        // Not "here are the new ones": the round may have been answered (on the Mac) with no new
+        // questions after it, triage going straight to a fidelity.
+        XCTAssertEqual(m.message, "These questions were answered or replaced.")
         m.send(.answer("d2"), command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
         c.answer(.failure(.server(code: "invalid_answer")))
-        XCTAssertEqual(m.message, "Your Mac wouldn't do that (invalid_answer).")
+        XCTAssertEqual(m.message, "Your Mac couldn't use one of these answers.")
+        m.send(.answer("d2"), command: { .intakeAnswer(id: id, token: $0, round: 2, digest: "d2", answers: answers) }, onAck: {})
+        c.answer(.failure(.server(code: "unknown_question")))
+        XCTAssertEqual(m.message, "Your Mac couldn't match these answers to its questions.")
     }
 
     /// A kept token retries one round's answer, never the next round's: the Mac would ack that

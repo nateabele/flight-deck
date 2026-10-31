@@ -33,7 +33,11 @@ enum CommandCopy {
                              : "Not connected to your Mac, so this wasn't sent."
         case .server(let code)?:
             switch code {
-            case "stale_questions": return "These questions changed. Here are the new ones."
+            // Not "here are the new ones": the round may have been answered on the Mac, with triage
+            // going straight to a fidelity and no new questions after it.
+            case "stale_questions": return "These questions were answered or replaced."
+            case "unknown_question": return "Your Mac couldn't match these answers to its questions."
+            case "invalid_answer": return "Your Mac couldn't use one of these answers."
             case "intake_moved_on": return "This intake has moved on."
             case "not_allowed": return "That isn't possible right now."
             case "note_consumed": return "A round has already read that note."
