@@ -411,6 +411,16 @@ final class IntakeRenderHarness: XCTestCase {
             try write(screenImage(of: reader, style: style, size: nil, height: 1900),
                       to: "reader-threads-\(Self.styleName(style)).png")
         }
+        do {
+            let fetcher = stub(detail)
+            fetcher.plan = plan
+            let flightControl = FlightControlModel(fetcher: fetcher)
+            flightControl.detailModel(for: id).refresh()
+            let reader = NavigationStack {
+                PlanReaderScreen(intake: id, checkpoint: nil, startBlock: 4, changes: false, flightControl: flightControl)
+            }
+            try write(screenImage(of: reader, style: .light, size: .accessibility5, height: 2600), to: "reader-threads-ax5.png")
+        }
 
         let question = WireStructuredQuestion(id: "q1", text: "Should a late producer be retried or dropped?", kind: "single",
                                               options: [WireOption(id: "retry", label: "Retry it"), WireOption(id: "drop", label: "Drop it")],

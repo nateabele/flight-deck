@@ -163,7 +163,7 @@ struct ThreadScreen: View {
             HStack(alignment: .top, spacing: 8) {
                 Capsule().fill(state == "pending" ? Color.green : Color.secondary).frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(.init(d.new)).font(.subheadline).lineLimit(3).multilineTextAlignment(.leading)
+                    DiffText(text: d.new)
                     Text(ThreadStyle.diffWords(state)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

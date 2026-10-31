@@ -96,9 +96,6 @@ struct PlanReaderScreen: View {
                                     ForEach(Array(PlanReaderStyle.segments(of: gutter.text).enumerated()), id: \.offset) { _, segment in
                                         segmentView(segment, block: block.index, plan: plan)
                                     }
-                                    ForEach(gutter.loose) { d in looseDiffCard(d) }
-                                    ForEach(threads.filter { $0.anchor?.block == block.index }) { t in askCard(t) }
-                                    ForEach(unsentAsks(block: block.index)) { d in unsentAskCard(d) }
                                     ForEach(unsent) { d in unsentCard(d) }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -115,6 +112,11 @@ struct PlanReaderScreen: View {
                                     : notes.contains { !$0.consumed } || !unsent.isEmpty ? Color.yellow.opacity(0.14)
                                     : notes.isEmpty ? Color.clear : Color.yellow.opacity(0.06)))
                                 .id(block.index)
+                            // Full width, under the passage rather than beside its buttons: at the largest
+                            // text size the column next to them is a few letters wide.
+                            ForEach(gutter.loose) { d in looseDiffCard(d).padding(.horizontal, 6) }
+                            ForEach(threads.filter { $0.anchor?.block == block.index }) { t in askCard(t).padding(.horizontal, 6) }
+                            ForEach(unsentAsks(block: block.index)) { d in unsentAskCard(d).padding(.horizontal, 6) }
                             removed(after: block.index, plan, show: showDiff)
                         }
                         let detached = allNotes.filter { $0.blockIndex == nil && !$0.consumed && !PlanReaderStyle.isElsewhere($0, viewing: plan.checkpoint) }
@@ -418,13 +420,16 @@ struct PlanReaderScreen: View {
     private func askCard(_ t: WireThreadSummary) -> some View {
         NavigationLink(value: IntakeRoute.thread(intake: intake, thread: t.id)) {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+                // Wraps rather than truncating, and the status sits on its own line: a title cut to
+                // "Is the drain…" means nothing.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "sparkles").imageScale(.small)
-                    Text(t.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text(ThreadStyle.statusWords(t.status)).font(.caption).foregroundStyle(ThreadStyle.statusTone(t.status))
+                    Text(t.title).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
                 }
-                if let excerpt = t.excerpt { Text(excerpt).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                Text(ThreadStyle.statusWords(t.status)).font(.caption).foregroundStyle(ThreadStyle.statusTone(t.status))
+                if let excerpt = t.excerpt {
+                    Text(excerpt).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(minHeight: 44)
@@ -442,7 +447,7 @@ struct PlanReaderScreen: View {
             HStack(alignment: .top, spacing: 8) {
                 Capsule().fill(d.state == "pending" ? Color.green : Color.orange).frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(.init(d.new)).font(.system(.subheadline, design: .serif)).multilineTextAlignment(.leading)
+                    DiffText(text: d.new)
                     Text(ThreadStyle.diffWords(d.state)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

@@ -1,4 +1,5 @@
 import FleetKit
+import MarkdownUI
 import SwiftUI
 
 /// Pending thread diffs in the plan reader, in the gutter-bar form (spec §6, option B): the
@@ -56,6 +57,18 @@ enum PhoneDiffGutter {
     }
 }
 
+/// Proposed or old plan text, rendered as Markdown the way a reply is (the passages are plan
+/// source, so `**bold**` must show as bold). The one place every diff surface draws its text.
+struct DiffText: View {
+    let text: String
+    var old = false
+
+    var body: some View {
+        let rendered = Markdown(text).markdownTheme(TimelineMarkdown.theme)
+        if old { rendered.strikethrough().foregroundStyle(.secondary) } else { rendered }
+    }
+}
+
 /// The 3 pt green bar and a small ✦, tappable. A column beside the text rather than a tap on the
 /// text: a tap gesture there would compete with the press that starts a selection.
 struct PhoneDiffBar: View {
@@ -91,12 +104,12 @@ struct PhoneDiffSheet: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Proposed change").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                 if !diff.old.isEmpty {
-                    Text(diff.old).font(.system(.body, design: .serif)).strikethrough().foregroundStyle(.secondary)
+                    DiffText(text: diff.old, old: true)
                         .accessibilityLabel("Old text: \(diff.old)")
                 }
                 HStack(alignment: .top, spacing: 8) {
                     Capsule().fill(Color.green).frame(width: 3)
-                    Text(diff.new).font(.system(.body, design: .serif))
+                    DiffText(text: diff.new)
                         .accessibilityLabel("New text: \(diff.new)")
                 }
                 .fixedSize(horizontal: false, vertical: true)
