@@ -78,6 +78,9 @@ public struct OpenCodeProfile: AgentProfile {
     /// tool set held.
     public static let readOnlyAgent = "flightdeck-readonly"
     public static let integratorAgent = "flightdeck-integrator"
+    /// An ask-thread turn's agent (`HeadlessAccess.threadRead`), defined only for a run that
+    /// asks for it, so a round seat's config is byte-for-byte what it was.
+    public static let threadAgent = "flightdeck-thread"
 
     /// The read-only permission set. A tool whose permission is `deny` with no allow pattern is
     /// REMOVED from the model's tool list, not merely refused — probed: the run offered exactly
@@ -99,6 +102,27 @@ public struct OpenCodeProfile: AgentProfile {
     static func writePermission(workDir: URL, fileExists: (String) -> Bool) -> [String: Any] {
         var permission = readOnlyPermission
         permission["edit"] = ["*": "deny", worktreeRelativePattern(for: workDir, fileExists: fileExists): "allow"]
+        return permission
+    }
+
+    /// A thread turn's: the read-only set, plus `bash` for the read commands only (R1). Each
+    /// command is allowed bare and with arguments; its writing flags are denied by patterns
+    /// that start with the command, so they sort after its allow (`threadDeniedPatterns`).
+    ///
+    /// `external_directory` is allowed because the thread's workspace lives under the intake,
+    /// outside the repo the run is rooted in, and the agent must read it. No tool that writes
+    /// exists here (`*: deny` removes `edit`), so the wider reach is reads only. Not yet probed
+    /// live on OpenCode; the `thread.turn` cell in `scripts/test-adapters.sh` pins the config.
+    static var threadPermission: [String: Any] {
+        var permission = readOnlyPermission
+        var bash: [String: String] = ["*": "deny"]
+        for command in HeadlessCommand.threadReadCommands {
+            bash[command] = "allow"
+            bash["\(command) *"] = "allow"
+        }
+        for pattern in HeadlessCommand.threadDeniedPatterns { bash[pattern] = "deny" }
+        permission["bash"] = bash
+        permission["external_directory"] = "allow"
         return permission
     }
 
@@ -127,13 +151,14 @@ public struct OpenCodeProfile: AgentProfile {
     }
 
     /// The `OPENCODE_CONFIG_CONTENT` a headless run carries: the read-only agent, plus the
-    /// integrator when `writeDir` is given.
-    public static func configContent(writeDir: URL?, fileExists: (String) -> Bool) -> String {
+    /// integrator when `writeDir` is given, and the thread agent when `thread` is set.
+    public static func configContent(writeDir: URL?, thread: Bool = false, fileExists: (String) -> Bool) -> String {
         func agent(_ permission: [String: Any]) -> [String: Any] {
             ["mode": "primary", "description": "Flight Deck planning agent", "permission": permission]
         }
         var agents: [String: Any] = [readOnlyAgent: agent(readOnlyPermission)]
         if let writeDir { agents[integratorAgent] = agent(writePermission(workDir: writeDir, fileExists: fileExists)) }
+        if thread { agents[threadAgent] = agent(threadPermission) }
         // A seat never shares its session to opencode.ai or swaps its own binary mid-round.
         let config: [String: Any] = ["agent": agents, "share": "disabled", "autoupdate": false]
         let data = (try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])) ?? Data("{}".utf8)
@@ -172,7 +197,9 @@ public struct OpenCodeProfile: AgentProfile {
         }
         let writeDir = value(after: "--agent") == Self.integratorAgent
             ? value(after: "--dir").map { URL(fileURLWithPath: $0, isDirectory: true) } : nil
-        env["OPENCODE_CONFIG_CONTENT"] = Self.configContent(writeDir: writeDir, fileExists: fileExists)
+        env["OPENCODE_CONFIG_CONTENT"] = Self.configContent(writeDir: writeDir,
+                                                            thread: value(after: "--agent") == Self.threadAgent,
+                                                            fileExists: fileExists)
         return env
     }
 
