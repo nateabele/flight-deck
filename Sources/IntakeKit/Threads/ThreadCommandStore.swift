@@ -6,10 +6,9 @@ import Foundation
 /// command, `seq` one above the highest on file, a torn last line skipped on read and closed off
 /// before the next append, and a kind a later build wrote dropped while its seq still counts.
 ///
-/// **Lock-agnostic on purpose.** Two writers (the app and ThreadRunner's auto-accept path, or two
-/// app processes) appending at once could both read the same max seq. Stream B wraps `append` in
-/// the locked append helper (`LockedAppend`), as it does `TapeStore.appendCommand`; nothing here
-/// takes a lock, so the helper is the one place that decides how.
+/// **Appends are locked.** Two writers (the app and ThreadRunner's auto-accept path, or two app
+/// processes) appending at once could both read the same max seq, so `append` reads the max and
+/// writes under `LockedAppend`'s lock, as `TapeStore.appendCommand` does. Reads take no lock.
 public struct ThreadCommandStore: Sendable {
     public let intakeDirectory: URL
 
@@ -22,24 +21,27 @@ public struct ThreadCommandStore: Sendable {
     @discardableResult
     public func append(_ command: ThreadCommand) throws -> Int {
         try FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
-        let seq = (lines().compactMap { try? Self.decoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
-        var line = try Self.encoder.encode(ThreadCommandEnvelope(seq: seq, command: command))
-        line.append(0x0A) // one line per command, never a multi-line pretty-print
+        // Read-max-then-write under a lock on a sibling file: the app and ThreadRunner append here.
+        return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
+            let seq = (lines().compactMap { try? Self.decoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
+            var line = try Self.encoder.encode(ThreadCommandEnvelope(seq: seq, command: command))
+            line.append(0x0A) // one line per command, never a multi-line pretty-print
 
-        if !FileManager.default.fileExists(atPath: commandsURL.path) {
-            FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: commandsURL)
-        defer { try? handle.close() }
-        // A crashed append leaves a torn last line with no newline; appending onto it would glue
-        // this command to the garbage and both would be dropped on read. Close it off first.
-        if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+            if !FileManager.default.fileExists(atPath: commandsURL.path) {
+                FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: commandsURL)
+            defer { try? handle.close() }
+            // A crashed append leaves a torn last line with no newline; appending onto it would glue
+            // this command to the garbage and both would be dropped on read. Close it off first.
+            if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+                handle.seekToEndOfFile()
+                handle.write(Data([0x0A]))
+            }
             handle.seekToEndOfFile()
-            handle.write(Data([0x0A]))
+            handle.write(line)
+            return seq
         }
-        handle.seekToEndOfFile()
-        handle.write(line)
-        return seq
     }
 
     /// Commands with a seq above `seq`, in file order. A torn or unknown line is skipped, never
@@ -49,8 +51,8 @@ public struct ThreadCommandStore: Sendable {
     }
 
     private func lines() -> [Data] {
-        guard let data = try? Data(contentsOf: commandsURL), let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { $0.data(using: .utf8) }
+        guard let data = try? Data(contentsOf: commandsURL) else { return [] }
+        return LockedAppend.lines(of: data)
     }
 
     /// Just a line's seq, so a line this build can't decode still counts toward the next one:

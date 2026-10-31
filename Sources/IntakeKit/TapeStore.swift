@@ -89,28 +89,32 @@ public struct TapeStore: Sendable {
     /// this write mid-flight.
     public func appendCommand(_ c: TapeCommand) throws -> Int {
         try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
-        let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
-        var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
-        line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.
+        // The seq is the highest on file plus one, so reading it and writing the line must be one
+        // step across processes: the app, the phone path and the runner all append here.
+        return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
+            let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
+            var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
+            line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.
 
-        if !FileManager.default.fileExists(atPath: commandsURL.path) {
-            FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: commandsURL)
-        defer { try? handle.close() }
-        // A prior append that crashed mid-write leaves a torn final line with no trailing
-        // newline. Appending straight onto that would glue this command onto the garbage,
-        // corrupting both — and since a torn line is silently dropped by `commands(after:)`,
-        // the command riding in on it (a pause/stop the user just asked for) would vanish
-        // with no error anywhere. Closing that line out with its own newline first keeps this
-        // append self-contained regardless of what the file already ends with.
-        if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+            if !FileManager.default.fileExists(atPath: commandsURL.path) {
+                FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: commandsURL)
+            defer { try? handle.close() }
+            // A prior append that crashed mid-write leaves a torn final line with no trailing
+            // newline. Appending straight onto that would glue this command onto the garbage,
+            // corrupting both — and since a torn line is silently dropped by `commands(after:)`,
+            // the command riding in on it (a pause/stop the user just asked for) would vanish
+            // with no error anywhere. Closing that line out with its own newline first keeps this
+            // append self-contained regardless of what the file already ends with.
+            if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+                handle.seekToEndOfFile()
+                handle.write(Data([0x0A]))
+            }
             handle.seekToEndOfFile()
-            handle.write(Data([0x0A]))
+            handle.write(line)
+            return seq
         }
-        handle.seekToEndOfFile()
-        handle.write(line)
-        return seq
     }
 
     /// Commands with `seq > seq`, in file order. Skips a torn last line (no trailing newline,
@@ -127,10 +131,8 @@ public struct TapeStore: Sendable {
     }
 
     private func commandLines() -> [Data] {
-        guard let data = try? Data(contentsOf: commandsURL), let text = String(data: data, encoding: .utf8) else {
-            return []
-        }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { $0.data(using: .utf8) }
+        guard let data = try? Data(contentsOf: commandsURL) else { return [] }
+        return LockedAppend.lines(of: data)
     }
 
     /// Just a line's `seq`, so a command `readCommandLines` can't decode still counts toward the
