@@ -212,6 +212,57 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertTrue(r.stderr.contains("Bad file descriptor"), r.stderr)
         XCTAssertEqual(try Data(contentsOf: file).count, 0, "the child wrote through an inherited descriptor")
     }
+
+    /// A double-forked `setsid` child leaves the process group, so no group signal reaches it,
+    /// and it keeps the stdout pipe. The run must still end soon after the leader does, and the
+    /// holder must be dead. A rescue kills the holder after 15s so a regression fails instead
+    /// of hanging the suite.
+    func testEscapedPipeHolderCannotStallTheRun() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { Self.pkill(marker) }
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec \"/bin/sleep\", \"\(marker)\"'; echo started"
+        let rescue = Task { try await Task.sleep(nanoseconds: 15_000_000_000); Self.pkill(marker) }
+        defer { rescue.cancel() }
+        let start = Date()
+        let r = try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script],
+                                                    cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+                                                    processGroup: true, onSpawn: nil)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "the run waited on the escaped holder")
+        XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "started\n")
+        XCTAssertEqual(r.exitCode, 0)
+        var waited = 0
+        while Self.alive(marker), waited < 100 { try await Task.sleep(nanoseconds: 20_000_000); waited += 1 }
+        XCTAssertFalse(Self.alive(marker), "the escaped pipe holder is still running")
+    }
+
+    /// stderr is for an error message. A flood of it is drained, so the child never blocks,
+    /// but only the head is kept.
+    func testStderrIsTruncatedButDrained() async throws {
+        let r = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "head -c 5000000 /dev/zero | tr '\\0' e >&2; printf done"],
+            cwd: URL(fileURLWithPath: "/tmp"), environment: env, processGroup: true, onSpawn: nil)
+        XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "done")
+        XCTAssertLessThanOrEqual(r.stderr.utf8.count, SystemCommandRunner.stderrCapture + 64)
+        XCTAssertTrue(r.stderr.hasSuffix(SystemCommandRunner.stderrTruncatedNote), String(r.stderr.suffix(80)))
+    }
+
+    static func pgrep(_ marker: String) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-f", "sleep \(marker)"]
+        p.standardOutput = FileHandle.nullDevice
+        try? p.run(); p.waitUntilExit()
+        return p.terminationStatus
+    }
+
+    static func alive(_ marker: String) -> Bool { pgrep(marker) == 0 }
+
+    static func pkill(_ marker: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-9", "-f", "sleep \(marker)"]
+        try? p.run(); p.waitUntilExit()
+    }
 }
 
 /// `GraphReader`'s br-list/br-graph/decode sequence, against the same fixtures

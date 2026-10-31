@@ -105,6 +105,84 @@ public struct SystemCommandRunner: CommandRunner {
         return all
     }
 
+    /// How long the drains may run on after the leader is reaped before the pipe's remaining
+    /// holders are killed.
+    static let drainGrace: TimeInterval = 1
+
+    /// Reads `fd` until EOF or until `abandon` is set. `poll` with a short timeout, so an
+    /// abandoned drain returns even while some process still holds the write end open. With
+    /// `keep`, only the first `keep` bytes are kept; the rest is still read, so the writer
+    /// never blocks on a full pipe, and `dropped` says so.
+    private static func pollingDrain(_ fd: Int32, keep: Int?, sink: (@Sendable (Data) -> Void)?,
+                                     abandon: Latch) -> (data: Data, dropped: Bool) {
+        var all = Data()
+        var dropped = false
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while !abandon.isSet {
+            var request = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&request, 1, 50)
+            if ready < 0 { if errno == EINTR { continue }; break }
+            if ready == 0 { continue }
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n < 0 { if errno == EINTR || errno == EAGAIN { continue }; break }
+            guard n > 0 else { break }
+            let chunk = Data(buffer[0..<n])
+            if let keep {
+                let room = keep - all.count
+                if room >= n { all.append(chunk) } else {
+                    if room > 0 { all.append(chunk.prefix(room)) }
+                    dropped = true
+                }
+            } else {
+                all.append(chunk)
+            }
+            sink?(chunk)
+        }
+        return (all, dropped)
+    }
+
+    /// SIGKILLs every process that holds the write end of one of our pipes, then waits (up to a
+    /// second) for them to go. A holder that left the process group is out of reach of every
+    /// group signal; libproc is the only place that knows it has our pipe. A writer's
+    /// `pipe_handle` is our read end's `pipe_peerhandle`. Processes we may not inspect (another
+    /// user's, setuid) cannot hold a descriptor we created, so skipping them misses nothing.
+    static func killPipeWriters(of readFDs: [Int32]) {
+        let infoSize = Int32(MemoryLayout<pipe_fdinfo>.size)
+        var peers = Set<UInt64>()
+        for fd in readFDs {
+            var info = pipe_fdinfo()
+            if proc_pidfdinfo(getpid(), fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize {
+                peers.insert(info.pipeinfo.pipe_peerhandle)
+            }
+        }
+        guard !peers.isEmpty else { return }
+        let me = getpid()
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
+        let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        let fdStride = MemoryLayout<proc_fdinfo>.stride
+        var writers: [pid_t] = []
+        for pid in pids.prefix(max(0, Int(count))) where pid > 0 && pid != me {
+            let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+            guard bytes > 0 else { continue }
+            var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / fdStride + 8)
+            let used = fds.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
+            guard used > 0 else { continue }
+            for entry in fds.prefix(Int(used) / fdStride) where entry.proc_fdtype == UInt32(PROX_FDTYPE_PIPE) {
+                var info = pipe_fdinfo()
+                if proc_pidfdinfo(pid, entry.proc_fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize,
+                   peers.contains(info.pipeinfo.pipe_handle) {
+                    writers.append(pid)
+                    break
+                }
+            }
+        }
+        for pid in writers { kill(pid, SIGKILL) }
+        let deadline = Date().addingTimeInterval(1)
+        while writers.contains(where: { kill($0, 0) == 0 }), Date() < deadline { usleep(10_000) }
+    }
+
     // MARK: - Foundation.Process path (moved from the app's SystemHeadlessRunner)
 
     private func runViaFoundationProcess(
@@ -178,6 +256,14 @@ public struct SystemCommandRunner: CommandRunner {
     private final class Buffer: @unchecked Sendable { var data = Data() }
 
     // MARK: - posix_spawn path (own process group, for Task 7's whole-subtree kill)
+
+    /// A one-way flag shared between the reaper and the drain threads.
+    private final class Latch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
 
     private struct RawPipe { let readFD: Int32; let writeFD: Int32 }
 
@@ -273,21 +359,28 @@ public struct SystemCommandRunner: CommandRunner {
         onSpawn?(childPID)
 
         let exitFlag = ExitFlag()
+        let abandon = Latch()
         let result: (Data, Data, Int32, Bool) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let group = DispatchGroup()
-                let out = Buffer(), err = Buffer()
-                group.enter()
+                let drains = DispatchGroup()
+                let out = Buffer(), err = Buffer(), errDropped = Latch()
+                drains.enter()
                 DispatchQueue.global().async {
-                    out.data = Self.drain(FileHandle(fileDescriptor: outPipe.readFD, closeOnDealloc: true), onStdout)
-                    group.leave()
+                    out.data = Self.pollingDrain(outPipe.readFD, keep: nil, sink: onStdout, abandon: abandon).data
+                    drains.leave()
                 }
-                group.enter()
+                drains.enter()
                 DispatchQueue.global().async {
-                    err.data = FileHandle(fileDescriptor: errPipe.readFD, closeOnDealloc: true).readDataToEndOfFile()
-                    group.leave()
+                    let drained = Self.pollingDrain(errPipe.readFD, keep: Self.stderrCapture, sink: nil, abandon: abandon)
+                    err.data = drained.data
+                    if drained.dropped { errDropped.set() }
+                    drains.leave()
                 }
-                group.notify(queue: .global()) {
+                // The reaper runs BESIDE the drains, not after them. Waiting for EOF first meant
+                // a process that left the group (a double fork into `setsid`) and kept stdout
+                // open held the run forever: no group signal reaches it, and nothing reaped the
+                // leader until it closed the pipe.
+                DispatchQueue.global().async {
                     var status: Int32 = 0
                     var rc: pid_t = -1
                     // A signal delivered to THIS process (not the child) while blocked in
@@ -297,11 +390,26 @@ public struct SystemCommandRunner: CommandRunner {
                     repeat {
                         rc = waitpid(childPID, &status, 0)
                     } while rc == -1 && errno == EINTR
+                    let waitErrno = errno
+                    if rc != -1 { exitFlag.markExited() }
+                    // The leader is gone. Output still in flight gets a grace; after it, whoever
+                    // still holds a write end is an orphan of this run and is killed, so the
+                    // drains see EOF. Our read ends stay open until then: the scan matches the
+                    // holders' handles against them.
+                    if drains.wait(timeout: .now() + Self.drainGrace) == .timedOut {
+                        Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD])
+                        if drains.wait(timeout: .now() + 0.5) == .timedOut {
+                            abandon.set()
+                            drains.wait()
+                        }
+                    }
+                    close(outPipe.readFD)
+                    close(errPipe.readFD)
                     guard rc != -1 else {
-                        continuation.resume(throwing: WaitFailed(errno: errno))
+                        continuation.resume(throwing: WaitFailed(errno: waitErrno))
                         return
                     }
-                    exitFlag.markExited()
+                    if errDropped.isSet { err.data.append(Data(Self.stderrTruncatedNote.utf8)) }
                     // `WIFSIGNALED`/`WTERMSIG`/`WEXITSTATUS` are `#define`s, not C functions —
                     // Swift can't call them, so this is their BSD wait-status layout by hand.
                     let low7 = status & 0x7f
