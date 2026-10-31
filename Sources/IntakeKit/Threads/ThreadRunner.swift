@@ -130,9 +130,7 @@ actor ThreadKeeper {
     }
 
     /// A command after the cursor, or a queued turn on a thread that takes turns.
-    func hasWork() -> Bool {
-        !commands.commands(after: store.cursor()).isEmpty || store.threads().contains { nextQueued($0) != nil }
-    }
+    func hasWork() -> Bool { store.hasPendingWork() }
 
     // MARK: Commands
 

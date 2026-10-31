@@ -532,6 +532,7 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertNotNil(store.turns(a).first?.endedAt)
         XCTAssertNil(store.turns(b).first?.endedAt, "the interrupted turn is still queued")
         XCTAssertNil(store.heartbeat())
+        XCTAssertTrue(store.hasPendingWork(), "what tells the app to start a runner again")
         XCTAssertEqual(store.cursor(), 4, "the message was read before the turn ran")
 
         agent.gate.open()
@@ -540,6 +541,9 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertEqual(agent.requests.filter { $0.thread == b }.count, 2, "the interrupted one ran again")
         XCTAssertEqual(store.turns(b).count, 1)
         XCTAssertEqual(store.turns(b).first?.reply, "Hello from the fake agent.")
+        XCTAssertFalse(store.hasPendingWork())
+        try send(b, "More")
+        XCTAssertTrue(store.hasPendingWork(), "an unread command is work")
     }
 
     /// One runner per intake: a second one started while the first holds the lock does nothing.

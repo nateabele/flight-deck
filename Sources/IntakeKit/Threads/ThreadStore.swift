@@ -123,6 +123,15 @@ public struct ThreadStore: ThreadStoreReading, Sendable {
         return activity.headline ?? "thinking"
     }
 
+    /// Whether a ThreadRunner has anything to do here: a thread command after the cursor, or a
+    /// queued turn on a thread that takes turns. The app's respawn check (with no live
+    /// heartbeat, work here means a runner should be started), the rule `ThreadRunner.run`
+    /// itself exits by.
+    public func hasPendingWork() -> Bool {
+        !ThreadCommandStore(intakeDirectory: intakeDirectory).commands(after: cursor()).isEmpty
+            || threads().contains { $0.status != .resolved && turns($0.id).contains { $0.endedAt == nil && !$0.isDivider } }
+    }
+
     /// The seq of the last thread command folded in; 0 before any.
     public func cursor() -> Int {
         (try? String(contentsOf: cursorURL, encoding: .utf8)).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
