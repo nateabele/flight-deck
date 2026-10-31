@@ -61,6 +61,11 @@ extension CommandRunner {
 ///   `posix_spawn` directly with `POSIX_SPAWN_SETPGROUP`, wiring stdin/stdout/stderr by hand
 ///   through `posix_spawn_file_actions_t`.
 public struct SystemCommandRunner: CommandRunner {
+    /// How much stderr the process-group path keeps. stderr is "enough for an error message";
+    /// a child that floods it is still drained to EOF so it never blocks, but the rest is dropped.
+    public static let stderrCapture = 1 << 20
+    public static let stderrTruncatedNote = "\n[stderr truncated]"
+
     public init() {}
 
     public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
@@ -227,7 +232,12 @@ public struct SystemCommandRunner: CommandRunner {
         // spawned here had SIGTERM blocked: `killpg(pid, SIGTERM)` returned 0 yet `sleep 30`
         // ran to completion, ⏹ only ever landed via the SIGKILL a second later, and no harness
         // got a chance to shut down cleanly.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+        // CLOEXEC_DEFAULT: the child gets 0/1/2 from the file actions above and nothing else.
+        // Without it every descriptor the app opened without O_CLOEXEC rode along, and a
+        // sandboxed child used one to write outside its sandbox: the sandbox checks paths at
+        // open, never a descriptor it was handed already open. (HostKit's Runner does the same.)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+                                              | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attr, 0)
         var allSignals = sigset_t(), noSignals = sigset_t()
         sigfillset(&allSignals); sigemptyset(&noSignals)

@@ -194,6 +194,24 @@ final class CommandRunnerTests: XCTestCase {
         if survived { kill(child, SIGKILL) }
         XCTAssertFalse(survived, "a TERM-ignoring descendant outlived ⏹ by 20s")
     }
+
+    /// A descriptor the app opened without O_CLOEXEC (a socket, a log, a file a sandbox would
+    /// have refused) must not reach the child: through it a sandboxed generator wrote outside its
+    /// folder and spoke HTTP.
+    func testProcessGroupChildInheritsNoStrayDescriptors() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-leak-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let fd = open(file.path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        XCTAssertGreaterThan(fd, 2)
+        defer { close(fd) }
+        let perl = "open(my $f, '>&=', \(fd)) or die \"fd: $!\\n\"; print $f \"leak\\n\" or die \"w: $!\\n\"; close $f or die \"c: $!\\n\""
+        let r = try await SystemCommandRunner().run(
+            executable: "perl", arguments: ["-e", perl], cwd: URL(fileURLWithPath: "/tmp"),
+            environment: env, processGroup: true, onSpawn: nil)
+        XCTAssertNotEqual(r.exitCode, 0)
+        XCTAssertTrue(r.stderr.contains("Bad file descriptor"), r.stderr)
+        XCTAssertEqual(try Data(contentsOf: file).count, 0, "the child wrote through an inherited descriptor")
+    }
 }
 
 /// `GraphReader`'s br-list/br-graph/decode sequence, against the same fixtures

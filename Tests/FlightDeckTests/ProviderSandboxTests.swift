@@ -167,6 +167,21 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertEqual(keys, ["PATH", "HOME", "TMPDIR"])
     }
 
+    /// The sandbox checks paths when a file is opened. A descriptor that was already open in
+    /// the app is checked by nothing, so the generator must not get one.
+    func testInheritedDescriptorIsClosed() async throws {
+        let file = tmp.appendingPathComponent("leak.txt")
+        let fd = open(file.path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        XCTAssertGreaterThan(fd, 2)
+        defer { close(fd) }
+        let perl = "open(my $f, '>&=', \(fd)) or die \"fd: $!\\n\"; print $f \"leak\\n\" or die \"w: $!\\n\"; close $f or die \"c: $!\\n\""
+        let result = try await sandbox().run(try provider(["/usr/bin/perl", "-e", perl]), outputDirectory: try output())
+        let (code, stderr) = exited(result)
+        XCTAssertNotEqual(code, 0)
+        XCTAssertTrue(stderr.contains("Bad file descriptor"), stderr)
+        XCTAssertEqual(try Data(contentsOf: file).count, 0, "the generator wrote through an inherited descriptor")
+    }
+
     // MARK: - Clock
 
     func testHangingGeneratorIsKilledWithItsChildAtTheTimeout() async throws {
