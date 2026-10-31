@@ -66,6 +66,16 @@ public struct StructuredQuestion: Codable, Equatable, Sendable {
         }
     }
 
+    /// Whether `a` names only this question's own options, each once — the shape check
+    /// `isComplete` does not make. Without it a stale or invented id (an option a retry
+    /// replaced, a typo from a client) is stored as the answer and renders as the raw id, and a
+    /// duplicate renders twice. A text question has no options, so any selection is wrong.
+    public func accepts(_ a: StructuredAnswer) -> Bool {
+        if kind == .text { return a.selected.isEmpty }
+        let valid = Set(options.map(\.id))
+        return Set(a.selected).count == a.selected.count && a.selected.allSatisfy(valid.contains)
+    }
+
     /// The answer as the plain string the agent reads back, so the structured path feeds the
     /// same `answers: [String]` the text path always has.
     public func render(_ a: StructuredAnswer) -> String {

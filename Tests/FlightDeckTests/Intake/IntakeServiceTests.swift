@@ -428,6 +428,25 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(svc.answer(UUID(), structured: []), .notAwaitingAnswers)
     }
 
+    /// An option id the question does not have (stale, invented), the same id twice, or a
+    /// selection on a text question is refused whole, not stored and rendered as a raw id.
+    func testAnswersNamingOptionsTheQuestionLacksAreRefused() throws {
+        let seeded = try seedStructuredRound()
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        let when = StructuredAnswer(questionID: "when", selected: [], other: "soon")
+        let unknown = [StructuredAnswer(questionID: "scope", selected: ["ghost"]), when]
+        XCTAssertEqual(svc.answer(seeded.id, structured: unknown), .incomplete)
+        let duplicate = [StructuredAnswer(questionID: "scope", selected: ["mac", "mac"]), when]
+        XCTAssertEqual(svc.answer(seeded.id, structured: duplicate), .incomplete)
+        let onText = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                      StructuredAnswer(questionID: "when", selected: ["mac"], other: "soon")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: onText), .incomplete)
+        let stored = intake(svc, seeded.id)
+        XCTAssertNil(stored.exchanges.last?.answers)
+        XCTAssertNil(stored.exchanges.last?.structuredAnswers)
+        XCTAssertEqual(stored.state, .needsAnswers)
+    }
+
     func testLegacyStringAnswerStillWorks() async throws {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
                               br: MutableRunner(Self.brReplies(Self.openGraph)))

@@ -986,7 +986,9 @@ final class IntakeService: ObservableObject {
         guard given.count == structured.count, given.isSubset(of: ids), given == ids else { return .unknownQuestion }
         let byID = Dictionary(uniqueKeysWithValues: structured.map { ($0.questionID, $0) })
         let ordered = presented.map { byID[$0.id]! }
-        guard zip(presented, ordered).allSatisfy({ $0.isComplete($1) }) else { return .incomplete }
+        // `accepts` before anything is saved: an option id the round does not have would be
+        // stored as the answer and reach the agent as a raw id.
+        guard zip(presented, ordered).allSatisfy({ $0.accepts($1) && $0.isComplete($1) }) else { return .incomplete }
         let rendered = zip(presented, ordered).map { $0.render($1) }
         i.exchanges[i.exchanges.count - 1].structuredAnswers = ordered
         i.exchanges[i.exchanges.count - 1].answers = rendered

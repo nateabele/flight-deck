@@ -96,4 +96,20 @@ final class StructuredQuestionTests: XCTestCase {
         XCTAssertEqual(back, ex)
         XCTAssertEqual(back.presentedQuestions, ex.structured)
     }
+
+    // MARK: accepts
+
+    func testAcceptsOnlyTheQuestionsOwnOptionsEachOnce() {
+        let single = question(.single), multi = question(.multi)
+        XCTAssertTrue(single.accepts(.init(questionID: "q1", selected: ["a"])))
+        XCTAssertTrue(multi.accepts(.init(questionID: "q1", selected: ["a", "b"], other: "C")))
+        XCTAssertTrue(multi.accepts(.init(questionID: "q1", selected: [])))
+        XCTAssertFalse(single.accepts(.init(questionID: "q1", selected: ["ghost"])), "an unknown id")
+        XCTAssertFalse(multi.accepts(.init(questionID: "q1", selected: ["a", "ghost"])), "an unknown id among known")
+        XCTAssertFalse(multi.accepts(.init(questionID: "q1", selected: ["a", "a"])), "a duplicate id")
+        XCTAssertFalse(question(.toggle, options: ["on"]).accepts(.init(questionID: "q1", selected: ["off"])))
+        let text = StructuredQuestion.text(id: "q1", "Who?")
+        XCTAssertTrue(text.accepts(.init(questionID: "q1", selected: [], other: "the maintainer")))
+        XCTAssertFalse(text.accepts(.init(questionID: "q1", selected: ["a"], other: "the maintainer")), "selected on a text question")
+    }
 }
