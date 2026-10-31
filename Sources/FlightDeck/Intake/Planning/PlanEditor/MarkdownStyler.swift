@@ -127,6 +127,14 @@ struct PlanTheme {
     var tableHeaderRule = PlanTheme.wash(dark: 0.3, light: 0.3)
     var tableHeaderBackground = PlanTheme.wash(dark: 0.07, light: 0.06)
 
+    // MARK: Visual blocks
+
+    /// The height of a visual block's view, by its id and `pending` (`VisualBlockLayout`): the
+    /// block's hidden source is held to it, so the view laid over it fits exactly. The editor
+    /// supplies it from the intake's visuals (`VisualBlockOverlay.height`); with none, every block
+    /// is the missing-visual placeholder's height.
+    var visualHeight: (String, Bool) -> CGFloat = { _, _ in VisualBlockLayout.placeholder }
+
     /// White on the dark window, black on the light one, at the given opacities.
     static func wash(dark: CGFloat, light: CGFloat) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -667,8 +675,18 @@ enum MarkdownStyler {
                 storage.addAttribute(.foregroundColor, value: theme.syntax, range: marker)
             }
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
-        case .code, .visual:
+        case .code:
             styleCode(storage, block, whole: whole, para: para, theme)
+        case .visual(let id, let pending):
+            // Drawn only when closed and the caret is not in it. With the caret in it the source
+            // shows as code, so the human can edit the caption or delete the fence; an unclosed
+            // fence (one being typed) runs to the end of the plan, and hiding that would hide
+            // the rest of the plan.
+            if !revealed, block.syntaxRanges.count > 1 {
+                styleVisual(storage, block, id: id, pending: pending, whole: whole, theme)
+            } else {
+                styleCode(storage, block, whole: whole, para: para, theme)
+            }
         }
         for span in block.spans {
             switch span.kind {
@@ -735,6 +753,37 @@ enum MarkdownStyler {
                 if closed, lines.count > 1 { style.paragraphSpacingBefore = theme.codeVerticalPadding }
             }
             storage.addAttributes([.paragraphStyle: style, .planCodeBox: place.rawValue], range: line)
+        }
+    }
+
+    /// A visual block (V-R1, the table pattern): every line of its source hidden and held to an
+    /// equal share of the view's height, so the lines together are exactly as tall as the view
+    /// `VisualBlockOverlay` lays over them, with the block's room above and below as paragraph
+    /// spacing. The plan's bytes are as typed; the block is drawing.
+    private static func styleVisual(_ storage: NSTextStorage, _ block: MarkdownBlock, id: String, pending: Bool, whole: NSRange,
+                                    _ theme: PlanTheme) {
+        let ns = storage.mutableString
+        var lines: [NSRange] = []
+        var at = whole.location
+        while at < NSMaxRange(whole) {
+            let line = ns.lineRange(for: NSRange(location: at, length: 0))
+            lines.append(NSIntersectionRange(line, whole))
+            at = NSMaxRange(line)
+        }
+        guard !lines.isEmpty else { return }
+        // The caption is the body between the fences (spec §7).
+        let inner = lines.count > 2 ? NSRange(location: lines[1].location, length: NSMaxRange(lines[lines.count - 2]) - lines[1].location) : nil
+        let caption = inner.map { ns.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let height = theme.visualHeight(id, pending)
+        let ref = PlanVisualRef(id: id, pending: pending, caption: caption, height: height)
+        let share = height / CGFloat(lines.count)
+        for (i, line) in lines.enumerated() {
+            let style = NSMutableParagraphStyle()
+            style.minimumLineHeight = share
+            style.maximumLineHeight = share
+            if i == 0 { style.paragraphSpacingBefore = VisualBlockLayout.spaceBefore }
+            if i == lines.count - 1 { style.paragraphSpacing = VisualBlockLayout.spaceAfter }
+            storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear, .paragraphStyle: style, .planVisual: ref], range: line)
         }
     }
 

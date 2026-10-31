@@ -364,6 +364,7 @@ struct PlanSectionBody: View {
                 .folds(hooks.folds)
                 .remembering(hooks.scroll)
                 .links(projectPath: hooks.projectPath)
+                .visuals(hooks.visuals, checkpoint: shown.checkpoint)
                 .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
@@ -378,6 +379,7 @@ struct PlanSectionBody: View {
                 .jump(diffJump)
                 .folds(hooks.folds)
                 .links(projectPath: hooks.projectPath)
+                .visuals(hooks.visuals, checkpoint: diff.checkpoint)
                 .annotating(notes)
                 .onChange(of: diff.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
         } else if mode == .taskGraph, let taskGraph {

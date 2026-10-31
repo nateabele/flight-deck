@@ -139,6 +139,11 @@ struct PlanTextView: NSViewRepresentable {
     var scrollMemory: PlanScrollMemory?
     /// What the plan's relative file links resolve against — the intake's project directory.
     var projectPath: String?
+    /// The intake's visuals, which the plan's `fd-visual` blocks draw (`VisualBlockOverlay`); nil
+    /// draws each as a "missing visual" placeholder.
+    var visuals: (any VisualStoreReading)?
+    /// The checkpoint whose plan is shown: its visuals are drawn as that checkpoint recorded them.
+    var visualCheckpoint: Int?
     /// Writes `text` on every keystroke rather than after `EditPolicy.idle`. For an editor whose
     /// binding is a draft read at once (the intake composer's Triage), where waiting two
     /// seconds would send the text from before the last few keystrokes. A plan keeps the idle
@@ -221,6 +226,14 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// Draws the plan's visual blocks from `store`, as checkpoint `checkpoint` recorded them — see `visuals`.
+    func visuals(_ store: (any VisualStoreReading)?, checkpoint: Int? = nil) -> PlanTextView {
+        var view = self
+        view.visuals = store
+        view.visualCheckpoint = checkpoint
+        return view
+    }
+
     /// This view committing on every keystroke — see `commitsEachKeystroke`.
     func committingEachKeystroke() -> PlanTextView {
         var view = self
@@ -267,6 +280,9 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.revertButton = container.revert
         // Before the first load, which a pending "Show in that version" is waiting for.
         coordinator.notesBridge.attach(notes, to: container.textView)
+        // Before the first load too: the styler holds each visual block to its height from these.
+        container.textView.visualBlocks.store = visuals
+        container.textView.visualBlocks.checkpoint = visualCheckpoint
         coordinator.load(text)
         if focusOnAppear {
             // After the view is in a window; `makeNSView` runs before it is.
@@ -296,6 +312,7 @@ struct PlanTextView: NSViewRepresentable {
         // Before the load, so the first text an editor gets is already seen by the notes (a
         // pending "Show in that version" is waiting for exactly that load).
         coordinator.notesBridge.attach(notes, to: container.textView)
+        coordinator.visualsChanged(store: visuals, checkpoint: visualCheckpoint)
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
@@ -319,6 +336,8 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.undo.removeAllActions()
         if let text = coordinator.session.endEditing() { coordinator.commit(text) }
         coordinator.notesBridge.detach()
+        // Gives the blocks' live web views back to the shared pool.
+        container.textView.visualBlocks.tearDown()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
@@ -406,6 +425,8 @@ struct PlanTextView: NSViewRepresentable {
             if textView.string != text { textView.string = text }
             undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
+            // A new text may be a round that made new revisions: the blocks read the store again.
+            MainActor.assumeIsolated { textView.visualBlocks.reload() }
             outline = nil
             // A new text (a round landed): folds follow their headings by text, and a fold
             // whose heading is gone is dropped.
@@ -546,6 +567,11 @@ struct PlanTextView: NSViewRepresentable {
             if let container = textView?.textContainer, container.size.width < 10_000 {
                 theme.contentWidth = max(0, container.size.width - 2 * container.lineFragmentPadding)
             }
+            if let overlay = textView?.visualBlocks {
+                theme.visualHeight = { [weak overlay] id, pending in
+                    MainActor.assumeIsolated { overlay?.height(id: id, pending: pending) } ?? VisualBlockLayout.placeholder
+                }
+            }
             return theme
         }
 
@@ -652,6 +678,32 @@ struct PlanTextView: NSViewRepresentable {
                 MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, proposals: proposals, theme: theme)
                 EditLayer.apply(marks, to: storage, within: nil, theme: theme)
             }
+            // At once, not next turn: the restyle may have shown a block's source (the caret went
+            // in) or moved it (text typed above), and its view must not be drawn over that text
+            // even for one frame. Again next turn, for layout that settles after this.
+            MainActor.assumeIsolated {
+                textView?.visualBlocks.refresh()
+                textView?.visualBlocks.setNeedsRefresh()
+            }
+        }
+
+        /// The visuals the blocks draw from, or the checkpoint shown, may have changed: the
+        /// blocks' heights may differ, so their lines are styled again.
+        func visualsChanged(store: (any VisualStoreReading)?, checkpoint: Int?) {
+            guard let textView, let storage = textView.textStorage else { return }
+            let changed = MainActor.assumeIsolated {
+                let overlay = textView.visualBlocks
+                let before = overlay.store.map(VisualStoreIdentity.of)
+                let beforeCheckpoint = overlay.checkpoint
+                overlay.store = store
+                overlay.checkpoint = checkpoint
+                return before != store.map(VisualStoreIdentity.of) || beforeCheckpoint != checkpoint
+            }
+            guard changed else { return }
+            let visuals = blocks.indices.filter { if case .visual = blocks[$0].kind { true } else { false } }
+            guard !visuals.isEmpty else { return }
+            style(storage, indices: visuals, reveal: revealed)
+            textView.layOutWholePlan()
         }
 
         // MARK: Edit layer
@@ -842,6 +894,7 @@ struct PlanTextView: NSViewRepresentable {
             textView.onScroll = { [weak self] in
                 self?.layOutFoldGutter()
                 self?.scrollTick()
+                MainActor.assumeIsolated { self?.textView?.visualBlocks.setNeedsRefresh() }
             }
             textView.linkAt = { [weak self] location in self?.link(at: location) }
             foldGutter.measure = { [weak self] in self?.foldMarks() ?? [] }
@@ -1493,6 +1546,8 @@ class PlanNSTextView: NSTextView {
         // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
         let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)
         if abs(height - frame.height) >= 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+        // Estimates above a visual block firmed up: its band may have moved.
+        visualBlocks.setNeedsRefresh()
     }
 
     /// An edit made while a pass was running may have replaced the text it was walking:
@@ -1603,6 +1658,8 @@ class PlanNSTextView: NSTextView {
 
     /// Editing a table in place — see `PlanTableController`.
     lazy var tables = PlanTableController(view: self)
+    /// The visual blocks' views, laid over their hidden source (V-R1).
+    lazy var visualBlocks = VisualBlockOverlay(view: self)
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         if let replacementString, !tables.structureEditing, !hasMarkedText() {
