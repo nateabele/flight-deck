@@ -301,6 +301,52 @@ targets:
       - target: FlightDeck
     settings:
       base: { GENERATE_INFOPLIST_FILE: "YES" }
+  # The window-free logic lane (scripts/test-logic.sh). Deliberately NO `FlightDeck` dependency:
+  # xcodegen sets TEST_HOST/BUNDLE_LOADER only when a unit-test bundle depends on an application
+  # target, so these two are plain xctest bundles that `xcodebuild test` runs in the xctest process
+  # without launching the app or opening a window. A pure test (imports only XCTest, Foundation,
+  # IntakeKit/FleetKit; no `@testable import FlightDeck`) belongs in Tests/IntakeKitTests or
+  # Tests/FleetKitTests, which runs on any Mac in parallel with no UI-test-Mac lock.
+  # Swift 5 mode (the project floor): these files were written and compiled in the Swift 5
+  # FlightDeckTests bundle, and moving them must not change how they compile.
+  IntakeKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/IntakeKitTests
+      # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
+      # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
+      - path: Tests/FlightDeckTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: IntakeKit
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+  FleetKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/FleetKitTests
+      # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
+      # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
+      - path: Tests/FlightDeckTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: FleetKit
+        embed: false
+      # Same static-archive reasoning as FlightDeckTests: FleetKit is linked with this xcframework,
+      # and the bundle must resolve the same module graph (HEADER_SEARCH_PATHS for the shim).
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
   FleetKit:
     type: framework
     platform: macOS
@@ -701,6 +747,15 @@ targets:
 # meant not to depend on. See the comment there for why `-scheme` is required at all on
 # this Xcode version.
 schemes:
+  # Only the two logic bundles; coverage off for the same reason as the FlightDeck scheme below.
+  FlightDeckLogic:
+    build:
+      targets:
+        IntakeKitTests: [test]
+        FleetKitTests: [test]
+    test:
+      gatherCoverageData: false
+      targets: [IntakeKitTests, FleetKitTests]
   FleetKitiOS:
     build:
       targets:
