@@ -92,11 +92,20 @@ public struct ProviderGenerator: Sendable, Equatable {
     public var command: [String]
     public var timeout: Duration
     public var network: Bool
+    /// True when `command[0]` was written as a path inside the provider folder (`./bin/render`).
+    /// The parser normalizes that to `bin/render`, which alone reads like a PATH lookup, so the
+    /// runner needs this to refuse a missing provider file instead of finding a host program.
+    public var providerRelative: Bool
 
-    public init(command: [String], timeout: Duration, network: Bool = false) {
+    /// The longest timeout a manifest may ask for. A generator is a step inside one turn, and a
+    /// bound here also keeps a runner's nanosecond arithmetic far from overflow.
+    public static let maxTimeout = Duration(seconds: 600)
+
+    public init(command: [String], timeout: Duration, network: Bool = false, providerRelative: Bool = false) {
         self.command = command
         self.timeout = timeout
         self.network = network
+        self.providerRelative = providerRelative
     }
 }
 

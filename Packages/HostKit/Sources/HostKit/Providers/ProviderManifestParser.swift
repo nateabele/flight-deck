@@ -195,7 +195,8 @@ public enum ProviderManifestParser {
         }
         // Only a relative path is the provider's own file. A bare name is a PATH lookup and an
         // absolute path is the host's, and neither can be inside the folder to begin with.
-        if !program.hasPrefix("/"), program.contains("/") {
+        let providerRelative = !program.hasPrefix("/") && program.contains("/")
+        if providerRelative {
             command[0] = try inside(program, folder: folder, line: commandNode.line, field: "generator.command[0]")
         }
         // 60s when absent: a generator with no deadline would be the one thing here that can hang
@@ -206,13 +207,16 @@ public enum ProviderManifestParser {
             guard let parsed = Duration.parse(text) else {
                 throw ProviderManifestIssue(.error, line: node.line, "generator.timeout must be a duration like \"60s\" or \"2m\", not \"\(text)\"")
             }
+            guard parsed <= ProviderGenerator.maxTimeout else {
+                throw ProviderManifestIssue(.error, line: node.line, "generator.timeout must be at most \(ProviderGenerator.maxTimeout.formatted), not \"\(text)\"")
+            }
             timeout = parsed
         }
         let network = try table.entries["network"].map { try bool($0, "generator.network") } ?? false
         for (key, node) in table.ordered where !["command", "timeout", "network"].contains(key) {
             warnings.append(ProviderManifestIssue(.warning, line: node.line, "unknown key \(key) in [generator] (ignored)"))
         }
-        return ProviderGenerator(command: command, timeout: timeout, network: network)
+        return ProviderGenerator(command: command, timeout: timeout, network: network, providerRelative: providerRelative)
     }
 
     // MARK: - Paths

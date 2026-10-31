@@ -92,6 +92,24 @@ final class ProviderManifestParserTests: XCTestCase {
         XCTAssertEqual(issue(bad)?.line, 14)
     }
 
+    func testProviderRelativeProgramIsMarked() throws {
+        XCTAssertEqual(try parse(Self.specExample).manifest.generator?.providerRelative, true)
+        let bare = head + kind() + "[generator]\ncommand = [\"python3\", \"x.py\"]\n"
+        XCTAssertEqual(try parse(bare).manifest.generator?.providerRelative, false)
+        let absolute = head + kind() + "[generator]\ncommand = [\"/usr/bin/python3\"]\n"
+        XCTAssertEqual(try parse(absolute).manifest.generator?.providerRelative, false)
+    }
+
+    func testTimeoutAboveTenMinutesIsRefusedWithItsLine() throws {
+        let ok = head + kind() + "[generator]\ncommand = [\"x\"]\ntimeout = \"10m\"\n"
+        XCTAssertEqual(try parse(ok).manifest.generator?.timeout, Duration(seconds: 600))
+        let long = head + kind() + "[generator]\ncommand = [\"x\"]\ntimeout = \"10m1s\"\n"
+        XCTAssertEqual(issue(long)?.line, 14)
+        XCTAssertEqual(issue(long)?.severity, .error)
+        let huge = head + kind() + "[generator]\ncommand = [\"x\"]\ntimeout = \"99999999999d\"\n"
+        XCTAssertEqual(issue(huge)?.line, 14)
+    }
+
     func testMissingRequiredKeyIsAnError() {
         XCTAssertNotNil(issue(head.replacingOccurrences(of: "name = \"P\"\n", with: "") + kind()))
         XCTAssertNotNil(issue(head + kind().replacingOccurrences(of: "entry = \"a.svg\"\n", with: "")))
