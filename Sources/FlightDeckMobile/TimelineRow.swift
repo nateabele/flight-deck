@@ -571,6 +571,10 @@ struct TimelineSegmentView: View {
         case .richBlock(let text):
             RichBlockView(text: text)
                 .modifier(CopyAction(text: text))
+        case .visual(_, let caption):
+            // The transcript never opens the visuals gate, so none arrives; if one ever did, its
+            // caption is the honest thing to show.
+            Text(caption).font(.callout).foregroundStyle(.secondary)
         }
     }
 }

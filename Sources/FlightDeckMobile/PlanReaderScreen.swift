@@ -36,6 +36,8 @@ struct PlanReaderScreen: View {
     private var commands: IntakeCommandModel { flightControl.commands(for: intake) }
     private var detailModel: IntakeDetailModel { flightControl.detailModel(for: intake) }
     private var notesAllowed: Bool { PlanReaderStyle.notesAllowed(detail: detailModel.detail, checkpoint: checkpoint) }
+    /// The gate for every visual op: a Mac that does not say `visuals == true` gets plan text.
+    private var visualsAllowed: Bool { PlanReaderStyle.visualsAllowed(detail: detailModel.detail) }
 
     struct AskTarget: Identifiable {
         let id = UUID()
@@ -93,7 +95,7 @@ struct PlanReaderScreen: View {
                                     PhoneDiffBar(count: gutter.bars.count) { openDiff = first }
                                 }
                                 VStack(alignment: .leading, spacing: PlanReaderStyle.segmentSpacing) {
-                                    ForEach(Array(PlanReaderStyle.segments(of: gutter.text).enumerated()), id: \.offset) { _, segment in
+                                    ForEach(Array(PlanReaderStyle.segments(of: gutter.text, visuals: visualsAllowed).enumerated()), id: \.offset) { _, segment in
                                         segmentView(segment, block: block.index, plan: plan)
                                     }
                                 }
@@ -274,7 +276,7 @@ struct PlanReaderScreen: View {
             ProseAction(title: "Ask…", systemImage: "sparkles") { quote in
                 askTarget = AskTarget(block: block, quote: quote, checkpoint: plan.checkpoint)
             },
-        ] : []))
+        ] : []), intake: intake, visuals: plan.visuals ?? [])
     }
 
     @ViewBuilder private func removed(after index: Int?, _ plan: WireIntakePlan, show: Bool) -> some View {
@@ -576,6 +578,9 @@ struct PlanReaderScreen: View {
 struct PlanSegmentView: View {
     let segment: TimelineSegment
     var actions: [ProseAction] = []
+    /// For a `.visual` segment: the intake it belongs to and the Mac's list of that plan's visuals.
+    var intake: UUID?
+    var visuals: [WireVisualRef] = []
 
     var body: some View {
         switch segment {
@@ -586,6 +591,12 @@ struct PlanSegmentView: View {
                 .markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
         case .richBlock(let text):
             RichBlockView(text: text, serif: true).textSelection(.enabled)
+        case .visual(let id, let caption):
+            if let intake {
+                VisualBlockCard(intake: intake, id: id, caption: caption, ref: visuals.first { $0.id == id })
+            } else {
+                Text(caption).font(.callout).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -599,9 +610,17 @@ enum PlanReaderStyle {
     static let segmentSpacing: CGFloat = 8
 
     /// A block's segments: `.prose` becomes selectable text, the rest stays MarkdownUI.
-    static func segments(of blockText: String) -> [TimelineSegment] {
-        TimelineSegmenter.segments(of: blockText)
+    ///
+    /// `visuals` is the gate (`visualsAllowed`): closed, an `fd-visual` fence is the plain code
+    /// block old plans showed; open, it is a `.visual` segment.
+    static func segments(of blockText: String, visuals: Bool = false) -> [TimelineSegment] {
+        TimelineSegmenter.segments(of: blockText, visuals: visuals)
     }
+
+    /// Whether the reader draws visual blocks and fetches their bytes: only a Mac whose detail
+    /// says `visuals == true`. An older Mac, or this one until V4, never receives an
+    /// `intake.visual.fetch` it would answer by dropping the socket.
+    static func visualsAllowed(detail: WireIntakeDetail?) -> Bool { detail?.visuals == true }
 
     /// Whether the reader offers notes: the intake must take them (`NoteComposer.notesAllowed`)
     /// and the reader must be on the head (`checkpoint == nil`, which is how every route opens

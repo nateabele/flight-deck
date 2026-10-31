@@ -16,7 +16,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading, VisualFetching {
     /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
     /// because the in-app attention banner (app level) and the board strip (deep in the stack)
     /// must push onto the same stack the list owns. Observed: the stack binds to it.
@@ -57,6 +57,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// The pending debounced fleet save, if one is scheduled. See `scheduleFleetSave()`.
     @ObservationIgnored private var fleetSave: Task<Void, Never>?
     @ObservationIgnored private var connector: FleetConnector?
+    /// The plan reader's visual fetcher over the shared cache. Lazy because it holds `self`
+    /// (weakly) as its fetcher, and not observed: it is a service, not state a view reads.
+    @ObservationIgnored private(set) lazy var visualLoader = VisualLoader(fetcher: self)
     @ObservationIgnored private var runner: PairingRunner?
     /// One open session's model per tab id, kept so that going back to the list and forward
     /// again shows the conversation the phone already holds instead of re-downloading it.
@@ -643,6 +646,17 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.requestFile(session: session, path: path, offset: offset, limit: limit,
                               maxPixel: maxPixel, then: completion)
+    }
+
+    /// Forwarded exactly as `readFile` is; `.disconnected` synchronously with no connector. Only
+    /// the visual loader calls this, and only for a plan whose detail says `visuals == true`.
+    func fetchVisual(
+        intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestVisual(id: intake, visualID: visualID, revision: revision, part: part,
+                                offset: offset, limit: limit, then: completion)
     }
 
     /// Ask the Mac to type something into a session's agent.

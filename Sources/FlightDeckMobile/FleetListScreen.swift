@@ -239,6 +239,7 @@ struct FleetListScreen: View {
         }
         // Every screen under the stack can open a transcript's file links — see `FileLinkRouting`.
         .environment(\.fileReader, model)
+        .environment(\.visualLoader, model.visualLoader)
     }
 
     private func refreshSearchCandidates() {

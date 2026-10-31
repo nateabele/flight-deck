@@ -39,6 +39,8 @@ final class IntakeRenderHarness: XCTestCase {
     private var stubs: [StubFetcher] = []
     /// `IntakeCommandModel` holds its commander `weak` for the same reason.
     private var commanders: [StubCommander] = []
+    /// `VisualLoader` holds its fetcher `weak`, like the models above.
+    private var visualFetchers: [RenderVisualFetcher] = []
 
     /// Called first by every render rather than from `setUp`, which is nonisolated.
     private func begin() throws {
@@ -341,6 +343,106 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The reader with a diagram card (P2a V3): the snapshot, its filmstrip of three states and an
+    /// alternate, the caption, and a visual that has not landed ("Waiting for ..."), between
+    /// ordinary prose. The snapshots are drawn here and served through the real `VisualLoader`
+    /// and `VisualCache`, so the picture on the card has been fetched in chunks and hash-checked.
+    func testDrawReaderWithVisuals() throws {
+        try begin()
+        var detail = Fixture.running
+        detail.visuals = true
+        let id = detail.summary.id
+        let names = ["Pair", "Confirm", "Done"]
+        var served: [String: Data] = [:]
+        var files: [WireVisualFile] = []
+        for (i, name) in names.enumerated() {
+            let png = Self.snapshotPNG(title: name, step: i)
+            let path = "snapshot@\(name.lowercased())-narrow.png"
+            served[path] = png
+            files.append(WireVisualFile(path: path, size: Int64(png.count), sha256: VisualCache.sha256Hex(png)))
+        }
+        let markdown = """
+        ## Pairing
+
+        The phone and the Mac meet through hostd. The diagram shows the three steps the maintainer sees.
+
+        ```fd-visual id=pairing-handshake
+        Pairing handshake: phone, Mac and hostd
+        ```
+
+        After the handshake the phone keeps the key. A second visual is still being drawn:
+
+        ```fd-visual id=rollback-flow pending
+        Rollback flow
+        ```
+
+        Nothing below this line depends on either.
+        """
+        var plan = Fixture.plan
+        plan.markdown = markdown
+        plan.notes = []
+        plan.added = nil
+        plan.removed = nil
+        plan.visuals = [WireVisualRef(
+            id: "pairing-handshake", revision: 2, kinds: ["diagram"],
+            alternates: [WireVisualAlternate(revision: 3, kind: "sequence", reason: "ordering is clearer")],
+            states: names.map { $0.lowercased() }, sizes: ["wide", "narrow"], aspect: 1.6, files: files)]
+        let fetcher = stub(detail)
+        fetcher.plan = plan
+        let cacheDir = outputDirectory.appendingPathComponent("visual-cache-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        let visualFetcher = RenderVisualFetcher(files: served)
+        visualFetchers.append(visualFetcher)
+        let loader = VisualLoader(fetcher: visualFetcher, cache: VisualCache(directory: cacheDir, budget: 50_000_000), chunkSize: 4_096)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let flightControl = FlightControlModel(fetcher: fetcher)
+            flightControl.detailModel(for: id).refresh()
+            let reader = NavigationStack {
+                PlanReaderScreen(intake: id, checkpoint: nil, startBlock: nil, changes: false, flightControl: flightControl)
+            }
+            .environment(\.visualLoader, loader)
+            try write(screenImage(of: reader, style: style, size: nil, height: 1100),
+                      to: "reader-visuals-\(Self.styleName(style)).png")
+        }
+        // The gate shut: the same plan from a Mac that does not say it serves visuals shows the
+        // fence as the plain code block old plans always had.
+        var ungated = detail
+        ungated.visuals = nil
+        let shutFetcher = stub(ungated)
+        shutFetcher.plan = plan
+        let flightControl = FlightControlModel(fetcher: shutFetcher)
+        flightControl.detailModel(for: id).refresh()
+        let reader = NavigationStack {
+            PlanReaderScreen(intake: id, checkpoint: nil, startBlock: nil, changes: false, flightControl: flightControl)
+        }
+        .environment(\.visualLoader, loader)
+        try write(screenImage(of: reader, style: .light, size: nil, height: 1100), to: "reader-visuals-gate-shut.png")
+    }
+
+    /// A stand-in diagram: three boxes and arrows with the current step filled.
+    private static func snapshotPNG(title: String, step: Int) -> Data {
+        let size = CGSize(width: 640, height: 400)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor.white.setFill(); ctx.fill(CGRect(origin: .zero, size: size))
+            let labels = ["Phone", "hostd", "Mac"]
+            for (i, label) in labels.enumerated() {
+                let box = CGRect(x: 40 + CGFloat(i) * 210, y: 150, width: 150, height: 90)
+                (i == step ? UIColor.systemBlue : UIColor(white: 0.9, alpha: 1)).setFill()
+                UIBezierPath(roundedRect: box, cornerRadius: 12).fill()
+                UIColor.black.setStroke(); UIBezierPath(roundedRect: box, cornerRadius: 12).stroke()
+                let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.boldSystemFont(ofSize: 28),
+                                                            .foregroundColor: i == step ? UIColor.white : UIColor.black]
+                label.draw(at: CGPoint(x: box.minX + 20, y: box.midY - 17), withAttributes: attrs)
+                if i < 2 {
+                    let arrow = UIBezierPath(); arrow.move(to: CGPoint(x: box.maxX, y: box.midY))
+                    arrow.addLine(to: CGPoint(x: box.maxX + 60, y: box.midY)); arrow.lineWidth = 3; UIColor.black.setStroke(); arrow.stroke()
+                }
+            }
+            title.draw(at: CGPoint(x: 40, y: 40), withAttributes: [.font: UIFont.systemFont(ofSize: 36, weight: .semibold)])
+        }
+        return image.pngData() ?? Data()
+    }
+
     /// The reader at Refine 1 with notes written on earlier versions: in a block of this plan
     /// (the version named on the card) and listed under their version below the plan, each group
     /// a row that opens that version. Never "can't find".
@@ -597,6 +699,22 @@ private final class StubFetcher: IntakeFetching, ThreadFetching {
         var plan = self.plan ?? Fixture.plan
         if !changes { plan.added = nil; plan.removed = nil }
         then(.success(plan))
+    }
+}
+
+/// Serves the render's snapshots by `part`, a chunk at a time, as the Mac would.
+@MainActor
+private final class RenderVisualFetcher: VisualFetching {
+    let files: [String: Data]
+    init(files: [String: Data]) { self.files = files }
+
+    func fetchVisual(intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
+                     then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) {
+        let path = part.hasPrefix("snapshot@") ? part + ".png" : (WireVisualPart.filePath(in: part) ?? "")
+        guard let bytes = files[path] else { return completion(.failure(.server(code: "unknown_file"))) }
+        let start = min(Int(offset), bytes.count)
+        let end = min(bytes.count, start + limit)
+        completion(.success(WireFileChunk(path: path, size: Int64(bytes.count), offset: offset, data: bytes.subdata(in: start..<end))))
     }
 }
 
