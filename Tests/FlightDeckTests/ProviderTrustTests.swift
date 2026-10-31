@@ -115,6 +115,30 @@ final class ProviderTrustTests: XCTestCase {
         XCTAssertNotEqual(before, try ProviderTrust.digest(folder: dir))
     }
 
+    /// Only the owner's bit decides whether the provider's own uid can exec the file. Folding in
+    /// any class's bit let `chmod u+x` on a 0o645 file (other-exec already set) go unnoticed.
+    func testOwnerExecBitChangesDigest() throws {
+        let dir = try folder("p", files: [("gen.sh", "echo")])
+        let path = dir.appendingPathComponent("gen.sh").path
+        try FileManager.default.setAttributes([.posixPermissions: 0o645], ofItemAtPath: path)
+        let before = try ProviderTrust.digest(folder: dir)
+        try FileManager.default.setAttributes([.posixPermissions: 0o745], ofItemAtPath: path)
+        XCTAssertNotEqual(before, try ProviderTrust.digest(folder: dir))
+    }
+
+    /// A permission read that fails must not hash as "not executable": that is a guess, and a
+    /// wrong guess approves a runnable file as data.
+    func testUnreadablePermissionsThrow() throws {
+        let dir = try folder("p", files: [("provider.toml", "x"), ("gen.sh", "echo")])
+        struct NoStat: Error {}
+        XCTAssertThrowsError(try ProviderTrust.digest(folder: dir, permissions: { url in
+            if url.lastPathComponent == "gen.sh" { throw NoStat() }
+            return 0o644
+        })) { error in
+            XCTAssertEqual(error as? ProviderTrust.DigestError, .unreadable("gen.sh"))
+        }
+    }
+
     func testFifoIsRefused() throws {
         let dir = try folder("p", files: [("provider.toml", "x")])
         XCTAssertEqual(mkfifo(dir.appendingPathComponent("pipe").path, 0o644), 0)

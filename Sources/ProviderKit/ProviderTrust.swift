@@ -22,10 +22,22 @@ public enum ProviderTrust {
     }
 
     /// SHA-256 over every file in `folder`, in sorted relative-path order. Each entry is the
-    /// path, a NUL, the length as 8 big-endian bytes, one byte for the executable bit, then the bytes. The NUL and the length
+    /// path, a NUL, the length as 8 big-endian bytes, one byte for the owner's executable bit, then the bytes. The NUL and the length
     /// make the stream unambiguous, so moving bytes from one file's tail to the next file's
     /// head cannot give the same digest.
     public static func digest(folder: URL) throws -> String {
+        try digest(folder: folder, permissions: { url in
+            struct NoMode: Error {}
+            guard let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int else {
+                throw NoMode()
+            }
+            return mode
+        })
+    }
+
+    /// `permissions` is a parameter only so a test can make the mode read fail, which a real
+    /// file system will not do on demand for a file it just let us read.
+    static func digest(folder: URL, permissions: (URL) throws -> Int) throws -> String {
         var files: [(path: String, url: URL)] = []
         try collect(folder, prefix: "", into: &files)
         // Sorted by UTF-8 bytes, not by locale: the digest must not depend on the user's language.
@@ -38,9 +50,12 @@ public enum ProviderTrust {
             hasher.update(data: Data([0]))
             var length = UInt64(data.count).bigEndian
             withUnsafeBytes(of: &length) { hasher.update(bufferPointer: $0) }
-            // The executable bit, so a generator made runnable after approval asks again.
-            let mode = (try? FileManager.default.attributesOfItem(atPath: file.url.path)[.posixPermissions]) as? Int ?? 0
-            hasher.update(data: Data([mode & 0o111 != 0 ? 1 : 0]))
+            // The owner's executable bit, so a generator made runnable after approval asks
+            // again. Owner only: the generator runs as the file's owner, and folding in any
+            // class's bit hid `chmod u+x` on a file whose other-exec bit was already set.
+            // A failed read throws: hashing it as "not executable" would be a guess.
+            guard let mode = try? permissions(file.url) else { throw DigestError.unreadable(file.path) }
+            hasher.update(data: Data([mode & 0o100 != 0 ? 1 : 0]))
             hasher.update(data: data)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
