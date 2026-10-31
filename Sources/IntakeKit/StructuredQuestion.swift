@@ -135,4 +135,30 @@ extension TriageExchange {
     public var presentedQuestions: [StructuredQuestion] {
         structured ?? questions.enumerated().map { .text(id: "q\($0.offset + 1)", $0.element) }
     }
+
+    /// Names this round by what it asks: the presented questions' ids, texts, kinds and option
+    /// ids, in order. The round's index is not enough: `retry` clears the exchanges, so a fresh
+    /// triage's first round reuses index 0 with different questions, and answers or drafts
+    /// keyed by index alone would land on questions they were never typed against.
+    ///
+    /// FNV-1a 64 over a length-prefixed encoding, as 16 hex digits: IntakeKit is Foundation-only,
+    /// and the value must be the same on every build and every launch (Swift's `Hasher` is
+    /// seeded per process). Labels and details are left out: rewording an option does not
+    /// change what its id means.
+    public var questionsDigest: String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ field: String) {
+            // The byte count first, so ["ab", "c"] and ["a", "bc"] never encode alike.
+            for byte in Array("\(field.utf8.count):".utf8) + Array(field.utf8) {
+                hash ^= UInt64(byte)
+                hash = hash &* 0x0000_0100_0000_01b3
+            }
+        }
+        for q in presentedQuestions {
+            mix(q.id); mix(q.text); mix(q.kind.rawValue)
+            mix("\(q.options.count)")
+            q.options.forEach { mix($0.id) }
+        }
+        return String(format: "%016llx", hash)
+    }
 }

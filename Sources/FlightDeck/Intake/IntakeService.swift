@@ -1014,13 +1014,16 @@ final class IntakeService: ObservableObject {
     /// What `answer-drafts.json` holds: the unsent answers, and the exact questions they were
     /// typed against — so a follow-up round with the same number of questions can never pick
     /// up drafts written for different ones. `answers` stays the rendered strings so a file
-    /// from before structured answers still reads; `round` and `structured` are optional so a
-    /// file written before they existed still decodes.
+    /// from before structured answers still reads; `round`, `structured` and `digest` are
+    /// optional so a file written before they existed still decodes. `digest` is the round's
+    /// `questionsDigest`: after `retry` a fresh round can have the same index and the same texts
+    /// with different option ids, and only the digest tells those drafts are not this round's.
     private struct AnswerDrafts: Codable {
         var questions: [String]
         var answers: [String]
         var round: Int?
         var structured: [StructuredAnswer]?
+        var digest: String?
     }
 
     private func answerDraftsURL(_ id: UUID) -> URL {
@@ -1039,7 +1042,8 @@ final class IntakeService: ObservableObject {
         guard Set(answers.map(\.questionID)).isSubset(of: Set(presented.map(\.id))) else { return }
         let byID = Dictionary(answers.map { ($0.questionID, $0) }, uniquingKeysWith: { _, last in last })
         let strings = presented.map { q in byID[q.id].map { q.render($0) } ?? "" }
-        let drafts = AnswerDrafts(questions: open.questions, answers: strings, round: round, structured: answers)
+        let drafts = AnswerDrafts(questions: open.questions, answers: strings, round: round, structured: answers,
+                                  digest: open.questionsDigest)
         guard let data = try? JSONEncoder().encode(drafts) else { return }
         try? data.write(to: answerDraftsURL(id), options: .atomic)
     }
@@ -1052,7 +1056,8 @@ final class IntakeService: ObservableObject {
               let drafts = try? JSONDecoder().decode(AnswerDrafts.self, from: data) else { return nil }
         // Asking for a round that isn't open says nothing about the file, so it is left alone.
         guard let i = intake(id), round == i.exchanges.count - 1, let open = i.exchanges.last else { return nil }
-        guard drafts.questions == open.questions, drafts.round ?? round == round else {
+        guard drafts.questions == open.questions, drafts.round ?? round == round,
+              drafts.digest ?? open.questionsDigest == open.questionsDigest else {
             clearAnswerDrafts(id)
             return nil
         }

@@ -469,6 +469,38 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
     }
 
+    /// `retry` clears the exchanges, so a fresh triage's first round is index 0 again — here with
+    /// the same question texts but different option ids. Drafts from the old round must not come
+    /// back: their ids name options the new round does not have.
+    func testDraftsFromAReplacedRoundWithTheSameTextsDoNotComeBack() throws {
+        let seeded = try seedStructuredRound()
+        let drafts = [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                      StructuredAnswer(questionID: "when", selected: [], other: "so")]
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
+        var retried = try IntakeStore(root: root).load(id: seeded.id)
+        var questions = Self.choiceQuestions
+        questions[0].options = [.init(id: "here", label: "Only this Mac"), .init(id: "all", label: "Any machine")]
+        retried.exchanges = [TriageExchange(questions: questions.map(\.text), structured: questions)]
+        try IntakeStore(root: root).save(retried)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, round: 0))
+    }
+
+    /// A drafts file written before the digest existed (round and structured, no digest) still
+    /// loads while its round and question texts match: storage is additive.
+    func testADraftsFileWithoutADigestStillLoads() throws {
+        let seeded = try seedStructuredRound()
+        let old = #"{"questions":["Which machines?","When?"],"answers":["Any machine","so"],"round":0,"#
+            + #""structured":[{"questionID":"scope","selected":["any"]},{"questionID":"when","selected":[],"other":"so"}]}"#
+        try Data(old.utf8).write(to: IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json"))
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(svc.answerDrafts(seeded.id, round: 0), [
+            StructuredAnswer(questionID: "scope", selected: ["any"]),
+            StructuredAnswer(questionID: "when", selected: [], other: "so"),
+        ])
+    }
+
     /// A drafts file from before structured answers has strings only; it must still come back.
     func testOldStringDraftsFileStillLoads() throws {
         let questions = ["Which README?", "Keep the badge?"]

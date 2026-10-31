@@ -112,4 +112,51 @@ final class StructuredQuestionTests: XCTestCase {
         XCTAssertTrue(text.accepts(.init(questionID: "q1", selected: [], other: "the maintainer")))
         XCTAssertFalse(text.accepts(.init(questionID: "q1", selected: ["a"], other: "the maintainer")), "selected on a text question")
     }
+
+    // MARK: questionsDigest
+
+    private func exchange(_ questions: [StructuredQuestion]) -> TriageExchange {
+        TriageExchange(questions: questions.map(\.text), structured: questions)
+    }
+
+    func testTheDigestIsStableAndIgnoresAnswersAndLabels() {
+        let q = question(.single, recommended: ["a"])
+        let a = exchange([q])
+        XCTAssertEqual(a.questionsDigest.count, 16)
+        XCTAssertTrue(a.questionsDigest.allSatisfy(\.isHexDigit), a.questionsDigest)
+        var answered = a
+        answered.answers = ["A"]
+        answered.structuredAnswers = [.init(questionID: "q1", selected: ["a"])]
+        XCTAssertEqual(answered.questionsDigest, a.questionsDigest, "answering a round does not rename it")
+        var relabelled = q
+        relabelled.options[0].label = "Option A"
+        XCTAssertEqual(exchange([relabelled]).questionsDigest, a.questionsDigest)
+        // Pinned, so a change to the encoding is a deliberate one: drafts on disk are keyed by it.
+        // The value was checked by hand against FNV-1a 64 over "2:q1" "4:Who?" "4:text" "1:0".
+        XCTAssertEqual(TriageExchange(questions: ["Who?"]).questionsDigest, "6660fac6cf48ba4e")
+    }
+
+    /// A retry's fresh triage can reuse index 0 and even the same text; anything that changes what
+    /// an answer's ids mean must change the digest.
+    func testTheDigestChangesWithWhatTheRoundAsks() {
+        let base = question(.single)
+        let digest = exchange([base]).questionsDigest
+        var otherOptions = base
+        otherOptions.options = [.init(id: "x", label: "A"), .init(id: "b", label: "B")]
+        var otherText = base
+        otherText.text = "Which one?"
+        var otherID = base
+        otherID.id = "q2"
+        var otherKind = base
+        otherKind.kind = .multi
+        for changed in [otherOptions, otherText, otherID, otherKind] {
+            XCTAssertNotEqual(exchange([changed]).questionsDigest, digest, "\(changed)")
+        }
+        let two = StructuredQuestion.text(id: "q2", "When?")
+        XCTAssertNotEqual(exchange([base, two]).questionsDigest, exchange([two, base]).questionsDigest, "order matters")
+        // Length-prefixed: moving a character across a field boundary is a different round.
+        XCTAssertNotEqual(TriageExchange(questions: ["ab", "c"]).questionsDigest,
+                          TriageExchange(questions: ["a", "bc"]).questionsDigest)
+        XCTAssertNotEqual(TriageExchange(questions: ["Who?"]).questionsDigest, TriageExchange(questions: ["When?"]).questionsDigest)
+    }
 }
