@@ -371,6 +371,95 @@ final class IntakeServiceTests: XCTestCase {
             atPath: IntakeStore(root: root).directory(for: id).appendingPathComponent("answer-drafts.json").path))
     }
 
+    private static let choiceQuestions: [StructuredQuestion] = [
+        StructuredQuestion(id: "scope", text: "Which machines?", kind: .single,
+                           options: [.init(id: "mac", label: "Only this Mac"), .init(id: "any", label: "Any machine")]),
+        .text(id: "when", "When?"),
+    ]
+
+    private func seedStructuredRound(_ extra: (inout Intake) -> Void = { _ in }) throws -> Intake {
+        var seeded = Intake(projectPath: "/p", intent: "Add a note")
+        seeded.state = .needsAnswers
+        seeded.exchanges = [TriageExchange(questions: Self.choiceQuestions.map(\.text), structured: Self.choiceQuestions)]
+        extra(&seeded)
+        try IntakeStore(root: root).save(seeded)
+        return seeded
+    }
+
+    /// Rounds still read plain strings, so a choice must reach them as its label.
+    func testStructuredAnswerRendersIntoPlainAnswersForRounds() async throws {
+        let seeded = try seedStructuredRound()
+        let headless = FakeHeadlessRunner([Self.codex(Self.sketch)])
+        let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))
+        let given = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                     StructuredAnswer(questionID: "when", selected: [], other: "soon")]
+        XCTAssertNil(svc.answer(seeded.id, structured: given))
+        await svc.task(for: seeded.id)?.value
+        let last = try XCTUnwrap(intake(svc, seeded.id).exchanges.first)
+        XCTAssertEqual(last.answers, ["Only this Mac", "soon"])
+        XCTAssertEqual(last.structuredAnswers, given)
+        let sent = headless.commands.flatMap(\.arguments).joined(separator: "\n")
+        XCTAssertTrue(sent.contains("Only this Mac"), sent)
+        XCTAssertTrue(sent.contains("soon"), sent)
+    }
+
+    func testIncompleteOrUnknownAnswersAreRefused() throws {
+        let seeded = try seedStructuredRound()
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        let blank = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                     StructuredAnswer(questionID: "when", selected: [], other: "  ")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: blank), .incomplete)
+        let unknown = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                       StructuredAnswer(questionID: "q9", selected: [], other: "x")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: unknown), .unknownQuestion)
+        let dup = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                   StructuredAnswer(questionID: "scope", selected: ["any"])]
+        XCTAssertEqual(svc.answer(seeded.id, structured: dup), .unknownQuestion)
+        let stored = intake(svc, seeded.id)
+        XCTAssertNil(stored.exchanges.last?.answers)
+        XCTAssertNil(stored.exchanges.last?.structuredAnswers)
+        XCTAssertEqual(stored.state, .needsAnswers)
+        XCTAssertEqual(svc.answer(UUID(), structured: []), .notAwaitingAnswers)
+    }
+
+    func testLegacyStringAnswerStillWorks() async throws {
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
+                              br: MutableRunner(Self.brReplies(Self.openGraph)))
+        let id = await capture(svc)
+        svc.answer(id, answers: ["The root one"])
+        await svc.task(for: id)?.value
+        let ex = try XCTUnwrap(intake(svc, id).exchanges.first)
+        XCTAssertEqual(ex.answers, ["The root one"])
+        XCTAssertEqual(ex.structuredAnswers, [StructuredAnswer(questionID: "q1", selected: [], other: "The root one")])
+    }
+
+    func testStructuredDraftsSurviveAFreshService() throws {
+        let seeded = try seedStructuredRound()
+        let drafts = [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                      StructuredAnswer(questionID: "when", selected: [], other: "so")]
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, round: 1))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
+    }
+
+    /// A drafts file from before structured answers has strings only; it must still come back.
+    func testOldStringDraftsFileStillLoads() throws {
+        let questions = ["Which README?", "Keep the badge?"]
+        var seeded = Intake(projectPath: "/p", intent: "Add a note")
+        seeded.state = .needsAnswers
+        seeded.exchanges = [TriageExchange(questions: questions)]
+        try IntakeStore(root: root).save(seeded)
+        let old = #"{"questions":["Which README?","Keep the badge?"],"answers":["root","yes"]}"#
+        try Data(old.utf8).write(to: IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json"))
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(svc.answerDrafts(seeded.id, round: 0), [
+            StructuredAnswer(questionID: "q1", selected: [], other: "root"),
+            StructuredAnswer(questionID: "q2", selected: [], other: "yes"),
+        ])
+    }
+
     func testAnswerResumesSameSessionWithModelPinned() async {
         let headless = FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)])
         let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))

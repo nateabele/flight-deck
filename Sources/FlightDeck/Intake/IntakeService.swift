@@ -965,24 +965,60 @@ final class IntakeService: ObservableObject {
         start(intake.id) { await $0.runTriage(intake.id, turn: .initial) }
     }
 
-    func answer(_ id: UUID, answers: [String]) {
-        guard var i = intake(id), i.state == .needsAnswers, !i.exchanges.isEmpty else { return }
-        i.exchanges[i.exchanges.count - 1].answers = answers
+    /// Why `answer(_:structured:)` took nothing. The raw values are the wire codes the phone gets.
+    enum AnswerRefusal: String {
+        case notAwaitingAnswers = "not_awaiting_answers"
+        case unknownQuestion = "unknown_question"
+        case incomplete = "invalid_answer"
+    }
+
+    /// Takes the open round's answers. Each presented question needs exactly one answer with its
+    /// id, and each must be complete; otherwise nothing is saved, so a half-valid submit can
+    /// never leave a round answered with a hole in it. The rounds themselves still get the plain
+    /// rendered strings, so nothing downstream of triage changes.
+    @discardableResult
+    func answer(_ id: UUID, structured: [StructuredAnswer]) -> AnswerRefusal? {
+        guard var i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last, open.answers == nil
+        else { return .notAwaitingAnswers }
+        let presented = open.presentedQuestions
+        let ids = Set(presented.map(\.id))
+        let given = Set(structured.map(\.questionID))
+        guard given.count == structured.count, given.isSubset(of: ids), given == ids else { return .unknownQuestion }
+        let byID = Dictionary(uniqueKeysWithValues: structured.map { ($0.questionID, $0) })
+        let ordered = presented.map { byID[$0.id]! }
+        guard zip(presented, ordered).allSatisfy({ $0.isComplete($1) }) else { return .incomplete }
+        let rendered = zip(presented, ordered).map { $0.render($1) }
+        i.exchanges[i.exchanges.count - 1].structuredAnswers = ordered
+        i.exchanges[i.exchanges.count - 1].answers = rendered
         save(i)
         pending[id] = PendingStart(kind: .triage, since: now())
         clearAnswerDrafts(id)
-        let questions = i.exchanges[i.exchanges.count - 1].questions
-        start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: answers)) }
+        let questions = open.questions
+        start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: rendered)) }
+        return nil
+    }
+
+    /// The plain-string path, for callers that only have typed text.
+    func answer(_ id: UUID, answers: [String]) {
+        guard let open = intake(id)?.exchanges.last, answers.count == open.presentedQuestions.count else { return }
+        let mapped = zip(open.presentedQuestions, answers).map {
+            StructuredAnswer(questionID: $0.id, selected: [], other: $1)
+        }
+        answer(id, structured: mapped)
     }
 
     // MARK: - Answer drafts
 
     /// What `answer-drafts.json` holds: the unsent answers, and the exact questions they were
     /// typed against — so a follow-up round with the same number of questions can never pick
-    /// up drafts written for different ones.
+    /// up drafts written for different ones. `answers` stays the rendered strings so a file
+    /// written now still reads under the string API; `round` and `structured` are optional so a
+    /// file written before they existed still decodes.
     private struct AnswerDrafts: Codable {
         var questions: [String]
         var answers: [String]
+        var round: Int?
+        var structured: [StructuredAnswer]?
     }
 
     private func answerDraftsURL(_ id: UUID) -> URL {
@@ -1001,6 +1037,20 @@ final class IntakeService: ObservableObject {
         try? data.write(to: answerDraftsURL(id), options: .atomic)
     }
 
+    /// The structured version, keyed by the open round's index. Refused for any round but the
+    /// open one, for the same reason as above.
+    func saveAnswerDrafts(_ id: UUID, round: Int, answers: [StructuredAnswer]) {
+        guard let i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last,
+              open.answers == nil, round == i.exchanges.count - 1 else { return }
+        let presented = open.presentedQuestions
+        guard Set(answers.map(\.questionID)).isSubset(of: Set(presented.map(\.id))) else { return }
+        let byID = Dictionary(answers.map { ($0.questionID, $0) }, uniquingKeysWith: { _, last in last })
+        let strings = presented.map { q in byID[q.id].map { q.render($0) } ?? "" }
+        let drafts = AnswerDrafts(questions: open.questions, answers: strings, round: round, structured: answers)
+        guard let data = try? JSONEncoder().encode(drafts) else { return }
+        try? data.write(to: answerDraftsURL(id), options: .atomic)
+    }
+
     /// The drafts saved against exactly `questions`, or nil. Drafts for any other question set
     /// are stale — a newer round replaced them — so they're deleted rather than left to match
     /// by accident later.
@@ -1012,6 +1062,26 @@ final class IntakeService: ObservableObject {
             return nil
         }
         return drafts.answers
+    }
+
+    /// The structured drafts for the open round. A file with strings only (written before
+    /// structured answers) loads as text answers while its questions still equal the round's.
+    func answerDrafts(_ id: UUID, round: Int) -> [StructuredAnswer]? {
+        guard let data = try? Data(contentsOf: answerDraftsURL(id)),
+              let drafts = try? JSONDecoder().decode(AnswerDrafts.self, from: data) else { return nil }
+        // Asking for a round that isn't open says nothing about the file, so it is left alone.
+        guard let i = intake(id), round == i.exchanges.count - 1, let open = i.exchanges.last else { return nil }
+        guard drafts.questions == open.questions, drafts.round ?? round == round else {
+            clearAnswerDrafts(id)
+            return nil
+        }
+        if let structured = drafts.structured { return structured }
+        let presented = open.presentedQuestions
+        guard drafts.answers.count == presented.count else {
+            clearAnswerDrafts(id)
+            return nil
+        }
+        return zip(presented, drafts.answers).map { StructuredAnswer(questionID: $0.id, selected: [], other: $1) }
     }
 
     private func clearAnswerDrafts(_ id: UUID) {
