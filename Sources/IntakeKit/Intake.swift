@@ -59,9 +59,16 @@ public struct HeadlessSession: Codable, Equatable, Sendable {
 public struct TriageExchange: Codable, Equatable, Sendable {
     public var questions: [String]
     public var answers: [String]?
-    public init(questions: [String], answers: [String]? = nil) {
+    /// Choice-style versions of `questions`, nil when the agent sent only strings. Optional so
+    /// every intake.json written before this decodes unchanged.
+    public var structured: [StructuredQuestion]?
+    public var structuredAnswers: [StructuredAnswer]?
+    public init(questions: [String], answers: [String]? = nil,
+                structured: [StructuredQuestion]? = nil, structuredAnswers: [StructuredAnswer]? = nil) {
         self.questions = questions
         self.answers = answers
+        self.structured = structured
+        self.structuredAnswers = structuredAnswers
     }
 }
 
