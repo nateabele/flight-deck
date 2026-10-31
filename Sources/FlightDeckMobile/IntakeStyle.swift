@@ -9,7 +9,7 @@ struct IntakeGlyph: Equatable { let symbol: String; let tone: IntakeTone }
 enum IntakeRowStyle {
     static func ordered(_ intakes: [WireIntakeSummary]) -> [WireIntakeSummary] {
         func rank(_ s: WireIntakeSummary) -> Int {
-            if s.needsAttention { return 0 }
+            if s.needsAttention || threadsNeedingYou(s) > 0 { return 0 }
             if s.runStatus == "running" || s.runStatus == "paused" || s.state == "triaging" { return 1 }
             return 2
         }
@@ -18,8 +18,17 @@ enum IntakeRowStyle {
         }
     }
 
+    /// Ask threads waiting on the person (`threadsNeedingYou` is nil from a Mac without threads).
+    static func threadsNeedingYou(_ s: WireIntakeSummary) -> Int { s.threadsNeedingYou ?? 0 }
+
+    /// The row's own badge: how many of its ask threads wait on the person.
+    static func threadsBadge(_ s: WireIntakeSummary) -> String? {
+        let n = threadsNeedingYou(s)
+        return n == 0 ? nil : "\(n) \(n == 1 ? "ask needs" : "asks need") you"
+    }
+
     static func badge(_ intakes: [WireIntakeSummary]?) -> String? {
-        let n = intakes?.filter(\.needsAttention).count ?? 0
+        let n = intakes?.filter { $0.needsAttention || threadsNeedingYou($0) > 0 }.count ?? 0
         return n == 0 ? nil : "\(n) \(n == 1 ? "needs" : "need") you"
     }
 

@@ -16,7 +16,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, IntakeCommanding, FileReading {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading {
     /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
     /// because the in-app attention banner (app level) and the board strip (deep in the stack)
     /// must push onto the same stack the list owns. Observed: the stack binds to it.
@@ -625,6 +625,14 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     ) {
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.requestIntakePlan(id: id, checkpoint: checkpoint, changes: changes, then: completion)
+    }
+
+    func intakeThread(
+        _ id: UUID, threadID: UUID, since: Int?,
+        then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestIntakeThread(id: id, threadID: threadID, since: since, then: completion)
     }
 
     /// Forwarded exactly as `timelinePage` is; `.disconnected` synchronously with no connector.

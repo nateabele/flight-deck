@@ -19,6 +19,8 @@ protocol IntakeCommanding: AnyObject {
 enum IntakeAction: Hashable {
     case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
     case answer(String)
+    /// Ask threads: a draft's send (by its id), a thread's resolve and answers (by thread id), a diff's decision.
+    case threadSend(UUID), threadResolve(UUID), threadAnswer(UUID), diffDecide(UUID)
 }
 
 enum CommandCopy {
@@ -42,6 +44,14 @@ enum CommandCopy {
             case "not_allowed": return "That isn't possible right now."
             case "note_consumed": return "A round has already read that note."
             case "empty_note": return "Write something first."
+            case "diff_stale": return "That change no longer fits the plan. Ask the agent to propose it again."
+            case "diff_decided": return "That change was already decided."
+            case "unknown_diff", "unknown_thread": return "That thread is no longer on your Mac."
+            case "thread_resolved": return "This thread is resolved."
+            case "empty_message": return "Write something first."
+            case "threads_unavailable": return "Your Mac isn't running ask threads."
+            case "no_agent": return "No agent is set up on your Mac to answer."
+            case "write_failed": return "Your Mac couldn't save that. Try again."
             case "no_agents": return "No agent is available on your Mac to run planning rounds."
             case "unknown_intake": return "This intake is no longer on your Mac."
             case "unknown_checkpoint", "unknown_block", "rounds_changed":

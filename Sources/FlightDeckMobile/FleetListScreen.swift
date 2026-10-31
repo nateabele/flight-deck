@@ -169,6 +169,8 @@ struct FleetListScreen: View {
                                          flightControl: model.flightControl)
                 case .plan(let intake, let checkpoint):
                     PlanOutlineScreen(intake: intake, checkpoint: checkpoint, flightControl: model.flightControl)
+                case .thread(let intake, let thread):
+                    ThreadScreen(intake: intake, threadID: thread, flightControl: model.flightControl)
                 case .reader(let intake, let checkpoint, let block, let changes):
                     PlanReaderScreen(intake: intake, checkpoint: checkpoint, startBlock: block, changes: changes,
                                      flightControl: model.flightControl)

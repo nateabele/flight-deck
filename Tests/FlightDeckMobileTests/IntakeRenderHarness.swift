@@ -371,6 +371,72 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The reader with ask threads on: a pending change in the gutter (the green bar beside its
+    /// new text), a thread card under its passage, one that needs the person, and an ask sent
+    /// but not yet listed; then the thread screen with a reply, a change and an open question.
+    func testDrawThreads() throws {
+        try begin()
+        var detail = Fixture.steering(Fixture.running, enabled: ["pause", "stop", "extend", "trim"])
+        detail.threads = true
+        let id = detail.summary.id
+        let thread = UUID(), asking = UUID()
+        let diff = WirePendingDiff(id: UUID(), thread: thread, checkpoint: 3, blockIndex: 4,
+                                   old: "wait until **the queue drains**",
+                                   new: "wait until **every producer has confirmed it paused and the queue drains**", state: "pending")
+        let summaries = [
+            WireThreadSummary(id: thread, title: "Is the drain order safe?",
+                              anchor: WireThreadAnchor(checkpoint: 3, block: 4, quote: "the queue drains"),
+                              status: "needsYou", counts: WireThreadCounts(turns: 2, pendingDiffs: 1, openQuestions: 1),
+                              excerpt: "Not quite: a producer can enqueue after the pause."),
+            WireThreadSummary(id: asking, title: "Who gets paged?", anchor: WireThreadAnchor(checkpoint: 3, block: 8, quote: "resume the producers"),
+                              status: "open", counts: WireThreadCounts(turns: 1), excerpt: "The on-call for the queue."),
+        ]
+        var plan = Fixture.plan
+        plan.threads = summaries
+        plan.pendingDiffs = [diff]
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let fetcher = stub(detail)
+            fetcher.plan = plan
+            let flightControl = FlightControlModel(fetcher: fetcher)
+            flightControl.detailModel(for: id).refresh()
+            // An ask sent from this reader that the Mac has acked but not listed.
+            let sent = ThreadDraft(threadID: nil, anchor: WireThreadAnchor(checkpoint: 3, block: 6, quote: "a ceiling of five minutes"),
+                                   text: "Why five minutes and not ten?")
+            flightControl.threadOutbox(for: id).outbox.submit(sent)
+            flightControl.threadOutbox(for: id).outbox.sending(sent.id, token: UUID())
+            flightControl.threadOutbox(for: id).outbox.acked(sent.id)
+            let reader = NavigationStack {
+                PlanReaderScreen(intake: id, checkpoint: nil, startBlock: nil, changes: false, flightControl: flightControl)
+            }
+            try write(screenImage(of: reader, style: style, size: nil, height: 1900),
+                      to: "reader-threads-\(Self.styleName(style)).png")
+        }
+
+        let question = WireStructuredQuestion(id: "q1", text: "Should a late producer be retried or dropped?", kind: "single",
+                                              options: [WireOption(id: "retry", label: "Retry it"), WireOption(id: "drop", label: "Drop it")],
+                                              recommended: ["retry"])
+        let page = WireThreadPage(
+            thread: summaries[0],
+            turns: [
+                WireThreadTurn(seq: 1, messageID: "m1", you: "Is it safe to wait only for the queue to drain?",
+                               reply: "Not quite. A producer can enqueue **after** the pause, so the queue can look empty and then fill again.",
+                               decision: "Wait for each producer to confirm.", diffs: [diff.id], checkpoint: 3,
+                               startedAt: Fixture.ago(120), endedAt: Fixture.ago(90)),
+                WireThreadTurn(seq: 2, messageID: "m2", reply: "One more thing I need from you.", questions: [question],
+                               checkpoint: 3, startedAt: Fixture.ago(60), endedAt: Fixture.ago(40)),
+            ],
+            diffs: [diff])
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let fetcher = stub(detail)
+            fetcher.threadPage = page
+            let flightControl = FlightControlModel(fetcher: fetcher)
+            flightControl.detailModel(for: id).refresh()
+            let screen = NavigationStack { ThreadScreen(intake: id, threadID: thread, flightControl: flightControl) }
+            try write(screenImage(of: screen, style: style, size: nil, height: 1500),
+                      to: "thread-\(Self.styleName(style)).png")
+        }
+    }
+
     // MARK: - Drawing
 
     private func draw(intake detail: WireIntakeDetail, style: UIUserInterfaceStyle, size: DynamicTypeSize?,
@@ -487,9 +553,15 @@ final class IntakeRenderHarness: XCTestCase {
 /// Answers every detail request with one fixture (then "unchanged"), and every plan request
 /// with `Fixture.plan` — synchronously, so a screen has content by its first layout.
 @MainActor
-private final class StubFetcher: IntakeFetching {
+private final class StubFetcher: IntakeFetching, ThreadFetching {
     let detail: WireIntakeDetail
     private var served = false
+    /// Served for every thread request when set.
+    var threadPage: WireThreadPage?
+
+    func intakeThread(_ id: UUID, threadID: UUID, since: Int?, then: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void) {
+        then(threadPage.map { .success($0) } ?? .failure(.server(code: "unknown_thread")))
+    }
     /// Served instead of `Fixture.plan` when set.
     var plan: WireIntakePlan?
     init(detail: WireIntakeDetail) { self.detail = detail }

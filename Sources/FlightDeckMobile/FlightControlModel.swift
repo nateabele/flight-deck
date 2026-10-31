@@ -25,6 +25,7 @@ final class FlightControlModel {
     @ObservationIgnored private weak var commander: IntakeCommanding?
     @ObservationIgnored private var commandModels: [UUID: IntakeCommandModel] = [:]
     @ObservationIgnored private var answerForms: [UUID: AnswerFormModel] = [:]
+    @ObservationIgnored private var threadOutboxes: [UUID: ThreadOutboxModel] = [:]
     @ObservationIgnored private let answerDrafts: AnswerDraftStore?
     @ObservationIgnored private let receivedAt: () -> Date
 
@@ -85,6 +86,7 @@ final class FlightControlModel {
         for m in commandModels.values { m.cancelAll() }
         commandModels = [:]
         answerForms = [:]
+        threadOutboxes = [:]
         purgeAnswerDrafts()
         plans = [:]
         planOrder = []
@@ -121,6 +123,23 @@ final class FlightControlModel {
         let m = AnswerFormModel(intake: id, drafts: answerDrafts)
         answerForms[id] = m
         return m
+    }
+
+    /// One thread outbox per intake, shared by the reader (which draws its cards) and the thread
+    /// screen (which draws pending messages), so an ask sent from one is seen by the other.
+    func threadOutbox(for id: UUID) -> ThreadOutboxModel {
+        if let m = threadOutboxes[id] { return m }
+        let m = ThreadOutboxModel()
+        threadOutboxes[id] = m
+        return m
+    }
+
+    /// One thread's page on demand: threads' turns are never pushed. `.disconnected` when the
+    /// fetcher cannot read threads (a test stub).
+    func thread(_ intake: UUID, threadID: UUID, since: Int?,
+                then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void) {
+        guard let reader = fetcher as? ThreadFetching else { return completion(.failure(.disconnected)) }
+        reader.intakeThread(intake, threadID: threadID, since: since, then: completion)
     }
 
     /// Contract: the HEAD is always requested with `checkpoint: nil`, never looked up in the cache,

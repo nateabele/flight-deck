@@ -43,6 +43,15 @@ struct IntakeRow: View {
                 }
             }
             Spacer(minLength: 0)
+            // Ask threads waiting on the person: a count, so a closed project's header badge and
+            // this row agree on why the intake is asking.
+            if let badge = IntakeRowStyle.threadsBadge(summary), let n = summary.threadsNeedingYou {
+                Text("✦ \(n)").font(.caption2.weight(.bold))
+                    .padding(.horizontal, 7).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange))
+                    .foregroundStyle(.black)
+                    .accessibilityLabel(badge)
+            }
         }
         .accessibilityElement(children: .combine)
     }

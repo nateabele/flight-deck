@@ -28,10 +28,27 @@ struct PlanReaderScreen: View {
     /// has), so dropping the maintainer's words always asks first.
     @State private var confirmingDelete: UUID?
     @State private var confirmingDiscard: UUID?
+    /// The Ask sheet's item: what was selected, and the checkpoint it was read on.
+    @State private var askTarget: AskTarget?
+    @State private var openDiff: WirePendingDiff?
+    @State private var openThread: UUID?
 
     private var commands: IntakeCommandModel { flightControl.commands(for: intake) }
     private var detailModel: IntakeDetailModel { flightControl.detailModel(for: intake) }
     private var notesAllowed: Bool { PlanReaderStyle.notesAllowed(detail: detailModel.detail, checkpoint: checkpoint) }
+
+    struct AskTarget: Identifiable {
+        let id = UUID()
+        let block: Int?
+        let quote: String?
+        let checkpoint: Int
+    }
+
+    /// Ask threads show wherever the Mac advertises them; asking also needs the head and a shaping
+    /// intake, as notes do. Every op is gated on the `threads` flag (`ThreadGate`).
+    private var threadsReadable: Bool { ThreadGate.canRead(detail: detailModel.detail) }
+    private var askAllowed: Bool { ThreadGate.canAskInReader(detail: detailModel.detail, checkpoint: checkpoint) }
+    private var threadOutbox: ThreadOutbox { flightControl.threadOutbox(for: intake).outbox }
 
     /// The sheet's item: a block, not one note, so every note pinned to it is reachable.
     struct BlockNotes: Identifiable {
@@ -62,16 +79,26 @@ struct PlanReaderScreen: View {
                     let blocks = PlanBlocks.split(plan.markdown).blocks
                     let added = Set(showDiff ? (plan.added ?? []) : [])
                     let allNotes = outbox.listing(plan.notes)
+                    let threads = threadsReadable ? threadOutbox.listing(plan.threads ?? []) : []
                     LazyVStack(alignment: .leading, spacing: PlanReaderStyle.blockSpacing) {
                         removed(after: nil, plan, show: showDiff)
                         ForEach(blocks, id: \.index) { block in
                             let notes = allNotes.filter { $0.blockIndex == block.index }
                             let unsent = outbox.unsent.filter { $0.target.block == block.index }
+                            let gutter = threadsReadable
+                                ? PhoneDiffGutter.apply(to: block.text, block: block.index, diffs: plan.pendingDiffs ?? [], outbox: threadOutbox)
+                                : PhoneDiffGutter.BlockDiffs(text: block.text)
                             HStack(alignment: .top, spacing: 8) {
+                                if let first = gutter.bars.first {
+                                    PhoneDiffBar(count: gutter.bars.count) { openDiff = first }
+                                }
                                 VStack(alignment: .leading, spacing: PlanReaderStyle.segmentSpacing) {
-                                    ForEach(Array(PlanReaderStyle.segments(of: block.text).enumerated()), id: \.offset) { _, segment in
+                                    ForEach(Array(PlanReaderStyle.segments(of: gutter.text).enumerated()), id: \.offset) { _, segment in
                                         segmentView(segment, block: block.index, plan: plan)
                                     }
+                                    ForEach(gutter.loose) { d in looseDiffCard(d) }
+                                    ForEach(threads.filter { $0.anchor?.block == block.index }) { t in askCard(t) }
+                                    ForEach(unsentAsks(block: block.index)) { d in unsentAskCard(d) }
                                     ForEach(unsent) { d in unsentCard(d) }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -103,10 +130,25 @@ struct PlanReaderScreen: View {
                             versionHeader(group.version, checkpoint: group.checkpoint, link: true)
                             ForEach(group.notes, id: \.id) { n in noteCard(n) }
                         }
+                        let wide = threads.filter { $0.anchor?.block == nil }
+                        let looseDiffs = threadsReadable ? PhoneDiffGutter.detached(plan.pendingDiffs ?? [], outbox: threadOutbox) : []
+                        if !wide.isEmpty || !unsentAsks(block: nil).isEmpty || !looseDiffs.isEmpty {
+                            Divider()
+                            Text("Asks about the whole plan").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach(looseDiffs) { d in looseDiffCard(d) }
+                            ForEach(wide) { t in askCard(t) }
+                            ForEach(unsentAsks(block: nil)) { d in unsentAskCard(d) }
+                        }
                         if notesAllowed {
                             Divider()
                             Button { draft = NoteDraft(target: NoteDraftTarget(block: nil, quote: nil), showing: plan.checkpoint) } label: {
                                 Label { Text("Add a note to the whole plan").font(.subheadline) } icon: { Image(systemName: "text.bubble") }
+                                    .frame(minHeight: 44)
+                            }
+                        }
+                        if askAllowed {
+                            Button { askTarget = AskTarget(block: nil, quote: nil, checkpoint: plan.checkpoint) } label: {
+                                Label { Text("Ask about the whole plan").font(.subheadline) } icon: { Image(systemName: "sparkles") }
                                     .frame(minHeight: 44)
                             }
                         }
@@ -140,6 +182,22 @@ struct PlanReaderScreen: View {
         }
         .sheet(item: $draft) { d in
             NoteSheet(draft: d) { submit($0) }
+        }
+        .sheet(item: $askTarget) { t in
+            AskSheet(quote: t.quote) { text in ask(t, text: text) }
+        }
+        .sheet(item: $openDiff) { diff in
+            PhoneDiffSheet(diff: diff, canDecide: PhoneDiffGutter.canDecide(diff, detail: detailModel.detail),
+                           deciding: commands.inFlight.contains(.diffDecide(diff.id)),
+                           onDecide: { accept in
+                flightControl.decideDiff(diff, accept: accept, intake: intake) { openDiff = nil; reloadHead() }
+            }, onOpenThread: {
+                openDiff = nil
+                openThread = diff.thread
+            })
+        }
+        .navigationDestination(item: $openThread) { thread in
+            ThreadScreen(intake: intake, threadID: thread, flightControl: flightControl)
         }
         .task(id: changes) { load() }
         .intakePresence(id: intake, model: flightControl.detailModel(for: intake), flightControl: flightControl)
@@ -203,11 +261,15 @@ struct PlanReaderScreen: View {
     /// its own grid (`PlanTableView`).
     /// **Note…** quotes the selection as rendered; the Mac finds it in the block's source.
     private func segmentView(_ segment: TimelineSegment, block: Int, plan: WireIntakePlan) -> some View {
-        PlanSegmentView(segment: segment, actions: notesAllowed ? [
+        PlanSegmentView(segment: segment, actions: (notesAllowed ? [
             ProseAction(title: "Note…", systemImage: "text.bubble") { quote in
                 draft = NoteDraft(target: NoteDraftTarget(block: block, quote: quote), showing: plan.checkpoint)
             },
-        ] : [])
+        ] : []) + (askAllowed ? [
+            ProseAction(title: "Ask…", systemImage: "sparkles") { quote in
+                askTarget = AskTarget(block: block, quote: quote, checkpoint: plan.checkpoint)
+            },
+        ] : []))
     }
 
     @ViewBuilder private func removed(after index: Int?, _ plan: WireIntakePlan, show: Bool) -> some View {
@@ -351,6 +413,84 @@ struct PlanReaderScreen: View {
         }
     }
 
+    /// An ask thread under the passage it is about: its title and where it stands, opening the
+    /// conversation. A real link, so VoiceOver reaches it as one.
+    private func askCard(_ t: WireThreadSummary) -> some View {
+        NavigationLink(value: IntakeRoute.thread(intake: intake, thread: t.id)) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles").imageScale(.small)
+                    Text(t.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text(ThreadStyle.statusWords(t.status)).font(.caption).foregroundStyle(ThreadStyle.statusTone(t.status))
+                }
+                if let excerpt = t.excerpt { Text(excerpt).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.08)))
+        .accessibilityHint("Opens the conversation")
+    }
+
+    /// A proposed change that cannot be shown in its passage (stale, or its passage moved): the
+    /// new text beside the bar, and a tap for the decision.
+    private func looseDiffCard(_ d: WirePendingDiff) -> some View {
+        Button { openDiff = d } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Capsule().fill(d.state == "pending" ? Color.green : Color.orange).frame(width: 3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(.init(d.new)).font(.system(.subheadline, design: .serif)).multilineTextAlignment(.leading)
+                    Text(ThreadStyle.diffWords(d.state)).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(d.state)): \(d.new)")
+    }
+
+    /// Asks this reader composed that the Mac has not acked: in flight, or failed with a Retry.
+    private func unsentAsks(block: Int?) -> [ThreadDraft] {
+        guard threadsReadable else { return [] }
+        return threadOutbox.unsent.filter { $0.threadID == nil && $0.anchor?.block == block }
+    }
+
+    private func unsentAskCard(_ d: ThreadDraft) -> some View {
+        let sending = commands.inFlight.contains(.threadSend(d.id))
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("Ask", systemImage: "sparkles").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if let q = d.anchor?.quote { Text("“\(q)”").font(.subheadline).italic().foregroundStyle(.secondary) }
+            Text(d.text).font(.body)
+            if sending {
+                Text("Not yet sent").font(.caption).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 16) {
+                    Text("Not sent").font(.caption).foregroundStyle(.secondary)
+                    Button { flightControl.sendThread(d, intake: intake) { reloadHead() } } label: {
+                        Text("Retry").font(.subheadline).frame(minHeight: 44)
+                    }
+                    Button(role: .destructive) { flightControl.threadOutbox(for: intake).outbox.remove(d.id) } label: {
+                        Text("Discard").font(.subheadline).frame(minHeight: 44)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(.secondarySystemBackground)))
+    }
+
+    /// Open a thread. The anchor is what the reader SHOWED — a block index and the selected
+    /// phrase, on the checkpoint it read them on — and the Mac builds the real anchor from source.
+    private func ask(_ t: AskTarget, text: String) {
+        let anchor = t.block == nil && t.quote == nil ? nil : WireThreadAnchor(checkpoint: t.checkpoint, block: t.block, quote: t.quote)
+        flightControl.sendThread(ThreadDraft(threadID: nil, anchor: anchor, text: text), intake: intake) { reloadHead() }
+    }
+
     /// Send a composed note. It is listed as unsent first, so the tap changes the screen before
     /// any answer; the ack re-requests the head, which lists it (or, still queued on the Mac,
     /// the outbox keeps showing it).
@@ -408,7 +548,11 @@ struct PlanReaderScreen: View {
         flightControl.plan(intake, checkpoint: checkpoint, changes: asked) { result in
             guard requests.accepts(token) else { return }
             switch result {
-            case .success(let p): plan = p; loadedChanges = asked; outbox.reconcile(with: p.notes)
+            case .success(let p):
+                plan = p; loadedChanges = asked; outbox.reconcile(with: p.notes)
+                let threadBox = flightControl.threadOutbox(for: intake)
+                threadBox.outbox.reconcile(threads: p.threads ?? [])
+                threadBox.outbox.reconcile(diffs: p.pendingDiffs ?? [])
             case .failure: if !refreshing || plan == nil { failed = true }
             }
         }
