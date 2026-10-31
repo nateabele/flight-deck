@@ -12,9 +12,12 @@ for terminal rendering and runs many coding agents across repos in a `session �
 Four things trip up every agent on this repo. The detail is in
 **[docs/AGENT-OPERATIONS.md](docs/AGENT-OPERATIONS.md)**.
 
-1. **You are probably running inside the app you are editing.** The process tree is
-   `Flight Deck.app → login → fish → claude`. Quitting or killing Flight Deck kills your own
-   session. Detach anything that must outlive the app (`nohup … &`).
+1. **You are probably running in a session of the app you are editing — but not inside its
+   process.** Each tab is a detached `fd-abduco` daemon parented to launchd:
+   `launchd → fd-abduco → shell → claude`. Quitting, killing or release-swapping Flight Deck
+   does **not** kill your session; it keeps running and the relaunched app reattaches to it.
+   What does kill it: `pkill`-style cleanup of `claude`/`fd-abduco` processes that matches
+   your own.
 2. **Never launch a bundle from `DerivedData/`.** Flight Deck has no argv parsing — even
    `--help` boots a *second full app instance*, spawning duplicate `claude --resume` processes
    that collide in Claude's pid-keyed name registry. Run only `/Applications/Flight Deck.app`.

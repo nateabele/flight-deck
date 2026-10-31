@@ -7,22 +7,26 @@ For build mechanics see [BUILD.md](BUILD.md); for why the toolchain is odd, [TOO
 
 ---
 
-## 1. You are probably running inside the app you are editing
+## 1. You are probably running in a session of the app you are editing
 
-Flight Deck hosts terminal sessions, and Claude Code usually runs in one of them:
+Flight Deck hosts terminal sessions, and Claude Code usually runs in one of them. The session
+is **not** a child of the app: each tab is a detached `fd-abduco` daemon parented to launchd,
+which the app attaches to.
 
 ```
-Flight Deck.app → /usr/bin/login → fish/zsh → claude   ← you are here
+launchd → fd-abduco (/tmp/flight-deck-<uid>/) → fish/zsh → claude   ← you are here
+Flight Deck.app ··· attaches to the daemon's socket
 ```
 
-Consequences, all of which have bitten:
+Consequences:
 
-- **Quitting or killing Flight Deck kills your own session mid-task.** Anything that must
-  outlive the app (a release swap) has to be detached first — see §2.
-- `pkill`-style cleanup aimed at "stray" `claude` processes can reap the session issuing it.
-- A crash you introduce takes down the agent investigating it.
-
-Treat "quit the app" as a destructive, self-affecting action: detach, or hand it to the user.
+- **Quitting, crashing or release-swapping Flight Deck does not kill your session.** The
+  daemon, its shell and `claude` keep running; the relaunched app reattaches. Do not refuse a
+  swap or a restart on the grounds that it would end the session running it — it will not.
+- `pkill`-style cleanup aimed at "stray" `claude` or `fd-abduco` processes **can** reap the
+  session issuing it. Match by session id or state root, never by name alone.
+- While the app is down nobody can see or answer the session, so an agent that blocks on a
+  prompt waits until it is back.
 
 ## 2. The release ritual
 
@@ -36,7 +40,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
   -configuration Release -derivedDataPath DerivedData build
 
-# 2. Swap, DETACHED (it quits the app running this very shell)
+# 2. Swap, detached so its log and timing don't depend on this tool call (the session
+#    itself survives the app quitting either way — see §1)
 nohup ./scripts/swap-release.sh <delay-seconds> <current-app-pid> >/dev/null 2>&1 &
 ```
 
