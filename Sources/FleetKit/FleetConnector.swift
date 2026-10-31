@@ -374,6 +374,22 @@ public final class FleetConnector: @unchecked Sendable {
         pendingFile[cid] = completion
     }
 
+    /// Ask for a byte range of one visual revision (`intake.visual.fetch`). The reply is a
+    /// `WireFileChunk` on the same table `requestFile` uses, so the err routing and the
+    /// disconnect drain are already right. Only for a Mac whose detail says `visuals == true`;
+    /// an older one answers `unsupported`.
+    public func requestVisual(
+        id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.intakeVisualFetch(
+            id: id, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingFile[cid] = completion
+    }
+
     /// Ask the Mac which addresses it can currently be reached on. Same contract as
     /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is
     /// nothing to ask.

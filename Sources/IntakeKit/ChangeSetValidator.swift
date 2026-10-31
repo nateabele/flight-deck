@@ -3,6 +3,8 @@ import Foundation
 public enum ValidationError: Equatable, Sendable {
     case unknownBead(String), undefinedTempId(String), duplicateTempId(String)
     case selfEdge(String), cycle, missingDelivery(String), preconditionMismatch(String)
+    /// A new task's `visualRefs` names a visual the plan does not have.
+    case unknownVisual(String)
 }
 public struct ValidationErrors: Error, Equatable, Sendable { public let errors: [ValidationError] }
 
@@ -19,6 +21,7 @@ extension ValidationError {
         case .cycle: "the blocking edges, together with the graph's existing edges, form a cycle"
         case .missingDelivery(let id): "`\(id)` is in_progress, so its editTask needs a `delivery` rating"
         case .preconditionMismatch(let id): "the `pre` for `\(id)` does not match its current status and assignee in the graph"
+        case .unknownVisual(let id): "`visualRefs` names the visual `\(id)`, which the plan does not have"
         }
     }
     /// The same failure for the human, when the corrected change set fails too (spec §11): in
@@ -33,6 +36,7 @@ extension ValidationError {
         case .cycle: "the new dependencies, with the graph's own, go round in a circle"
         case .missingDelivery(let id): "\(id) is in progress, so its edit needs a rating for how to tell its holder"
         case .preconditionMismatch(let id): "\(id)'s status or holder doesn't match the task graph"
+        case .unknownVisual(let id): "a task points at a visual (\(id)) the plan doesn't have"
         }
     }
 }
@@ -46,7 +50,11 @@ public struct ValidatedChangeSet: Equatable, Sendable {
 }
 
 public enum ChangeSetValidator {
-    public static func validate(_ cs: ChangeSet, against graph: GraphSnapshot) -> Result<ValidatedChangeSet, ValidationErrors> {
+    /// `knownVisuals`: the ids of the visuals the plan has. nil skips the visual check, which is
+    /// right for every caller that predates visuals, and for a plan with none: a task cannot
+    /// name a visual that was never offered.
+    public static func validate(_ cs: ChangeSet, against graph: GraphSnapshot,
+                                knownVisuals: Set<String>? = nil) -> Result<ValidatedChangeSet, ValidationErrors> {
         var errors: [ValidationError] = []
         var temps = Set<String>()
         for op in cs.ops {
@@ -63,7 +71,12 @@ public enum ChangeSetValidator {
         var blocking: [(String, String)] = graph.edges.map { ($0.dependent, $0.dependency) }
         for (i, op) in cs.ops.enumerated() {
             switch op {
-            case .createBead: break
+            case .createBead(let bead):
+                if let known = knownVisuals {
+                    for ref in bead.visualRefs ?? [] where !known.contains(ref.visualID) {
+                        errors.append(.unknownVisual(ref.visualID))
+                    }
+                }
             case .addEdge(let from, let to, let kind):
                 check(from); check(to)
                 if from == to { errors.append(.selfEdge(from.wireValue)) }

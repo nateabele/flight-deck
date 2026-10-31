@@ -157,7 +157,7 @@ enum ControlScope {
             // Messaging another tab is a cross-tab write, not a read disguised as a request.
             return level == .full || caller == .human
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
-             .intakeDetail, .intakePlan, .intakeThreadGet:
+             .intakeDetail, .intakePlan, .intakeThreadGet, .intakeVisualFetch:
             return true
         case .fileRead:
             // A read, and of nothing a local caller cannot already `cat` from its own shell.

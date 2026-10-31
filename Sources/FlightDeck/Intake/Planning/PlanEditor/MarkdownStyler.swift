@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 
 /// An inline run inside a block: `range` is the content only (`bold`, not `**bold**`); its
 /// delimiters are in the block's `syntaxRanges`.
@@ -19,7 +20,14 @@ struct MarkdownSpan: Hashable {
 /// attributes can't draw a bullet in place of a hidden `- `, so hiding it would leave a list
 /// that reads as prose, and a hidden `1.` would lose the number.
 struct MarkdownBlock: Hashable {
-    enum Kind: Hashable { case heading(Int), paragraph, listItem, code, table, quote, blank }
+    enum Kind: Hashable {
+        case heading(Int), paragraph, listItem, code, table, quote, blank
+        /// A fenced block whose info string is `fd-visual id=<id> [pending]` (planning v2 §7).
+        /// Parsed like `.code` — same range, same hidden fences — so the plan is still plain
+        /// text; only the kind differs, for the overlay that draws it. `pending` is a
+        /// placeholder for a visual that has been asked for and not yet made.
+        case visual(id: String, pending: Bool)
+    }
     let kind: Kind
     let range: NSRange
     let syntaxRanges: [NSRange]
@@ -170,7 +178,7 @@ struct PlanTheme {
     func font(for kind: MarkdownBlock.Kind) -> NSFont {
         switch kind {
         case .heading(let level): heading(level)
-        case .code: mono
+        case .code, .visual: mono
         case .blank: gap
         case .paragraph, .listItem, .quote, .table: body
         }
@@ -198,7 +206,7 @@ struct PlanTheme {
             para.paragraphSpacing = paragraphSpacing
             para.firstLineHeadIndent = quoteIndent
             para.headIndent = quoteIndent
-        case .code:
+        case .code, .visual:
             para.lineSpacing = 3
             para.firstLineHeadIndent = codePadding
             para.headIndent = codePadding
@@ -286,18 +294,26 @@ enum MarkdownStyler {
             let (s, e) = lines[li]
             if !out.isEmpty || s != start, stop(s) { return (out, s) }
             switch kinds[li] {
-            case .fence:
+            case .fence(let char, let length, let info):
                 // An unclosed fence runs to the end: un-fencing the rest would style code as
                 // headings the moment the human types the opening ```.
+                //
+                // Only a fence of the same character and at least the same length closes it
+                // (CommonMark): a plan that shows a ```markdown example inside a ````-fence
+                // would otherwise end its outer block at the example's first fence line.
                 var close: Int?
                 var j = li + 1
-                while has(j) { if kinds[j] == .fence { close = j; break }; j += 1 }
+                while has(j) {
+                    if case .fence(let c2, let l2, _) = kinds[j], c2 == char, l2 >= length { close = j; break }
+                    j += 1
+                }
                 let last = close ?? lines.count - 1
                 // The opening fence's newline is syntax too, so a hidden fence collapses to a
                 // hairline instead of leaving an empty code line.
                 var syntax = [NSRange(location: s, length: min(e + 1, lines[last].end) - s)]
                 if let close { syntax.append(NSRange(location: lines[close].start, length: lines[close].end - lines[close].start)) }
-                out.append(MarkdownBlock(kind: .code, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: syntax))
+                let kind: MarkdownBlock.Kind = visualInfo(info).map { .visual(id: $0.id, pending: $0.pending) } ?? .code
+                out.append(MarkdownBlock(kind: kind, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: syntax))
                 li = last + 1
             case .blank:
                 out.append(MarkdownBlock(kind: .blank, range: NSRange(location: s, length: e - s), syntaxRanges: []))
@@ -354,7 +370,9 @@ enum MarkdownStyler {
                       spans: spans.sorted { $0.range.location < $1.range.location })
     }
 
-    private enum LineKind: Equatable { case blank, fence, heading(Int, contentStart: Int), table, listItem(contentStart: Int), quote(contentStart: Int), plain }
+    /// `fence` carries what the closing rule and the visual block need: the fence character
+    /// (backtick or tilde), its run length, and the info string after it, trimmed.
+    private enum LineKind: Equatable { case blank, fence(char: UInt16, length: Int, info: String), heading(Int, contentStart: Int), table, listItem(contentStart: Int), quote(contentStart: Int), plain }
 
     private static func lineKind(_ u: [UInt16], _ s: Int, _ e: Int) -> LineKind {
         var i = s
@@ -363,7 +381,14 @@ enum MarkdownStyler {
         let indent = i - s
         let c = u[i]
         // ``` or ~~~, at most three spaces in (four is an indented code line in CommonMark).
-        if indent <= 3, c == 96 || c == 126, i + 2 < e, u[i + 1] == c, u[i + 2] == c { return .fence }
+        if indent <= 3, c == 96 || c == 126, i + 2 < e, u[i + 1] == c, u[i + 2] == c {
+            var run = i + 3
+            while run < e, u[run] == c { run += 1 }
+            var a = run, b = e
+            while a < b, u[a] == 32 || u[a] == 9 { a += 1 }
+            while b > a, u[b - 1] == 32 || u[b - 1] == 9 { b -= 1 }
+            return .fence(char: c, length: run - i, info: String(utf16CodeUnits: Array(u[a..<b]), count: b - a))
+        }
         if indent <= 3, c == 35 {
             var j = i
             while j < e, u[j] == 35 { j += 1 }
@@ -383,6 +408,22 @@ enum MarkdownStyler {
             if j - i <= 9, j + 1 < e, u[j] == 46 || u[j] == 41, u[j + 1] == 32 { return .listItem(contentStart: j + 2) }
         }
         return .plain
+    }
+
+    /// `fd-visual id=<id> [pending]`, or nil for any other info string. A malformed one (no id,
+    /// or an id that is not a usable folder name) is an ordinary code block rather than a visual
+    /// pointing nowhere or somewhere it should not.
+    private static func visualInfo(_ info: String) -> (id: String, pending: Bool)? {
+        guard info.hasPrefix("fd-visual") else { return nil }
+        let words = info.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard words.first == "fd-visual" else { return nil }
+        var id: String?
+        var pending = false
+        for word in words.dropFirst() {
+            if word.hasPrefix("id=") { id = String(word.dropFirst(3)) } else if word == "pending" { pending = true }
+        }
+        guard let id, VisualID.isValid(id) else { return nil }
+        return (id, pending)
     }
 
     /// Inline syntax on one line, by precedence: code spans first (nothing inside them is
@@ -637,7 +678,7 @@ enum MarkdownStyler {
                 storage.addAttribute(.foregroundColor, value: theme.syntax, range: marker)
             }
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
-        case .code:
+        case .code, .visual:
             styleCode(storage, block, whole: whole, para: para, theme)
         }
         for span in block.spans {

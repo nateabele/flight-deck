@@ -223,6 +223,12 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// it answers with data on its `cid` and writes nothing — `intakePlan`'s shape. Sent only
     /// when the detail has `threads == true`.
     case intakeThreadGet(id: UUID, threadID: UUID, since: Int?)
+    /// A byte range of one visual revision's snapshot or bundle (`intake.visual.fetch`), answered
+    /// with `WireFileChunk` as `fileRead` is. A request, not a `FleetCommand`: it answers with
+    /// bytes on its `cid` and writes nothing. Not a `fileRead` either, which is scoped to a tab
+    /// session and a path; this is scoped to an intake and a visual. `part` is a
+    /// `WireVisualPart`. Sent only when the detail has `visuals == true`.
+    case intakeVisualFetch(id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int)
     /// Every paired host and its link state — `flightdeck host ls`. Answered from the Mac's
     /// own registry, so it costs no round trip to any host and works with all of them offline.
     case hostList
@@ -259,6 +265,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case intake, ifNot, checkpoint, changes, name, agent, target
         case path, offset, maxPixel
         case threadID, since
+        case visualID, revision, part
     }
 
     private enum Op: String, Codable {
@@ -273,6 +280,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case intakeDetail = "intake.detail"
         case intakePlan = "intake.plan"
         case intakeThreadGet = "intake.thread.get"
+        case intakeVisualFetch = "intake.visual.fetch"
         case hostList = "host.list"
         case hostInfo = "host.info"
         case accountList = "account.list"
@@ -328,6 +336,14 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .intake)
             try c.encode(threadID, forKey: .threadID)
             try c.encodeIfPresent(since, forKey: .since)
+        case .intakeVisualFetch(let id, let visualID, let revision, let part, let offset, let limit):
+            try c.encode(Op.intakeVisualFetch, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encode(visualID, forKey: .visualID)
+            try c.encode(revision, forKey: .revision)
+            try c.encode(part, forKey: .part)
+            try c.encode(offset, forKey: .offset)
+            try c.encode(limit, forKey: .limit)
         case .hostList:
             try c.encode(Op.hostList, forKey: .op)
         case .hostInfo(let name):
@@ -418,6 +434,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .intakeThreadGet(id: try c.decode(UUID.self, forKey: .intake),
                                     threadID: try c.decode(UUID.self, forKey: .threadID),
                                     since: try c.decodeIfPresent(Int.self, forKey: .since))
+        case .intakeVisualFetch:
+            self = .intakeVisualFetch(id: try c.decode(UUID.self, forKey: .intake),
+                                      visualID: try c.decode(String.self, forKey: .visualID),
+                                      revision: try c.decode(Int.self, forKey: .revision),
+                                      part: try c.decode(String.self, forKey: .part),
+                                      offset: try c.decodeIfPresent(Int64.self, forKey: .offset) ?? 0,
+                                      limit: try c.decode(Int.self, forKey: .limit))
         case .hostList:
             self = .hostList
         case .hostInfo:

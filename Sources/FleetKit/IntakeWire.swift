@@ -107,6 +107,10 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// — the phone's licence to offer Ask. Separate from `steer` for the same reason `choose` is:
     /// an older Mac drops the socket on an op it does not know. nil from such a Mac.
     public var threads: Bool?
+    /// true from a Mac that answers `intake.visual.fetch` — the phone's licence to draw a plan's
+    /// visual blocks. Separate for the same reason: an older Mac drops the socket on an op it does
+    /// not know. nil from such a Mac, and from this one until visuals ship.
+    public var visuals: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -116,7 +120,8 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
         roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
         roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil,
-        structuredQuestions: Bool? = nil, threads: Bool? = nil
+        structuredQuestions: Bool? = nil, threads: Bool? = nil,
+        visuals: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -127,6 +132,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.editRounds = editRounds; self.roundsMenu = roundsMenu; self.roundsLock = roundsLock
         self.structuredQuestions = structuredQuestions
         self.threads = threads
+        self.visuals = visuals
     }
 }
 
@@ -670,17 +676,21 @@ public struct WireIntakePlan: Codable, Equatable, Sendable {
     /// Every thread's diffs still awaiting the human, in full, for the reader's gutter. nil from
     /// a Mac without threads.
     public var pendingDiffs: [WirePendingDiff]?
+    /// The plan's visual blocks, so the reader lays them out before their bytes arrive. nil from
+    /// a Mac without visuals.
+    public var visuals: [WireVisualRef]?
 
     public init(
         checkpoint: Int, roundName: String, editsVersion: String, markdown: String,
         outline: [WireSection] = [], notes: [WireNote] = [], added: [Int]? = nil,
         removed: [WireRemovedBlock]? = nil, threads: [WireThreadSummary]? = nil,
-        pendingDiffs: [WirePendingDiff]? = nil
+        pendingDiffs: [WirePendingDiff]? = nil, visuals: [WireVisualRef]? = nil
     ) {
         self.checkpoint = checkpoint; self.roundName = roundName; self.editsVersion = editsVersion
         self.markdown = markdown; self.outline = outline; self.notes = notes
         self.added = added; self.removed = removed
         self.threads = threads; self.pendingDiffs = pendingDiffs
+        self.visuals = visuals
     }
 }
 

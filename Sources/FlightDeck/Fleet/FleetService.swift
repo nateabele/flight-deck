@@ -731,6 +731,14 @@ final class FleetService: ObservableObject {
             case .success(let page): reply(.intakeThread(cid: cid, page))
             case .failure(let refusal): reply(.err(cid: cid, code: refusal.code))
             }
+        case .intakeVisualFetch(let id, let visualID, let revision, let part, let offset, let limit):
+            // Bytes from `visuals/`, which only ThreadRunner writes; nothing here writes and
+            // nothing enters `FleetSnapshot`. Replies `fileChunk`, as `fileRead` does.
+            switch store.intakeService.phoneVisualFetch(id, visualID: visualID, revision: revision, part: part,
+                                                        offset: offset, limit: limit) {
+            case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
+            case .failure(let refusal): reply(.err(cid: cid, code: refusal.code))
+            }
         case .fileRead(let session, let path, let offset, let limit, let maxPixel):
             // A `Task` for `timeline`'s reason: the read and any image decode run detached,
             // and `reply` lands back here on `queue`. Nothing is written and nothing enters
