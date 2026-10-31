@@ -96,7 +96,8 @@ enum IntakeDetailProjection {
         let tape = service.tapes[id]
         let files = service.seats.files(id)
         let summary = IntakeSummaryProjection.summary(i, tape: tape, seats: files,
-                                                      needsAttention: service.needsAttention(i))
+                                                      needsAttention: service.needsAttention(i),
+                                                      threadsNeedingYou: IntakeThreadProjection.needingYou(intake: id, service: service))
         let load: (Int, String) -> Data? = { service.checkpointFile(id, checkpoint: $0, $1) }
         let progress = tape.map { ProgressSummary.line(intake: i, tape: $0, triage: service.triageActivities[id], loadFile: load) } ?? []
 
