@@ -2500,7 +2500,8 @@ final class SessionStore: ObservableObject {
         // pool's leases sit in one ledger.
         let accounts: AccountResolving? = accountResolver
         let runner = IntakeRunnerController(daemon: daemon, control: daemonControl,
-                                            spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts)
+                                            spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts,
+                                            runnerSecret: controlSecret)
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,

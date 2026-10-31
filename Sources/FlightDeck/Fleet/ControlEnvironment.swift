@@ -111,6 +111,31 @@ enum ControlEnvironment {
         return session
     }
 
+    static let intakeRunnerPrefix = "intake-runner:"
+
+    /// "intake-runner:<UUID>.<hex HMAC-SHA256(utf8("intake-runner:<UUID>"), key: secret)>", UUID = uuidString (uppercase)
+    ///
+    /// A detached planning runner's identity, derived like a tab's so nothing is registered or
+    /// persisted per runner. The prefix is inside the MAC'd bytes, so a tab token (a MAC over the
+    /// bare id) can never be replayed as a runner token or the other way round.
+    static func intakeRunnerToken(for intake: UUID, secret: Data) -> String {
+        let claim = "\(intakeRunnerPrefix)\(intake.uuidString)"
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(claim.utf8), using: SymmetricKey(data: secret))
+        return "\(claim).\(hex(mac))"
+    }
+
+    /// The intake a runner token names, or `nil` if it is not a runner token, is malformed, or
+    /// its MAC is not what this secret would produce. Compares the recomputed token, as
+    /// `session(forToken:)` does.
+    static func intakeRunner(forToken token: String, secret: Data) -> UUID? {
+        guard token.hasPrefix(intakeRunnerPrefix) else { return nil }
+        let rest = token.dropFirst(intakeRunnerPrefix.count)
+        let parts = rest.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2, let intake = UUID(uuidString: String(parts[0])) else { return nil }
+        guard token == intakeRunnerToken(for: intake, secret: secret) else { return nil }
+        return intake
+    }
+
     /// The three variables a launched tab needs to reach this Mac's control socket as itself:
     /// which session it is, where the socket is, and the token that proves it without the CLI
     /// having to ask the user to name a session by hand.

@@ -103,6 +103,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
     private func makeFixture(
         flightdeckPath: (() -> String?)? = nil,
         environment: @escaping () -> [String: String]? = { ["PATH": "/fake/path"] },
+        runnerSecret: Data? = nil,
         now: @escaping () -> Date = Date.init
     ) throws -> Fixture {
         let daemonDir = tempDir.appendingPathComponent("daemon")
@@ -119,6 +120,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
             flightdeckPath: flightdeckPath ?? { "/fake/flightdeck" },
             intakesRoot: intakesRoot,
             environment: environment,
+            runnerSecret: runnerSecret,
             now: now
         )
         return Fixture(
@@ -172,6 +174,18 @@ final class IntakeRunnerControllerTests: XCTestCase {
             ]
         )
         XCTAssertEqual(call.environment, ["PATH": "/fake/path"])
+    }
+
+    /// The runner's `flightdeck` calls present a token for exactly its own intake.
+    func testTheRunnerIsLaunchedWithAnIntakeRunnerCallerToken() throws {
+        let secret = Data(repeating: 3, count: 32)
+        let fixture = try makeFixture(runnerSecret: secret)
+        let id = UUID()
+        expectSuccess(fixture.controller.ensureRunning(id))
+        let env = fixture.spawner.calls[0].environment
+        XCTAssertEqual(env["PATH"], "/fake/path")
+        XCTAssertEqual(env[ControlEnvironment.callerVariable], ControlEnvironment.intakeRunnerToken(for: id, secret: secret))
+        XCTAssertEqual(ControlScope.caller(token: env[ControlEnvironment.callerVariable], secret: secret), .intakeRunner(id))
     }
 
     /// The default `environment` recipe, exercised end to end: repaired PATH, no Claude

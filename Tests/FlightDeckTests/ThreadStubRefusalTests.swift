@@ -63,15 +63,21 @@ final class ThreadStubRefusalTests: XCTestCase {
                                            level: .readOnly, caller: .session(me)))
     }
 
-    /// A runner's caller identity lands now so the scope switches are complete; until Stream B
-    /// gives it its own intake it reaches nothing, at any level — not even a read.
-    func testAnIntakeRunnerCallerIsRefusedEverythingForNow() {
-        let runner = ControlCaller.intakeRunner(UUID())
+    /// A runner's token names one intake, and that is all it reaches: commands and reads about its
+    /// own intake pass at every level, and anything else gets `out_of_scope`.
+    func testAnIntakeRunnerCallerReachesOnlyItsOwnIntake() {
+        let own = UUID()
+        let runner = ControlCaller.intakeRunner(own)
         for level in ControlScopeLevel.allCases {
+            for (command, _) in ThreadWireCodingTests.commands(intake: own, thread: thread) {
+                XCTAssertTrue(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
+            }
             for (command, _) in ThreadWireCodingTests.commands(intake: UUID(), thread: thread) {
                 XCTAssertFalse(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
             }
             XCTAssertFalse(ControlScope.permits(FleetCommand.viewing(session: nil), level: level, caller: runner))
+            XCTAssertTrue(ControlScope.permits(FleetRequest.intakeThreadGet(id: own, threadID: thread, since: nil),
+                                               level: level, caller: runner), "\(level)")
             XCTAssertFalse(ControlScope.permits(FleetRequest.intakeThreadGet(id: UUID(), threadID: thread, since: nil),
                                                 level: level, caller: runner), "\(level)")
             XCTAssertFalse(ControlScope.permits(FleetRequest.hostList, level: level, caller: runner), "\(level)")

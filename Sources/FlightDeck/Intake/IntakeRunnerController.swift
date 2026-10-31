@@ -101,6 +101,10 @@ final class IntakeRunnerController {
     private let intakesRoot: URL
     /// nil means "not ready yet" — see `RunnerStartError.notReady`.
     private let environment: () -> [String: String]?
+    /// The key `FLIGHT_DECK_CALLER` is minted under (`ControlEnvironment.intakeRunnerToken`), so
+    /// the runner's `flightdeck` calls reach only its own intake. `nil` (control socket off, or a
+    /// test) injects no token and the runner is a plain human-shell caller.
+    private let runnerSecret: Data?
     /// Injected so `isRunning`'s heartbeat-freshness check is deterministic under test —
     /// see the doc comment there for why a live socket alone isn't enough.
     private let now: () -> Date
@@ -195,9 +199,11 @@ final class IntakeRunnerController {
         staleGrace: TimeInterval = 2 * heartbeatFreshness,
         orphanGrace: TimeInterval = 30,
         accounts: AccountResolving? = nil,
+        runnerSecret: Data? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.accounts = accounts
+        self.runnerSecret = runnerSecret
         self.daemon = daemon
         self.control = control
         self.spawner = spawner
@@ -333,7 +339,11 @@ final class IntakeRunnerController {
             return .failure(.noFdAbduco)
         }
 
-        guard let environment = environment() else { return .failure(.notReady) }
+        guard var environment = environment() else { return .failure(.notReady) }
+        // Per start, not in the shared environment closure: the token names this intake.
+        if let runnerSecret {
+            environment[ControlEnvironment.callerVariable] = ControlEnvironment.intakeRunnerToken(for: id, secret: runnerSecret)
+        }
         // Resolved last, after every check that can refuse or defer: a `.notReady` retried each
         // tick must not lease (and churn) a pool account per tick.
         if case .failure(let refusal) = resolveAccounts(id) { return .failure(refusal) }
