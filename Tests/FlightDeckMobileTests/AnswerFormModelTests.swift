@@ -118,6 +118,36 @@ final class AnswerFormModelTests: XCTestCase {
         XCTAssertFalse(form.sending(open, inFlight: commands.inFlight))
     }
 
+    /// A lone single-select question: one tap is a whole answer, yet the tap only picks. Nothing
+    /// goes to the Mac until Send, so a thumb landing on an option on its way to the Other field
+    /// sends nothing (the prompt card's rule since e2b55cb0).
+    func testALoneSingleSelectTapPicksAndOnlySendCommits() throws {
+        let c = Commander(), commands = IntakeCommandModel(intake: intake, commander: c)
+        let form = AnswerFormModel(intake: intake)
+        let open = try XCTUnwrap(AnswerFormModel.openRound(detail()))
+        XCTAssertEqual(open.questions.count, 1)
+        let start = form.initialAnswers(open)[0]
+
+        let picked = StructuredQuestionForm.picking("b", in: start, multi: false)
+        XCTAssertEqual(picked.selected, ["b"])
+        XCTAssertTrue(question.isComplete(picked), "Send is ready")
+        XCTAssertTrue(c.commands.isEmpty, "the tap sent nothing")
+        XCTAssertFalse(form.sending(open, inFlight: commands.inFlight))
+
+        let again = StructuredQuestionForm.picking("a", in: picked, multi: false)
+        XCTAssertEqual(again.selected, ["a"], "a second tap changes the pick, still unsent")
+        XCTAssertTrue(c.commands.isEmpty)
+
+        form.send([again], for: open, via: commands, refresh: {})
+        XCTAssertEqual(c.commands, [.intakeAnswer(id: intake, token: try XCTUnwrap(Self.token(c.commands.first)),
+                                                  round: 0, digest: "d1", answers: [again])])
+    }
+
+    private static func token(_ command: FleetCommand?) -> UUID? {
+        if case .intakeAnswer(_, let token, _, _, _)? = command { return token }
+        return nil
+    }
+
     // MARK: drafts
 
     func testTheFormStartsFromThisRoundsKeptAnswersAndASendClearsThem() throws {

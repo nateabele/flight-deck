@@ -103,12 +103,7 @@ struct StructuredQuestionForm: View {
     private func optionRow(_ q: WireStructuredQuestion, _ option: WireOption, multi: Bool, index i: Int) -> some View {
         let on = answers[i].selected.contains(option.id)
         return Button {
-            if multi {
-                if on { answers[i].selected.removeAll { $0 == option.id } } else { answers[i].selected.append(option.id) }
-            } else {
-                answers[i].selected = [option.id]
-                answers[i].other = nil
-            }
+            answers[i] = Self.picking(option.id, in: answers[i], multi: multi)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: Self.symbol(multi: multi, on: on)).foregroundStyle(on ? Color.accentColor : .secondary)
@@ -121,6 +116,21 @@ struct StructuredQuestionForm: View {
         .buttonStyle(.plain)
         .disabled(sending)
         .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// What an option tap does: it only picks, and never sends — not even for a lone single-select
+    /// question, where one tap would be a whole answer. The options sit under the keyboard, and a
+    /// thumb reaching for the Other field kept landing on one and sending an answer nobody meant
+    /// (the prompt card's rule since e2b55cb0). Send is the only commit.
+    static func picking(_ option: String, in a: WireStructuredAnswer, multi: Bool) -> WireStructuredAnswer {
+        var a = a
+        if multi {
+            if a.selected.contains(option) { a.selected.removeAll { $0 == option } } else { a.selected.append(option) }
+        } else {
+            a.selected = [option]
+            a.other = nil
+        }
+        return a
     }
 
     /// "Other…" is a choice of its own: in a single question it clears the pick, so what is sent
