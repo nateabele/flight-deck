@@ -855,6 +855,8 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case intakeDetail(cid: Int, WireIntakeDetail?)
     /// The reply to `FleetRequest.intakePlan`. Unsequenced, like `page`.
     case intakePlan(cid: Int, WireIntakePlan)
+    /// The reply to `FleetRequest.fileRead`. Unsequenced, like `page`: a file is not fleet state.
+    case fileChunk(cid: Int, WireFileChunk)
     /// The reply to `FleetRequest.hostList`. Unsequenced, like `page`: link state is not
     /// fleet state. Only the local CLI asks today; a paired phone that sent
     /// `host.list` would be answered like any other client, so nothing here depends on the
@@ -918,6 +920,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case conversations, hits, session, closed, detail, plan, hosts, info
         case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
         case line, machine, machines, orphans, unreadable, checks, choices, switched
+        case file
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
@@ -928,6 +931,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
         case infraProgress, infraMachine, infraList, infraDoctor, infraDone
         case accountChoices, accountSwitched
+        case fileChunk
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1001,6 +1005,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.intakePlan, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(plan, forKey: .plan)
+        case .fileChunk(let cid, let file):
+            try c.encode(Tag.fileChunk, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(file, forKey: .file)
         case .hostList(let cid, let hosts):
             try c.encode(Tag.hosts, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -1150,6 +1158,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .intakePlan:
                 self = .intakePlan(cid: try c.decode(Int.self, forKey: .cid),
                                    try c.decode(WireIntakePlan.self, forKey: .plan))
+            case .fileChunk:
+                self = .fileChunk(cid: try c.decode(Int.self, forKey: .cid),
+                                  try c.decode(WireFileChunk.self, forKey: .file))
             case .hosts:
                 self = .hostList(cid: try c.decode(Int.self, forKey: .cid),
                                  try c.decode([WireHost].self, forKey: .hosts))
@@ -1231,7 +1242,7 @@ public extension ServerFrame {
         case .ack(let cid), .err(let cid, _, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
-             .intakeDetail(let cid, _), .intakePlan(let cid, _), .hostList(let cid, _),
+             .intakeDetail(let cid, _), .intakePlan(let cid, _), .fileChunk(let cid, _), .hostList(let cid, _),
              .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
              .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),

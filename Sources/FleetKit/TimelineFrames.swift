@@ -241,11 +241,18 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// label or id (`flightdeck account switch`). Answered with `WireAccountSwitchResult`
     /// BEFORE the move starts: the agent that asked is the one the move retires.
     case accountSwitch(session: UUID, target: String)
+    /// Up to `limit` bytes of a file a link in tab `session`'s transcript names, from
+    /// `offset`. `path` is the link as written — absolute, `~/`, or relative, which the Mac
+    /// resolves against the tab's working directory, because that is what the agent that
+    /// wrote the link meant by it. `maxPixel`: the file is an image, and one larger than this
+    /// on its long side comes back re-encoded to fit (`WireFileChunk.downsampled`).
+    case fileRead(session: UUID, path: String, offset: Int64, limit: Int, maxPixel: Int? = nil)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project, peer
         case query, conversationID, projectPath
         case intake, ifNot, checkpoint, changes, name, agent, target
+        case path, offset, maxPixel
     }
 
     private enum Op: String, Codable {
@@ -263,6 +270,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case hostInfo = "host.info"
         case accountList = "account.list"
         case accountSwitch = "account.switch"
+        case fileRead = "file.read"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -320,6 +328,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(Op.accountSwitch, forKey: .op)
             try c.encode(session, forKey: .session)
             try c.encode(target, forKey: .target)
+        case .fileRead(let session, let path, let offset, let limit, let maxPixel):
+            try c.encode(Op.fileRead, forKey: .op)
+            try c.encode(session, forKey: .session)
+            try c.encode(path, forKey: .path)
+            try c.encode(offset, forKey: .offset)
+            try c.encode(limit, forKey: .limit)
+            try c.encodeIfPresent(maxPixel, forKey: .maxPixel)
         case .delegate(let request):
             try request.encode(to: encoder)
         case .infra(let request):
@@ -396,6 +411,12 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .accountSwitch:
             self = .accountSwitch(session: try c.decode(UUID.self, forKey: .session),
                                   target: try c.decode(String.self, forKey: .target))
+        case .fileRead:
+            self = .fileRead(session: try c.decode(UUID.self, forKey: .session),
+                             path: try c.decode(String.self, forKey: .path),
+                             offset: try c.decodeIfPresent(Int64.self, forKey: .offset) ?? 0,
+                             limit: try c.decode(Int.self, forKey: .limit),
+                             maxPixel: try c.decodeIfPresent(Int.self, forKey: .maxPixel))
         }
     }
 }

@@ -143,6 +143,8 @@ public final class FleetConnector: @unchecked Sendable {
     /// The intake tables: one per answer shape, in the shared `cid` space like the rest.
     private var pendingIntakeDetail: [Int: (Result<WireIntakeDetail?, FleetRequestError>) -> Void] = [:]
     private var pendingIntakePlan: [Int: (Result<WireIntakePlan, FleetRequestError>) -> Void] = [:]
+    /// File reads for the phone's file viewer, one table per answer shape like the rest.
+    private var pendingFile: [Int: (Result<WireFileChunk, FleetRequestError>) -> Void] = [:]
     /// A fourth answer type, on the same reasoning `pendingAcks` and `pendingOptions` give:
     /// one table per answer shape, all four sharing the single `cid` space `FleetClient.send`
     /// mints from, so a number is filed in at most one and `apply` tries each in turn.
@@ -341,6 +343,20 @@ public final class FleetConnector: @unchecked Sendable {
         pendingIntakePlan[cid] = completion
     }
 
+    /// Ask for a byte range of a file a transcript links. Same contract as
+    /// `requestIntakeDetail`; a Mac too old to know `file.read` answers `unsupported`.
+    public func requestFile(
+        session: UUID, path: String, offset: Int64, limit: Int, maxPixel: Int?,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.fileRead(
+            session: session, path: path, offset: offset, limit: limit, maxPixel: maxPixel))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingFile[cid] = completion
+    }
+
     /// Ask the Mac which addresses it can currently be reached on. Same contract as
     /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is
     /// nothing to ask.
@@ -472,6 +488,14 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingIntakePlan.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveFile(
+        _ cid: Int, with result: Result<WireFileChunk, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingFile.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -727,6 +751,9 @@ public final class FleetConnector: @unchecked Sendable {
         case .intakePlan(let cid, let plan):
             resolveIntakePlan(cid, with: .success(plan))
             return
+        case .fileChunk(let cid, let file):
+            resolveFile(cid, with: .success(file))
+            return
         case .err(let cid, let code, _):
             // Commands first, then requests. The tables share one `cid` space
             // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
@@ -747,6 +774,10 @@ public final class FleetConnector: @unchecked Sendable {
             }
             if pendingIntakePlan[cid] != nil {
                 resolveIntakePlan(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingFile[cid] != nil {
+                resolveFile(cid, with: .failure(.server(code: code)))
                 return
             }
             if pendingEndpoints[cid] != nil {
@@ -1016,6 +1047,9 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingIntakePlan = pendingIntakePlan
         pendingIntakePlan.removeAll()
         for completion in outstandingIntakePlan.values { completion(.failure(.disconnected)) }
+        let outstandingFile = pendingFile
+        pendingFile.removeAll()
+        for completion in outstandingFile.values { completion(.failure(.disconnected)) }
         // And the endpoint refresh. Added the moment the table was, per the rule in
         // docs/NETWORKING.md: a client whose socket dies with a request outstanding waits
         // forever otherwise.

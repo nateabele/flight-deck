@@ -30,6 +30,9 @@ struct SelectableProseView: UIViewRepresentable {
     var serif = false
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// A `UITextView` opens its links itself and never asks SwiftUI, so the `openURL` a
+    /// screen installed (`FileLinkRouting`) is carried in by hand for file links.
+    @Environment(\.openURL) private var openURL
 
     func makeUIView(context: Context) -> UITextView {
         let view = TextView()
@@ -55,6 +58,7 @@ struct SelectableProseView: UIViewRepresentable {
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.actions = actions
         context.coordinator.serif = serif
+        context.coordinator.openURL = openURL
         context.coordinator.apply(markdown, to: view)
     }
 
@@ -92,6 +96,7 @@ struct SelectableProseView: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var actions: [ProseAction]
         var serif: Bool
+        var openURL: OpenURLAction?
 
         /// The last markdown parsed, and what it parsed to. `sizeThatFits` and `updateUIView`
         /// both need the attributed string and SwiftUI calls them in either order and more than
@@ -161,6 +166,18 @@ struct SelectableProseView: UIViewRepresentable {
         /// reaching into it to find Copy is a lookup that silently does nothing the first time
         /// Apple renames it. Appended, they are the last items in the bar — which on a selection
         /// with the standard actions is the position immediately after Copy anyway.
+        /// A link naming a local file goes to the screen's `openURL`, which pushes the file
+        /// viewer. Every other link keeps the text view's own action, exactly as before.
+        func textView(
+            _ textView: UITextView,
+            primaryActionFor textItem: UITextItem,
+            defaultAction: UIAction
+        ) -> UIAction? {
+            guard case .link(let url) = textItem.content, LocalFileLink(url) != nil, let openURL
+            else { return defaultAction }
+            return UIAction { _ in openURL(url) }
+        }
+
         func textView(
             _ textView: UITextView,
             editMenuForTextIn range: NSRange,

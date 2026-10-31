@@ -793,6 +793,21 @@ page.
     the Mac's config after opening the phone's screen, then Save: "The plan changed — reopen it and
     try again.").
 
+104. **File links open in the app.** In a conversation, tap a link to a local file — a relative
+    `[HANDOFF](docs/HANDOFF.md)`, an absolute `/Users/…/plan.md`, a `file://` URL, and a
+    `Foo.swift:42` / `#L42` link — in prose, in a tool result and on an item's detail screen.
+    Each pushes a viewer titled with the file name, its full Mac path and size under the title.
+    Markdown reads like the plan reader (serif prose, code in monospace, tables as grids) with no
+    notes column or passage menu, and front matter shows as a YAML block; a relative link inside
+    it opens the file beside it. A `.txt`/`.log` reads in the body face with open line spacing; a
+    source file in monospace, scrolled to and washing the linked line. A big log draws its first
+    screen at once and buffers on as you scroll, stopping at 16 MB with "Showing the first …". A
+    large photo or screenshot arrives quickly and the caption reads "6000 × 4000, shown at …";
+    pinch and double-tap zoom. A web link, a directory link (`docs/superpowers/specs`) and a `.zip`
+    keep their old behaviour. Against a Mac from before this the viewer says "Update Flight Deck
+    on your Mac to open files from the phone." Wrong: a spinner that never ends, a split character (`�`) mid-file, or the whole file fetched
+    before anything draws.
+
 ## A second checklist: the iOS plumbing
 
 The hundred and two items above test the *feature* — that pairing, replication, resume, revocation,

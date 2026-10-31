@@ -6882,6 +6882,17 @@ final class SessionStore: ObservableObject {
         return .file(agent: session.agent, url: url)
     }
 
+    /// The directories a relative path in tab `id`'s transcript can mean, most likely first:
+    /// where the agent is working now (a worktree it followed into), then where the tab was
+    /// opened. `nil` for a tab that is gone. A read for `FileReadService`; changes nothing.
+    func fileBases(of id: UUID) -> [String]? {
+        guard let at = locate(id) else { return nil }
+        let session = repos[at.repo].sessions[at.session]
+        var bases = [session.transcriptDirectory]
+        if session.workingDirectory != session.transcriptDirectory { bases.append(session.workingDirectory) }
+        return bases
+    }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title

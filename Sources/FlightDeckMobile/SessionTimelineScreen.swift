@@ -305,12 +305,14 @@ struct SessionTimelineScreen: View {
         }
         .navigationTitle(session?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
+        .opensFileLinks(session: model.sessionID)
         .navigationDestination(for: TimelineItem.self) { item in
             TimelineItemDetailScreen(
                 item: item,
                 result: Self.pairedResult(for: item, in: model.feed.items),
                 agent: session?.agent
             )
+            .opensFileLinks(session: model.sessionID)
         }
         // A second `.navigationDestination`, keyed on presence rather than on a value: this
         // is a `PlanReviewModel` and the `for:` form above needs a `Hashable` value to match a

@@ -629,6 +629,7 @@ final class CLIRunner {
             case .newSessionOptions(_, let options): self.out(CLIOutput.json(options))
             case .intakeDetail(_, let detail): self.out(CLIOutput.json(detail))
             case .intakePlan(_, let plan): self.out(CLIOutput.json(plan))
+            case .fileChunk(_, let file): self.out(CLIOutput.json(file))
             case .macEndpoints(_, let endpoints): self.out(CLIOutput.json(endpoints))
             case .recentlyClosed(_, let closed): self.out(CLIOutput.json(closed))
             case .conversations(_, let catalogue): self.out(CLIOutput.json(catalogue))

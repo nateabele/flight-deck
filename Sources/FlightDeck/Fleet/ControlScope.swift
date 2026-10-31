@@ -130,6 +130,9 @@ enum ControlScope {
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
              .intakeDetail, .intakePlan:
             return true
+        case .fileRead:
+            // A read, and of nothing a local caller cannot already `cat` from its own shell.
+            return true
         case .hostList, .hostInfo:
             // Reads too: `host.info` crosses to the host, but asks it only for facts and
             // changes nothing there or here. An agent in any tab may need the toolchain.

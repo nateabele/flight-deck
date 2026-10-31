@@ -82,6 +82,7 @@ final class FleetService: ObservableObject {
     /// store, and because there is exactly one of it — a request carries its own session id,
     /// so nothing about it is per-connection.
     private let timeline: TimelineService
+    private let files: FileReadService
     /// Carries out a phone's answer to a blocked dialog. Held here rather than built per
     /// command for the reason `timeline` is: it holds the store, and there is exactly one of
     /// it — a command carries its own session id, so nothing about it is per-connection.
@@ -190,6 +191,7 @@ final class FleetService: ObservableObject {
         }
         self.socketLog = SocketLog(replicator.log)
         self.timeline = TimelineService(store: store)
+        self.files = FileReadService(store: store)
         let prompts = PromptService(store: store)
         self.prompts = prompts
         // Built on the same `PromptService`, deliberately: what the log says is open has to be
@@ -718,6 +720,20 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "unknown_checkpoint"))
             }
             reply(.intakePlan(cid: cid, plan))
+        case .fileRead(let session, let path, let offset, let limit, let maxPixel):
+            // A `Task` for `timeline`'s reason: the read and any image decode run detached,
+            // and `reply` lands back here on `queue`. Nothing is written and nothing enters
+            // `FleetSnapshot`.
+            Task { @MainActor in
+                switch await self.files.read(
+                    session: session, path: path, offset: offset, limit: limit, maxPixel: maxPixel
+                ) {
+                case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
+                case .failure(let code):
+                    Self.logger.info("check=file_read code=\(code.code, privacy: .public)")
+                    reply(.err(cid: cid, code: code.code))
+                }
+            }
         case .recentlyClosed:
             // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
             // the stack is in memory on this actor, so there is nothing to hop a `Task`

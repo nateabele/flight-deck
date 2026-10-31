@@ -234,6 +234,8 @@ struct FleetListScreen: View {
             .onChange(of: model.fleet) { _, _ in refreshSearchCandidates() }
             .onChange(of: model.conversationCatalogue) { _, _ in refreshSearchCandidates() }
         }
+        // Every screen under the stack can open a transcript's file links — see `FileLinkRouting`.
+        .environment(\.fileReader, model)
     }
 
     private func refreshSearchCandidates() {
