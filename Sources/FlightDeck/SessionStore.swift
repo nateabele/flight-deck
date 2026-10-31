@@ -557,10 +557,21 @@ final class SessionStore: ObservableObject {
         // run as. A restored tab on another account can differ in padding only: its command is
         // resolved against its own account in `launchEnvironment`.
         guard agent == .claude else { return options }
+        let account = preferences?.account(for: .claude, project: project)
         return ClaudePluginLocation.applying(
             to: options, bundle: .main,
-            userStatusLine: claudeUserStatusLine(project: project, account: preferences?.account(for: .claude, project: project)),
+            userStatusLine: claudeUserStatusLine(project: project, account: account),
+            theme: claudeTheme(project: project, account: account),
             projectDirectory: URL(fileURLWithPath: project, isDirectory: true))
+    }
+
+    /// The theme a claude tab here runs under, so its colours follow the terminal's light/dark
+    /// palette (see `ClaudeStatusLine.theme`). Like the status line, from the user's flags.
+    private func claudeTheme(project: String, account: AgentAccount?) -> String? {
+        var flags = FlagSet()
+        if case .claude(let f)? = preferences?.resolvedOptions(for: .claude, project: project) { flags = f }
+        return ClaudeStatusLine.theme(flags: flags, configHome: account?.home ?? AgentID.claude.builtInHome,
+                                      projectDirectory: URL(fileURLWithPath: project, isDirectory: true))
     }
 
     /// The status line a claude tab would show without Flight Deck: the command our wrapper must

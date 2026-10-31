@@ -39,15 +39,7 @@ enum ClaudeStatusLine {
     /// wrapper as its own "user command" would recurse once per refresh until claude killed it.
     static func user(flags: FlagSet, configHome: URL, projectDirectory: URL,
                      home: String = NSHomeDirectory()) -> User? {
-        var sources: [[String: Any]?] = []
-        if case .value(let raw)? = flags.values["--settings"] {
-            sources.append(settingsObject(flagValue: raw, projectDirectory: projectDirectory, home: home))
-        }
-        let project = projectDirectory.appendingPathComponent(".claude", isDirectory: true)
-        sources.append(jsonObject(at: project.appendingPathComponent("settings.local.json")))
-        sources.append(jsonObject(at: project.appendingPathComponent("settings.json")))
-        sources.append(jsonObject(at: configHome.appendingPathComponent("settings.json")))
-        for case let settings? in sources {
+        for settings in sources(flags: flags, configHome: configHome, projectDirectory: projectDirectory, home: home) {
             guard let line = settings["statusLine"] as? [String: Any],
                   (line["type"] as? String ?? "command") == "command",
                   let command = line["command"] as? String,
@@ -61,7 +53,47 @@ enum ClaudeStatusLine {
         return nil
     }
 
-    /// Sets `--settings` to carry our status line. A `--settings` the user already passed is
+    /// The theme a claude tab runs under, or `nil` to leave the user's own in force.
+    ///
+    /// Flight Deck's terminal swaps its palette with the system appearance (`GhosttyApp`), but
+    /// claude's `dark` and `light` themes paint in fixed true colour: under `dark` on the light
+    /// palette, body text, a diff's unchanged lines and a question's text are white on white, and
+    /// the user's own messages sit on a near-black band. `auto` reads the terminal's background
+    /// at start and follows each change after it (claude turns on mode 2031, which libghostty
+    /// answers), so it is the one theme that is right in both appearances.
+    ///
+    /// Left alone: a theme in the user's own `--settings` (that flag is set for Flight Deck, so
+    /// whatever it says was chosen here), and the ANSI and colour-blind themes from any source —
+    /// the ANSI ones draw from the palette and so already follow it, and the colour-blind ones
+    /// have no `auto` counterpart to trade them for.
+    static func theme(flags: FlagSet, configHome: URL, projectDirectory: URL,
+                      home: String = NSHomeDirectory()) -> String? {
+        if case .value(let raw)? = flags.values["--settings"],
+           settingsObject(flagValue: raw, projectDirectory: projectDirectory, home: home)?["theme"] != nil {
+            return nil
+        }
+        let chosen = sources(flags: FlagSet(), configHome: configHome, projectDirectory: projectDirectory, home: home)
+            .lazy.compactMap { $0["theme"] as? String }.first
+        if let chosen, chosen.hasSuffix("-ansi") || chosen.hasSuffix("-daltonized") { return nil }
+        return "auto"
+    }
+
+    /// The settings claude reads, highest precedence first: a `--settings` flag the user set, the
+    /// project's `.claude/settings.local.json`, its `.claude/settings.json`, then the account's
+    /// `settings.json`. Unreadable sources are dropped.
+    private static func sources(flags: FlagSet, configHome: URL, projectDirectory: URL, home: String) -> [[String: Any]] {
+        var sources: [[String: Any]?] = []
+        if case .value(let raw)? = flags.values["--settings"] {
+            sources.append(settingsObject(flagValue: raw, projectDirectory: projectDirectory, home: home))
+        }
+        let project = projectDirectory.appendingPathComponent(".claude", isDirectory: true)
+        sources.append(jsonObject(at: project.appendingPathComponent("settings.local.json")))
+        sources.append(jsonObject(at: project.appendingPathComponent("settings.json")))
+        sources.append(jsonObject(at: configHome.appendingPathComponent("settings.json")))
+        return sources.compactMap { $0 }
+    }
+
+    /// Sets `--settings` to carry our status line, and `theme` when one is given (see `theme(...)`). A `--settings` the user already passed is
     /// merged into, never replaced: their other settings keep applying, and their status line
     /// (if any) is what `user(...)` hands the wrapper to run. A path value is read and folded in
     /// inline, because claude takes one `--settings` and a second one would drop the first.
@@ -69,7 +101,7 @@ enum ClaudeStatusLine {
     /// When the user's value cannot be read as a JSON object — a missing file, bad JSON — the
     /// flags are returned unchanged: claude would refuse that value anyway, and its error is the
     /// user's to see. Replacing it would hide their mistake behind our working status line.
-    static func injecting(into flags: FlagSet, wrapper: URL, user: User?, projectDirectory: URL?,
+    static func injecting(into flags: FlagSet, wrapper: URL, user: User?, theme: String? = nil, projectDirectory: URL?,
                           home: String = NSHomeDirectory()) -> FlagSet {
         var settings: [String: Any] = [:]
         if case .value(let raw)? = flags.values["--settings"] {
@@ -87,6 +119,7 @@ enum ClaudeStatusLine {
         if let padding = user?.padding { line["padding"] = padding }
         if let hide = user?.hideVimModeIndicator { line["hideVimModeIndicator"] = hide }
         settings["statusLine"] = line
+        if let theme, settings["theme"] == nil { settings["theme"] = theme }
         // `.withoutEscapingSlashes`: the value is typed into the tab's shell, and under fish a
         // backslash inside single quotes is an escape character. Every path has slashes, so
         // JSONSerialization's default `\/` would put a backslash in every launch line.
