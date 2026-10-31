@@ -31,6 +31,12 @@ public protocol CommandRunner: Sendable {
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
              onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult
+
+    /// The same, keeping at most `stdoutCapture` bytes of stdout in the result. The sink still
+    /// sees every byte; the rest is drained and dropped, so a flood costs no memory.
+    func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+             processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+             onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?) async throws -> CommandResult
 }
 
 extension CommandRunner {
@@ -43,6 +49,16 @@ extension CommandRunner {
                                    processGroup: processGroup, onSpawn: onSpawn)
         if let onStdout, !result.stdout.isEmpty { onStdout(result.stdout) }
         return result
+    }
+
+    /// A fake has nothing to bound, so it truncates after the fact.
+    public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                    processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+                    onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?) async throws -> CommandResult {
+        let result = try await run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                                   processGroup: processGroup, onSpawn: onSpawn, onStdout: onStdout)
+        guard let stdoutCapture, result.stdout.count > stdoutCapture else { return result }
+        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode)
     }
 
     /// The common case: no process group, nobody needs the pid while it runs.
@@ -77,12 +93,24 @@ public struct SystemCommandRunner: CommandRunner {
     public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
                     onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult {
+        try await run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                      processGroup: processGroup, onSpawn: onSpawn, onStdout: onStdout, stdoutCapture: nil)
+    }
+
+    public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                    processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+                    onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?) async throws -> CommandResult {
         if processGroup {
             return try await runInNewProcessGroup(executable: executable, arguments: arguments, cwd: cwd,
-                                                  environment: environment, onSpawn: onSpawn, onStdout: onStdout)
+                                                  environment: environment, onSpawn: onSpawn, onStdout: onStdout,
+                                                  stdoutCapture: stdoutCapture)
         }
-        return try await runViaFoundationProcess(executable: executable, arguments: arguments, cwd: cwd,
-                                                  environment: environment, onSpawn: onSpawn, onStdout: onStdout)
+        // The Process path reads with Foundation and is not bounded while it runs; nothing that
+        // needs a bound (a sandboxed generator) uses it, so it only truncates the result.
+        let result = try await runViaFoundationProcess(executable: executable, arguments: arguments, cwd: cwd,
+                                                       environment: environment, onSpawn: onSpawn, onStdout: onStdout)
+        guard let stdoutCapture, result.stdout.count > stdoutCapture else { return result }
+        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode)
     }
 
     /// Reads `handle` to EOF on the calling thread, handing each chunk to `sink` as it lands.
@@ -141,12 +169,25 @@ public struct SystemCommandRunner: CommandRunner {
         return (all, dropped)
     }
 
-    /// SIGKILLs every process that holds the write end of one of our pipes, then waits (up to a
-    /// second) for them to go. A holder that left the process group is out of reach of every
-    /// group signal; libproc is the only place that knows it has our pipe. A writer's
-    /// `pipe_handle` is our read end's `pipe_peerhandle`. Processes we may not inspect (another
-    /// user's, setuid) cannot hold a descriptor we created, so skipping them misses nothing.
-    static func killPipeWriters(of readFDs: [Int32]) {
+    /// XNU's `PIPE_EOF` in `pipe_status`: set on a read end once its last write end has closed,
+    /// whoever held it, even with bytes still buffered (measured). It answers "can a writer
+    /// still exist" for processes the libproc scan cannot inspect, too.
+    private static let pipeEOF: Int32 = 0x80
+
+    static func noWriterLeft(_ readFDs: [Int32]) -> Bool {
+        let infoSize = Int32(MemoryLayout<pipe_fdinfo>.size)
+        return readFDs.allSatisfy { fd in
+            var info = pipe_fdinfo()
+            // Unknown counts as "a writer may be alive": the caller then bounds its wait.
+            guard proc_pidfdinfo(getpid(), fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize else { return false }
+            return info.pipeinfo.pipe_status & pipeEOF != 0
+        }
+    }
+
+    /// Every other process holding a write end of one of our pipes. A holder that left the
+    /// process group is out of reach of every group signal; libproc is the only place that
+    /// knows it has our pipe. A writer's `pipe_handle` is our read end's `pipe_peerhandle`.
+    static func pipeWriters(of readFDs: [Int32]) -> Set<pid_t> {
         let infoSize = Int32(MemoryLayout<pipe_fdinfo>.size)
         var peers = Set<UInt64>()
         for fd in readFDs {
@@ -155,14 +196,14 @@ public struct SystemCommandRunner: CommandRunner {
                 peers.insert(info.pipeinfo.pipe_peerhandle)
             }
         }
-        guard !peers.isEmpty else { return }
+        guard !peers.isEmpty else { return [] }
         let me = getpid()
         let capacity = proc_listallpids(nil, 0)
-        guard capacity > 0 else { return }
+        guard capacity > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
         let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         let fdStride = MemoryLayout<proc_fdinfo>.stride
-        var writers: [pid_t] = []
+        var writers = Set<pid_t>()
         for pid in pids.prefix(max(0, Int(count))) where pid > 0 && pid != me {
             let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
             guard bytes > 0 else { continue }
@@ -173,14 +214,38 @@ public struct SystemCommandRunner: CommandRunner {
                 var info = pipe_fdinfo()
                 if proc_pidfdinfo(pid, entry.proc_fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize,
                    peers.contains(info.pipeinfo.pipe_handle) {
-                    writers.append(pid)
+                    writers.insert(pid)
                     break
                 }
             }
         }
-        for pid in writers { kill(pid, SIGKILL) }
-        let deadline = Date().addingTimeInterval(1)
-        while writers.contains(where: { kill($0, 0) == 0 }), Date() < deadline { usleep(10_000) }
+        return writers
+    }
+
+    /// SIGTERM to every holder of our pipes, half a second for them to close (an MCP server or
+    /// an ssh master shuts down cleanly on it), then SIGKILL to whatever still holds one, found
+    /// by a fresh scan so a holder forked meanwhile is caught too. `killed` counts the processes
+    /// signalled; `writerAlive` is true only if a write end is still open afterwards (a holder
+    /// this user may not inspect or kill), the one case in which EOF cannot be awaited.
+    static func killPipeWriters(of readFDs: [Int32]) -> (killed: Int, writerAlive: Bool) {
+        func waitForEOF(_ seconds: Double) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !noWriterLeft(readFDs), Date() < deadline { usleep(10_000) }
+        }
+        var signalled = pipeWriters(of: readFDs)
+        for pid in signalled { kill(pid, SIGTERM) }
+        if !signalled.isEmpty { waitForEOF(0.5) }
+        if !noWriterLeft(readFDs) {
+            let stubborn = pipeWriters(of: readFDs)
+            for pid in stubborn { kill(pid, SIGKILL) }
+            signalled.formUnion(stubborn)
+            if !stubborn.isEmpty { waitForEOF(1) }
+        }
+        return (signalled.count, !noWriterLeft(readFDs))
+    }
+
+    static func killedHoldersNote(_ count: Int) -> String {
+        "\n[killed \(count) background processes still holding output]"
     }
 
     // MARK: - Foundation.Process path (moved from the app's SystemHeadlessRunner)
@@ -285,7 +350,7 @@ public struct SystemCommandRunner: CommandRunner {
 
     private func runInNewProcessGroup(
         executable: String, arguments: [String], cwd: URL, environment: [String: String],
-        onSpawn: (@Sendable (Int32) -> Void)?, onStdout: (@Sendable (Data) -> Void)?
+        onSpawn: (@Sendable (Int32) -> Void)?, onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?
     ) async throws -> CommandResult {
         try Task.checkCancellation()
 
@@ -366,7 +431,7 @@ public struct SystemCommandRunner: CommandRunner {
                 let out = Buffer(), err = Buffer(), errDropped = Latch()
                 drains.enter()
                 DispatchQueue.global().async {
-                    out.data = Self.pollingDrain(outPipe.readFD, keep: nil, sink: onStdout, abandon: abandon).data
+                    out.data = Self.pollingDrain(outPipe.readFD, keep: stdoutCapture, sink: onStdout, abandon: abandon).data
                     drains.leave()
                 }
                 drains.enter()
@@ -396,12 +461,16 @@ public struct SystemCommandRunner: CommandRunner {
                     // still holds a write end is an orphan of this run and is killed, so the
                     // drains see EOF. Our read ends stay open until then: the scan matches the
                     // holders' handles against them.
+                    var killed = 0
                     if drains.wait(timeout: .now() + Self.drainGrace) == .timedOut {
-                        Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD])
-                        if drains.wait(timeout: .now() + 0.5) == .timedOut {
-                            abandon.set()
-                            drains.wait()
-                        }
+                        let outcome = Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD])
+                        killed = outcome.killed
+                        // With no writer left EOF is certain, so the drains finish on their own
+                        // however slow the sink is: cutting them off here lost the tail of a
+                        // slow sink's stream (a round's final JSON line). Only a writer still
+                        // alive, one we could not see or kill, can hold them forever.
+                        if outcome.writerAlive { abandon.set() }
+                        drains.wait()
                     }
                     close(outPipe.readFD)
                     close(errPipe.readFD)
@@ -410,6 +479,9 @@ public struct SystemCommandRunner: CommandRunner {
                         return
                     }
                     if errDropped.isSet { err.data.append(Data(Self.stderrTruncatedNote.utf8)) }
+                    // A holder killed above may have been a same-group child with late output
+                    // still to write; its loss is never silent.
+                    if killed > 0 { err.data.append(Data(Self.killedHoldersNote(killed).utf8)) }
                     // `WIFSIGNALED`/`WTERMSIG`/`WEXITSTATUS` are `#define`s, not C functions —
                     // Swift can't call them, so this is their BSD wait-status layout by hand.
                     let low7 = status & 0x7f

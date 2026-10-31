@@ -230,6 +230,8 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 5, "the run waited on the escaped holder")
         XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "started\n")
         XCTAssertEqual(r.exitCode, 0)
+        // A same-group child's lost late output is never silent.
+        XCTAssertTrue(r.stderr.hasSuffix("\n[killed 1 background processes still holding output]"), r.stderr)
         var waited = 0
         while Self.alive(marker), waited < 100 { try await Task.sleep(nanoseconds: 20_000_000); waited += 1 }
         XCTAssertFalse(Self.alive(marker), "the escaped pipe holder is still running")
@@ -244,6 +246,69 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "done")
         XCTAssertLessThanOrEqual(r.stderr.utf8.count, SystemCommandRunner.stderrCapture + 64)
         XCTAssertTrue(r.stderr.hasSuffix(SystemCommandRunner.stderrTruncatedNote), String(r.stderr.suffix(80)))
+    }
+
+    /// The escapee floods stdout through the grace and the kill. Only `stdoutCapture` bytes
+    /// may be kept: before the cap, an escaped `yes` pushed about 1.8 GB into the runner.
+    func testEscapedFloodKeepsOnlyTheCapture() async throws {
+        let keep = 1 << 20
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec \"/usr/bin/yes\"'"
+        let r = try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script],
+                                                    cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+                                                    processGroup: true, onSpawn: nil, onStdout: nil, stdoutCapture: keep)
+        XCTAssertLessThanOrEqual(r.stdout.count, keep)
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        print("[measure] testEscapedFloodKeepsOnlyTheCapture kept=\(r.stdout.count) peakRSS=\(usage.ru_maxrss / (1 << 20)) MiB")
+    }
+
+    /// No holder, but a sink slower than the grace: the leader is long gone, and the pipe still
+    /// has bytes in it. With no writer left EOF is certain, so nothing may be abandoned.
+    func testSlowSinkWithNoHolderReceivesEveryByte() async throws {
+        let received = Received()
+        let r = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "printf a; sleep 0.2; head -c 10000 /dev/zero"],
+            cwd: URL(fileURLWithPath: "/tmp"), environment: env, processGroup: true, onSpawn: nil,
+            onStdout: { chunk in
+                if received.add(chunk) == 1 { Thread.sleep(forTimeInterval: 2.5) }
+            })
+        XCTAssertEqual(r.stdout.count, 10_001)
+        XCTAssertEqual(received.bytes, 10_001)
+        XCTAssertFalse(r.stderr.contains("[killed"), r.stderr)
+    }
+
+    /// The holder is asked first: SIGTERM, which an MCP server or an ssh master uses to shut
+    /// down cleanly. The trap's marker proves TERM arrived and was handled.
+    func testHolderGetsSIGTERMFirst() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { Self.pkill(marker) }
+        let termed = FileManager.default.temporaryDirectory.appendingPathComponent("fd-termed-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: termed) }
+        let inner = "trap \"echo term > \(termed.path); exit 0\" TERM; /bin/sleep \(marker) & wait"
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec \"/bin/sh\", \"-c\", $ARGV[0]' '\(inner)'"
+        let rescue = Task { try await Task.sleep(nanoseconds: 15_000_000_000); Self.pkill(marker) }
+        defer { rescue.cancel() }
+        let r = try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script],
+                                                    cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+                                                    processGroup: true, onSpawn: nil)
+        XCTAssertEqual(try? String(contentsOf: termed, encoding: .utf8), "term\n", "the holder was not sent SIGTERM first")
+        XCTAssertTrue(r.stderr.contains("[killed "), r.stderr)
+    }
+
+    /// A holder that ignores SIGTERM gets SIGKILL half a second later.
+    func testTermIgnoringHolderIsKilled() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { Self.pkill(marker) }
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; $SIG{TERM} = \"IGNORE\"; exec \"/bin/sleep\", \"\(marker)\"'"
+        let rescue = Task { try await Task.sleep(nanoseconds: 15_000_000_000); Self.pkill(marker) }
+        defer { rescue.cancel() }
+        let start = Date()
+        let r = try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script],
+                                                    cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+                                                    processGroup: true, onSpawn: nil)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        XCTAssertFalse(Self.alive(marker), "a TERM-ignoring holder survived")
+        XCTAssertTrue(r.stderr.hasSuffix("\n[killed 1 background processes still holding output]"), r.stderr)
     }
 
     static func pgrep(_ marker: String) -> Int32 {
@@ -305,4 +370,13 @@ final class GraphReaderTests: XCTestCase {
             XCTAssertEqual(failure.detail, "no such project")
         }
     }
+}
+
+private final class Received: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private var total = 0
+    /// Returns the call number, from 1.
+    func add(_ chunk: Data) -> Int { lock.lock(); defer { lock.unlock() }; calls += 1; total += chunk.count; return calls }
+    var bytes: Int { lock.lock(); defer { lock.unlock() }; return total }
 }
