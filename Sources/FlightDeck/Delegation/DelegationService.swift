@@ -309,6 +309,10 @@ final class DelegationService {
             // about, so every answer would be wrong; refused like a scoped write is.
             return reply(.err(cid: cid, code: "out_of_scope",
                               message: "this tab's control token is not valid — reopen the tab and retry"))
+        case .intakeRunner:
+            // A planning runner delegates nothing; `ControlScope` already refuses it, and this
+            // arm keeps that true if a caller ever reaches here some other way.
+            return reply(.err(cid: cid, code: "out_of_scope", message: "a planning runner cannot delegate work"))
         }
         Task { @MainActor in
             do {

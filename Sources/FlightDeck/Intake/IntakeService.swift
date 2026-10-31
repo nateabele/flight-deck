@@ -1267,33 +1267,35 @@ final class IntakeService: ObservableObject {
 
     /// Phone command tokens already accepted, per intake — a repeat is acked without being
     /// applied twice (a retry after a lost ack must not queue a second Step). Last 16 kept.
-    private var phoneTokens: [UUID: [UUID]] = [:]
+    /// This and the helpers below are internal, not private, so the phone's thread ops
+    /// (`IntakeService+PhoneThreads`) share one token memory and one refusal log with these.
+    var phoneTokens: [UUID: [UUID]] = [:]
     static let maxRememberedPhoneTokens = 16
 
     /// Whether `token` was already accepted for `id`. Checked BEFORE validating: a retry after
     /// a lost ack meets the state its first delivery changed — the note it removed is gone, the
     /// tape it paused is paused — and validating that would refuse a command that in fact landed.
-    private func alreadyAccepted(_ token: UUID, for id: UUID) -> Bool {
+    func alreadyAccepted(_ token: UUID, for id: UUID) -> Bool {
         phoneTokens[id]?.contains(token) == true
     }
 
     /// Remembers `token` as accepted — only once the command passed validation, so a refusal
     /// does not burn the token and a corrected retry with the same one still applies.
-    private func accept(_ token: UUID, for id: UUID) {
+    func accept(_ token: UUID, for id: UUID) {
         var seen = phoneTokens[id, default: []]
         seen.append(token)
         if seen.count > Self.maxRememberedPhoneTokens { seen.removeFirst(seen.count - Self.maxRememberedPhoneTokens) }
         phoneTokens[id] = seen
     }
 
-    private func refuse(_ code: String, _ id: UUID) -> String {
+    func refuse(_ code: String, _ id: UUID) -> String {
         Self.logger.info("check=\(code, privacy: .public) intake=\(id, privacy: .public)")
         return code
     }
 
     /// The intake a phone command may act on, or the refusal code: `send` silently drops a
     /// command for an intake that has left shaping, so the phone is told instead.
-    private func notShaping(_ id: UUID) -> String? {
+    func notShaping(_ id: UUID) -> String? {
         guard let i = intake(id) else { return refuse("unknown_intake", id) }
         return i.state == .shaping ? nil : refuse("intake_moved_on", id)
     }
@@ -2522,11 +2524,15 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Plumbing
 
-    private func tapeStore(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: store.directory(for: id)) }
+    func tapeStore(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: store.directory(for: id)) }
+
+    /// `<intake>/threads/`, ThreadRunner's alone to write (R5, R8); the app reads it and appends
+    /// only to its `commands.jsonl` (`ThreadCommandStore`).
+    func threadsDirectory(_ id: UUID) -> URL { ThreadCommandStore(intakeDirectory: store.directory(for: id)).threadsDirectory }
 
     private var graphReader: IntakeGraphReader { IntakeGraphReader(runner: processRunner, brPath: brPath) }
 
-    private func intake(_ id: UUID) -> Intake? { intakes.first { $0.id == id } }
+    func intake(_ id: UUID) -> Intake? { intakes.first { $0.id == id } }
 
     private func start(_ id: UUID, _ body: @escaping (IntakeService) async -> Void) {
         tasks[id]?.task.cancel()

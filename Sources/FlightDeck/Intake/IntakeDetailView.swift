@@ -559,6 +559,7 @@ struct IntakeDetailView: View {
         dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
+        notes.threads = service.threadBinding(for: intake.id)
         notes.projectPath = intake.projectPath
         notes.intakeID = intake.id
         notes.versionOf = { [service, id = intake.id] entry in

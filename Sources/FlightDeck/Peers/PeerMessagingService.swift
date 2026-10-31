@@ -342,6 +342,8 @@ final class PeerMessagingService {
             sourceID = id
         case .human: sourceID = request.source
         case .invalid: throw PeerFailure.invalid("invalid tab token")
+        // A planning runner is no tab: it has no inbox and no one to speak as.
+        case .intakeRunner: throw PeerFailure.invalid("a planning runner cannot message tabs")
         }
         synchronize()
         let result: Any

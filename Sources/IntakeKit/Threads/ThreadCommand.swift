@@ -28,6 +28,10 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
     case repropose(ThreadID, diff: UUID)
     case decideDiff(ThreadID, diff: UUID, accept: Bool)
 
+    /// The `messageID` of the first message in a thread the phone opened with `token` (see
+    /// `ThreadID.opened(byToken:)`): the token's string, so a retried send runs no second turn.
+    public static func firstMessageID(token: UUID) -> String { token.uuidString }
+
     /// The thread every command addresses.
     public var thread: ThreadID {
         switch self {

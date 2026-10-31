@@ -1,32 +1,19 @@
 import XCTest
 import FleetKit
-import IntakeKit
-@testable import FlightDeck
 
-/// Ask threads on the fleet wire (P1 Task 0): the ops, the reply, the projection fields and the
-/// capability flag. Until threads ship every op is refused with `threads_unavailable` and the
-/// flag stays off, so a phone never offers what this Mac can't do.
-@MainActor
+/// Ask threads on the fleet wire (P1 Task 0): the ops, the reply and the projection fields, as
+/// bytes. Pure FleetKit, nothing from the app, so the local logic lane can take this file whole.
+/// What the Mac does with the ops is `ThreadStubRefusalTests`.
 final class ThreadWireCodingTests: XCTestCase {
     private let intake = UUID()
     private let thread = UUID()
-    private var root: URL!
-
-    override func setUp() {
-        super.setUp()
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("ThreadWire-\(UUID())", isDirectory: true)
-    }
-
-    override func tearDown() {
-        try? FileManager.default.removeItem(at: root)
-        super.tearDown()
-    }
 
     private func object(_ value: some Encodable) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
     }
 
-    private var commands: [(FleetCommand, String)] {
+    /// Every thread command with its dotted op, for the coding and scope tests.
+    static func commands(intake: UUID, thread: UUID) -> [(FleetCommand, String)] {
         let token = UUID()
         return [
             (.intakeThreadSend(id: intake, token: token, threadID: nil,
@@ -34,6 +21,9 @@ final class ThreadWireCodingTests: XCTestCase {
              "intake.thread.send"),
             (.intakeThreadSend(id: intake, token: token, threadID: thread, anchor: nil, text: "And then?"),
              "intake.thread.send"),
+            (.intakeThreadAnswer(id: intake, token: token, threadID: thread,
+                                 answers: [WireStructuredAnswer(questionID: "q1", selected: ["a"], other: "and b")]),
+             "intake.thread.answer"),
             (.intakeThreadResolve(id: intake, token: token, threadID: thread), "intake.thread.resolve"),
             (.intakeDiffDecide(id: intake, token: token, threadID: thread, diffID: UUID(), accept: true), "intake.diff.decide"),
         ]
@@ -42,7 +32,7 @@ final class ThreadWireCodingTests: XCTestCase {
     // MARK: - Ops
 
     func testEveryThreadCommandRoundTripsUnderItsDottedOp() throws {
-        for (command, op) in commands {
+        for (command, op) in Self.commands(intake: intake, thread: thread) {
             let data = try JSONEncoder().encode(command)
             XCTAssertEqual(try JSONDecoder().decode(FleetCommand.self, from: data), command)
             let obj = try object(command)
@@ -57,6 +47,11 @@ final class ThreadWireCodingTests: XCTestCase {
     func testANewWholePlanThreadOmitsThreadAndAnchor() throws {
         let obj = try object(FleetCommand.intakeThreadSend(id: intake, token: UUID(), threadID: nil, anchor: nil, text: "t"))
         XCTAssertEqual(Set(obj.keys), ["op", "id", "token", "text"])
+    }
+
+    func testThreadAnswerCarriesItsAnswersUnderTheSiblingKey() throws {
+        let obj = try object(FleetCommand.intakeThreadAnswer(id: intake, token: UUID(), threadID: thread, answers: []))
+        XCTAssertEqual(Set(obj.keys), ["op", "id", "token", "threadID", "answers"])
     }
 
     /// A read, so a request (`req`, answered on its `cid`) like `intake.plan`, not a command.
@@ -81,7 +76,7 @@ final class ThreadWireCodingTests: XCTestCase {
         status: "needsYou", counts: WireThreadCounts(turns: 2, pendingDiffs: 1, openQuestions: 1),
         excerpt: "Because the dispatcher…")
 
-    static let pendingDiff = WirePendingDiff(id: UUID(), thread: UUID(), checkpoint: 3, quote: "the job stays Unassigned",
+    static let pendingDiff = WirePendingDiff(id: UUID(), thread: UUID(), checkpoint: 3, blockIndex: 7,
                                              old: "the job stays Unassigned", new: "the job stays with its dispatcher",
                                              state: "pending")
 
@@ -95,9 +90,20 @@ final class ThreadWireCodingTests: XCTestCase {
         diffs: [pendingDiff])
 
     func testProjectionShapesRoundTrip() throws {
-        for value in [Self.page] { XCTAssertEqual(try JSONDecoder().decode(WireThreadPage.self, from: JSONEncoder().encode(value)), value) }
+        XCTAssertEqual(try JSONDecoder().decode(WireThreadPage.self, from: JSONEncoder().encode(Self.page)), Self.page)
         XCTAssertEqual(try JSONDecoder().decode(WireThreadSummary.self, from: JSONEncoder().encode(Self.summary)), Self.summary)
         XCTAssertEqual(try JSONDecoder().decode(WirePendingDiff.self, from: JSONEncoder().encode(Self.pendingDiff)), Self.pendingDiff)
+    }
+
+    /// The phone places a diff by its block, as it places a note; `old` is the passage replaced.
+    /// No separate quote: it would only repeat `old`.
+    func testAPendingDiffIsPlacedByBlockAndCarriesNoQuote() throws {
+        let obj = try object(Self.pendingDiff)
+        XCTAssertEqual(Set(obj.keys), ["id", "thread", "checkpoint", "blockIndex", "old", "new", "state"])
+        var unplaced = Self.pendingDiff
+        unplaced.blockIndex = nil
+        XCTAssertNil(try object(unplaced)["blockIndex"])
+        XCTAssertEqual(try JSONDecoder().decode(WirePendingDiff.self, from: JSONEncoder().encode(unplaced)), unplaced)
     }
 
     /// A status a later Mac invents still decodes: it is a string on the wire for that reason.
@@ -115,9 +121,8 @@ final class ThreadWireCodingTests: XCTestCase {
             summary: WireIntakeSummary(id: UUID(), title: "T", state: "shaping", needsAttention: false,
                                        createdAt: Date(timeIntervalSince1970: 1)),
             intent: "i", servedAt: Date(timeIntervalSince1970: 2), structuredQuestions: true)
-        var obj = try object(detail)
+        let obj = try object(detail)
         XCTAssertNil(obj["threads"], "nil is absent, so the bytes an old phone reads are unchanged")
-        obj.removeValue(forKey: "threads")
         let decoded = try JSONDecoder().decode(WireIntakeDetail.self, from: JSONSerialization.data(withJSONObject: obj))
         XCTAssertNil(decoded.threads)
 
@@ -136,87 +141,16 @@ final class ThreadWireCodingTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WireIntakePlan.self, from: JSONEncoder().encode(withThreads)), withThreads)
     }
 
-    // MARK: - Scope
-
-    /// An intake is a project's, not the asking agent's: fleet-wide, like the sibling intake ops.
-    /// The get is a read and is always allowed, like `intake.plan`.
-    func testThreadWritesAreFleetWideAndTheGetIsARead() {
-        let me = UUID()
-        for (command, _) in commands {
-            XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(me)), "\(command)")
-            XCTAssertTrue(ControlScope.permits(command, level: .full, caller: .session(me)), "\(command)")
-        }
-        XCTAssertTrue(ControlScope.permits(FleetRequest.intakeThreadGet(id: intake, threadID: thread, since: nil),
-                                           level: .readOnly, caller: .session(me)))
-    }
-
-    // MARK: - Stubs
-
-    func testEveryThreadEntryPointIsRefusedUntilThreadsShip() async throws {
-        var i = Intake(projectPath: "/p", intent: "Plan the thing")
-        i.state = .shaping
-        i.recommended = .fullPlan
-        i.chosenPreset = .fullPlan
-        i.roundConfig = PresetExpansion.config(for: .fullPlan, available: .defaults)
-        try IntakeStore(root: root).save(i)
-        let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
-                                processRunner: SilentProcessRunner(),
-                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
-                                availableModels: .defaults, runner: FakeRunnerController(),
-                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
-                                now: { Date(timeIntervalSince1970: 1_800_000_000) },
-                                readFile: { try? Data(contentsOf: $0) }, announce: { _ in })
-        await svc.launchRecovery?.value
-        let unavailable = IntakeService.threadsUnavailable
-        XCTAssertEqual(unavailable, "threads_unavailable")
-        XCTAssertFalse(svc.threadsAvailable)
-        XCTAssertNil(svc.threadReader(i.id))
-
-        let t = ThreadID(thread)
-        XCTAssertEqual(svc.openThread(i.id, anchor: .wholePlan, title: "T", text: "Why?", agent: .codex, model: "m",
-                                      effort: "high"), .failure(ThreadRefusal(code: unavailable)))
-        XCTAssertEqual(svc.sendThreadMessage(i.id, thread: t, text: "x")?.code, unavailable)
-        XCTAssertEqual(svc.answerThread(i.id, thread: t, answers: [])?.code, unavailable)
-        XCTAssertEqual(svc.setThreadAutoAccept(i.id, thread: t, true)?.code, unavailable)
-        XCTAssertEqual(svc.setThreadAgent(i.id, thread: t, agent: .claude, model: "m", effort: "e")?.code, unavailable)
-        XCTAssertEqual(svc.resolveThread(i.id, thread: t)?.code, unavailable)
-        XCTAssertEqual(svc.reopenThread(i.id, thread: t)?.code, unavailable)
-        XCTAssertEqual(svc.decideDiff(i.id, thread: t, diff: UUID(), accept: true)?.code, unavailable)
-        XCTAssertEqual(svc.reproposeDiff(i.id, thread: t, diff: UUID())?.code, unavailable)
-
-        XCTAssertEqual(svc.phoneThreadSend(i.id, token: UUID(), threadID: nil, anchor: nil, text: "x"), unavailable)
-        XCTAssertEqual(svc.phoneThreadResolve(i.id, token: UUID(), threadID: thread), unavailable)
-        XCTAssertEqual(svc.phoneDiffDecide(i.id, token: UUID(), threadID: thread, diffID: UUID(), accept: false), unavailable)
-        XCTAssertEqual(svc.phoneThreadGet(i.id, threadID: thread, since: nil), .failure(ThreadRefusal(code: unavailable)))
-
-        // Nothing was queued for a runner to act on.
-        let store = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id))
-        XCTAssertTrue(store.commands(after: 0).isEmpty)
-
-        // And the phone is never told it may ask.
-        let detail = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
-        XCTAssertNil(detail.threads)
-    }
-}
-
-@MainActor
-private final class FakeRunnerController: IntakeRunnerControlling {
-    var socketDirectory: URL = FileManager.default.temporaryDirectory
-    func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError> { .success(()) }
-    func isRunning(_ id: UUID, tape: Tape?) -> Bool { false }
-    func reap(_ id: UUID) {}
-    func socketPath(for id: UUID) -> String {
-        socketDirectory.appendingPathComponent("intake-\(id.uuidString.lowercased()).sock").path
-    }
-}
-
-private final class SilentProcessRunner: FlywheelProcessRunner, @unchecked Sendable {
-    func run(_ exe: String, _ args: [String], cwd: String?) async throws -> (stdout: String, exitCode: Int32) { ("", 127) }
-}
-
-private final class InertHeadlessRunner: HeadlessRunner, @unchecked Sendable {
-    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
-             cwd: URL) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
-        (Data(), "", 1)
+    /// The fleet list's "needs you" count rides the summary; absent from an old Mac, and from
+    /// this one while it is nil.
+    func testTheSummarysNeedsYouCountIsOptional() throws {
+        let summary = WireIntakeSummary(id: UUID(), title: "T", state: "shaping", needsAttention: false,
+                                        createdAt: Date(timeIntervalSince1970: 1))
+        XCTAssertNil(try object(summary)["threadsNeedingYou"])
+        var counted = summary
+        counted.threadsNeedingYou = 2
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakeSummary.self, from: JSONEncoder().encode(counted)), counted)
+        let old = #"{"id":"\#(UUID().uuidString)","title":"T","state":"shaping","needsAttention":false,"createdAt":1}"#
+        XCTAssertNil(try JSONDecoder().decode(WireIntakeSummary.self, from: Data(old.utf8)).threadsNeedingYou)
     }
 }

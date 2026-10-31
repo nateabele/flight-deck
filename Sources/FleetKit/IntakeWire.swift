@@ -35,18 +35,22 @@ public struct WireIntakeSummary: Codable, Equatable, Sendable, Identifiable {
     public var releasedTaskCount: Int?
     /// Orders "newest first" within a group on the phone.
     public var createdAt: Date
+    /// How many of the intake's ask threads wait on the human (`needsYou`): the fleet list's
+    /// badge. nil from a Mac without threads, and from this one until they ship.
+    public var threadsNeedingYou: Int?
 
     public init(
         id: UUID, title: String, state: String, needsAttention: Bool, preset: String? = nil,
         now: String? = nil, runStatus: String? = nil, clockSince: Date? = nil,
         agentsDone: Int? = nil, agentsTotal: Int? = nil, questionCount: Int? = nil,
-        releasedTaskCount: Int? = nil, createdAt: Date
+        releasedTaskCount: Int? = nil, createdAt: Date, threadsNeedingYou: Int? = nil
     ) {
         self.id = id; self.title = title; self.state = state; self.needsAttention = needsAttention
         self.preset = preset; self.now = now; self.runStatus = runStatus; self.clockSince = clockSince
         self.agentsDone = agentsDone; self.agentsTotal = agentsTotal
         self.questionCount = questionCount; self.releasedTaskCount = releasedTaskCount
         self.createdAt = createdAt
+        self.threadsNeedingYou = threadsNeedingYou
     }
 }
 

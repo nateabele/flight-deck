@@ -77,19 +77,21 @@ public struct WireThreadTurn: Codable, Equatable, Sendable {
 }
 
 /// A diff awaiting the human, in full, so the phone draws its gutter bar without a fetch.
-/// `quote` is where it sits on `checkpoint`'s plan, `old` the text it replaces and `new` its
+/// `blockIndex` is the reader block of `checkpoint`'s plan it sits in (as `WireNote.blockIndex`
+/// places a note), nil when the Mac can't place it. `old` is the passage being replaced, as it
+/// reads in that plan — the phone shows it on tap and finds it within the block — and `new` its
 /// replacement. `state` is a `DiffState` raw value; a `stale` one is refused (`diff_stale`).
 public struct WirePendingDiff: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var thread: UUID
     public var checkpoint: Int
-    public var quote: String
+    public var blockIndex: Int?
     public var old: String
     public var new: String
     public var state: String
 
-    public init(id: UUID, thread: UUID, checkpoint: Int, quote: String, old: String, new: String, state: String) {
-        self.id = id; self.thread = thread; self.checkpoint = checkpoint; self.quote = quote
+    public init(id: UUID, thread: UUID, checkpoint: Int, blockIndex: Int? = nil, old: String, new: String, state: String) {
+        self.id = id; self.thread = thread; self.checkpoint = checkpoint; self.blockIndex = blockIndex
         self.old = old; self.new = new; self.state = state
     }
 }

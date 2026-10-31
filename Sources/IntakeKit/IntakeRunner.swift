@@ -83,10 +83,7 @@ public struct IntakeRunner: Sendable {
             // on seeing the cleared heartbeat — which can take the lock we just dropped.
             lock.release()
             let acked = await keeper.tape.ackedCommandSeq
-            // A command this build holds unapplied (`TapeKeeper.held`) is unacked but not work:
-            // re-driving would only hold it again, in a loop, so it never counts as a late one.
-            let held = await keeper.held != nil
-            guard !Task.isCancelled, !held, !store.commands(after: acked).isEmpty, lock.acquire() else { return status }
+            guard !Task.isCancelled, !store.commands(after: acked).isEmpty, lock.acquire() else { return status }
             await keeper.reload()
             (status, final) = await drive(keeper, intakes)
         }
@@ -293,8 +290,7 @@ private actor TapeKeeper {
     func applyCommands(config: RoundConfig, heartbeat: Bool = false) -> Bool {
         let fresh = store.commands(after: tape.ackedCommandSeq)
         var stop = false
-        held = nil
-        folding: for envelope in fresh {
+        for envelope in fresh {
             switch envelope.command {
             case .stop:
                 stop = true
@@ -307,20 +303,12 @@ private actor TapeKeeper {
                 TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
                 applyEdit(checkpoint: checkpoint, markdown: markdown)
-            case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
-                do {
-                    try applyThreadDiff(thread: thread, diff: diff, checkpoint: checkpoint, markdown: markdown)
-                } catch {
-                    // Not applied, so not acked: `ackedCommandSeq` is a high-water mark, and
-                    // acking past this line would lose the diff for good — the human's ✓ would
-                    // silently do nothing. The fold stops here instead, so nothing behind it is
-                    // applied out of order either; it all waits on disk for a build that can
-                    // apply it. `held` keeps the runner from re-driving on it (`run`).
-                    FileHandle.standardError.write(Data(
-                        "flightdeck: applyThreadDiff (seq \(envelope.seq)) not yet: \(error); left unacked\n".utf8))
-                    held = envelope.seq
-                    break folding
-                }
+            case .applyThreadDiff(_, _, let checkpoint, let markdown):
+                // The payload is exactly `editPlan`'s — the whole edited plan for one checkpoint
+                // — and so is the effect: the human accepted the text, so it is their edit.
+                // Recording which thread and diff it came from (provenance for the rail and the
+                // round record) is Task 6's; until then the ids ride along unread.
+                applyEdit(checkpoint: checkpoint, markdown: markdown)
             }
             tape.ackedCommandSeq = envelope.seq
         }
@@ -328,23 +316,6 @@ private actor TapeKeeper {
         if heartbeat { tape.heartbeat = now() }
         if heartbeat || !fresh.isEmpty { save() }
         return stop
-    }
-
-    /// The seq of a command the last `applyCommands` could not apply and left unacked, or nil.
-    private(set) var held: Int?
-
-    /// Thrown by a command arm this build declares but does not run yet.
-    struct NotYet: Error, CustomStringConvertible {
-        let command: String
-        var description: String { "\(command) is not implemented in this build" }
-    }
-
-    /// Ask threads' accepted diff (R8), applied like `editPlan` — with a rebase (`PlanRebase`)
-    /// when a newer round has landed — and recorded against its thread. P1 Task 0 lands the
-    /// command's shape only; Stream A fills this in. Until then it throws, and the caller holds
-    /// the command unacked rather than dropping it.
-    private func applyThreadDiff(thread: ThreadID, diff: UUID, checkpoint: Int, markdown: String) throws {
-        throw NotYet(command: "applyThreadDiff")
     }
 
     /// Stores the human's edit as the checkpoint's `plan.user.md` — the runner writes it because

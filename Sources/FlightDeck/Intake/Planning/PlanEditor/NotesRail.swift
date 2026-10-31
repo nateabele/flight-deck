@@ -268,6 +268,9 @@ final class PlanNotesController: ObservableObject {
 
     /// Queues a command for this intake's runner; bound by the detail pane.
     var send: (TapeCommand) -> Void = { _ in }
+    /// This intake's ask threads — what the Ask cards and the thread panel read, and the API they
+    /// send through (`IntakeService+Threads`); bound by the detail pane. nil before binding.
+    var threads: IntakeThreadBinding?
     /// Opens the inspector in Notes mode so a draft started from the toolbar has somewhere to be
     /// written. An explicit switch, and the only one the rail makes: focus in the plan used to
     /// hand the rail the inspector too, which took the Rounds editor away whenever the human

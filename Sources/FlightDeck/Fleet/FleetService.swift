@@ -611,7 +611,7 @@ final class FleetService: ObservableObject {
         switch caller {
         case .session(let tab): presenter = tab
         case .human: presenter = nil
-        case .invalid: return caller
+        case .invalid, .intakeRunner: return caller
         }
         guard let owner = store.codexTab(sharingDaemonWith: presenter, thread: thread) else { return caller }
         return .session(owner)
@@ -1466,6 +1466,10 @@ final class FleetService: ObservableObject {
             // Every thread refusal is `IntakeService`'s (`IntakeService+Threads`), as for the
             // sibling intake ops: `threads_unavailable` until threads ship.
             if let code = store.intakeService.phoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadAnswer(let id, let token, let threadID, let answers):
+            if let code = store.intakeService.phoneThreadAnswer(id, token: token, threadID: threadID, answers: answers) {
                 return .err(cid: cid, code: code)
             }
         case .intakeThreadResolve(let id, let token, let threadID):

@@ -36,6 +36,11 @@ enum ControlCaller: Equatable {
     /// different secret. Treated the same as a caller with no standing at all: scoped levels
     /// fail closed rather than falling back to `.human`'s trust.
     case invalid
+    /// A detached planning runner (IntakeRunner or ThreadRunner) for intake `UUID`, proven by its
+    /// own token. Lands with every arm so no shared switch has to change later; until Stream B
+    /// mints and verifies runner tokens and scopes them to their own intake, it reaches nothing
+    /// (`out_of_scope`) at any level.
+    case intakeRunner(UUID)
 }
 
 /// A pure policy for whether a `flightdeck` CLI caller may issue a given fleet command or
@@ -80,6 +85,8 @@ enum ControlScope {
     /// Exhaustive with no `default`, so a new `FleetCommand` case cannot compile until someone
     /// here decides whether it is a write reachable only by its own session, or fleet-wide.
     static func permits(_ command: FleetCommand, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
+        // First, before `.full` waves everything through: a runner is not a human or a tab.
+        if case .intakeRunner = caller { return false }
         if case .viewing = command { return true }
         if level == .full || caller == .human { return true }
         guard case .session(let me) = caller, level == .ownSession else { return false }
@@ -102,7 +109,7 @@ enum ControlScope {
         case .viewing:
             return true
         case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
-             .intakeAnswer, .intakeStart, .intakeRounds, .intakeThreadSend, .intakeThreadResolve, .intakeDiffDecide:
+             .intakeAnswer, .intakeStart, .intakeRounds, .intakeThreadSend, .intakeThreadAnswer, .intakeThreadResolve, .intakeDiffDecide:
             // An intake is a project's, not the asking session's: no session id names it. Its
             // ask threads too — a thread's agent is not the tab that asked.
             return false
@@ -122,6 +129,8 @@ enum ControlScope {
     /// that write follow the own-session rule instead (see their arm). Every other request only
     /// reads and is always allowed.
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
+        // As for commands: nothing for a runner until Stream B scopes it to its own intake.
+        if case .intakeRunner = caller { return false }
         switch request {
         case .peer(let peer):
             if caller == .invalid { return false }

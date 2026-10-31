@@ -1,5 +1,4 @@
 import Foundation
-import FleetKit
 import IntakeKit
 
 /// Why a thread operation was refused. `code` is the machine-readable contract, the same
@@ -9,10 +8,9 @@ struct ThreadRefusal: Error, Equatable {
 }
 
 /// Ask threads' entry points on the Mac (P1 Task 0): the API the Mac UI (Stream C) sends
-/// through and the phone ops (Stream D) answer from. Every one refuses with
-/// `threads_unavailable` and queues nothing until the streams fill them in: the shapes land
-/// first so five streams can code against them at once, and nothing behind them runs yet.
-/// The detail's `threads` flag stays off meanwhile, so the phone never sends these.
+/// through. Every one refuses with `threads_unavailable` and queues nothing until Stream A's
+/// runner exists: the shapes land first so the streams can code against them at once, and
+/// nothing behind them runs yet. The phone's ops are `IntakeService+PhoneThreads`.
 extension IntakeService {
     static let threadsUnavailable = "threads_unavailable"
 
@@ -23,7 +21,12 @@ extension IntakeService {
     /// `id`'s threads as ThreadRunner last wrote them; nil while threads are unavailable.
     func threadReader(_ id: UUID) -> (any ThreadStoreReading)? { nil }
 
-    // MARK: - The Mac's own
+    /// What the detail pane hands `PlanNotesController` for intake `id`: the reader and the send
+    /// API in one value, so the Ask cards and the thread panel are built on it without the
+    /// detail view changing again.
+    func threadBinding(for id: UUID) -> IntakeThreadBinding {
+        IntakeThreadBinding(intakeID: id, reader: threadReader(id) ?? EmptyThreadStore(), service: self)
+    }
 
     /// A new thread on `anchor`, with its first message. Returns the thread's id at once; the
     /// turn runs in ThreadRunner.
@@ -53,23 +56,54 @@ extension IntakeService {
     /// One turn against the newest checkpoint for a stale diff.
     func reproposeDiff(_ id: UUID, thread: ThreadID, diff: UUID) -> ThreadRefusal? { Self.unavailable }
 
-    // MARK: - The phone's (`intake.thread.*`, `intake.diff.decide`)
+    static var unavailable: ThreadRefusal { ThreadRefusal(code: threadsUnavailable) }
+}
 
-    /// `String?` like the sibling phone ops: nil is accepted, otherwise the `err` code.
-    func phoneThreadSend(_ id: UUID, token: UUID, threadID: UUID?, anchor: WireThreadAnchor?, text: String) -> String? {
-        Self.threadsUnavailable
+/// One intake's ask threads as the Mac UI holds them: what to read, and where each send goes —
+/// `IntakeService`'s own API above, for this intake. Weak to the service, as the notes
+/// controller's other closures are bound: the view state must not keep a service alive.
+@MainActor
+struct IntakeThreadBinding {
+    let intakeID: UUID
+    let reader: any ThreadStoreReading
+    weak var service: IntakeService?
+
+    func open(anchor: ThreadAnchor, title: String, text: String, agent: AgentID, model: String,
+              effort: String) -> Result<ThreadID, ThreadRefusal> {
+        guard let service else { return .failure(IntakeService.unavailable) }
+        return service.openThread(intakeID, anchor: anchor, title: title, text: text, agent: agent, model: model,
+                                  effort: effort)
     }
 
-    func phoneThreadResolve(_ id: UUID, token: UUID, threadID: UUID) -> String? { Self.threadsUnavailable }
-
-    /// Refused with `diff_stale` once threads ship, when the diff could not be rebased.
-    func phoneDiffDecide(_ id: UUID, token: UUID, threadID: UUID, diffID: UUID, accept: Bool) -> String? {
-        Self.threadsUnavailable
+    func send(_ thread: ThreadID, text: String) -> ThreadRefusal? {
+        service?.sendThreadMessage(intakeID, thread: thread, text: text) ?? IntakeService.unavailable
     }
 
-    func phoneThreadGet(_ id: UUID, threadID: UUID, since: Int?) -> Result<WireThreadPage, ThreadRefusal> {
-        .failure(Self.unavailable)
+    func answer(_ thread: ThreadID, answers: [StructuredAnswer]) -> ThreadRefusal? {
+        service?.answerThread(intakeID, thread: thread, answers: answers) ?? IntakeService.unavailable
     }
 
-    private static var unavailable: ThreadRefusal { ThreadRefusal(code: threadsUnavailable) }
+    func setAutoAccept(_ thread: ThreadID, _ on: Bool) -> ThreadRefusal? {
+        service?.setThreadAutoAccept(intakeID, thread: thread, on) ?? IntakeService.unavailable
+    }
+
+    func setAgent(_ thread: ThreadID, agent: AgentID, model: String, effort: String) -> ThreadRefusal? {
+        service?.setThreadAgent(intakeID, thread: thread, agent: agent, model: model, effort: effort) ?? IntakeService.unavailable
+    }
+
+    func resolve(_ thread: ThreadID) -> ThreadRefusal? {
+        service?.resolveThread(intakeID, thread: thread) ?? IntakeService.unavailable
+    }
+
+    func reopen(_ thread: ThreadID) -> ThreadRefusal? {
+        service?.reopenThread(intakeID, thread: thread) ?? IntakeService.unavailable
+    }
+
+    func decideDiff(_ thread: ThreadID, diff: UUID, accept: Bool) -> ThreadRefusal? {
+        service?.decideDiff(intakeID, thread: thread, diff: diff, accept: accept) ?? IntakeService.unavailable
+    }
+
+    func repropose(_ thread: ThreadID, diff: UUID) -> ThreadRefusal? {
+        service?.reproposeDiff(intakeID, thread: thread, diff: diff) ?? IntakeService.unavailable
+    }
 }

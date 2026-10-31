@@ -699,32 +699,27 @@ final class IntakeRunnerTests: XCTestCase {
 // MARK: - Human edits and notes
 
 extension IntakeRunnerTests {
-    /// `applyThreadDiff` before ask threads ship (P1 Task 0): the runner neither applies it nor
-    /// acks it. Everything queued before it is folded and acked; it and everything after it wait
-    /// on disk for a build that can apply it, in order. And the runner still exits — a held
-    /// command must not read as "unacked work" to the late-command recheck and spin it.
-    func testApplyThreadDiffIsLeftUnackedAndTheRunnerStillExits() async throws {
+    /// An ask thread's accepted diff carries the whole edited plan, like `.editPlan`, and the
+    /// runner stores it the same way: as the checkpoint's `plan.user.md`. A ⏹ queued after it
+    /// is still honoured — the diff is folded and acked like any command, never held.
+    func testApplyThreadDiffIsAppliedLikeAnEditAndAStopAfterItIsHonoured() async throws {
         _ = try store.appendCommand(.step)
         let first = await runner(scripted()).run()
         XCTAssertEqual(first, .paused)
 
-        _ = try store.appendCommand(.extend(.refine, by: 1))
-        let held = try store.appendCommand(.applyThreadDiff(thread: ThreadID(UUID()), diff: UUID(), checkpoint: 1,
-                                                            markdown: "# Plan\n\n## Scope\nOne, edited\n"))
-        _ = try store.appendCommand(.step)
-        let runner = runner(scripted())
-        let exited = expectation(description: "the runner exits")
-        let box = StatusBox()
-        Task { box.status = await runner.run(); exited.fulfill() }
-        await fulfillment(of: [exited], timeout: 10)
+        let edited = "# Plan\n\n## Scope\nOne, from a thread\n"
+        _ = try store.appendCommand(.applyThreadDiff(thread: ThreadID(UUID()), diff: UUID(), checkpoint: 1, markdown: edited))
+        _ = try store.appendCommand(.applyThreadDiff(thread: ThreadID(UUID()), diff: UUID(), checkpoint: 99, markdown: "nowhere"))
+        let stop = try store.appendCommand(.stop)
+        let commands = scripted()
+        let status = await runner(commands).run()
 
-        XCTAssertEqual(box.status, .paused)
-        let tape = store.loadTape()
-        XCTAssertEqual(tape.extraRefinement, 1, "the command before it is applied")
-        XCTAssertEqual(tape.ackedCommandSeq, held - 1, "it is never acked unapplied")
-        XCTAssertEqual(tape.checkpoints.count, 1, "the ▶ behind it waits its turn")
-        XCTAssertNil(store.userEdits(checkpoint: 1), "nothing applied it")
-        XCTAssertEqual(store.commands(after: tape.ackedCommandSeq).map(\.seq), [held, held + 1])
+        XCTAssertEqual(status, .stopped)
+        XCTAssertEqual(store.userEdits(checkpoint: 1), edited)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.checkpointDirectory(99).path),
+                       "a diff for a checkpoint not on the tape has nowhere to go, as for an edit")
+        XCTAssertEqual(store.loadTape().ackedCommandSeq, stop)
+        XCTAssertTrue(commands.calls.isEmpty, "a stopped tape runs no round")
     }
 
     /// `.editPlan` is applied by the runner (it owns `checkpoints/`): the edit lands as
@@ -941,11 +936,3 @@ extension IntakeRunnerTests {
     }
 }
 
-private final class StatusBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _status: RunnerStatus?
-    var status: RunnerStatus? {
-        get { lock.withLock { _status } }
-        set { lock.withLock { _status = newValue } }
-    }
-}

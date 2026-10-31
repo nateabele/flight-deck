@@ -336,8 +336,9 @@ public struct Tape: Codable, Equatable, Sendable {
 ///   `plan.user.md`. Markdown identical to the generated plan clears the layer. Send it on a
 ///   save, not per keystroke: every command is a line the runner re-reads.
 /// - `applyThreadDiff` is an ask thread's accepted diff (R8): the whole edited plan for
-///   `checkpoint`, like `editPlan`, plus the thread and diff it came from. The app appends it
-///   on ✓, or ThreadRunner when the thread auto-accepts. A runner that predates it drops the
+///   `checkpoint`, like `editPlan`, plus the thread and diff it came from, and the runner stores
+///   it exactly as it stores `editPlan`. The app appends it on ✓, or ThreadRunner when the thread
+///   auto-accepts. A runner that predates it drops the
 ///   line as an unknown kind. Thread-only commands never come here: they go to
 ///   `threads/commands.jsonl` (`ThreadCommand`), which IntakeRunner never reads.
 public enum TapeCommand: Codable, Equatable, Sendable {

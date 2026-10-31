@@ -94,9 +94,31 @@ final class ThreadModelCodingTests: XCTestCase {
 
     func testDiffRoundTripsInEveryState() throws {
         for state in [DiffState.pending, .accepted, .rejected, .stale] {
-            try roundTrip(ThreadDiff(id: UUID(), thread: thread, checkpoint: 4, anchor: anchor,
+            try roundTrip(ThreadDiff(id: UUID(), thread: thread, turn: 2, checkpoint: 4, anchor: anchor,
                                      old: "the job stays Unassigned", new: "the job stays with its dispatcher", state: state))
         }
+        let unlinked = ThreadDiff(thread: thread, checkpoint: 4, anchor: anchor, old: "a", new: "b")
+        XCTAssertNil(unlinked.turn)
+        XCTAssertNil(try object(unlinked)["turn"])
+        try roundTrip(unlinked)
+    }
+
+    /// A phone's new thread (`intake.thread.send` with no thread) is named by its token, and its
+    /// first message by the token's string — so a retry of the same send opens the same thread
+    /// and runs the same turn, never a second of either.
+    func testANewThreadFromThePhoneIsNamedByItsToken() {
+        let token = UUID()
+        XCTAssertEqual(ThreadID.opened(byToken: token), ThreadID(raw: token))
+        XCTAssertEqual(ThreadID(raw: token).raw, token)
+        XCTAssertEqual(ThreadCommand.firstMessageID(token: token), token.uuidString)
+    }
+
+    func testTheEmptyReaderHasNothingAndNoActivity() {
+        let empty = EmptyThreadStore()
+        XCTAssertTrue(empty.threads().isEmpty)
+        XCTAssertTrue(empty.turns(thread).isEmpty)
+        XCTAssertTrue(empty.diffs(thread).isEmpty)
+        XCTAssertNil(empty.activity(thread))
     }
 
     // MARK: - The agent's answer
@@ -105,14 +127,14 @@ final class ThreadModelCodingTests: XCTestCase {
     func testAnswerDecodesTheSchemaShapeWithNulls() throws {
         let json = """
         {"reply":"See [cite:v2].","decision":null,"actions":[
-          {"op":"proposeDiff","checkpoint":4,"quote":"q","prefix":"p","suffix":"s","replacement":"r",
+          {"op":"proposeDiff","checkpoint":4,"quote":"q","prefix":"p","suffix":"s","section":"## Scope","replacement":"r",
            "kind":null,"anchor":null,"note":null,"question":null},
-          {"op":"addNote","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"replacement":null,
+          {"op":"addNote","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"section":null,"replacement":null,
            "kind":"mustChange","anchor":{"checkpoint":4,"quote":"q","section":null,"prefix":"p","suffix":"s"},
            "note":"Name the owner","question":null},
-          {"op":"addNote","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"replacement":null,
+          {"op":"addNote","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"section":null,"replacement":null,
            "kind":"comment","anchor":null,"note":"About the whole plan","question":null},
-          {"op":"askQuestion","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"replacement":null,
+          {"op":"askQuestion","checkpoint":null,"quote":null,"prefix":null,"suffix":null,"section":null,"replacement":null,
            "kind":null,"anchor":null,"note":null,
            "question":{"id":"q1","text":"Which?","kind":"multi","options":[{"id":"a","label":"A","detail":null},{"id":"b","label":"B","detail":"bee"}],
                        "recommended":["a"],"allowOther":true}}]}
@@ -122,7 +144,7 @@ final class ThreadModelCodingTests: XCTestCase {
         XCTAssertEqual(answer.decision, "", "a null decision is no decision")
         XCTAssertEqual(answer.actions.count, 4)
         XCTAssertEqual(answer.actions[0], .proposeDiff(ProposedThreadDiff(checkpoint: 4, quote: "q", prefix: "p", suffix: "s",
-                                                                          replacement: "r")))
+                                                                          section: "## Scope", replacement: "r")))
         guard case .addNote(let anchored) = answer.actions[1], case .addNote(let whole) = answer.actions[2] else {
             return XCTFail("expected two notes, got \(answer.actions)")
         }
@@ -135,6 +157,37 @@ final class ThreadModelCodingTests: XCTestCase {
             id: "q1", text: "Which?", kind: .multi,
             options: [.init(id: "a", label: "A"), .init(id: "b", label: "B", detail: "bee")],
             recommended: ["a"], allowOther: true)))
+    }
+
+    /// A strict-mode agent sends every key, so an `addNote` whose words it left null is a note
+    /// with no words — a Highlight or a Delete — not a malformed answer.
+    func testAnAddNoteWithANullNoteDecodesAsEmpty() throws {
+        let json = #"{"reply":"r","decision":"","actions":[{"op":"addNote","kind":"delete","note":null,"anchor":null}]}"#
+        guard case .addNote(let note) = try ThreadActions.decode(Data(json.utf8)).actions.first else { return XCTFail() }
+        XCTAssertEqual(note.kind, .delete)
+        XCTAssertEqual(note.note, "")
+    }
+
+    /// A diff with no section decodes; a stored one keeps its section.
+    func testAProposedDiffsSectionIsOptional() throws {
+        let json = #"{"reply":"r","decision":"","actions":[{"op":"proposeDiff","checkpoint":1,"quote":"q","replacement":"r"}]}"#
+        XCTAssertEqual(try ThreadActions.decode(Data(json.utf8)).actions,
+                       [.proposeDiff(ProposedThreadDiff(checkpoint: 1, quote: "q", replacement: "r"))])
+        let turn = ThreadTurn(seq: 1, messageID: "m", actions: [.proposeDiff(ProposedThreadDiff(
+            checkpoint: 1, quote: "q", section: "## A", replacement: "r"))], checkpoint: 1, startedAt: Date(timeIntervalSince1970: 0))
+        try roundTrip(turn)
+    }
+
+    /// Gemini takes the schema through its own rewrite (nullable enums become `anyOf`); the
+    /// thread schema must survive it as JSON, with no nullable enum left in Gemini's
+    /// unsupported form.
+    func testSchemaSurvivesGeminisRewrite() throws {
+        let rewritten = GeminiSchema.compatible(ThreadActions.schemaJSON)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rewritten.utf8)) as? [String: Any])
+        XCTAssertNotNil(root["properties"])
+        XCTAssertFalse(rewritten.contains(",null]"), "a nullable enum left unrewritten: \(rewritten)")
+        XCTAssertTrue(rewritten.contains("anyOf"), "the nullable note kind is rewritten")
+        XCTAssertTrue(rewritten.contains("\"section\""))
     }
 
     func testAnswerWithNoActionsDecodes() throws {
@@ -172,6 +225,9 @@ final class ThreadModelCodingTests: XCTestCase {
         let ops = (((schema["properties"] as? [String: Any])?["actions"] as? [String: Any])?["items"] as? [String: Any])
             .flatMap { ($0["properties"] as? [String: Any])?["op"] as? [String: Any] }?["enum"] as? [String]
         XCTAssertEqual(ops, ["proposeDiff", "addNote", "askQuestion"])
+        let action = ((schema["properties"] as? [String: Any])?["actions"] as? [String: Any])?["items"] as? [String: Any]
+        XCTAssertEqual((action?["properties"] as? [String: Any])?["section"] as? [String: [String]],
+                       ["type": ["string", "null"]], "a diff's section is nullable, strict style")
     }
 
     // MARK: - threads/commands.jsonl

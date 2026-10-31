@@ -11,6 +11,12 @@ public struct ThreadID: Hashable, Codable, Sendable {
     public var raw: UUID
 
     public init(_ raw: UUID = UUID()) { self.raw = raw }
+    public init(raw: UUID) { self.raw = raw }
+
+    /// The thread a phone's `intake.thread.send` with no thread opens: named by the send's token,
+    /// so a retry after a lost ack names the same thread and opens no second one. Its first
+    /// message's id is `ThreadCommand.firstMessageID(token:)`, for the same reason.
+    public static func opened(byToken token: UUID) -> ThreadID { ThreadID(raw: token) }
 
     public init(from decoder: Decoder) throws {
         raw = try decoder.singleValueContainer().decode(UUID.self)
@@ -148,16 +154,20 @@ public enum DiffState: String, Codable, Sendable {
 public struct ThreadDiff: Codable, Equatable, Sendable {
     public var id: UUID
     public var thread: ThreadID
+    /// The `ThreadTurn.seq` that proposed it, so the conversation can show a diff in its turn;
+    /// nil when no turn is known.
+    public var turn: Int?
     public var checkpoint: Int
     public var anchor: NoteAnchor
     public var old: String
     public var new: String
     public var state: DiffState
 
-    public init(id: UUID = UUID(), thread: ThreadID, checkpoint: Int, anchor: NoteAnchor, old: String, new: String,
-                state: DiffState = .pending) {
+    public init(id: UUID = UUID(), thread: ThreadID, turn: Int? = nil, checkpoint: Int, anchor: NoteAnchor, old: String,
+                new: String, state: DiffState = .pending) {
         self.id = id
         self.thread = thread
+        self.turn = turn
         self.checkpoint = checkpoint
         self.anchor = anchor
         self.old = old
@@ -173,6 +183,19 @@ public protocol ThreadStoreReading {
     func threads() -> [ThreadRecord]
     func turns(_ id: ThreadID) -> [ThreadTurn]
     func diffs(_ id: ThreadID) -> [ThreadDiff]
+    /// What the thread's agent is doing while a turn runs — "reading §3", "running rg …",
+    /// "thinking" (R2: the reply itself lands only when the turn ends). nil when no turn runs.
+    func activity(_ id: ThreadID) -> String?
+}
+
+/// A reader with no threads: what the Mac UI and the phone projection read until ThreadRunner's
+/// store exists, and a starting point for a test's fake.
+public struct EmptyThreadStore: ThreadStoreReading, Sendable {
+    public init() {}
+    public func threads() -> [ThreadRecord] { [] }
+    public func turns(_ id: ThreadID) -> [ThreadTurn] { [] }
+    public func diffs(_ id: ThreadID) -> [ThreadDiff] { [] }
+    public func activity(_ id: ThreadID) -> String? { nil }
 }
 
 /// One element of a list, or nil where it failed to decode, so one unknown entry costs only

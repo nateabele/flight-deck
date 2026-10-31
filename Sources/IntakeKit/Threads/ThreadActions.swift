@@ -8,13 +8,18 @@ public struct ProposedThreadDiff: Codable, Equatable, Sendable {
     public var quote: String
     public var prefix: String
     public var suffix: String
+    /// The `#` heading the agent read the quote under, as `NoteAnchor.section` is: a tiebreak
+    /// for the validator and a label for the card. nil when the agent didn't say.
+    public var section: String?
     public var replacement: String
 
-    public init(checkpoint: Int, quote: String, prefix: String = "", suffix: String = "", replacement: String) {
+    public init(checkpoint: Int, quote: String, prefix: String = "", suffix: String = "", section: String? = nil,
+                replacement: String) {
         self.checkpoint = checkpoint
         self.quote = quote
         self.prefix = prefix
         self.suffix = suffix
+        self.section = section
         self.replacement = replacement
     }
 }
@@ -32,7 +37,7 @@ public enum ThreadAction: Codable, Equatable, Sendable {
 
     private enum Op: String, Codable { case proposeDiff, addNote, askQuestion }
     private enum CodingKeys: String, CodingKey {
-        case op, checkpoint, quote, prefix, suffix, replacement, id, kind, anchor, note, source, question
+        case op, checkpoint, quote, prefix, suffix, section, replacement, id, kind, anchor, note, source, question
     }
 
     public init(from decoder: Decoder) throws {
@@ -44,6 +49,7 @@ public enum ThreadAction: Codable, Equatable, Sendable {
                 quote: try c.decode(String.self, forKey: .quote),
                 prefix: try c.decodeIfPresent(String.self, forKey: .prefix) ?? "",
                 suffix: try c.decodeIfPresent(String.self, forKey: .suffix) ?? "",
+                section: try c.decodeIfPresent(String.self, forKey: .section),
                 replacement: try c.decode(String.self, forKey: .replacement)))
         case .addNote:
             let raw = try c.decode(String.self, forKey: .kind)
@@ -51,9 +57,10 @@ public enum ThreadAction: Codable, Equatable, Sendable {
                 throw DecodingError.dataCorruptedError(forKey: .kind, in: c, debugDescription: "unknown note kind \"\(raw)\"")
             }
             // The agent sends no id; a stored note keeps the one it was given, so the note a
-            // turn added and the note the tape later holds are the same note.
+            // turn added and the note the tape later holds are the same note. A null note is
+            // no words — a Highlight or a Delete — which strict mode makes the agent send.
             self = .addNote(PlanNote(id: try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID(), kind: kind,
-                                     note: try c.decode(String.self, forKey: .note),
+                                     note: try c.decodeIfPresent(String.self, forKey: .note) ?? "",
                                      anchor: try c.decodeIfPresent(NoteAnchor.self, forKey: .anchor),
                                      source: (try? c.decodeIfPresent(NoteSource.self, forKey: .source)) ?? nil))
         case .askQuestion:
@@ -70,6 +77,7 @@ public enum ThreadAction: Codable, Equatable, Sendable {
             try c.encode(d.quote, forKey: .quote)
             try c.encode(d.prefix, forKey: .prefix)
             try c.encode(d.suffix, forKey: .suffix)
+            try c.encodeIfPresent(d.section, forKey: .section)
             try c.encode(d.replacement, forKey: .replacement)
         case .addNote(let n):
             try c.encode(Op.addNote, forKey: .op)
@@ -118,11 +126,11 @@ public enum ThreadActions {
     /// property is required and an op's unused ones are null, as strict mode demands.
     private static let action = """
     {"type":"object","additionalProperties":false,
-     "required":["op","checkpoint","quote","prefix","suffix","replacement","kind","anchor","note","question"],
+     "required":["op","checkpoint","quote","prefix","suffix","section","replacement","kind","anchor","note","question"],
      "properties":{
       "op":{"type":"string","enum":["proposeDiff","addNote","askQuestion"]},
       "checkpoint":{"type":["integer","null"]},
-      "quote":\(nullableString),"prefix":\(nullableString),"suffix":\(nullableString),"replacement":\(nullableString),
+      "quote":\(nullableString),"prefix":\(nullableString),"suffix":\(nullableString),"section":\(nullableString),"replacement":\(nullableString),
       "kind":{"type":["string","null"],"enum":[\(noteKinds),null]},
       "anchor":\(anchor),
       "note":\(nullableString),
