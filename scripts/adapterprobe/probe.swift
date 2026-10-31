@@ -11,6 +11,7 @@
 // the operation failed (the object carries "error"); 2 = usage. A non-zero exit is never by
 // itself a statement about the adapter — the runner decides that.
 import Foundation
+import IntakeKit
 @testable import FlightDeck
 
 @main
@@ -22,6 +23,13 @@ struct Probe {
         case "declare":
             guard args.count == 2, let agent = agentID(args[1]) else { usage() }
             await emit(declare(agent))
+
+        case "thread-turn":
+            // The argv an ask-thread turn runs (`HeadlessAccess.threadRead`), built by the real
+            // `HeadlessCommand.build`: what it lets the agent read, and whether anything in it
+            // writes. Nothing is spawned.
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            await emit(threadTurn(agent))
 
         case "sanitize":
             guard args.count == 3, let agent = agentID(args[1]) else { usage() }
@@ -114,6 +122,8 @@ struct Probe {
                     binding = try await withCodex {
                         try await $0.prepare(for: session, options: .codex(CodexThreadOptions()))
                     }
+                // `agentID` names only the two agents this matrix covers.
+                case .grok, .gemini, .opencode: usage()
                 }
                 await emit([
                     // Lowercased: both `*-command` cases below print the agents' own
@@ -144,6 +154,7 @@ struct Probe {
                     binding = try await withCodex {
                         try await $0.rebind(for: session, options: .codex(CodexThreadOptions()))
                     }
+                case .grok, .gemini, .opencode: usage()
                 }
                 await emit([
                     // Lowercased for the same reason `prepare` is — see that emission site.
@@ -198,6 +209,7 @@ struct Probe {
                     result = (title: nil, activity: nil)
                 case .codex:
                     result = try await withCodex { try await $0.read(binding) }
+                case .grok, .gemini, .opencode: usage()
                 }
                 await emit([
                     "title": result.title as Any,
@@ -217,9 +229,9 @@ struct Probe {
             // is that a row calls `environment(for:)` at all, instead of asserting on the
             // probe's own hand-rolled `CLAUDE_CONFIG_DIR`/`CODEX_HOME` plumbing.
             guard args.count == 2, let agent = agentID(args[1]) else { usage() }
-            guard let home = ProcessInfo.processInfo.environment[agent.homeEnvironmentKey] else {
+            guard let key = agent.homeEnvironmentKey, let home = ProcessInfo.processInfo.environment[key] else {
                 await emit([
-                    "error": "\(agent.homeEnvironmentKey) is unset in the probe's own environment",
+                    "error": "\(agent.homeEnvironmentKey ?? "no home key") is unset in the probe's own environment",
                 ], exit: 1)
             }
             let account = AgentAccount(agent: agent, displayName: "adapterprobe",
@@ -262,6 +274,7 @@ struct Probe {
                                 : adapter.resumeCommand(binding, session, .codex(CodexThreadOptions()))
                         }
                     }
+                case .grok, .gemini, .opencode: usage()
                 }
                 await emit(["text": text])
             } catch {
@@ -333,6 +346,32 @@ struct Probe {
         }
     }
 
+    static func threadTurn(_ agent: AgentID) -> [String: Any] {
+        let request = HeadlessRequest(agent: agent, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/repo"),
+                                      readableDirs: [URL(fileURLWithPath: "/workspace")], prompt: "P",
+                                      schemaFile: URL(fileURLWithPath: "/schema.json"), schemaJSON: "{}",
+                                      resumeSessionID: nil, access: .threadRead)
+        let args: [String]
+        do { args = try HeadlessCommand.build(request, home: URL(fileURLWithPath: "/nonexistent-fd-home")).arguments }
+        catch { return ["error": "\(error)"] }
+        func value(_ flag: String) -> String? {
+            args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
+        }
+        switch agent {
+        case .claude:
+            let allowed = value("--allowedTools") ?? "", denied = value("--disallowedTools") ?? ""
+            let missing = HeadlessCommand.threadReadCommands.filter { !allowed.contains("Bash(\($0) *)") }
+            let undenied = HeadlessCommand.threadDeniedPatterns.filter { !denied.contains("Bash(\($0))") }
+            let writes = ["Edit", "Write", "NotebookEdit"].contains { allowed.split(separator: " ").contains(Substring($0)) }
+                || value("--permission-mode") != "dontAsk"
+            return ["reads": missing.isEmpty && undenied.isEmpty, "writes": writes,
+                    "detail": "missing allows \(missing), missing denies \(undenied)"]
+        default:
+            return ["reads": value("-s") == "read-only", "writes": value("-s") != "read-only",
+                    "detail": "sandbox \(value("-s") ?? "none")"]
+        }
+    }
+
     static func emit(_ object: [String: Any], exit code: Int32 = 0) -> Never {
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
             ?? Data(#"{"error":"unserializable"}"#.utf8)
@@ -363,5 +402,8 @@ final class ViewportInjector: TextInjecting {
     func sendArrowDown()          { sent.append("down") }
     func sendArrowUp()            { sent.append("up") }
     func sendEscape()             { sent.append("escape") }
+    func sendTab()                { sent.append("tab") }
+    func sendCharacterKey(_ c: Character) { sent.append("char:\(c)") }
+    func sendControlKey(_ c: Character)   { sent.append("ctrl:\(c)") }
     func readViewport() -> String? { viewport }
 }

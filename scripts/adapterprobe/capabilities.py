@@ -1294,6 +1294,18 @@ def _agent_completion_notification(ctx, agent):
     )
 
 
+def _thread_turn(ctx, agent):
+    """An ask-thread turn (`HeadlessAccess.threadRead`, planning v2 R1) may read the repo and run
+    reading commands, and nothing that writes. Cheap: the probe builds the turn's argv with the
+    real `HeadlessCommand.build` and reports what it grants; no agent is spawned. claude must
+    allow each read command and deny their writing flags; codex must keep `-s read-only`."""
+    out = ctx.probe(["thread-turn", agent])
+    if "error" in out:
+        return Observation(declared=True, observed=False, detail=out["error"])
+    return Observation(declared=True, observed=bool(out.get("reads")) and not out.get("writes"),
+                       detail=out.get("detail", ""))
+
+
 BOTH = ("claude", "codex")
 
 ROWS = [
@@ -1360,6 +1372,9 @@ ROWS = [
         _agent_notification_sites),
     Row("agentResumeClosesByEitherId", "grammars", ("claude",), "cheap", (),
         _agent_resume_closes_by_either_id),
+    # Planning v2's ask threads: the argv a thread turn would run, never the turn itself, so it
+    # stays in the cheap tier and spends nothing.
+    Row("thread.turn", "declarations", BOTH, "cheap", (), _thread_turn),
 ]
 
-assert len(ROWS) == 28, f"expected exactly 28 rows, found {len(ROWS)}"
+assert len(ROWS) == 29, f"expected exactly 29 rows, found {len(ROWS)}"

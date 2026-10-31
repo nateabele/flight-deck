@@ -43,6 +43,7 @@ swiftc -O -parse-as-library \
   -Xcc -I"$PWD/vendor/boringssl-artifacts/include" \
   -Xcc -I"$PWD/$PRODUCTS/include" \
   -framework FleetKit \
+  -framework IntakeKit \
   "$DYLIB" \
   -Xlinker -rpath -Xlinker "$APPMACOS" \
   -Xlinker -rpath -Xlinker "$PWD/$PRODUCTS" \
