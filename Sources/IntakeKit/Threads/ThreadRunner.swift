@@ -320,7 +320,14 @@ actor ThreadKeeper {
         try? store.save(turns: turns, of: id)
     }
 
-    func save(_ diff: ThreadDiff) { try? store.save(diff) }
+    /// A turn's write of a diff it read before an await (its rebase, the commit's rebase, an
+    /// auto-accept). Re-read here, inside the keeper, so a ✓ or ✗ folded meanwhile stands (A-4):
+    /// a decided diff is the human's, and no turn's copy overwrites it.
+    func save(_ diff: ThreadDiff) {
+        if let stored = store.diff(diff.thread, diff.id), stored.state == .accepted || stored.state == .rejected,
+           stored.state != diff.state { return }
+        try? store.save(diff)
+    }
 
     /// Where a thread rests once no turn runs: needing the human while a question or a diff
     /// waits on them, else open.

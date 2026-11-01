@@ -261,6 +261,26 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertTrue(agent.requests.isEmpty)
     }
 
+    /// A-4: a ✓ folded while a turn held a copy of the diff (across its rebase's awaits) is not
+    /// undone when the turn saves that copy: the keeper re-reads under its isolation and the
+    /// human's decision stands.
+    func testADecisionFoldedMidTurnSurvivesTheTurnsSave() async throws {
+        let id = try open()
+        let keeper = ThreadKeeper(store: store, tapeStore: tapeStore, commands: commands, now: Date.init)
+        await keeper.fold()
+        let pending = ThreadDiff(thread: id, turn: 1, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "Use SQLite for the queue."),
+                                 old: "Use SQLite for the queue.", new: "Use a file queue.")
+        await keeper.save(pending)
+        let held = pending  // the turn's copy, read before the ✓
+        try commands.append(.decideDiff(id, diff: pending.id, accept: true))
+        await keeper.fold()
+        XCTAssertEqual(store.diff(id, pending.id)?.state, .accepted)
+        var rebased = held
+        rebased.state = .stale
+        await keeper.save(rebased)
+        XCTAssertEqual(store.diff(id, pending.id)?.state, .accepted, "the human's ✓ stands")
+    }
+
     // MARK: - One turn
 
     func testAMessageRunsOneTurnAndStoresTheReply() async throws {
