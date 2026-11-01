@@ -142,6 +142,27 @@ public struct ProviderTrustStore: Sendable {
         return all
     }
 
+    /// True when the file exists but cannot be read as approvals. Settings explains this and
+    /// offers `moveAside()`, because approve and revoke refuse a corrupt file.
+    public var isUnreadable: Bool {
+        do { _ = try load(); return false } catch { return true }
+    }
+
+    /// Renames a corrupt trust file to `provider-trust.corrupt-<timestamp>.json`, so it is kept
+    /// for a look and the next approval starts a fresh file. Every provider then asks again.
+    @discardableResult
+    public func moveAside(now: Date = Date()) throws -> URL {
+        let stamp = String(Int(now.timeIntervalSince1970))
+        var target = directory.appendingPathComponent("provider-trust.corrupt-\(stamp).json")
+        var n = 1
+        while FileManager.default.fileExists(atPath: target.path) {
+            n += 1
+            target = directory.appendingPathComponent("provider-trust.corrupt-\(stamp)-\(n).json")
+        }
+        try FileManager.default.moveItem(at: fileURL, to: target)
+        return target
+    }
+
     public func isApproved(repoPath: String, providerID: String, digest: String) -> Bool {
         approvals().contains { $0.repoPath == repoPath && $0.providerID == providerID && $0.digest == digest }
     }

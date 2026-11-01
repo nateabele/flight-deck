@@ -1,7 +1,7 @@
 import IntakeKit
 import SwiftUI
 
-/// Settings → Flight Control: Routing, Task Kinds, Capability Index and Capacity. The sections are
+/// Settings → Flight Control: Routing, Task Kinds, Capability Index, Capacity and Providers. The sections are
 /// a segmented control rather than a nested `TabView`: a tab strip inside the Settings tab strip
 /// reads as two windows' chrome.
 struct FlightControlSettingsTab: View {
@@ -10,6 +10,7 @@ struct FlightControlSettingsTab: View {
         case kinds = "Task Kinds"
         case capabilityIndex = "Capability Index"
         case capacity = "Capacity"
+        case providers = "Providers"
         var id: String { rawValue }
         /// What the UI tests name a section by. A segmented `Picker`'s segments are not separate
         /// views, so they cannot carry these as accessibility identifiers; the UI tests'
@@ -20,6 +21,7 @@ struct FlightControlSettingsTab: View {
             case .kinds: "fc-section-kinds"
             case .capabilityIndex: "fc-section-index"
             case .capacity: "fc-section-capacity"
+            case .providers: "fc-section-providers"
             }
         }
     }
@@ -89,6 +91,10 @@ struct FlightControlSettingsTab: View {
                 case .capacity:
                     CapacityPane(preferences: preferences, usage: UsageService.shared,
                                  localAgents: CapacityPane.defaultLocalAgents())
+                case .providers:
+                    ProvidersPane(model: ProvidersSettingsModel(
+                        registry: ProvidersPane.defaultRegistry(),
+                        repo: project.map { URL(fileURLWithPath: $0, isDirectory: true) }))
                 }
             }
             .id(project)
