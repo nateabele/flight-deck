@@ -7,8 +7,9 @@ import XCTest
 
 /// Renders the Ask threads' Mac surfaces for design review against the approved renders
 /// (`thread-ux-v1.html`, `diff-slim-v2.html`): the rail with Ask cards, the thread panel, and a
-/// proposed edit at rest and under the pointer. Written to `FD_INTAKE_RENDER_DIR`; skipped
-/// without it. The plan sits beside the rail in an HStack rather than through `.inspector`, as
+/// proposed edit at rest and under the pointer. Written to `FD_INTAKE_RENDER_DIR` to look at;
+/// without it to a temporary folder, so the assertions (the proposed words at rest, the old words
+/// hidden) run in every suite rather than only in a render run (review B, M4). The plan sits beside the rail in an HStack rather than through `.inspector`, as
 /// `NotesRailRenderTests` does: an offscreen render can't draw the inspector's AppKit split pane.
 @MainActor
 final class ThreadRenderTests: XCTestCase {
@@ -40,9 +41,8 @@ final class ThreadRenderTests: XCTestCase {
     static let newSentence = "Revoked tokens stop working within one second, and the Mac closes the phone's socket."
 
     private func dir() throws -> URL {
-        guard let path = ProcessInfo.processInfo.environment["FD_INTAKE_RENDER_DIR"] else {
-            throw XCTSkip("set FD_INTAKE_RENDER_DIR to render the thread PNGs")
-        }
+        let path = ProcessInfo.processInfo.environment["FD_INTAKE_RENDER_DIR"]
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("thread-renders-\(ProcessInfo.processInfo.processIdentifier)").path
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
         return URL(fileURLWithPath: path)
     }
