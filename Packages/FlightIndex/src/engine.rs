@@ -8,10 +8,11 @@
 //! the point of keying facts by git blob.
 
 use crate::error::{Error, Result};
-use crate::facts::BlobFacts;
+use crate::facts::InternedFacts;
 use crate::git::{self, FileRef, Overlay, View, MAX_FILE_BYTES};
 use crate::graph::{facts_bytes, FileChange, ViewGraph};
 use crate::lang;
+use crate::names::NamePool;
 use crate::resolve::{Resolved, Resolver};
 use crate::store::{GcStats, ParsedBlob, Reader, Writer};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -93,7 +94,14 @@ pub struct Engine {
     /// Blob facts shared between every graph that holds them. Weak, so a blob nobody's graph holds
     /// any more is freed: ten graphs of ten commits of one repository hold one copy of each blob
     /// they share, not ten.
-    facts: Mutex<HashMap<(String, &'static str), SharedFacts>>,
+    ///
+    /// Keyed by store as well as blob: references hold that store's name ids (`names`), so the
+    /// same blob in two repositories, or in a repository's database before and after a rebuild,
+    /// is two entries.
+    facts: Mutex<HashMap<(u64, String, &'static str), SharedFacts>>,
+    /// Each repository's name pool, as a frozen snapshot replaced (never mutated) when a load
+    /// meets ids it does not know yet. Every graph of the repository resolves through it.
+    names: Mutex<HashMap<PathBuf, Arc<NamePool>>>,
     /// What the store's `worktrees` row says for each worktree, so a request whose view has not
     /// changed writes nothing (see `record_view`).
     recorded: Mutex<HashMap<PathBuf, Recorded>>,
@@ -122,7 +130,7 @@ fn charged(estimate: usize) -> usize {
 }
 
 /// A blob's facts as held weakly by the shared cache, with their estimated size.
-type SharedFacts = (Weak<BlobFacts>, usize);
+type SharedFacts = (Weak<InternedFacts>, usize);
 
 /// Default budget for resolved graphs: with hundreds of worktrees on many commits the daemon
 /// cannot hold them all (one tessera graph is ~100 MB), so the least recently used are dropped.
@@ -181,6 +189,7 @@ impl Engine {
             bases: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
             facts: Mutex::new(HashMap::new()),
+            names: Mutex::new(HashMap::new()),
             recorded: Mutex::new(HashMap::new()),
         })
     }
@@ -322,6 +331,7 @@ impl Engine {
             GraphKey::Overlay(_) => g.graph.label.repo != repo,
         });
         self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        self.names.lock().unwrap().remove(repo);
         crate::store::remove_repo_db(&self.store_root, repo);
     }
 
@@ -470,7 +480,8 @@ impl Engine {
                 let w = writer.lock().unwrap();
                 for &i in &first {
                     let f = &files[i];
-                    let Some(facts) = w.get_facts(&f.blob_id, f.language, version(f.language))? else { continue };
+                    // Only the imports are read; the interned form skips resolving every reference name.
+                    let Some(facts) = w.get_interned(&f.blob_id, f.language, version(f.language))? else { continue };
                     for imp in &facts.imports {
                         if let Resolved::File { path, .. } = resolver.resolve_import(&f.path, f.language, imp)
                             && let Some(&t) = by_path.get(path.as_str())
@@ -608,7 +619,9 @@ impl Engine {
     }
 
     fn live_facts_bytes(&self) -> usize {
-        self.facts.lock().unwrap().values().filter(|(w, _)| w.strong_count() > 0).map(|(_, b)| *b).sum()
+        let facts: usize = self.facts.lock().unwrap().values().filter(|(w, _)| w.strong_count() > 0).map(|(_, b)| *b).sum();
+        // Reference names are held once per repository, in its pool, not per blob.
+        facts + self.names.lock().unwrap().values().map(|p| p.heap_bytes()).sum::<usize>()
     }
 
     /// Evict least recently used graphs until the cache fits its budget; the entry just touched
@@ -676,26 +689,31 @@ impl Engine {
 
     fn graph_with(&self, view: &View, complete: bool) -> Result<Arc<ViewGraph>> {
         // Opened only when a graph actually has to be built: a cached one needs no connection.
-        let load = |files: &[FileRef]| -> Result<Vec<(FileRef, Arc<BlobFacts>)>> {
+        type Loaded = (Vec<(FileRef, Arc<InternedFacts>)>, Arc<NamePool>);
+        let load = |files: &[FileRef]| -> Result<Loaded> {
             let reader = self.reader(&view.label.repo)?;
-            let mut local: HashMap<(&str, &str), Arc<BlobFacts>> = HashMap::new();
+            let mut local: HashMap<(&str, &str), Arc<InternedFacts>> = HashMap::new();
             let mut out = Vec::with_capacity(files.len());
+            let mut bound = 0u32;
             for f in files {
                 let facts = match local.get(&(f.blob_id.as_str(), f.language)) {
                     Some(a) => a.clone(),
                     None => {
                         let a = self.facts_for(&reader, f)?;
+                        bound = bound.max(a.name_bound);
                         local.insert((f.blob_id.as_str(), f.language), a.clone());
                         a
                     }
                 };
                 out.push((f.clone(), facts));
             }
-            Ok(out)
+            let names = self.names_for(&view.label.repo, &reader, bound)?;
+            Ok((out, names))
         };
 
         let Some(commit) = &view.label.base_commit else {
-            return Ok(Arc::new(ViewGraph::build(view.label.clone(), load(&view.files())?)));
+            let (inputs, names) = load(&view.files())?;
+            return Ok(Arc::new(ViewGraph::build(view.label.clone(), inputs, names)));
         };
         let base_key = GraphKey::Base(view.label.repo.clone(), commit.clone());
         let base = match self.cached(&base_key, "").filter(|_| complete) {
@@ -709,7 +727,8 @@ impl Engine {
                     None => {
                         let mut base_label = view.label.clone();
                         base_label.dirty = false;
-                        let b = Arc::new(ViewGraph::build(base_label, load(&view.base)?));
+                        let (inputs, names) = load(&view.base)?;
+                        let b = Arc::new(ViewGraph::build(base_label, inputs, names));
                         if complete {
                             self.remember(base_key.clone(), String::new(), b.clone());
                         }
@@ -740,14 +759,22 @@ impl Engine {
                 Overlay::Deleted(_) => None,
             })
             .collect();
-        let mut changes: Vec<FileChange> = load(&present)?.into_iter().map(|(f, facts)| FileChange::Upsert(f, facts)).collect();
+        let (loaded, names) = load(&present)?;
+        if names.store_id() != base.names().store_id() {
+            // The database was rebuilt under a cached base graph, so the overlay's ids and the
+            // base's come from different files and cannot be mixed. Rare enough to just resolve
+            // the whole view afresh, uncached.
+            let (inputs, names) = load(&view.files())?;
+            return Ok(Arc::new(ViewGraph::build(view.label.clone(), inputs, names)));
+        }
+        let mut changes: Vec<FileChange> = loaded.into_iter().map(|(f, facts)| FileChange::Upsert(f, facts)).collect();
         changes.extend(view.overlay.iter().filter_map(|o| match o {
             Overlay::Deleted(p) => Some(FileChange::Remove(p.clone())),
             Overlay::Present(_) => None,
         }));
         // `with_changes` re-points the resolver at this worktree's root itself, so the base graph
         // of another worktree of the same commit can be used as is.
-        let g = Arc::new(base.with_changes(view.label.clone(), changes));
+        let g = Arc::new(base.with_changes(view.label.clone(), changes, names));
         if complete {
             self.remember(overlay_key, stamp, g.clone());
         }
@@ -756,21 +783,20 @@ impl Engine {
 
     /// Facts for one file, from the shared in-memory copy when some graph still holds it. A file
     /// the build could not store (vanished, changed) is an empty file.
-    fn facts_for(&self, reader: &Reader, f: &FileRef) -> Result<Arc<BlobFacts>> {
-        let key = (f.blob_id.clone(), f.language);
+    fn facts_for(&self, reader: &Reader, f: &FileRef) -> Result<Arc<InternedFacts>> {
+        let key = (reader.store_id(), f.blob_id.clone(), f.language);
         if let Some((w, _)) = self.facts.lock().unwrap().get(&key)
             && let Some(a) = w.upgrade()
         {
             return Ok(a);
         }
         let v = lang::by_id(f.language).map(|l| l.parser_version()).unwrap_or(0);
-        match reader.get_facts(&f.blob_id, f.language, v)? {
+        match reader.get_interned(&f.blob_id, f.language, v)? {
             Some(mut facts) => {
                 // Rows arrive from SQLite one at a time, so these vectors grew by doubling and
                 // carry up to 2x slack; on a 650k-reference repository that is tens of MB held
-                // for as long as the graph lives.
+                // for as long as the graph lives. (`refs` is sized exactly by the store.)
                 facts.symbols.shrink_to_fit();
-                facts.refs.shrink_to_fit();
                 facts.imports.shrink_to_fit();
                 facts.hierarchy.shrink_to_fit();
                 let bytes = facts_bytes(&facts);
@@ -778,8 +804,32 @@ impl Engine {
                 self.facts.lock().unwrap().insert(key, (Arc::downgrade(&a), bytes));
                 Ok(a)
             }
-            None => Ok(Arc::new(BlobFacts::default())),
+            None => Ok(Arc::new(InternedFacts::default())),
         }
+    }
+
+    /// The repository's name pool, extended from the store if it is shorter than `bound` (the
+    /// highest `name_bound` of the facts just loaded) or belongs to a database since rebuilt.
+    /// Facts taken from the shared cache were loaded under an earlier pool, which any later one
+    /// covers, since ids only append.
+    fn names_for(&self, repo: &Path, reader: &Reader, bound: u32) -> Result<Arc<NamePool>> {
+        let mut names = self.names.lock().unwrap();
+        let cur = names.get(repo).filter(|p| p.store_id() == reader.store_id());
+        if let Some(p) = cur
+            && p.len() >= bound as usize
+        {
+            return Ok(p.clone());
+        }
+        // A clone, not an in-place append: graphs hold the old snapshot and read it unlocked.
+        let mut next = cur.map(|p| (**p).clone()).unwrap_or_else(|| NamePool::new(reader.store_id()));
+        reader.load_names(&mut next)?;
+        if next.len() < bound as usize {
+            return Err(Error::Msg(format!("{}: names table ends at {} but facts use id {}", reader.path().display(), next.len(), bound - 1)));
+        }
+        next.shrink_to_fit();
+        let next = Arc::new(next);
+        names.insert(repo.to_path_buf(), next.clone());
+        Ok(next)
     }
 }
 

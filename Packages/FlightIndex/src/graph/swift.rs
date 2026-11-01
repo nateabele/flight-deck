@@ -3,7 +3,7 @@
 //! definition and the file dependency (see `resolve_file`).
 
 use super::{Confidence, RefRes, SymId, GraphData};
-use crate::facts::{Reference, SymbolKind};
+use crate::facts::{RefSite, SymbolKind};
 use crate::resolve::swift_module_key;
 
 fn is_type_kind(k: SymbolKind) -> bool {
@@ -49,15 +49,17 @@ impl GraphData {
         keys
     }
 
-    pub(super) fn swift_ref(&self, f: u32, r: &Reference, keys: &[String]) -> RefRes {
+    pub(super) fn swift_ref(&self, f: u32, r: &RefSite, keys: &[String]) -> RefRes {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
         let guess = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Fallback, external: None };
         let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
+        let name = self.name(r.name);
+        let qualifier = self.qualifier(r);
 
         // Definitions of this name in visible modules, with how near their module is (0 = own).
         let cands: Vec<(SymId, usize)> = self
             .name_index
-            .get(&r.name)
+            .get(name)
             .into_iter()
             .flatten()
             .filter(|id| self.files[id.file as usize].language == "swift")
@@ -82,7 +84,7 @@ impl GraphData {
         let enclosing_chain: Vec<&str> = {
             let node = &self.files[f as usize];
             let mut chain = Vec::new();
-            let mut cur = r.enclosing;
+            let mut cur = r.enclosing();
             while let Some(c) = cur {
                 let s = node.symbol(c);
                 if is_container_kind(s.kind) {
@@ -98,7 +100,7 @@ impl GraphData {
         // Last resorts shared by every branch: a unique member name in scope, then a unique name
         // anywhere in the view. Both are guesses and say so.
         let unique_member = || -> Option<RefRes> {
-            if LIBRARY_MEMBERS.contains(&r.name.as_str()) && r.qualifier.is_some() {
+            if LIBRARY_MEMBERS.contains(&name) && qualifier.is_some() {
                 return None;
             }
             let members: Vec<_> = cands.iter().copied().filter(|(id, _)| sym(*id).parent.is_some() && sym(*id).kind != SymbolKind::Extension).collect();
@@ -116,7 +118,7 @@ impl GraphData {
             }
             let pool: Vec<SymId> = self
                 .name_index
-                .get(&r.name)
+                .get(name)
                 .into_iter()
                 .flatten()
                 .copied()
@@ -125,8 +127,8 @@ impl GraphData {
             if pool.len() == 1 { guess(pool[0]) } else { none.clone() }
         };
 
-        match r.qualifier.as_deref() {
-            None if r.name.starts_with(|c: char| c.is_uppercase()) => {
+        match qualifier {
+            None if name.starts_with(|c: char| c.is_uppercase()) => {
                 // A nested type (`Store.Kind`) is nameable bare only from inside its parent, so
                 // an `Error` or `Entry` nested somewhere else is not what a bare `Error` means.
                 let types: Vec<_> = cands

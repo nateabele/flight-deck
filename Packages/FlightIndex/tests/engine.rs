@@ -250,3 +250,28 @@ fn concurrent_builds_of_one_repository_parse_each_blob_once() {
     // 150 blobs shared by both commits, plus the one file that differs: 151 distinct.
     assert_eq!(e.parse_count(), 151, "builds ran one after the other, so the second found the first's blobs");
 }
+
+#[test]
+fn a_name_first_seen_in_an_overlay_resolves_through_the_shared_pool() {
+    // The base graph loaded the repository's name pool; the edit below stores names the pool has
+    // never seen, so the overlay graph must read them from the store before resolving.
+    let (_d, e) = engine();
+    let r = init_repo();
+    seed(&r);
+    let v = e.view_for_path(&r.root).unwrap();
+    e.build(&v, &[], |_| {}).unwrap();
+    let base = e.graph(&v).unwrap();
+    let before = base.names().len();
+    write(&r.root, "web/util.ts", "export function f() { return 1 }\nexport function brandNewName() { return 2 }\n");
+    write(&r.root, "web/app.ts", "import { f, brandNewName } from './util';\nexport const g = () => f() + brandNewName();\n");
+    let v = e.view_for_path(&r.root).unwrap();
+    e.build(&v, &[], |_| {}).unwrap();
+    let g = e.graph(&v).unwrap();
+    assert!(g.names().len() > before, "the pool grew: {before} -> {}", g.names().len());
+    assert!(base.names().get("brandNewName").is_none(), "the base graph's snapshot is untouched");
+    let fp = g.fingerprint();
+    assert!(
+        fp.iter().any(|l| l.starts_with("web/app.ts ref 2:brandNewName -> Some(\"web/util.ts#1\")")),
+        "{fp:#?}"
+    );
+}

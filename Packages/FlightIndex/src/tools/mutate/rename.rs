@@ -134,8 +134,8 @@ pub fn rename(c: &MutCtx) -> Result<Plan, ToolError> {
     for id in &targets {
         for &(fi, ri) in g.incoming.get(id).map(|v| v.as_slice()).unwrap_or(&[]) {
             let r = &g.file(fi).facts.refs[ri as usize];
-            if r.name == old {
-                sites.entry(fi).or_default().entry(r.line).or_default().push(r.qualifier.clone());
+            if g.name(r.name) == old {
+                sites.entry(fi).or_default().entry(r.line).or_default().push(g.qualifier(r).map(String::from));
             }
         }
     }
@@ -146,14 +146,14 @@ pub fn rename(c: &MutCtx) -> Result<Plan, ToolError> {
     if matches!(t.kind, SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Class | SymbolKind::TypeAlias) {
         for (fi, node) in g.files.iter().enumerate().filter(|(_, n)| n.alive) {
             for (ri, r) in node.facts.refs.iter().enumerate() {
-                let Some(q) = &r.qualifier else { continue };
+                let Some(q) = g.qualifier(r) else { continue };
                 if q.rsplit(['.', ':']).next() != Some(old.as_str()) {
                     continue;
                 }
                 let Some(tid) = g.res[fi].refs[ri].target else { continue };
                 let owner = g.file(tid.file).symbol(tid.local).parent.map(|p| g.file(tid.file).symbol(p));
                 if owner.is_some_and(|o| o.name == old && (tid.file == tf || o.kind == SymbolKind::Impl)) {
-                    member_sites.entry(fi as u32).or_default().push((r.line, r.name.clone(), q.clone()));
+                    member_sites.entry(fi as u32).or_default().push((r.line, g.name(r.name).to_string(), q.to_string()));
                 }
             }
         }

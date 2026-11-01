@@ -18,13 +18,17 @@ use crate::error::{Error, Result};
 use crate::facts::*;
 use crate::git::{FileRef, Overlay};
 use crate::lang;
+use crate::names::{NameId, NamePool};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha1::{Digest, Sha1};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 /// Bump when the table layout changes. A mismatch rebuilds the file.
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// 2: reference names and qualifiers are ids into a `names` table (see `names`), and `facts`
+/// records each blob's reference count.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Where the index lives by default: `~/Library/Application Support/FlightDeck/index` on macOS,
 /// `$XDG_DATA_HOME/flightdeck/index` (else `~/.local/share/flightdeck/index`) elsewhere.
@@ -107,6 +111,9 @@ CREATE TABLE facts (
     status INTEGER NOT NULL DEFAULT 0,
     module_name TEXT,
     line_count INTEGER NOT NULL,
+    -- Rows in `refs` for this blob, so a load sizes its vector exactly: grown by doubling and
+    -- then shrunk, macOS keeps the old block (measured 56.8 MB of buffers for 44.9 MB of sites).
+    ref_count INTEGER NOT NULL DEFAULT 0,
     UNIQUE (blob_id, language, parser_version)
 );
 CREATE TABLE symbols (
@@ -124,10 +131,15 @@ CREATE TABLE imports (
     specifier TEXT NOT NULL, alias TEXT, names TEXT NOT NULL, line INTEGER NOT NULL, kind TEXT NOT NULL,
     PRIMARY KEY (facts_id, idx)
 ) WITHOUT ROWID;
+-- Every reference name and qualifier the repository has stored, once. Append-only: ids are
+-- what `refs` and every in-memory pool hold, so a row is never deleted or renumbered (GC leaves
+-- names of dead blobs behind; 28.0k -> 28.4k ids across seven tessera commits). Ids are assigned
+-- densely from 0 by the writer.
+CREATE TABLE names (id INTEGER PRIMARY KEY, s TEXT NOT NULL UNIQUE);
 CREATE TABLE refs (
     facts_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
     idx INTEGER NOT NULL,
-    name TEXT NOT NULL, qualifier TEXT, line INTEGER NOT NULL, enclosing INTEGER, kind TEXT NOT NULL,
+    name_id INTEGER NOT NULL, qual_id INTEGER, line INTEGER NOT NULL, enclosing INTEGER, kind INTEGER NOT NULL,
     PRIMARY KEY (facts_id, idx)
 ) WITHOUT ROWID;
 CREATE TABLE hierarchy (
@@ -183,11 +195,15 @@ pub struct StoreStats {
 pub struct Reader {
     conn: Connection,
     path: PathBuf,
+    store_id: u64,
 }
 
 /// The single writer for one repository's database. Dereferences to `Reader` for queries.
 pub struct Writer {
     reader: Reader,
+    /// The `names` table as this writer has seen it, read on the first `put_facts`. Another
+    /// process may have added names since; a miss goes to the table, which stays the authority.
+    names: Option<NamePool>,
 }
 
 impl Deref for Writer {
@@ -206,6 +222,25 @@ fn read_version(conn: &Connection) -> Result<Option<i64>> {
         Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// The `store_id` meta value: which file assigned this store's name ids (`names`).
+fn read_store_id(conn: &Connection) -> Result<u64> {
+    let v: Option<String> =
+        conn.query_row("SELECT value FROM meta WHERE key = 'store_id'", [], |r| r.get(0)).optional()?;
+    Ok(v.and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// A fresh identity for a new database file. Only has to differ from the file it replaces, so
+/// the clock and pid are enough; no randomness dependency for it.
+fn new_store_id() -> u64 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut h = Sha1::new();
+    h.update(nanos.to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    let d = h.finalize();
+    // Positive i64 range, so it survives SQLite and JSON unchanged.
+    u64::from_le_bytes(d[..8].try_into().unwrap()) >> 1
 }
 
 fn remove_db_files(path: &Path) {
@@ -274,19 +309,45 @@ impl Writer {
             conn.execute_batch(SCHEMA)?;
             conn.execute("INSERT INTO meta VALUES ('schema_version', ?1)", params![SCHEMA_VERSION.to_string()])?;
             conn.execute("INSERT INTO meta VALUES ('repo', ?1)", params![repo.to_string_lossy()])?;
+            conn.execute("INSERT INTO meta VALUES ('store_id', ?1)", params![new_store_id().to_string()])?;
         }
-        Ok(Writer { reader: Reader { conn, path: path.to_path_buf() } })
+        let store_id = read_store_id(&conn)?;
+        Ok(Writer { reader: Reader { conn, path: path.to_path_buf(), store_id }, names: None })
     }
 
     /// Insert a batch of parse results in one transaction. Re-inserting a key is a no-op, so two
     /// builds racing on the same blob cannot conflict.
     pub fn put_facts(&mut self, batch: &[ParsedBlob]) -> Result<()> {
+        if self.names.is_none() {
+            let mut pool = NamePool::new(self.reader.store_id);
+            self.reader.load_names(&mut pool)?;
+            self.names = Some(pool);
+        }
+        // Ids learned inside the transaction go into a copy, adopted only on commit: a rolled-back
+        // insert must not leave the writer believing a name has an id the table never got.
+        let mut names = self.names.clone().unwrap_or_default();
         let tx = self.reader.conn.transaction()?;
         {
             let mut ins_facts = tx.prepare_cached(
-                "INSERT OR IGNORE INTO facts (blob_id, language, parser_version, status, module_name, line_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO facts (blob_id, language, parser_version, status, module_name, line_count, ref_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
+            // Dense ids from 0, assigned here rather than by rowid so they start where an
+            // in-memory pool's indices do. `OR IGNORE` because another writer process may have
+            // added the name since this one last looked; the SELECT then reads its id.
+            let mut ins_name = tx.prepare_cached(
+                "INSERT OR IGNORE INTO names (id, s) SELECT coalesce(max(id) + 1, 0), ?1 FROM names",
+            )?;
+            let mut sel_name = tx.prepare_cached("SELECT id FROM names WHERE s = ?1")?;
+            let mut intern = |s: &str| -> Result<i64> {
+                if let Some(id) = names.get(s) {
+                    return Ok(id.0 as i64);
+                }
+                ins_name.execute(params![s])?;
+                let id: i64 = sel_name.query_row(params![s], |r| r.get(0))?;
+                names.set(NameId(id as u32), s);
+                Ok(id)
+            };
             let mut ins_sym = tx.prepare_cached(
                 "INSERT INTO symbols VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
@@ -294,12 +355,12 @@ impl Writer {
             let mut ins_ref = tx.prepare_cached("INSERT INTO refs VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
             let mut ins_h = tx.prepare_cached("INSERT INTO hierarchy VALUES (?1, ?2, ?3, ?4, ?5)")?;
             for p in batch {
-                let (status, module, lines) = match &p.facts {
-                    Some(f) => (0, f.module_name.as_deref(), f.line_count),
-                    None => (1, None, 0),
+                let (status, module, lines, nrefs) = match &p.facts {
+                    Some(f) => (0, f.module_name.as_deref(), f.line_count, f.refs.len()),
+                    None => (1, None, 0, 0),
                 };
                 let inserted =
-                    ins_facts.execute(params![p.blob_id, p.language, p.parser_version, status, module, lines])?;
+                    ins_facts.execute(params![p.blob_id, p.language, p.parser_version, status, module, lines, nrefs as i64])?;
                 let Some(f) = &p.facts else { continue };
                 if inserted == 0 {
                     continue;
@@ -323,7 +384,12 @@ impl Writer {
                     ])?;
                 }
                 for (i, r) in f.refs.iter().enumerate() {
-                    ins_ref.execute(params![id, i as i64, r.name, r.qualifier, r.line, r.enclosing, r.kind.as_str()])?;
+                    let name = intern(&r.name)?;
+                    let qual = match &r.qualifier {
+                        Some(q) => Some(intern(q)?),
+                        None => None,
+                    };
+                    ins_ref.execute(params![id, i as i64, name, qual, r.line, r.enclosing, r.kind.code()])?;
                 }
                 for (i, h) in f.hierarchy.iter().enumerate() {
                     ins_h.execute(params![id, i as i64, h.symbol, h.target, h.kind.as_str()])?;
@@ -331,6 +397,7 @@ impl Writer {
             }
         }
         tx.commit()?;
+        self.names = Some(names);
         Ok(())
     }
 
@@ -498,13 +565,34 @@ impl Reader {
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         match read_version(&conn)? {
-            Some(SCHEMA_VERSION) => Ok(Reader { conn, path }),
+            Some(SCHEMA_VERSION) => {
+                let store_id = read_store_id(&conn)?;
+                Ok(Reader { conn, path, store_id })
+            }
             other => Err(Error::Msg(format!("{}: schema version {other:?}, want {SCHEMA_VERSION}", path.display()))),
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Identifies the file that assigned this store's name ids; a rebuilt file gets a new one.
+    pub fn store_id(&self) -> u64 {
+        self.store_id
+    }
+
+    /// Add to `pool` every name the store has past `pool.len()`. 28k names read in about 2 ms,
+    /// so a fresh pool loads the whole table and a warm one reads only what is new.
+    pub fn load_names(&self, pool: &mut NamePool) -> Result<()> {
+        let mut st = self.conn.prepare_cached("SELECT id, s FROM names WHERE id >= ?1 ORDER BY id")?;
+        let mut rows = st.query(params![pool.len() as i64])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let s = r.get_ref(1)?.as_str().map_err(rusqlite::Error::from)?;
+            pool.set(NameId(id as u32), s);
+        }
+        Ok(())
     }
 
     pub fn has_facts(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<bool> {
@@ -514,23 +602,81 @@ impl Reader {
         Ok(st.exists(params![blob_id, language, parser_version])?)
     }
 
-    /// Facts for one blob; `Ok(None)` if absent. A skipped blob yields empty facts.
+    /// Facts for one blob with names as text, as the parser produced them; `Ok(None)` if absent.
+    /// A skipped blob yields empty facts. The graph loads `get_interned` instead.
     pub fn get_facts(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<BlobFacts>> {
+        let Some((id, f)) = self.get_common(blob_id, language, parser_version)? else { return Ok(None) };
+        let mut facts = BlobFacts {
+            module_name: f.module_name,
+            line_count: f.line_count,
+            symbols: f.symbols,
+            imports: f.imports,
+            refs: Vec::new(),
+            hierarchy: f.hierarchy,
+        };
+        let Some(id) = id else { return Ok(Some(facts)) };
+        let mut st = self.conn.prepare_cached(
+            "SELECT n.s, q.s, r.line, r.enclosing, r.kind FROM refs r
+             JOIN names n ON n.id = r.name_id LEFT JOIN names q ON q.id = r.qual_id
+             WHERE r.facts_id = ?1 ORDER BY r.idx",
+        )?;
+        facts.refs = st
+            .query_map(params![id], |r| {
+                Ok(Reference {
+                    name: r.get(0)?,
+                    qualifier: r.get(1)?,
+                    line: r.get(2)?,
+                    enclosing: r.get(3)?,
+                    kind: RefKind::from_code(r.get(4)?),
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Some(facts))
+    }
+
+    /// Facts for one blob with references as store name ids (resolve them through a pool filled
+    /// by `load_names` from this store); `Ok(None)` if absent. Reads integer columns only, and
+    /// sizes the references exactly from `facts.ref_count`.
+    pub fn get_interned(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<InternedFacts>> {
+        let Some((id, mut facts)) = self.get_common(blob_id, language, parser_version)? else { return Ok(None) };
+        let Some(id) = id else { return Ok(Some(facts)) };
+        let mut st = self.conn.prepare_cached(
+            "SELECT name_id, qual_id, line, enclosing, kind FROM refs WHERE facts_id = ?1 ORDER BY idx",
+        )?;
+        let mut rows = st.query(params![id])?;
+        let mut bound = 0u32;
+        while let Some(r) = rows.next()? {
+            let name = NameId(r.get::<_, i64>(0)? as u32);
+            let qual = r.get::<_, Option<i64>>(1)?.map(|q| NameId(q as u32));
+            bound = bound.max(name.0 + 1).max(qual.map_or(0, |q| q.0 + 1));
+            facts.refs.push(RefSite::new(name, qual, r.get(2)?, r.get(3)?, RefKind::from_code(r.get(4)?)));
+        }
+        // A count that disagreed with the rows (it cannot, both are written in one transaction)
+        // would only cost the exact sizing.
+        facts.refs.shrink_to_fit();
+        facts.name_bound = bound;
+        Ok(Some(facts))
+    }
+
+    /// Everything but the references, with `refs` reserved to the stored count. The facts row id
+    /// is `None` for a skipped blob, which has nothing more to read.
+    fn get_common(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<(Option<i64>, InternedFacts)>> {
         let row = self
             .conn
             .prepare_cached(
-                "SELECT id, status, module_name, line_count FROM facts
+                "SELECT id, status, module_name, line_count, ref_count FROM facts
                  WHERE blob_id = ?1 AND language = ?2 AND parser_version = ?3",
             )?
             .query_row(params![blob_id, language, parser_version], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, u32>(3)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, u32>(3)?, r.get::<_, i64>(4)?))
             })
             .optional()?;
-        let Some((id, status, module_name, line_count)) = row else { return Ok(None) };
-        let mut facts = BlobFacts { module_name, line_count, ..Default::default() };
+        let Some((id, status, module_name, line_count, ref_count)) = row else { return Ok(None) };
+        let mut facts = InternedFacts { module_name, line_count, ..Default::default() };
         if status != 0 {
-            return Ok(Some(facts));
+            return Ok(Some((None, facts)));
         }
+        facts.refs = Vec::with_capacity(ref_count.max(0) as usize);
         let mut st = self.conn.prepare_cached(
             "SELECT local_id, name, kind, start_line, start_col, end_line, end_col, signature, parent, exported
              FROM symbols WHERE facts_id = ?1 ORDER BY local_id",
@@ -565,20 +711,6 @@ impl Reader {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
-        let mut st = self.conn.prepare_cached(
-            "SELECT name, qualifier, line, enclosing, kind FROM refs WHERE facts_id = ?1 ORDER BY idx",
-        )?;
-        facts.refs = st
-            .query_map(params![id], |r| {
-                Ok(Reference {
-                    name: r.get(0)?,
-                    qualifier: r.get(1)?,
-                    line: r.get(2)?,
-                    enclosing: r.get(3)?,
-                    kind: RefKind::parse(&r.get::<_, String>(4)?),
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
         let mut st = self
             .conn
             .prepare_cached("SELECT symbol, target, kind FROM hierarchy WHERE facts_id = ?1 ORDER BY idx")?;
@@ -591,7 +723,7 @@ impl Reader {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
-        Ok(Some(facts))
+        Ok(Some((Some(id), facts)))
     }
 
     pub fn has_tree(&self, commit: &str) -> Result<bool> {

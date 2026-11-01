@@ -429,17 +429,17 @@ fn rename_file_rust(w: &mut Work, fi: u32, from: &Path, to: &Path, sites: &mut u
                 }
             }
             for r in &refs {
-                let Some(q) = &r.qualifier else { continue };
+                let Some(q) = g.qualifier(r) else { continue };
                 let segs: Vec<String> = q.split("::").map(String::from).collect();
                 for (k, seg) in segs.iter().enumerate() {
                     if *seg != old_stem || !(is_target(gi, &segs[..=k]) || (k == 0 && binds_local)) {
                         continue;
                     }
-                    for tok in d.line_tokens(r.line as usize, &r.name) {
+                    for tok in d.line_tokens(r.line as usize, g.name(r.name)) {
                         if qualifier_ok(&d.masked, tok, Some(q)) {
                             let q_start = tok - q.len() - 2;
                             let off: usize = segs[..k].iter().map(|s| s.len() + 2).sum();
-                            if d.masked[q_start..tok - 2] == **q {
+                            if &d.masked[q_start..tok - 2] == q {
                                 v.push((q_start + off, old_stem.len()));
                             }
                         }
@@ -565,15 +565,15 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     let mut sibling_items: Vec<String> = Vec::new();
     let mut used_names: HashSet<String> = HashSet::new();
     for (ri, r) in sfile.facts.refs.iter().enumerate() {
-        if !(in_block(r.line) || r.enclosing.is_some_and(&inside)) {
+        if !(in_block(r.line) || r.enclosing().is_some_and(&inside)) {
             continue;
         }
         let res = &g.res[sf as usize].refs[ri];
         if res.target.is_some_and(|tid| tid.file == sf && inside(tid.local)) {
             continue;
         }
-        used_names.insert(r.name.clone());
-        if let Some(q) = &r.qualifier {
+        used_names.insert(g.name(r.name).to_string());
+        if let Some(q) = g.qualifier(r) {
             used_names.insert(q.split(['.', ':']).next().unwrap_or(q).to_string());
         }
         if let Some(tid) = res.target
@@ -590,14 +590,14 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         }
         let binding = sfile.facts.imports.iter().enumerate().find(|(ii, imp)| {
             let local = |n: &str| imp.names.iter().any(|x| x.local() == n && x.name != "*");
-            match &r.qualifier {
+            match g.qualifier(r) {
                 Some(q) => {
                     let first = q.split(['.', ':']).next().unwrap_or(q);
-                    let whole_alias = imp.alias.as_deref() == Some(q.as_str()) || (imp.alias.is_none() && imp.specifier == *q);
+                    let whole_alias = imp.alias.as_deref() == Some(q) || (imp.alias.is_none() && imp.specifier == q);
                     whole_alias || imp.alias.as_deref() == Some(first) || local(first) || (lang == "rust" && imp.specifier.rsplit("::").next() == Some(first))
                 }
                 None => {
-                    local(&r.name)
+                    local(g.name(r.name))
                         || (imp.names.iter().any(|x| x.name == "*") && res.target.is_some_and(|tid| matches!(&g.res[sf as usize].imports[*ii], Resolved::File { path, .. } if *path == g.file(tid.file).path)))
                 }
             }
@@ -615,7 +615,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     let uses_after = moved.iter().any(|&l| {
         g.incoming.get(&SymId { file: sf, local: l }).map(|v| v.as_slice()).unwrap_or(&[]).iter().any(|&(fi, ri)| {
             let r = &g.file(fi).facts.refs[ri as usize];
-            fi == sf && !(in_block(r.line) || r.enclosing.is_some_and(&inside))
+            fi == sf && !(in_block(r.line) || r.enclosing().is_some_and(&inside))
         })
     });
     if !siblings.is_empty() {
@@ -797,13 +797,13 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
                     continue;
                 }
                 let r = &node.facts.refs[ri as usize];
-                if gi == sf && (in_block(r.line) || r.enclosing.is_some_and(&inside)) {
+                if gi == sf && (in_block(r.line) || r.enclosing().is_some_and(&inside)) {
                     continue;
                 }
                 if g.res[gi as usize].refs[ri as usize].confidence == crate::graph::Confidence::Fallback {
                     by_name_only += 1;
                 }
-                uses.push((ri as usize, r.qualifier.is_some()));
+                uses.push((ri as usize, r.qualifier().is_some()));
             }
         }
         // Import statements of this file that land on the source file and name the symbol.
@@ -1101,8 +1101,8 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
                 continue;
             }
             let r = &node.facts.refs[ri];
-            let q = r.qualifier.as_deref().unwrap_or("");
-            for tok in d.line_tokens(r.line as usize, &r.name) {
+            let q = g.qualifier(r).unwrap_or("");
+            for tok in d.line_tokens(r.line as usize, g.name(r.name)) {
                 if qualifier_ok(&d.masked, tok, Some(q)) {
                     let sep = if cx.lang == "rust" { 2 } else { 1 };
                     let start = tok - q.len() - sep;
@@ -1129,8 +1129,8 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
                     continue;
                 }
                 let r = &node.facts.refs[ri];
-                let q = r.qualifier.as_deref().unwrap_or("");
-                for tok in d.line_tokens(r.line as usize, &r.name) {
+                let q = g.qualifier(r).unwrap_or("");
+                for tok in d.line_tokens(r.line as usize, g.name(r.name)) {
                     if qualifier_ok(&d.masked, tok, Some(q)) && tok > q.len() {
                         let start = tok - q.len() - 1;
                         if d.masked[start..tok - 1] == *q && !d.edits.touches(start, tok) {
@@ -1164,12 +1164,12 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
                     continue;
                 }
                 let r = &node.facts.refs[ri];
-                let q = r.qualifier.as_deref().unwrap_or("");
+                let q = g.qualifier(r).unwrap_or("");
                 let ns = node.facts.imports.iter().any(|i| i.alias.as_deref() == Some(q));
                 if !ns {
                     continue;
                 }
-                for tok in d.line_tokens(r.line as usize, &r.name) {
+                for tok in d.line_tokens(r.line as usize, g.name(r.name)) {
                     if qualifier_ok(&d.masked, tok, Some(q)) && tok > q.len() {
                         let start = tok - q.len() - 1;
                         if !d.edits.touches(start, tok) {
@@ -1196,11 +1196,11 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
                     continue;
                 }
                 let r = &node.facts.refs[ri];
-                let q = r.qualifier.as_deref().unwrap_or("");
+                let q = g.qualifier(r).unwrap_or("");
                 if matches!(q, "self" | "Self") {
                     continue;
                 }
-                for tok in d.line_tokens(r.line as usize, &r.name) {
+                for tok in d.line_tokens(r.line as usize, g.name(r.name)) {
                     if qualifier_ok(&d.masked, tok, Some(q)) && tok >= q.len() + 2 {
                         let start = tok - q.len() - 2;
                         if d.masked[start..tok - 2] == *q && !d.edits.touches(start, tok - 2) {
