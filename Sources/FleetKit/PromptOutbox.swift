@@ -25,6 +25,10 @@ public struct PromptOutboxEntry: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let text: String
     public var state: State
+    /// Whether a `.failed` entry may be sent again. True only for a failure that proves the
+    /// Mac never had it to type twice, decided by whoever filed the failure (`fail`). Sending
+    /// again reuses `id`, so the Mac's dedupe holds even if that proof was wrong.
+    public var canRetry: Bool = false
 
     public init(id: UUID, text: String, state: State = .sending) {
         self.id = id
@@ -90,9 +94,24 @@ public struct PromptOutbox: Equatable, Sendable {
     /// It will not be typed. The entry STAYS, carrying the reason: an outbox that cleared
     /// itself on failure would be a message that vanished, which is the failure this whole
     /// mechanism exists to prevent.
-    public mutating func fail(_ id: UUID, _ message: String) {
+    public mutating func fail(_ id: UUID, _ message: String, canRetry: Bool = false) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].state = .failed(message)
+        entries[index].canRetry = canRetry
+    }
+
+    /// The reader asked to send a retryable failure again: back to `.sending`, same id, same
+    /// text, same witness set — what the conversation held when it was first composed is
+    /// still what a matching turn must not be confused with. A no-op unless the entry is a
+    /// failure marked retryable, so a stale tap cannot resurrect anything else.
+    @discardableResult
+    public mutating func retry(_ id: UUID) -> PromptOutboxEntry? {
+        guard let index = entries.firstIndex(where: { $0.id == id }),
+              case .failed = entries[index].state, entries[index].canRetry
+        else { return nil }
+        entries[index].state = .sending
+        entries[index].canRetry = false
+        return entries[index]
     }
 
     /// The reader has read the failure and wants the row gone.

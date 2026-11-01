@@ -784,17 +784,29 @@ final class SessionTimelineModel {
     /// which is minutes. A fetch that vanishes leaves a spinner. A prompt that vanishes
     /// leaves a person believing they told an agent something.
     ///
-    /// **It does not retry, and the entry it leaves says so.** A timeout cannot distinguish
-    /// "the Mac never got it" from "the Mac got it and the ack was lost", and the second is
-    /// where a silent retry types the message twice into a live session. The token would make
-    /// a retry safe — `SessionStore.submitPrompt` dedupes on it — but only by resending the
-    /// SAME token, and a token whose first send may still be sitting in a queue on the Mac is
-    /// a resend nobody can reason about. So the row stays visible and the human decides.
+    /// **It never retries on its own, and the entry it leaves says so.** A timeout cannot
+    /// distinguish "the Mac never got it" from "the Mac got it and the ack was lost", and the
+    /// second is where a silent retry types the message twice into a live session. So the row
+    /// stays visible and the human decides — and only a `.disconnected` failure offers them a
+    /// Retry (`retry(_:)`), because only that one says the phone had no Mac to send to.
     func send(_ raw: String) {
         guard let text = PromptText(raw) else { return }
         let token = UUID()
         outbox.add(id: token, text: text.value, alreadyShowing: feed.items)
+        dispatch(token, text: text.value)
+    }
 
+    /// Sends a failed message again, on the reader's tap. Offered only for a `.disconnected`
+    /// failure (`dispatch` marks it), and it resends the SAME token: if the first copy
+    /// did reach the Mac after all — a socket that died with the frame already written — the
+    /// Mac's dedupe on the token (`SessionStore.submitPrompt`) acks the second without typing
+    /// it, so a retry can never become two messages.
+    func retry(_ id: UUID) {
+        guard let entry = outbox.retry(id) else { return }
+        dispatch(entry.id, text: entry.text)
+    }
+
+    private func dispatch(_ token: UUID, text: String) {
         // Armed BEFORE the send, because the send can complete before it returns:
         // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
         // same asymmetry `fetch` arms its own deadline ahead of. Armed afterwards, this task
@@ -809,7 +821,7 @@ final class SessionTimelineModel {
             self.outbox.fail(token, Self.noConfirmation)
         }
 
-        fleet.sendPrompt(.prompt(id: sessionID, token: token, text: text.value)) {
+        fleet.sendPrompt(.prompt(id: sessionID, token: token, text: text)) {
             [weak self] result in
             // The deadline is claimed here, exactly as `claim(_:)` claims a fetch's: whichever
             // of the answer and the deadline gets here first wins, and the loser finds nothing
@@ -826,7 +838,7 @@ final class SessionTimelineModel {
                 // and the outbox row sits there until the reader leaves the screen.
                 self.loadNewer()
             case .failure(let error):
-                self.outbox.fail(token, Self.promptMessage(for: error))
+                self.outbox.fail(token, Self.promptMessage(for: error), canRetry: error == .disconnected)
             }
         }
     }
