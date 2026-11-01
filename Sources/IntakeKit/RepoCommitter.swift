@@ -199,14 +199,15 @@ public struct RepoCommitter: Sendable {
         while i < paths.count {
             let batch = Array(paths[i..<min(i + 200, paths.count)])
             i += 200
-            switch try await run(repo, ["check-ignore", "--"] + batch).exitCode {
+            let r = try await run(repo, ["check-ignore", "--"] + batch)
+            switch r.exitCode {
             case 0:
                 for p in batch {
                     let r = try await run(repo, ["check-ignore", "-q", "--", p])
                     if r.exitCode == 0 { out.append(p) } else if r.exitCode != 1 { throw Failure.git(step: "check-ignore", stderr: r.stderr) }
                 }
             case 1: break
-            default: throw Failure.git(step: "check-ignore", stderr: "")
+            default: throw Failure.git(step: "check-ignore", stderr: r.stderr)
             }
         }
         return out

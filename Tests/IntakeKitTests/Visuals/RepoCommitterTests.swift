@@ -401,6 +401,19 @@ final class RepoCommitterTests: XCTestCase {
         await assertFails(.ignored(["docs/plans/demo/\(name)"])) { _ = try await committer().commit(e, repo: repo) }
     }
 
+    /// A batch `check-ignore` that git itself fails (not "ignored", not "not ignored") reports
+    /// git's own words, so the release names what went wrong.
+    func testABatchCheckIgnoreErrorCarriesGitsStderr() async throws {
+        let failing = CheckIgnoreFailingRunner(real: runner)
+        do {
+            _ = try await RepoCommitter(runner: failing).commit(sample(), repo: repo)
+            XCTFail("should have thrown")
+        } catch {
+            XCTAssertEqual(error as? RepoCommitter.Failure, .git(step: "check-ignore", stderr: "fatal: index file corrupt\n"))
+        }
+        XCTAssertFalse(exists("docs/plans/demo/plan.md"), "refused before anything was written")
+    }
+
     func testSlugOwnerReadsTheMarker() async throws {
         XCTAssertEqual(RepoCommitter.owner(of: "demo", repo: repo), .free)
         try write("docs/plans/demo/x", "x")
@@ -423,5 +436,18 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         if arguments.contains("--show-toplevel") { out = top }
         if arguments.contains("check-ignore") { code = 1 }
         return CommandResult(stdout: Data(out.utf8), stderr: "", exitCode: code)
+    }
+}
+
+/// Real git for everything except a batch `check-ignore`, which fails the way a broken index does.
+private struct CheckIgnoreFailingRunner: CommandRunner {
+    let real: CommandRunner
+    func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+             processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+        if arguments.contains("check-ignore"), !arguments.contains("-q") {
+            return CommandResult(stdout: Data(), stderr: "fatal: index file corrupt\n", exitCode: 128)
+        }
+        return try await real.run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                                  processGroup: processGroup, onSpawn: onSpawn)
     }
 }
