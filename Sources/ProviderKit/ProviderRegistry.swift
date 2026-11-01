@@ -43,6 +43,23 @@ public struct ResolvedProvider: Equatable, Sendable {
 /// Finds visual providers: the repo's `.flightdeck/visual-providers/`, then the user's, then the
 /// bundled ones. All three roots are parameters so tests use temp folders.
 public struct ProviderRegistry: Sendable {
+    /// The entry that records "switched off" for a provider: `<source>:<id>`. A repo entry applies
+    /// in every repo, by id, and never to a bundled or user provider of the same id.
+    public static func disabledEntry(_ p: ResolvedProvider) -> String {
+        let source: String
+        switch p.source {
+        case .bundled: source = "bundled"
+        case .user: source = "user"
+        case .repo: source = "repo"
+        }
+        return "\(source):\(p.id)"
+    }
+
+    /// Whether a provider may run: usable (trusted, readable, not too new) and not switched off.
+    public static func isEnabled(_ p: ResolvedProvider, disabled: Set<String>) -> Bool {
+        p.isUsable && !disabled.contains(disabledEntry(p))
+    }
+
     public static let repoSubpath = ".flightdeck/visual-providers"
 
     public let userRoot: URL?

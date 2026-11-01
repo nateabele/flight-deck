@@ -9,8 +9,10 @@ struct ProviderRowModel: Identifiable, Equatable {
         case needsApproval(command: String)
         case needsNewerFlightDeck
         case broken(String)
+        case off
     }
     var id: String
+    var providerID: String
     var name: String
     var sourceCaption: String
     var status: Status
@@ -25,7 +27,9 @@ struct ProviderRowModel: Identifiable, Equatable {
 /// remembered by provider id, per person, not per project.
 @MainActor
 final class ProvidersSettingsModel: ObservableObject {
-    static let disabledKey = "visualProviders.disabled.v1"
+    static let disabledKey = "visualProviders.disabled.v2"
+    /// Plain provider ids, from before a switch knew its source. Read once as bundled and user entries.
+    static let legacyDisabledKey = "visualProviders.disabled.v1"
 
     @Published private(set) var rows: [ProviderRowModel] = []
     /// Set when `provider-trust.json` cannot be read. Approving is refused until it is moved aside.
@@ -42,6 +46,9 @@ final class ProvidersSettingsModel: ObservableObject {
         self.registry = registry
         self.repo = repo
         self.defaults = defaults
+        if defaults.object(forKey: Self.disabledKey) == nil, let old = defaults.stringArray(forKey: Self.legacyDisabledKey) {
+            defaults.set(old.flatMap { ["bundled:\($0)", "user:\($0)"] }.sorted(), forKey: Self.disabledKey)
+        }
         refresh()
     }
 
@@ -53,40 +60,52 @@ final class ProvidersSettingsModel: ObservableObject {
     func refresh() {
         resolved = registry.resolve(repo: repo)
         trustProblem = registry.trustStore.isUnreadable
-            ? "Flight Deck cannot read its list of approved providers, so every provider that runs code asks again, and Approve is off. "
-            + "Approvals are kept in provider-trust.json. Move the damaged file aside to start a new list."
+            ? "Approvals are saved in a file Flight Deck cannot read. Move it aside to start a new list; providers that run code will ask again."
             : nil
         let disabled = disabledIDs
         rows = resolved.map { row($0, disabled: disabled) }
     }
 
-    func setEnabled(_ id: String, _ enabled: Bool) {
+    func setEnabled(_ rowID: String, _ enabled: Bool) {
+        guard let provider = resolved.first(where: { Self.rowID($0) == rowID }) else { return }
+        let entry = ProviderRegistry.disabledEntry(provider)
         var disabled = disabledIDs
-        if enabled { disabled.remove(id) } else { disabled.insert(id) }
+        if enabled { disabled.remove(entry) } else { disabled.insert(entry) }
         defaults.set(disabled.sorted(), forKey: Self.disabledKey)
         refresh()
     }
 
-    func approve(_ id: String) {
+    func approve(_ rowID: String) {
         approvalError = nil
-        guard let repo, let provider = resolved.first(where: { $0.id == id }), let digest = provider.digest else { return }
+        guard let repo, let provider = resolved.first(where: { Self.rowID($0) == rowID }),
+              let digest = provider.digest else { return }
+        let id = provider.id
         do {
             try registry.approve(provider, shownDigest: digest, repo: repo)
         } catch ProviderRegistry.ApprovalError.changedSinceShown {
             approvalError = "\(provider.manifest?.name ?? id) changed while you were looking at it. Check it again, then approve."
         } catch ProviderTrustStore.StoreError.trustFileUnreadable {
-            // refresh() below words this.
+            approvalError = "Nothing was approved: the approvals file is damaged. Move it aside first."
         } catch {
-            approvalError = "Could not approve \(provider.manifest?.name ?? id): \(error)"
+            approvalError = "Could not approve \(provider.manifest?.name ?? id). Check that Flight Deck can read the provider's folder, then try again."
         }
         refresh()
     }
 
     func moveTrustFileAside() {
-        do { try registry.trustStore.moveAside() } catch {
-            approvalError = "Could not move the damaged file aside: \(error.localizedDescription)"
+        approvalError = nil
+        do { try registry.trustStore.moveAside() } catch ProviderTrustStore.StoreError.fileIsReadable {
+            approvalError = "The approvals file can be read now, so it was left where it is."
+        } catch {
+            approvalError = "Could not move the approvals file aside."
         }
         refresh()
+    }
+
+    /// Unique per provider folder, so a broken repo provider and a good bundled one with the same
+    /// id are two rows.
+    static func rowID(_ p: ResolvedProvider) -> String {
+        "\(ProviderRegistry.disabledEntry(p))@\(p.folder.standardizedFileURL.path)"
     }
 
     private var disabledIDs: Set<String> {
@@ -116,9 +135,10 @@ final class ProvidersSettingsModel: ObservableObject {
         case .bundled, .user, .repoDataOnly: status = .none
         }
         let usable = p.isUsable
+        let enabled = ProviderRegistry.isEnabled(p, disabled: disabled)
         return ProviderRowModel(
-            id: p.id, name: name, sourceCaption: origin + version, status: status,
-            isEnabled: usable && !disabled.contains(p.id), canToggle: usable,
-            canApprove: p.trust == .repoNeedsApproval && p.digest != nil)
+            id: Self.rowID(p), providerID: p.id, name: name, sourceCaption: origin + version, status: usable && !enabled && status == .none ? .off : status,
+            isEnabled: enabled, canToggle: usable,
+            canApprove: p.trust == .repoNeedsApproval && p.digest != nil && trustProblem == nil)
     }
 }

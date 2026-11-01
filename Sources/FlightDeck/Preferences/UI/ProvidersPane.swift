@@ -31,7 +31,7 @@ struct ProvidersPane: View {
                 }
                 if let problem = model.trustProblem { trustProblem(problem) }
                 if let error = model.approvalError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
+                    Text(error).font(.caption).foregroundStyle(providerWarningColor)
                         .accessibilityIdentifier("providers-approval-error")
                 }
                 if model.rows.isEmpty {
@@ -51,7 +51,7 @@ struct ProvidersPane: View {
     private func trustProblem(_ text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Approvals cannot be read", systemImage: "exclamationmark.triangle.fill")
-                .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(providerWarningColor)
             Text(text).font(.caption).foregroundStyle(.secondary)
             Button("Move damaged file aside") { model.moveTrustFileAside() }
                 .accessibilityIdentifier("providers-trust-move-aside")
@@ -62,6 +62,12 @@ struct ProvidersPane: View {
         .accessibilityIdentifier("providers-trust-problem")
     }
 }
+
+/// System orange fails contrast as small text on a light window, so light mode gets a darker one.
+let providerWarningColor = Color(nsColor: NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? .systemOrange : NSColor(red: 0.72, green: 0.33, blue: 0, alpha: 1)
+})
 
 struct ProviderRow: View {
     let row: ProviderRowModel
@@ -84,6 +90,7 @@ struct ProviderRow: View {
             Spacer()
             if row.canApprove {
                 Button("Approve") { model.approve(row.id) }
+                    .accessibilityLabel("Approve \(row.name)")
                     .accessibilityIdentifier("provider-approve-\(row.id)")
             }
         }
@@ -94,9 +101,10 @@ struct ProviderRow: View {
         switch row.status {
         case .none: nil
         case .approved: ("Approved to run on this Mac", .secondary)
-        case .needsApproval(let command): ("Needs approval: it runs \(command) on this Mac", .orange)
-        case .needsNewerFlightDeck: ("Needs a newer Flight Deck", .orange)
+        case .needsApproval(let command): ("Needs approval: it runs \(command) on this Mac", providerWarningColor)
+        case .needsNewerFlightDeck: ("Needs a newer Flight Deck", providerWarningColor)
         case .broken(let reason): ("Cannot be used: \(reason)", .red)
+        case .off: ("Off", .secondary)
         }
     }
 }

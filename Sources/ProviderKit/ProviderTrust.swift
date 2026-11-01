@@ -107,7 +107,7 @@ public struct ProviderApproval: Codable, Equatable, Sendable {
 /// `provider-trust.json`, a plain list of approvals. The directory is a parameter so tests never
 /// touch the real one.
 public struct ProviderTrustStore: Sendable {
-    public enum StoreError: Error, Equatable { case trustFileUnreadable }
+    public enum StoreError: Error, Equatable { case trustFileUnreadable, fileIsReadable }
 
     public static let fileName = "provider-trust.json"
 
@@ -152,6 +152,8 @@ public struct ProviderTrustStore: Sendable {
     /// for a look and the next approval starts a fresh file. Every provider then asks again.
     @discardableResult
     public func moveAside(now: Date = Date()) throws -> URL {
+        // A file repaired since the person looked holds approvals worth keeping.
+        guard isUnreadable else { throw StoreError.fileIsReadable }
         let stamp = String(Int(now.timeIntervalSince1970))
         var target = directory.appendingPathComponent("provider-trust.corrupt-\(stamp).json")
         var n = 1

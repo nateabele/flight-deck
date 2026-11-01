@@ -23,12 +23,13 @@ final class ProvidersSettingsRenderTests: XCTestCase {
     }
 
     func testRenderProvidersPane() throws {
-        guard let out = ProcessInfo.processInfo.environment["FD_PROVIDERS_RENDER_DIR"] else {
-            throw XCTSkip("set FD_PROVIDERS_RENDER_DIR to render the Providers PNGs")
-        }
-        let dir = URL(fileURLWithPath: out)
+        // Always renders, so a blank or failed render fails the suite; FD_PROVIDERS_RENDER_DIR
+        // keeps the PNGs where they can be looked at.
+        let out = ProcessInfo.processInfo.environment["FD_PROVIDERS_RENDER_DIR"]
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("providers-render-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
+        let dir = out.map { URL(fileURLWithPath: $0) } ?? tmp.appendingPathComponent("png")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let repo = tmp.appendingPathComponent("flight-deck")
         let repoRoot = repo.appendingPathComponent(ProviderRegistry.repoSubpath)
         let user = tmp.appendingPathComponent("user"), bundled = tmp.appendingPathComponent("bundled")
@@ -44,12 +45,12 @@ final class ProvidersSettingsRenderTests: XCTestCase {
         let size = NSSize(width: 720, height: 460)
 
         let model = ProvidersSettingsModel(registry: registry, repo: repo, defaults: defaults)
-        model.setEnabled("sketch", false)
+        model.setEnabled(model.key("sketch"), false)
         for (suffix, appearance) in [("", NSAppearance.Name.darkAqua), ("-light", .aqua)] {
             try PlanningRender.write(ProvidersPane(model: model), size: size,
                                      to: dir.appendingPathComponent("providers\(suffix).png"), appearance: appearance)
         }
-        model.approve("charts")
+        model.approve(model.key("charts"))
         try PlanningRender.write(ProvidersPane(model: model), size: size,
                                  to: dir.appendingPathComponent("providers-approved.png"))
 
@@ -60,5 +61,10 @@ final class ProvidersSettingsRenderTests: XCTestCase {
             try PlanningRender.write(ProvidersPane(model: corrupt), size: NSSize(width: 720, height: 560),
                                      to: dir.appendingPathComponent("providers-corrupt\(suffix).png"), appearance: appearance)
         }
+        let sizes = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])
+            .filter { $0.pathExtension == "png" }
+            .map { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
+        XCTAssertGreaterThanOrEqual(sizes.count, 5)
+        XCTAssertTrue(sizes.allSatisfy { $0 > 15_000 }, "a blank render compresses to almost nothing: \(sizes)")
     }
 }
