@@ -38,6 +38,7 @@ mod compact;
 mod elixir;
 mod elm_pkg;
 mod precise;
+pub(crate) mod ppr;
 mod python;
 pub mod rank;
 mod surface;
@@ -228,6 +229,10 @@ pub struct GraphData {
     swift_types: Arc<swift_types::SwiftTypes>,
     /// BM25 over symbol words (`crate::words`), built on the first ranked query, not here.
     pub(crate) words: std::sync::OnceLock<Arc<crate::words::WordIndex>>,
+    /// The weighted adjacency personalized PageRank walks (`graph/ppr.rs`), built on the first
+    /// seeded `map` and dropped with everything else `finalize` derives. Lazy because most graphs
+    /// (a base tree behind a dirty worktree, a linked view) are never asked for a seeded rank.
+    ppr: std::sync::OnceLock<Arc<ppr::PprGraph>>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -305,6 +310,7 @@ impl ViewGraph {
             soft_index: Arc::default(),
             swift_types: Arc::default(),
             words: std::sync::OnceLock::new(),
+            ppr: std::sync::OnceLock::new(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -581,6 +587,7 @@ impl GraphData {
     /// (warm-started from `prior` when given).
     fn finalize(&mut self, prior: Option<&GraphData>) {
         let n = self.files.len();
+        self.ppr = std::sync::OnceLock::new();
         self.importers = vec![Vec::new(); n];
         for (i, r) in self.res.iter().enumerate() {
             for &t in &r.edges {
@@ -695,6 +702,17 @@ impl ViewGraph {
 }
 
 impl GraphData {
+    /// File ranks with the random walk restarting at `seeds` (file index, weight) and reverse
+    /// edges at `reverse` times their forward weight; the plain `file_rank` when no seed is live.
+    /// See `graph/ppr.rs`.
+    pub fn personalized_file_rank(&self, seeds: &[(u32, f64)], reverse: f64) -> Vec<f64> {
+        ppr::personalized_file_rank(self, seeds, reverse)
+    }
+
+    pub(crate) fn ppr_graph(&self) -> &ppr::PprGraph {
+        self.ppr.get_or_init(|| Arc::new(ppr::build(self)))
+    }
+
     // ---- resolution --------------------------------------------------------------------
 
     pub fn file(&self, i: u32) -> &FileNode {
@@ -1228,6 +1246,7 @@ impl GraphData {
         n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
         n += self.name_index.bytes() + self.incoming.bytes();
         n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
+        n += self.ppr.get().map(|p| p.bytes()).unwrap_or(0);
         n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
         // Only once built (lazily, on the first overlay derived from this graph): about 1-2 MB on
         // tessera (15k keys, 144k entries).

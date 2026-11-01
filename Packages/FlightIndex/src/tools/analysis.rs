@@ -62,16 +62,37 @@ pub fn map(c: &Ctx) -> ToolResult {
     let by_symbols = c.args.str(&["by"]).as_deref() == Some("symbols");
     let boost_files: Vec<PathBuf> = c.args.list(&["boost_files"]).iter().map(|f| super::args::resolve_path(&c.args.cwd, f)).collect();
     let boost_terms: Vec<String> = c.args.list(&["boost_terms"]).iter().map(|t| t.to_lowercase()).collect();
+    let personalize = c.args.flag(&["personalize"], true);
     let live = graph.stats().data;
     let name = graph.label.worktree.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let mut out = format!("Codebase: {name} ({} files, {} symbols indexed)\n", live.files, live.symbols);
 
+    // The files the caller is working on seed a personalized PageRank (`graph/ppr.rs`): the ones
+    // it names, or else the worktree's modified files, which the service passes as `diff_files`.
+    // On the eval's seeded tasks this took the top ten from 0.3% to 32% of gold files (tessera)
+    // and from 2.7% to 57% (flight-deck). Not for `by=symbols`: ranked that way
+    // the walk found 1-3% of gold functions, worse than the symbol PageRank it would replace.
+    let seed_paths: Vec<PathBuf> = if !personalize || by_symbols {
+        Vec::new()
+    } else if !boost_files.is_empty() {
+        boost_files.clone()
+    } else {
+        c.args.list(&["diff_files"]).iter().map(|f| super::args::resolve_path(&c.args.cwd, f)).collect()
+    };
+    let seeds: Vec<u32> = seed_paths.iter().filter_map(|p| graph.file_idx(p)).filter(|f| graph.file(*f).alive).collect::<std::collections::BTreeSet<u32>>().into_iter().collect();
+    let personalized = (!seeds.is_empty()).then(|| {
+        let weights: Vec<(u32, f64)> = seeds.iter().map(|f| (*f, 1.0)).collect();
+        graph.personalized_file_rank(&weights, crate::graph::ppr::DEFAULT_REVERSE)
+    });
+
     // A boost multiplies the PageRank of what the caller says it is working on, so the map leans
-    // toward it without hiding the rest of the codebase.
+    // toward it without hiding the rest of the codebase. A seeded map has already ranked by the
+    // boosted files; terms still multiply, after the walk: fed into the restart vector they
+    // dilute the seed (measured 2-3 pp worse).
     let weight = |fi: u32| -> f64 {
         let node = graph.file(fi);
         let mut w = 1.0;
-        if boost_files.iter().any(|b| *b == graph.abs(fi)) {
+        if personalized.is_none() && boost_files.iter().any(|b| *b == graph.abs(fi)) {
             w *= 10.0;
         }
         if !boost_terms.is_empty() {
@@ -105,10 +126,20 @@ pub fn map(c: &Ctx) -> ToolResult {
         return Ok(c.fit(out));
     }
 
+    // A seeded map lists the seeds once, apart, and ranks the rest: the caller already knows its
+    // own files. It shows test files too, because a change's other files are tests 35-46% of the
+    // time (the eval's gold sets); an unseeded map keeps hiding them, as it always has.
+    let ranks = personalized.as_ref().unwrap_or(&graph.file_rank);
+    let all = all || personalized.is_some();
+    if personalized.is_some() {
+        let names: Vec<String> = seeds.iter().map(|f| graph.abs(*f).display().to_string()).collect();
+        let _ = writeln!(out, "Seeds: {}", names.join(", "));
+    }
     let mut rows: Vec<(f64, u32)> = (0..graph.files.len() as u32)
         .filter(|i| graph.file(*i).alive)
         .filter(|i| all || (!is_test_path(&graph.file(*i).path) && !graph.file(*i).facts.symbols.is_empty()))
-        .map(|i| (graph.file_rank[i as usize] * weight(i), i))
+        .filter(|i| personalized.is_none() || seeds.binary_search(i).is_err())
+        .map(|i| (ranks[i as usize] * weight(i), i))
         .collect();
     rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(graph.file(a.1).path.cmp(&graph.file(b.1).path)));
     out.push_str("  # | File | PageRank | Exports | Blast\n");

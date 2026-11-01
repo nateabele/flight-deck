@@ -20,11 +20,15 @@ A strategy is `Fn(&Probe, &Task) -> Option<Ranking>`. `Probe` holds the parent's
 |---|---|
 | `map` | `map top_n=20` for files, `map by=symbols top_n=20` for symbols. No seed. |
 | `map_terms` | `map` with `boost_terms` = the task's terms, in lowercase. |
-| `map_open` | `map` with `boost_files` = the first gold file (the simulated open file). It applies only to tasks with 2 or more gold files. The seed file is removed from the ranking and from the gold set. |
+| `map_open` | `map` with `boost_files` = the first gold file (the simulated open file). It applies only to tasks with 2 or more gold files. The seed file is removed from the ranking and from the gold set. Since `map` personalizes on `boost_files`, this scores the shipped personalized PageRank. |
 | `find` | `find name=<term>` per term, merged round-robin. |
 | `grep` | `grep query=<term>` (prefix) per term, merged round-robin. |
 | `bm25` | The graph's word index (`src/words.rs`, the ranking `grep` gives a sentence) queried directly: BM25F (k1 1.2, b 0.75 per field) over one document per symbol except impls and fields, with fields for the symbol's name, its parent's name, and its file path plus Elm module, all split on camelCase, snake_case and separators and lightly stemmed. Files in first-mention order of the best 200 symbols. |
 | `grep_words` | `grep query=<whole task text> rank=true limit=200`: the same ranking through the tool's text, as an agent sees it. |
+| `ppr_open_rev{0,1,5,20}` | Personalized PageRank (`graph/ppr.rs`) called directly, seeded at the first gold file, reverse-edge weight 0/1/5/20, every file ranked (tests included). `rev20` is what a seeded `map` ships; `rev0` is Aider's forward-only walk. Seeded tasks only. |
+| `nbr_open` | Control: the seed's direct imports and importers by global rank, then the rest by global rank. What personalized PageRank must beat to earn its cost. |
+| `bm25_open` | `bm25` on the seeded subset, the seed excluded, so it compares with the cells below. |
+| `bm25_map_open`, `bm25_nbr_open` | Reciprocal-rank fusion (k = 60) of `bm25`'s files with the seeded `map`'s, or with `nbr_open`'s. Symbols stay `bm25`'s. |
 
 **Terms** are the identifier-shaped words of the task text: 3 or more characters, not stopwords, de-duplicated without regard to case, at most 12.
 
@@ -40,6 +44,8 @@ cargo build --release --features eval --example eval
   --repo fd=/Users/me/Projects/flight-deck@master \
   --tasks 200 --store <scratch>/store --out <scratch>/out --label baseline
 ```
+`--gate [REPO:]STRATEGY=MIN` fails the run (exit 1) when a strategy's File@10 is under MIN percent, or it scored no task. The seeded map's regression gate is `--gate tessera:map_open=20 --gate fd:map_open=40` (measured 32.2 and 57.2 at tessera@81f973be69fb and fd@9c49d8260c1d).
+
 The output files are `<out>/<label>-summary.json` (repo → strategy → means) and `<out>/<label>-tasks.jsonl` (one row per task and strategy: gold files, top 10 files, scores).
 
 ## Score a variant without editing the harness

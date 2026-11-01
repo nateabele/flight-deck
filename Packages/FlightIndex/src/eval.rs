@@ -27,6 +27,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
+mod seeded;
+
 /// A commit that changes more files than this is a mass change (a rename sweep, a format pass).
 pub const MAX_CHANGED_FILES: usize = 25;
 /// Gold sets larger than this say little about ranking; such commits are skipped too.
@@ -220,6 +222,7 @@ pub fn builtin_strategies() -> Vec<(String, Strategy)> {
         // files of the best 200 symbols are what File@10 reads, as for `bm25`.
         Arc::new(|p, t| (!t.terms().is_empty()).then(|| p.ranking_from(&p.tool("grep", json!({ "query": t.query, "rank": true, "limit": DEPTH * 10 }))))),
     ));
+    v.extend(seeded::strategies());
     v
 }
 
@@ -416,6 +419,9 @@ pub struct Config {
     pub extra: HashMap<String, Map<String, Value>>,
     pub label: String,
     pub compare: Option<PathBuf>,
+    /// `--gate STRATEGY=MIN`: File@10 (percent) the strategy must reach on every repo, or the run
+    /// exits 1. Per repo: `--gate fd:map_open=40`.
+    pub gates: Vec<(Option<String>, String, f64)>,
 }
 
 fn load_avg() -> String {
@@ -563,7 +569,7 @@ fn print_table(s: &BTreeMap<String, BTreeMap<String, Score>>, prev: Option<&BTre
 /// `fn main() { flightindex::eval::main_with(vec![("mine".into(), Arc::new(|p, t| ...))]) }`.
 pub fn main_with(extra: Vec<(String, Strategy)>) {
     let usage = "eval --repo NAME=PATH[@REV]... [--tasks 200] [--skip 0] [--store DIR] [--out DIR] [--message subject|full] \
-                 [--only a,b] [--args STRATEGY=JSON]... [--label NAME] [--compare SUMMARY.json]";
+                 [--only a,b] [--args STRATEGY=JSON]... [--label NAME] [--compare SUMMARY.json] [--gate [REPO:]STRATEGY=MIN_FILE10]...";
     let mut a = std::env::args().skip(1);
     let mut cfg = Config {
         repos: Vec::new(),
@@ -576,6 +582,7 @@ pub fn main_with(extra: Vec<(String, Strategy)>) {
         extra: HashMap::new(),
         label: "run".into(),
         compare: None,
+        gates: Vec::new(),
     };
     while let Some(flag) = a.next() {
         let mut val = || a.next().unwrap_or_else(|| panic!("{flag} needs a value\n{usage}"));
@@ -600,18 +607,74 @@ pub fn main_with(extra: Vec<(String, Strategy)>) {
             }
             "--label" => cfg.label = val(),
             "--compare" => cfg.compare = Some(PathBuf::from(val())),
+            "--gate" => {
+                let v = val();
+                let (target, min) = v.split_once('=').expect("--gate [REPO:]STRATEGY=MIN");
+                let (repo, strategy) = match target.split_once(':') {
+                    Some((r, s)) => (Some(r.to_string()), s.to_string()),
+                    None => (None, target.to_string()),
+                };
+                cfg.gates.push((repo, strategy, min.parse().expect("--gate MIN is a percentage")));
+            }
             _ => panic!("unknown flag {flag}\n{usage}"),
         }
     }
     assert!(!cfg.repos.is_empty(), "{usage}");
     let mut strategies = builtin_strategies();
     strategies.extend(extra);
-    run(&cfg, &strategies);
+    let summary = run(&cfg, &strategies);
+    let failed = gate_failures(&summary, &cfg.gates);
+    for f in &failed {
+        eprintln!("gate failed: {f}");
+    }
+    if !failed.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+/// Each gate a summary misses, as text. A gated strategy that scored no task on a repo misses it:
+/// a regression cell that silently stopped running is a failure, not a pass.
+pub fn gate_failures(summary: &BTreeMap<String, BTreeMap<String, Score>>, gates: &[(Option<String>, String, f64)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (repo, rows) in summary {
+        for (only, strategy, min) in gates {
+            if only.as_ref().is_some_and(|r| r != repo) {
+                continue;
+            }
+            match rows.get(strategy) {
+                Some(s) if s.tasks > 0 && s.file[2] * 100.0 >= *min => {}
+                Some(s) => out.push(format!("{repo} {strategy} File@10 {:.1} < {min}", s.file[2] * 100.0)),
+                None => out.push(format!("{repo} {strategy} scored no task")),
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gate_fails_below_its_minimum_and_when_its_strategy_never_ran() {
+        let score = |f10: f64| Score { tasks: 10, file: [0.0, 0.0, f10], ..Default::default() };
+        let summary: BTreeMap<String, BTreeMap<String, Score>> = [
+            ("tessera".to_string(), [("map_open".to_string(), score(0.25))].into_iter().collect()),
+            ("fd".to_string(), [("map_open".to_string(), score(0.39))].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
+        let gates = vec![(Some("tessera".into()), "map_open".to_string(), 20.0), (Some("fd".into()), "map_open".to_string(), 40.0)];
+        assert_eq!(gate_failures(&summary, &gates), vec!["fd map_open File@10 39.0 < 40".to_string()]);
+        assert_eq!(gate_failures(&summary, &[(None, "nbr_open".to_string(), 1.0)]).len(), 2);
+    }
+
+    #[test]
+    fn splits_identifiers_into_words() {
+        assert_eq!(split_words("InfraPreflight.checkTofu"), ["infra", "preflight", "check", "tofu"]);
+        assert_eq!(split_words("HTTPServer_load2Files"), ["http", "server", "load2", "files"]);
+        assert_eq!(split_words("Sources/FlightDeck/x.swift"), ["sources", "flight", "deck", "swift"]);
+    }
 
     #[test]
     fn recall_is_normalised_by_the_smaller_of_k_and_gold() {

@@ -1,7 +1,7 @@
 [
  {
   "name": "qartez_map",
-  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. To locate a known name use qartez_find; to rank around a task pass boost_terms or boost_files.",
+  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. With boost_files, or uncommitted changes, ranks by what those files reach. To locate a known name use qartez_find; boost_terms ranks around words.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -26,7 +26,7 @@
     },
     "boost_files": {
      "default": null,
-     "description": "Paths to rank higher (x10), e.g. files named in the task.",
+     "description": "Files you are working on: what they reach ranks first, seeds listed apart. personalize=false: x10 boost instead.",
      "items": {
       "type": "string"
      },
@@ -67,6 +67,14 @@
       }
      ],
      "description": "concise: file rows only. detailed (default): plus up to 6 exported signatures per file."
+    },
+    "personalize": {
+     "default": null,
+     "description": "Seed the rank from boost_files or the worktree's changed files (default true). False: plain PageRank.",
+     "type": [
+      "boolean",
+      "null"
+     ]
     },
     "token_budget": {
      "default": null,
@@ -157,7 +165,7 @@
      "type": "string"
     },
     "near": {
-     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -168,7 +176,7 @@
     },
     "history": {
      "default": null,
-     "description": "Also list symbols whose recent commit messages match these words (BM25). Default: on for a multi-word query or no name hit; false = off.",
+     "description": "Also list symbols whose recent commit messages match (BM25). Default: on for several words or no name hit; false = off.",
      "type": [
       "boolean",
       "null"
@@ -198,7 +206,7 @@
  },
  {
   "name": "qartez_grep",
-  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. A query with spaces, or rank=true, is ranked by words (BM25). Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
+  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Several words, or rank=true, rank by words (BM25). Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -242,7 +250,7 @@
      ]
     },
     "near": {
-     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -257,7 +265,7 @@
     },
     "history": {
      "default": null,
-     "description": "Also list symbols whose recent commit messages match these words (BM25). Default: on for a multi-word query or no name hit; false = off.",
+     "description": "Also list symbols whose recent commit messages match (BM25). Default: on for several words or no name hit; false = off.",
      "type": [
       "boolean",
       "null"
@@ -265,7 +273,7 @@
     },
     "rank": {
      "default": null,
-     "description": "Rank by the words of the query (BM25 over split names, parents, paths) even for one word. A query with spaces is ranked anyway.",
+     "description": "Rank by the query's words (BM25 over names, parents, paths), even one word. Several words are ranked anyway.",
      "type": [
       "boolean",
       "null"
@@ -620,7 +628,7 @@
      ]
     },
     "near": {
-     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -687,7 +695,7 @@
      ]
     },
     "near": {
-     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -827,7 +835,7 @@
      "type": "string"
     },
     "near": {
-     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
