@@ -322,3 +322,31 @@ fn overlay_deleting_and_renaming_files_matches_a_rebuild() {
     // Elm resolves an import by path, so a file whose declaration disagrees still answers it.
     assert!(deps.iter().any(|d| d.path.ends_with("src/Expression/Node.elm")), "{deps:?}");
 }
+
+#[test]
+fn overlay_shifting_local_ids_re_resolves_a_qualified_path_caller_without_an_import() {
+    // `a::m::f()` by full path records no import edge, so b/lib.rs is not among m.rs's importers;
+    // inserting a symbol before `f` moves `f` from local id 0 to 1, and only a rule that follows
+    // resolved references (not imports) re-resolves the caller. Found on tessera:
+    // engine/proto/src/msg.rs calling `tessera_evaluator::value::from_json`.
+    let r = init_repo();
+    write(&r.root, "crates/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
+    write(&r.root, "crates/a/src/lib.rs", "pub mod m;\n");
+    write(&r.root, "crates/a/src/m.rs", "pub fn f() {}\n");
+    write(&r.root, "crates/b/Cargo.toml", "[package]\nname = \"b\"\nversion = \"0.1.0\"\n");
+    write(&r.root, "crates/b/src/lib.rs", "pub fn g() { a::m::f() }\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "crates/a/src/m.rs", "pub fn before() { f() }\npub fn f() {}\n"));
+    let f = g.find_symbols(&NameMatch::Exact("f".into()), None, 5).data;
+    assert!(g.references(f[0].id).data.iter().any(|h| h.path.ends_with("crates/b/src/lib.rs")));
+}
+
+#[test]
+fn overlay_shifting_local_ids_behind_a_re_export_re_resolves_the_importer_of_the_barrel() {
+    // app.ts imports `lib` (index.ts), whose `export { helper } from './impl'` lands the reference
+    // in impl.ts: app.ts imports index.ts, not impl.ts, so the importer rule alone misses it.
+    let r = ts_fixture();
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "web/lib/impl.ts", "export function first() {}\nexport function helper() { first() }\n"));
+    let helper = g.find_symbols(&NameMatch::Exact("helper".into()), None, 5).data;
+    assert!(g.references(helper[0].id).data.iter().any(|h| h.path.ends_with("web/app.ts")));
+}

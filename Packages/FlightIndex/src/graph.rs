@@ -7,7 +7,9 @@
 //! changed files and what depends on them:
 //!
 //! * the changed files themselves;
-//! * their importers (a symbol they used may have moved, been renamed, or gone);
+//! * their importers (a symbol they used may have moved, been renamed, or gone), and the files
+//!   whose resolved references land in them without an import (`ref_dependents`: qualified Rust
+//!   paths, re-exports followed through a barrel file);
 //! * if any file was added or removed (or an Elm module renamed), every file with an unresolved
 //!   import, since it may resolve now (or a resolved one may now be dangling);
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
@@ -129,6 +131,11 @@ pub struct GraphData {
     pub(crate) index: HashMap<String, u32>,
     pub(crate) res: Vec<FileRes>,
     pub(crate) importers: Vec<Vec<u32>>,
+    /// target file -> files with a resolved reference into it that do not import it: a qualified
+    /// Rust path (`a::m::f()` records no import), or a re-export followed through a barrel
+    /// (`import { helper } from './lib'` lands in `lib/impl.ts`). `with_changes` re-resolves these
+    /// next to `importers`, or their references keep a target whose local id has moved.
+    pub(crate) ref_dependents: Vec<Vec<u32>>,
     pub(crate) name_index: HashMap<String, Vec<SymId>>,
     /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
     pub(crate) incoming: HashMap<SymId, Vec<(u32, u32)>>,
@@ -174,6 +181,7 @@ impl ViewGraph {
             files,
             index: HashMap::new(),
             importers: Vec::new(),
+            ref_dependents: Vec::new(),
             name_index: HashMap::new(),
             incoming: HashMap::new(),
             external_refs: HashMap::new(),
@@ -251,6 +259,7 @@ impl ViewGraph {
         for &c in &changed {
             if (c as usize) < old_files_len {
                 dirty.extend(self.data.importers[c as usize].iter().copied());
+                dirty.extend(self.data.ref_dependents[c as usize].iter().copied());
             }
         }
         for (i, r) in g.res.iter().enumerate() {
@@ -319,10 +328,18 @@ impl GraphData {
             }
         }
         self.incoming.clear();
+        self.ref_dependents = vec![Vec::new(); n];
         for (fi, r) in self.res.iter().enumerate() {
+            let fi = fi as u32;
             for (ri, rr) in r.refs.iter().enumerate() {
                 if let Some(t) = rr.target {
-                    self.incoming.entry(t).or_default().push((fi as u32, ri as u32));
+                    self.incoming.entry(t).or_default().push((fi, ri as u32));
+                    // `importers[t]` is sorted (filled in file order above), so this check is a
+                    // binary search; `deps.last()` dedups because one file's refs are visited together.
+                    let deps = &mut self.ref_dependents[t.file as usize];
+                    if t.file != fi && deps.last() != Some(&fi) && self.importers[t.file as usize].binary_search(&fi).is_err() {
+                        deps.push(fi);
+                    }
                 }
             }
         }
@@ -887,6 +904,7 @@ impl GraphData {
             n += r.refs.iter().filter_map(|x| x.external.as_deref()).flatten().map(|t| t.path.as_os_str().len() + t.name.len() + 2 * ALLOC).sum::<usize>();
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
+        n += self.ref_dependents.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
         n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
         n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
         n += self.name_index.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<SymId>>() + v.len() * size_of::<SymId>() + 8).sum::<usize>();
