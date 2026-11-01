@@ -4,13 +4,13 @@ import XCTest
 @testable import FlightDeck
 
 /// Three branches each needed a Settings home and, built in parallel, each made a temporary one.
-/// The joined build has exactly one: Flight Control, with four sections. A leftover top-level
-/// tab would show the same pane twice and leave one copy unmaintained.
+/// The joined build has exactly one: Flight Control, with five sections (Providers joined in P3).
+/// A leftover top-level tab would show the same pane twice and leave one copy unmaintained.
 @MainActor
 final class FlightControlTabIntegrationTests: XCTestCase {
-    func testOneTabFourSections() {
+    func testOneTabFiveSections() {
         XCTAssertEqual(FlightControlSettingsTab.Section.allCases.map(\.identifier),
-                       ["fc-section-routing", "fc-section-kinds", "fc-section-index", "fc-section-capacity"])
+                       ["fc-section-routing", "fc-section-kinds", "fc-section-index", "fc-section-capacity", "fc-section-providers"])
         let raw = PreferencesTab.allCases.map { "\($0)" }
         XCTAssertTrue(raw.contains("flightControl"))
         XCTAssertFalse(raw.contains("capabilityIndex"))
