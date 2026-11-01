@@ -668,6 +668,62 @@ the edit. Requests are safe, because an unknown request gets an error reply.
   `Sources/FlightDeck`, `Sources/FlightDeckMobile` and `Sources/IntakeKit`. It matches
   the old word for tasks, `flywheel`, and `seat`/`seats`, with a few allow-listed paths.
 
+### 5.5 Visual providers (P3 core)
+
+A visual provider is a folder with a `provider.toml` that tells Flight Control which kinds of
+picture it can make. P3 core ships the loader, the trust gate, the sandbox, the checker, the
+Settings list and the authoring skill. Nothing in planning calls a provider yet (see
+`docs/FOLLOWUPS.md`, "Visual providers").
+
+**Where the code lives:**
+- `Packages/HostKit/Sources/HostKit/Providers/`: `ProviderManifest` and `ProviderManifestParser`.
+  They sit in HostKit beside `DelegateConfigParser` because the TOML reader is internal to HostKit.
+- `Sources/ProviderKit/`: `ProviderRegistry` (resolution), `ProviderTrust` (digest and approvals),
+  `ProviderSandbox` (generator runs), `ProviderCheck`. This folder is compiled into both the app
+  target and the CLI target in `project.yml`.
+- `flightdeck provider check DIR [--run-samples]`: local, not over the socket. It is caught in
+  `Sources/FlightDeckTool/main.swift` before the transport, like `intake run`.
+- Settings → Flight Control → Providers: `Sources/FlightDeck/Preferences/UI/ProvidersPane.swift` and
+  `ProvidersSettingsModel.swift`.
+- The skill: `Resources/ClaudePlugin/skills/visual-provider/`. Claude reaches it through the plugin.
+  Codex gets a copy from `Sources/FlightDeck/Agents/Codex/CodexBundledSkill.swift`, which copies a
+  whole folder and also installs `delegate` and `peer-messaging`.
+
+**Trust model.** A repo is untrusted input.
+- A repo provider with no `[generator]` is data only. It is used with no approval.
+- A repo provider with a generator needs a one-time Approve. The approval stores the SHA-256 of the
+  folder (path, NUL, length, owner-exec bit, bytes, in sorted path order). Any change asks again.
+- The Approve button takes the digest the row showed. If the folder changed since, it refuses.
+- Bundled and user providers are trusted, but are re-checked against the folder at run time.
+- Links are refused anywhere in a provider folder. xattrs are not hashed.
+- The digest does not hide `.DS_Store` or editor swap files. They change the digest and ask again.
+- Approvals live in `~/Library/Application Support/Flight Deck/provider-trust.json`. If that file is
+  corrupt, Approve is off and the pane offers "Move damaged file aside".
+
+**Sandbox.** A generator runs only in `ProviderSandbox`, never in the agent. It runs from a private
+copy of the folder, re-hashed against the approval. It has no network, writes only to its output and
+temp folders, and cannot read the home folder. It has a timeout, output caps and a small
+environment. If `/usr/bin/sandbox-exec` is missing, the generator is refused. The summary is in
+`docs/ARCHITECTURE.md`, "Visual providers".
+
+**`--run-samples`.** `provider check` validates the manifest, kinds, instruction files, assets and
+`entry` files. By default it does not run a generator. With `--run-samples` it first prints the
+argv, then runs the generator in the sandbox on `samples/<kind>/`, once per kind. This is intent, not
+a security boundary: an agent can already run shell. The skill tells agents to pass the flag only
+when the author asked for a sample run. Exit codes: 0 valid (warnings print), 1 problems or a failed
+sample, 2 usage error.
+
+**The disabled switch.** The on/off switch is stored in `UserDefaults` under
+`visualProviders.disabled.v2`. Each entry is `<source>:<id>`, with source `repo`, `user` or
+`bundled`. A bundled switch must not reach a repo override of the same id. The old key
+`visualProviders.disabled.v1` (ids only) is migrated on first read. Nothing reads the key yet:
+P3-integration must.
+
+**Skill installs.** Codex gets the skill folder under `~/.codex/skills/` with a
+`.flightdeck-managed` digest sidecar. The installer never follows a link and swaps a refresh in
+whole. A folder that holds a `.git` counts as edited by the user and is left frozen, so it never
+auto-upgrades.
+
 ---
 
 ## 6. Plan notes

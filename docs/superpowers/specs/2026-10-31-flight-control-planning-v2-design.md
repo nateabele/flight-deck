@@ -549,3 +549,21 @@ The pure-logic unit tests cover:
 4. **Thread agents' tools are wider than reviewers' tools.** They get read-only Bash, under the same restricted-command policy reviewers already run with, plus Write limited to the current draft visual folder (§5). The `write.scoped` cell checks that each adapter enforces the path limit. An adapter that can't enforce it cannot make visuals from threads.
 5. **Comps need the app running**, as snapshots do, because the canvas engine runs inside the app (§8). Accepted; a comp job fails visibly when the app is closed.
 6. **Live threads cost tokens.** Each message is a resumed headless turn. The thread header shows the agent and model. The default is the integrator's, and the person can choose a cheaper one per thread.
+
+## Errata: P3 core (2026-11-01)
+
+What was built differs from §9 in these ways. The code and `docs/ARCHITECTURE.md` ("Visual providers") are the truth.
+
+- **K-R1, parser.** `provider.toml` is parsed by `ProviderManifestParser` inside HostKit, beside `DelegateConfigParser`, because the TOML reader is internal to HostKit and IntakeKit cannot import it. Problems come back as `ProviderManifestIssue` values.
+- **K-R2, trust.** `Sources/ProviderKit/` is compiled into the app and the CLI. The digest is SHA-256 over sorted relative paths, each with a NUL, an 8-byte length, the owner-exec bit and the bytes. Links, FIFOs and devices are refused. A failed permission read throws. Approvals are `{repoPath, providerID, digest, approvedAt}` in `provider-trust.json`. Approve must be given the digest the UI showed and refuses on a mismatch or over a corrupt file. xattrs are not hashed. `.DS_Store` and swap files are hashed, so they ask again. A data-only repo provider skips the digest.
+- **K-R3, sandbox.** Generators run under `sandbox-exec`, and are refused when it is missing. Network is denied. `network = true` parses and is refused at run time. This goes beyond §9's "no network, timeout, folder only":
+  - the generator runs from a private copy of the folder, re-hashed against the approval;
+  - the profile also denies reads of the home folder and shared scratch folders, and denies `lsopen`, `appleevent-send`, `mach-lookup` and signals outside the sandbox;
+  - fds are closed on spawn, and stdout, `out/`, `tmp/` and single files have size caps;
+  - the whole process group is killed on timeout.
+- **xcrun seed.** Each run starts with a copy of a Flight Deck-owned xcrun cache, never the user's `T/xcrun_db`, and the copy is never saved back. This keeps `git` and `swift` shims at about 0.15 s without exposing path history.
+- **Pipe-holder kill.** `CommandRunner` now kills every holder of a run's pipes after a 1 s grace (SIGTERM, then SIGKILL) for every `processGroup` run in the app, not only providers. The old behaviour was a hang in the same cases. A late write from a same-group child is lost, and is reported on stderr.
+- **K-R4, Settings.** The list is in the **Flight Control** tab, not "Planning". The on/off switch is per (source, id): `UserDefaults` key `visualProviders.disabled.v2`, entries `<source>:<id>`. §9 says a repo override wins only in that repo, so a bundled switch must not reach it. The `v1` key (ids only) is migrated. Approve is off while the trust file is unreadable, and "Move damaged file aside" is offered. Rows are keyed by source and folder.
+- **K-R5, skill install.** `CodexDelegateSkill` is generalized to `CodexBundledSkill(name:)`, which copies a folder with a `.flightdeck-managed` digest sidecar and installs `delegate`, `peer-messaging` and `visual-provider`. It never follows a link and swaps a refresh in whole. A `.git` inside an installed skill folder counts as a user edit and freezes the folder, because a refresh would destroy a repo. Such a folder gets no auto-upgrade.
+- **K-R6, `provider check`.** It is local, intercepted before the transport. It also checks that each `entry` exists. A generator runs only with an explicit **`--run-samples`**, and the argv is printed first, against `samples/<kind>/`. It does not make a sample visual with a cheap model (§9, last bullet): that step needs ProviderHost and is deferred. Exit codes are 0 valid, 1 problems, 2 usage.
+- **Deferred from §9:** `ProviderHost` (providers are not called by planning yet), the bundled provider folder and `fd.comp.canvas`.

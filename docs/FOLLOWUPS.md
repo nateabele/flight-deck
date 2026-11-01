@@ -5,6 +5,26 @@ as work lands. Last audited against the tree on **2026-08-11** (master, post ses
 and menu-key-equivalent merges) — every entry below was re-checked against the code, not
 carried forward on trust.
 
+## Visual providers (P3 core), deferred
+
+Found during the P3-core build (2026-11-01). Nothing here blocks the core.
+
+- **P3-integration must read `visualProviders.disabled.v2`.** The Settings switch stores entries `<source>:<id>` but nothing reads them yet, so a switched-off provider is still used.
+- **The bundled `VisualProviders` folder does not exist.** The registry's bundled source is empty, so `fd.diagram.mermaid` and `fd.diagram.svg` are not shipped yet.
+- **`ProviderHost` is deferred.** Nothing in ThreadRunner or a round calls a provider or its sandbox.
+- **The sample-per-kind cheap-model step of `provider check` is deferred.** It needs ProviderHost. Today `check` runs generators only (`--run-samples`).
+- **`fd.comp.canvas` is deferred** until P2b lands the canvas.
+- **xcrun seed `prepare()` refusals have no tests** (symlink, wrong owner, wrong mode), and neither has a failed warm. Inject a temp `xcrunSeedFolder` to test them.
+- **Cross-process warm race.** Two processes warming the seed at once can leave a partial or cold cache. It is slower, not unsafe.
+- **A failed warm is not retried in-process.** The runs after it use a cold cache until the app restarts.
+- **The xcrun tests warm the real** `~/Library/Caches/dev.flightdeck/xcrun-seed` on whichever Mac runs them.
+- **A broken repo provider falls through** to user and bundled silently in the registry. The Settings row shows the broken row beside the winner, but no other caller does.
+- **`.repoDataOnly` skips the digest.** Revisit if a contract adds executable fields.
+- **xattrs are not hashed**, and `.DS_Store` or swap files ask for re-approval. Both are accepted.
+- **Manifest minors:** the contract is read only after the full TOML parse (so contract-2 syntax gives a parse error, not "needs a newer Flight Deck"); the root missing-key line number is cosmetic; a self-loop hop limit (`a`→`a`) is untested; the fallback `[` break also matches a multi-line array line.
+- **`provider check` minors:** line numbers for missing files come from a text search of `provider.toml`.
+- **Skill installer:** the sidecar write and `removeStaging` were fixed for links and live staging folders, but a refresh of a folder that has a `.git` never happens by design.
+
 ## Resolved (kept for the reasoning trail)
 
 - **Phone log fetches blocked the phone's main thread and always timed out — FIXED

@@ -2666,6 +2666,84 @@ already visible on its own. Every intake state except `.releasing` has a way off
 Discard, or Dismiss once released — and Dismiss is the only thing that stops a
 `.partiallyReleased` intake counting (it hides the intake; its `ReleaseRecord` stays on disk).
 
+## Visual providers (`Packages/HostKit/.../Providers/`, `Sources/ProviderKit/`)
+
+A provider is a folder with `provider.toml`. P3 core is the loader, trust, sandbox, checker and
+Settings list. The planning flow does not call providers yet.
+
+**Manifest.** `ProviderManifestParser` (HostKit, on `TOMLReader`) reads `id`, `name`, `version`,
+`contract`, one `[[kind]]` per kind (`output`, `entry`, `pins`, `states`, `sizes`, `cost`,
+`instructions`, `assets`) and an optional `[generator]` (`command`, `timeout`, `network`). Problems
+come back as `ProviderManifestIssue` values with a line number, not as one thrown error. The id is a
+safe name (no path characters, no trailing newline). A contract higher than 1 gives "needs a newer
+Flight Deck", never a partial load. `network = true` parses and is refused at run time. Links that
+point outside the folder are refused.
+
+**Resolution (`ProviderRegistry`).** Sources in order: repo (`.flightdeck/visual-providers/`) ›
+user (`~/Library/Application Support/Flight Deck/visual-providers/`) › bundled. The first valid
+provider with an id wins, and a repo provider wins only in its own repo. A broken provider is listed
+with its reason and does not shadow a lower source. The Settings row shows the broken repo row next
+to the winner. Trust states: `bundled`, `user`, `repoDataOnly`, `repoApproved`, `repoNeedsApproval`,
+`unusable`.
+
+**Trust.** `ProviderTrust.digest(folder:)` is SHA-256 over sorted relative paths, each with a NUL,
+the length as 8 big-endian bytes, the owner-exec bit and the bytes. An approval is the digest of
+one exact folder, so it is a digest, not a promise about the author: any byte change, or `chmod u+x`,
+asks again. A failed read throws, and the code never guesses. `.DS_Store` and swap files are
+hashed, so they ask again (fail closed). Approve takes the digest that the UI showed and refuses on
+a mismatch. It also refuses over a corrupt `provider-trust.json`. The file is
+`~/Library/Application Support/Flight Deck/provider-trust.json`, entries
+`{repoPath, providerID, digest, approvedAt}`. The digest is point-in-time, so the sandbox closes the
+gap (below). A data-only repo provider skips the digest. Revisit this if a contract adds executable
+fields.
+
+**Sandbox (`ProviderSandbox`, spec §9).** Per run:
+1. Copy the folder to a private snapshot and re-hash it against the approval (bundled and user:
+   against the folder as it stood when the run began). A mismatch is `providerChanged`.
+2. Write a `.sb` profile and run `/usr/bin/sandbox-exec` through `/bin/bash` (never `/bin/sh`, whose
+   `ulimit -f` counts 512-byte blocks). No `sandbox-exec` means the generator is refused.
+3. Profile: `(allow default)`, then deny network, deny all file writes except the output folder,
+   the temp folder and `/dev/null`, deny reads of the home folder, the per-user
+   `/private/var/folders` parent, `/private/tmp`, `/private/var/tmp` and `/Users/Shared`, then allow
+   reads of the run root and the input. Also deny `lsopen`, `appleevent-send`, `mach-lookup` and
+   `signal` (signals to the same sandbox only). Paths are passed with `-D`, never spliced into the
+   text.
+4. Environment: a short fixed `PATH` and `HOME`, `TMPDIR`, `USER` and `LOGNAME`, nothing else.
+   Fds are closed on spawn (`POSIX_SPAWN_CLOEXEC_DEFAULT`).
+5. Limits (`Limits.standard`): stdout 1 MiB, `out/` 10 MiB, `tmp/` 256 MiB, 64 MiB per file. A run
+   over a limit returns `outputTooLarge` and delivers nothing. Hard links and non-regular files in
+   the output are refused. Output is delivered by copy after every holder of the run is gone.
+6. The timeout is raced, and the process group gets SIGTERM, then SIGKILL after `killGrace`.
+
+**The xcrun seed.** The first `xcrun` in a fresh `TMPDIR` rebuilds its cache and takes about 0.9 s per
+shim (`git`, `swift`). Copying the user's `T/xcrun_db` would fix that but leaks 2 MB of path history
+(13,000 paths). So Flight Deck warms its own cache once per process in
+`~/Library/Caches/dev.flightdeck/xcrun-seed` (0700, owned by this user, not a link): `xcrun --find`
+for git, swift, python3, clang and make, with HOME, TMPDIR and `xcrun_db` set to that folder, after
+`xcode-select -p` (so a Mac with no developer folder gets no install prompt). Each run gets a copy,
+and the copy is never saved back. The seed is 3.4 KB. Sandboxed `git --version` falls from about
+900 ms to about 140 ms.
+
+**`CommandRunner` pipe-holder and drain rules (shared app-wide).** These live in
+`Sources/IntakeKit/CommandRunner.swift` and apply to every `processGroup: true` run, not only
+providers:
+- A run drains stdout and stderr. After the leader is reaped, the drains get `drainGrace` (1 s).
+- Then the runner finds every other process that holds a write end of the run's pipes
+  (a process that called `setsid` leaves the group but keeps the pipe). It sends SIGTERM, waits
+  0.5 s, then SIGKILL to what is left, found by a fresh scan.
+- stderr gets a note with the count of stopped processes. Dropped stdout (past the keep limit) is flagged
+  by `CommandResult.stdoutTruncated`.
+- The drain is abandoned only while a writer may remain. Before this, the same cases hung.
+- A `PIPE_EOF` kernel bit says no writer is left. It is self-tested first. If the self-test fails and
+  the scan sees no holder, the drain waits at most `untrustedDrainLimit` (600 s plus the grace),
+  then abandons and notes it on stderr. A cancel abandons after one second of SIGKILL.
+- stderr is kept to 1 MiB and drained to EOF, so a flooding child never blocks.
+- Cost: a late write from a child in the same group is lost, and is now reported.
+
+**Settings and the skill.** Providers section in the Flight Control tab, rows keyed by source and
+folder. See HANDOFF §5.5. `CodexBundledSkill(name:)` copies a skill folder and keeps a
+`.flightdeck-managed` digest sidecar.
+
 ## Not yet built (design, not code)
 
 **The shared code index and the context engine** are design only — see the
