@@ -9,6 +9,7 @@
 
 mod analysis;
 pub mod args;
+pub mod mutate;
 mod nav;
 
 use crate::cochange::CoChange;

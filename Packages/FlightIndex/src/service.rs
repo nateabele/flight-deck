@@ -18,6 +18,7 @@
 //! 4. The tool runs on the view's graph and the result gets the view header.
 
 use crate::cochange::CoChange;
+use crate::edit;
 use crate::engine::{Engine, Phase, Progress, DEFAULT_GRAPH_BUDGET};
 use crate::error::{Error, Result};
 use crate::git::{self, View};
@@ -27,7 +28,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 /// A request never waits on a build longer than this, whatever it asks for: an agent blocked on
@@ -93,6 +94,10 @@ pub struct Service {
     builds: Mutex<HashMap<PathBuf, Arc<Job>>>,
     views: Mutex<HashMap<PathBuf, ViewInfo>>,
     cochange: Mutex<HashMap<PathBuf, (String, CoChangeCell)>>,
+    /// One gate per worktree: a mutation holds it for writing from planning to re-index, and every
+    /// read holds it for reading while it fetches its view and graph. A query therefore sees the
+    /// worktree before a mutation or after it, never between two of its file writes.
+    gates: Mutex<HashMap<PathBuf, Arc<RwLock<()>>>>,
     /// Last `seq` seen per cwd. Nothing reads it yet; the watcher step uses it to prove a
     /// caller's earlier edits were indexed before it is answered.
     seqs: Mutex<HashMap<String, u64>>,
@@ -112,6 +117,7 @@ impl Service {
             builds: Mutex::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),
             cochange: Mutex::new(HashMap::new()),
+            gates: Mutex::new(HashMap::new()),
             seqs: Mutex::new(HashMap::new()),
             started: Instant::now(),
             requests: AtomicU64::new(0),
@@ -156,6 +162,10 @@ impl Service {
             }),
             "status" => Ok(self.status()),
             "gc" | "build" | "add_root" | "workspace" => self.admin(name, req).map(|t| Response::text(Value::Null, t)),
+            other if tools::mutate::canonical(other).is_some() => {
+                let tool = tools::mutate::canonical(other).expect("checked");
+                self.run_mutator(tool, req).map(|t| Response::text(Value::Null, t))
+            }
             other => {
                 let tool = tools::canonical(other).ok_or_else(|| ToolError::bad(format!("unknown tool '{other}'")))?;
                 self.run_tool(tool, req).map(|t| Response::text(Value::Null, t))
@@ -173,13 +183,9 @@ impl Service {
         let wait = self.wait_bound(&args);
 
         let located = git::locate(&anchor.path)?;
-        if !located.is_git && !has_project_marker(&located.root) {
-            // Without this, `read /etc/hosts` would index `/etc`.
-            return Err(ToolError::failed(format!(
-                "{} is not inside a git repository or a recognised project (no .git, elm.json, Cargo.toml, package.json, mix.exs, Package.swift or pyproject.toml above it), so there is no index to answer from",
-                anchor.path.display()
-            )));
-        }
+        check_indexable(&located, &anchor.path)?;
+        let gate = self.gate(&located.root);
+        let _reading = gate.read().unwrap_or_else(|e| e.into_inner());
         let view = self.freshness.view(&self.engine, &anchor.path)?;
         self.touch(&view);
 
@@ -192,6 +198,124 @@ impl Service {
         let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, cochange: &cochange };
         let body = tools::run(tool, &ctx)?;
         Ok(format!("{}\n{body}", tools::header(&view.label, view.overlay.len(), building)))
+    }
+
+    fn gate(&self, worktree: &Path) -> Arc<RwLock<()>> {
+        self.gates.lock().unwrap().entry(worktree.to_path_buf()).or_default().clone()
+    }
+
+    /// A mutator: plan the change on the view that answers the lookup, then either show it or
+    /// write it. The write gate is held from the first look at the view to the re-index, so the
+    /// plan is made against what will be written over and no query sees half of it.
+    fn run_mutator(self: &Arc<Self>, tool: &'static str, req: &Request) -> std::result::Result<String, ToolError> {
+        use tools::mutate::{self, MutCtx};
+        if req.cwd.is_empty() || !Path::new(&req.cwd).is_absolute() {
+            return Err(ToolError::bad("cwd must be an absolute path"));
+        }
+        let args = Args::new(req.args.clone(), PathBuf::from(&req.cwd));
+        let (_, token_budget) = tools::common_params(tool, &args)?;
+        let apply = args.flag(&["apply"], false);
+        let anchor = mutate::anchor_path(tool, &args)?;
+        let priority = mutate::priority_paths(tool, &args);
+        let wait = self.wait_bound(&args);
+        let located = git::locate(&anchor)?;
+        check_indexable(&located, &anchor)?;
+        let gate = self.gate(&located.root);
+        let _writing = gate.write().unwrap_or_else(|e| e.into_inner());
+
+        let mut attempt = 0;
+        let (view, plan) = loop {
+            attempt += 1;
+            let view = self.freshness.view(&self.engine, &anchor)?;
+            self.touch(&view);
+            // A rename that misses a file because its importers were not parsed yet would leave
+            // the code broken, so a mutator never works from a partial graph.
+            if let Readiness::Building { done, total } = self.ensure_built(&view, &priority, false, Some(wait))? {
+                return Err(ToolError {
+                    state: state::BUILDING,
+                    message: format!("{} needs the complete index of {}, which is still building (index: building, {done} of {total} files); nothing was changed, retry shortly", tool, view.label.worktree.display()),
+                });
+            }
+            let graph = self.engine.graph(&view)?;
+            match mutate::plan(tool, &MutCtx { graph: &graph, args: &args }) {
+                Ok(plan) => break (view, plan),
+                // The index lagged an edit made a moment ago: look again.
+                Err(e) if e.message.starts_with(mutate::STALE) && attempt < 3 => continue,
+                Err(e) => return Err(e),
+            }
+        };
+
+        // An agent that named a path in another checkout asked for that checkout, but the answer
+        // must still say so: an edit landing somewhere unexpected, unlabelled, is the failure to avoid.
+        let cwd_root = git::locate(Path::new(&req.cwd)).map(|l| l.root).ok();
+        let elsewhere = cwd_root.as_deref().filter(|r| *r != view.label.worktree).map(|r| {
+            format!("\nnote: this is not your worktree ({}): the path you named is in {}, so that is where the change lands", r.display(), view.label.worktree.display())
+        });
+        let mut out = tools::header(&view.label, view.overlay.len(), None);
+        out.push_str(elsewhere.as_deref().unwrap_or(""));
+        let lists = |out: &mut String, plan: &mutate::Plan| {
+            for n in &plan.notes {
+                out.push_str(&format!("\n{n}"));
+            }
+            for w in &plan.warnings {
+                out.push_str(&format!("\nwarning: {w}"));
+            }
+        };
+        if plan.changes.is_empty() {
+            out.push_str(&format!("\nno change: {} would not alter any file", plan.summary));
+            return Ok(out);
+        }
+        if !apply {
+            out.push_str(&format!("\npreview: {} ({} file(s)); nothing written, pass apply=true to write", plan.summary, plan.changes.len()));
+            lists(&mut out, &plan);
+            let mut diff = String::new();
+            for c in &plan.changes {
+                let text = |b: &Option<Vec<u8>>| b.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
+                diff.push_str(&edit::unified_diff(&c.path, text(&c.before).as_deref(), text(&c.after).as_deref()));
+            }
+            out.push('\n');
+            out.push_str(&tools::truncate(diff, token_budget));
+            return Ok(out);
+        }
+
+        let parsed_before = self.engine.parse_count();
+        edit::apply_changes(&view.label.worktree, &plan.changes).map_err(ToolError::failed)?;
+        log::info(&format!("{tool}: wrote {} file(s) in {}", plan.changes.len(), view.label.worktree.display()));
+
+        // Re-index before answering: the next query from this cwd must see the change, so look at
+        // the worktree again now (the writes are on disk) and make its graph.
+        let view = self.freshness.view(&self.engine, &anchor)?;
+        let written: Vec<PathBuf> = plan.changes.iter().filter(|c| c.after.is_some()).map(|c| c.path.clone()).collect();
+        self.ensure_built(&view, &written, false, Some(MAX_BUILD_WAIT))?;
+        let graph = self.engine.graph(&view)?;
+        let stale: Vec<String> = plan
+            .changes
+            .iter()
+            .filter(|c| match &c.after {
+                Some(b) => graph.file_idx(&c.path).is_none_or(|i| graph.file(i).blob_id != git::blob_id(b)) && tools::mutate::indexable(&c.path),
+                None => graph.file_idx(&c.path).is_some(),
+            })
+            .map(|c| c.path.display().to_string())
+            .collect();
+
+        let mut out = tools::header(&view.label, view.overlay.len(), None);
+        out.push_str(elsewhere.as_deref().unwrap_or(""));
+        out.push_str(&format!("\napplied: {}", plan.summary));
+        out.push_str(&format!("\nwrote {} file(s):", plan.changes.len()));
+        for c in &plan.changes {
+            out.push_str(&format!("\n  {} {}", if c.after.is_none() { "deleted" } else if c.before.is_none() { "created" } else { "modified" }, c.path.display()));
+        }
+        if stale.is_empty() {
+            out.push_str(&format!(
+                "\nview updated: {} blob(s) re-parsed and the graph recomputed; the next query from {} sees the change",
+                self.engine.parse_count().saturating_sub(parsed_before),
+                req.cwd
+            ));
+        } else {
+            out.push_str(&format!("\nwarning: the index does not yet reflect {} (a concurrent edit changed it again); the next query re-reads it", stale.join(", ")));
+        }
+        lists(&mut out, &plan);
+        Ok(out)
     }
 
     fn wait_bound(&self, args: &Args) -> Duration {
@@ -520,6 +644,17 @@ impl Freshness {
             return computed;
         }
     }
+}
+
+/// Refuse a path outside any repository or project: `read /etc/hosts` must not index `/etc`.
+fn check_indexable(located: &git::Located, path: &Path) -> std::result::Result<(), ToolError> {
+    if !located.is_git && !has_project_marker(&located.root) {
+        return Err(ToolError::failed(format!(
+            "{} is not inside a git repository or a recognised project (no .git, elm.json, Cargo.toml, package.json, mix.exs, Package.swift or pyproject.toml above it), so there is no index to answer from",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn has_project_marker(root: &Path) -> bool {

@@ -1,6 +1,7 @@
 pub mod client;
 pub mod cochange;
 pub mod daemon;
+pub mod edit;
 pub mod engine;
 pub mod error;
 pub mod facts;
