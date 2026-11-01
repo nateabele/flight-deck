@@ -216,6 +216,46 @@ extension IntakeService {
 
     // MARK: - ThreadRunner
 
+    /// The pid of `id`'s ThreadRunner when its own heartbeat (`threads/runner.json`) is fresh —
+    /// the real heartbeat, not the controller's spawn grace.
+    func liveThreadRunnerPID(_ id: UUID) -> Int32? {
+        guard let beat = threadStore(id).heartbeat(), now().timeIntervalSince(beat.heartbeat) < Self.threadHeartbeatFreshness
+        else { return nil }
+        return beat.pid
+    }
+    /// `IntakeRunnerController.heartbeatFreshness`, for the thread runner's own heartbeat.
+    static let threadHeartbeatFreshness: TimeInterval = 10
+
+    /// Trash and Discard (A-I1): tells a beating ThreadRunner to stop — a `stop` in its log —
+    /// and starts the grace `collectThreadStops` waits out before SIGTERM. Returns whether one
+    /// was beating, so Trash knows to wait for it.
+    @discardableResult
+    func stopThreads(_ id: UUID) -> Bool {
+        guard let pid = liveThreadRunnerPID(id) else { return false }
+        _ = try? ThreadCommandStore(intakeDirectory: tapeStore(id).intakeDirectory).append(.stop)
+        threadStops[id] = ThreadStop(pid: pid, deadline: now().addingTimeInterval(Self.threadStopGrace))
+        return true
+    }
+
+    /// Each tick: a stopped ThreadRunner whose heartbeat has stopped is done; one still beating
+    /// at the end of its grace gets SIGTERM and one more grace, and after that nothing waits on it.
+    func collectThreadStops() {
+        for (id, stop) in threadStops {
+            if liveThreadRunnerPID(id) == nil {
+                threadStops[id] = nil
+                threadRunner?.reap(id)
+                continue
+            }
+            guard now() >= stop.deadline else { continue }
+            if stop.signalled {
+                threadStops[id] = nil
+            } else {
+                terminateThreadRunner(stop.pid)
+                threadStops[id] = ThreadStop(pid: stop.pid, deadline: now().addingTimeInterval(Self.threadStopGrace), signalled: true)
+            }
+        }
+    }
+
     /// Starts `id`'s ThreadRunner unless one is live. ThreadRunner holds `threads/runner.lock`,
     /// so a second one started in a race exits at once without touching anything.
     func kickThreads(_ id: UUID) {

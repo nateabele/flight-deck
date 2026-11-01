@@ -380,7 +380,7 @@ final class IntakeService: ObservableObject {
     private var triageSettings: TriageSettings?
     private let inject: (_ project: String, _ agent: String, _ text: String, _ token: UUID) -> Bool
     private let hasSession: (_ project: String, _ agent: String) -> Bool
-    private let now: () -> Date
+    let now: () -> Date
     private let defaults: UserDefaults
     /// `UserDefaults` key for `selectedIntake`, persisted as `[path: uuidString]` since
     /// `UserDefaults` plists can't hold `UUID` values directly.
@@ -398,6 +398,18 @@ final class IntakeService: ObservableObject {
     /// Moves an intake's directory to the Trash — `FileManager.trashItem` in the app, a recorder
     /// in tests, so no test run ever fills the human's Trash.
     private let trashItem: (URL) throws -> Void
+    /// SIGTERM to a ThreadRunner that outlived its `stop` (`threadStops`); a recorder in tests.
+    let terminateThreadRunner: (Int32) -> Void
+    /// Trash's and Discard's ThreadRunner stops in flight (A-I1): the runner's pid, when the
+    /// current grace runs out, and whether SIGTERM was sent at the first one.
+    var threadStops: [UUID: ThreadStop] = [:]
+    struct ThreadStop {
+        var pid: Int32
+        var deadline: Date
+        var signalled = false
+    }
+    /// How long a ThreadRunner gets to fold its `stop`, and again after SIGTERM.
+    static let threadStopGrace: TimeInterval = 5
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     ///
@@ -567,10 +579,12 @@ final class IntakeService: ObservableObject {
         readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
         announce: @escaping (String) -> Void = IntakeService.postAnnouncement,
         detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() },
-        trashItem: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+        trashItem: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
+        terminateThreadRunner: @escaping (Int32) -> Void = { pid in if pid > 1 { kill(pid, SIGTERM) } }
     ) {
         self.detectAgents = detectAgents
         self.trashItem = trashItem
+        self.terminateThreadRunner = terminateThreadRunner
         self.store = store
         self.headless = headless
         self.processRunner = processRunner
@@ -948,9 +962,12 @@ final class IntakeService: ObservableObject {
         let listed = listedIntakes(forProject: project)
         tasks.removeValue(forKey: id)?.task.cancel()
         let live = i.state == .shaping && runner?.isRunning(id, tape: latestTapes[id]) == true
-        if live {
+        // A ThreadRunner beating is stopped too, and the folder waits for it (A-I1): trashed
+        // under it, it would run every queued turn and recreate `threads/` at the old path.
+        let threadsLive = stopThreads(id)
+        if live || threadsLive {
             try? store.setArchived(true, id: id)
-            _ = try? tapeStore(id).appendCommand(.stop)
+            if live { _ = try? tapeStore(id).appendCommand(.stop) }
             pendingTrash.insert(id)
         } else {
             do { try trashItem(store.directory(for: id)) } catch { return false }
@@ -976,7 +993,7 @@ final class IntakeService: ObservableObject {
 
     /// Trashes each `pendingTrash` directory whose runner has exited; collects its daemon first.
     private func collectPendingTrash() {
-        for id in pendingTrash where runner?.isRunning(id, tape: nil) != true {
+        for id in pendingTrash where runner?.isRunning(id, tape: nil) != true && threadStops[id] == nil {
             runner?.reap(id)
             pendingTrash.remove(id)
             try? trashItem(store.directory(for: id))
@@ -1764,6 +1781,7 @@ final class IntakeService: ObservableObject {
         pollThreads(shaping)
         pollTriageActivity()
         settlePending()
+        collectThreadStops()
         collectPendingTrash()
         if let runner {
             for id in pendingReaps where !runner.isRunning(id, tape: nil) {
@@ -2069,6 +2087,7 @@ final class IntakeService: ObservableObject {
             // on for an intake nobody can see; the tick collects its daemon once it has.
             _ = try? tapeStore(id).appendCommand(.stop)
             pendingReaps.insert(id)
+            _ = stopThreads(id)
         }
         i.state = .discarded
         save(i)

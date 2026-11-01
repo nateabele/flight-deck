@@ -70,15 +70,18 @@ final class IntakeThreadServiceTests: XCTestCase {
         return i
     }
 
-    private func makeService() async -> IntakeService {
+    private func makeService(now: @escaping () -> Date = { Date(timeIntervalSince1970: 1_800_000_000) },
+                             trashItem: @escaping (URL) throws -> Void = { _ in },
+                             terminate: @escaping (Int32) -> Void = { _ in }) async -> IntakeService {
         let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
                                 processRunner: SilentProcessRunner(),
                                 triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 availableModels: .defaults, runner: FakeRunnerController(prefix: "intake-"),
                                 threadRunner: threadRunner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
-                                now: { Date(timeIntervalSince1970: 1_800_000_000) },
-                                readFile: { try? Data(contentsOf: $0) }, announce: { _ in })
+                                now: now,
+                                readFile: { try? Data(contentsOf: $0) }, announce: { _ in }, trashItem: trashItem,
+                                terminateThreadRunner: terminate)
         await svc.launchRecovery?.value
         return svc
     }
@@ -405,6 +408,60 @@ final class IntakeThreadServiceTests: XCTestCase {
         svc.pollTapes()
         XCTAssertNotEqual(key(), quiet)
         XCTAssertEqual(shown(), accepted.replacingOccurrences(of: "A hand note.", with: "A hand note, reworded."))
+    }
+
+    // MARK: - Trash and Discard stop ThreadRunner (A-I1)
+
+    private func beat(_ id: UUID, pid: Int32, at date: Date) throws {
+        let threads = ThreadStore(intakeDirectory: directory(id))
+        try FileManager.default.createDirectory(at: threads.threadsDirectory, withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(ThreadRunnerHeartbeat(pid: pid, heartbeat: date)).write(to: threads.heartbeatURL)
+    }
+
+    /// Trash with a ThreadRunner beating: a `stop` goes to the thread log and the folder waits;
+    /// once the heartbeat stops, the next tick trashes it.
+    func testTrashStopsALiveThreadRunnerBeforeMovingTheFolder() async throws {
+        let i = try shapingIntake()
+        var trashed: [URL] = []
+        let svc = await makeService(trashItem: { trashed.append($0) })
+        try beat(i.id, pid: 4242, at: date)
+        XCTAssertTrue(svc.moveToTrash(i.id, inProject: "/p"))
+        XCTAssertEqual(threadCommands(i.id), [.stop])
+        XCTAssertTrue(trashed.isEmpty, "the folder waits for the runner")
+
+        svc.pollTapes()
+        XCTAssertTrue(trashed.isEmpty, "still beating")
+        try FileManager.default.removeItem(at: ThreadStore(intakeDirectory: directory(i.id)).heartbeatURL)
+        svc.pollTapes()
+        XCTAssertEqual(trashed, [directory(i.id)])
+    }
+
+    /// A runner that keeps beating past the grace gets SIGTERM, then the folder goes anyway.
+    func testAThreadRunnerThatIgnoresTheStopIsTerminated() async throws {
+        let i = try shapingIntake()
+        var clock = date
+        var trashed: [URL] = [], killed: [Int32] = []
+        let svc = await makeService(now: { clock }, trashItem: { trashed.append($0) }, terminate: { killed.append($0) })
+        try beat(i.id, pid: 4242, at: clock)
+        XCTAssertTrue(svc.moveToTrash(i.id, inProject: "/p"))
+        clock = clock.addingTimeInterval(IntakeService.threadStopGrace + 1)
+        try beat(i.id, pid: 4242, at: clock)
+        svc.pollTapes()
+        XCTAssertEqual(killed, [4242])
+        XCTAssertTrue(trashed.isEmpty)
+        clock = clock.addingTimeInterval(IntakeService.threadStopGrace + 1)
+        try beat(i.id, pid: 4242, at: clock)
+        svc.pollTapes()
+        XCTAssertEqual(trashed, [directory(i.id)], "two graces, then the folder goes")
+    }
+
+    /// Discard keeps the folder, so the `stop` is how the runner learns of it.
+    func testDiscardStopsALiveThreadRunner() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        try beat(i.id, pid: 4242, at: date)
+        XCTAssertTrue(svc.discard(i.id))
+        XCTAssertEqual(threadCommands(i.id), [.stop])
     }
 
     // MARK: - ThreadRunner liveness

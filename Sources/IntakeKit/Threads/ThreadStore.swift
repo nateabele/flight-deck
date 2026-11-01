@@ -159,12 +159,12 @@ public struct ThreadStore: ThreadStoreReading, Sendable {
     // MARK: - Writing (ThreadRunner only)
 
     func save(_ record: ThreadRecord) throws {
-        try FileManager.default.createDirectory(at: directory(record.id), withIntermediateDirectories: true)
+        try IntakeDirectory.create(directory(record.id), in: intakeDirectory)
         try IntakeJSON.encoder.encode(record).write(to: recordURL(record.id), options: .atomic)
     }
 
     func save(turns: [ThreadTurn], of id: ThreadID) throws {
-        try FileManager.default.createDirectory(at: directory(id), withIntermediateDirectories: true)
+        try IntakeDirectory.create(directory(id), in: intakeDirectory)
         var data = Data()
         for turn in turns.sorted(by: { $0.seq < $1.seq }) {
             data.append(try Self.lineEncoder.encode(turn))
@@ -175,19 +175,35 @@ public struct ThreadStore: ThreadStoreReading, Sendable {
 
     func save(_ diff: ThreadDiff) throws {
         let dir = diffsDirectory(diff.thread)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeDirectory.create(dir, in: intakeDirectory)
         try IntakeJSON.encoder.encode(diff).write(to: dir.appendingPathComponent("\(diff.id.uuidString).json"), options: .atomic)
     }
 
     func saveCursor(_ seq: Int) throws {
-        try FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.create(threadsDirectory, in: intakeDirectory)
         try Data("\(seq)\n".utf8).write(to: cursorURL, options: .atomic)
     }
 
     func saveHeartbeat(_ beat: ThreadRunnerHeartbeat?) {
         guard let beat else { try? FileManager.default.removeItem(at: heartbeatURL); return }
-        try? FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+        guard (try? IntakeDirectory.create(threadsDirectory, in: intakeDirectory)) != nil else { return }
         try? IntakeJSON.encoder.encode(beat).write(to: heartbeatURL, options: .atomic)
+    }
+
+    /// `threads/runner.exited`: when the last ThreadRunner exited. Written only into an existing
+    /// `threads/` (A-I1).
+    public var exitedURL: URL { threadsDirectory.appendingPathComponent("runner.exited") }
+
+    public func saveExited(_ date: Date) {
+        guard FileManager.default.fileExists(atPath: threadsDirectory.path) else { return }
+        try? Data(ISO8601DateFormatter.fractional.string(from: date).utf8).write(to: exitedURL, options: .atomic)
+    }
+
+    /// When the last ThreadRunner exited; nil if none has.
+    public func exitedAt() -> Date? {
+        (try? String(contentsOf: exitedURL, encoding: .utf8)).flatMap {
+            ISO8601DateFormatter.fractional.date(from: $0.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 
     func clearActivity(_ id: ThreadID) { try? FileManager.default.removeItem(at: activityURL(id)) }
@@ -253,6 +269,15 @@ final class ReadCache: @unchecked Sendable {
         lock.withLock { entries[url.path] = (stamp, value) }
         return value
     }
+}
+
+extension ISO8601DateFormatter {
+    /// With milliseconds, for `runner.exited`: an exit and a spawn can be well under a second apart.
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
 
 /// `threads/runner.json` (R5): which process runs this intake's threads, and when it last said

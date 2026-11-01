@@ -61,7 +61,7 @@ public struct ThreadRunner: Sendable {
         let directory = IntakeStore(root: root).directory(for: intakeID)
         guard let intake = try? IntakeStore(root: root).load(id: intakeID) else { return }
         let store = ThreadStore(intakeDirectory: directory)
-        try? FileManager.default.createDirectory(at: store.threadsDirectory, withIntermediateDirectories: true)
+        guard (try? IntakeDirectory.create(store.threadsDirectory, in: directory)) != nil else { return }
         guard let lock = ThreadRunnerLock(url: store.lockURL) else { return }
         let keeper = ThreadKeeper(store: store, tapeStore: TapeStore(intakeDirectory: directory),
                                   commands: ThreadCommandStore(intakeDirectory: directory), now: now)
@@ -72,8 +72,9 @@ public struct ThreadRunner: Sendable {
         while true {
             await drive(keeper, context)
             lock.release()
-            guard !Task.isCancelled, await keeper.hasWork(), lock.acquire() else { return }
+            guard !Task.isCancelled, await !keeper.mustExit, await keeper.hasWork(), lock.acquire() else { break }
         }
+        await keeper.markExited()
     }
 
     private func drive(_ keeper: ThreadKeeper, _ context: TurnContext) async {
@@ -82,8 +83,12 @@ public struct ThreadRunner: Sendable {
         // (and through `CommandRunner`'s process groups, every CLI they started).
         await withTaskGroup(of: Void.self) { group in
             while !Task.isCancelled {
+                // Trash moved the folder away, or Trash or Discard asked for a stop (A-I1): the
+                // running turns are cancelled (they stay queued) and nothing more runs.
+                if await keeper.mustExit { break }
                 await keeper.beat(pid: pid)
                 await keeper.fold()
+                if await keeper.mustExit { break }
                 while await keeper.runningCount < Self.concurrencyCap, let next = await keeper.claimNext() {
                     group.addTask { await context.run(next, keeper) }
                 }
@@ -129,6 +134,18 @@ actor ThreadKeeper {
 
     var runningCount: Int { running.count }
 
+    /// A `stop` was folded (Trash, Discard).
+    private(set) var stopRequested = false
+
+    /// Stop, or the intake's folder is gone (Trash moved it): checked every loop (A-I1).
+    var mustExit: Bool {
+        stopRequested || (try? IntakeDirectory.require(tapeStore.intakeDirectory)) == nil
+    }
+
+    /// The runner's last write, beside removing its heartbeat: when it exited, so the app can tell
+    /// a runner that came and went from one still starting (A-5).
+    func markExited() { store.saveExited(now()) }
+
     func beat(pid: Int32?) {
         store.saveHeartbeat(pid.map { ThreadRunnerHeartbeat(pid: $0, heartbeat: now()) })
     }
@@ -155,8 +172,14 @@ actor ThreadKeeper {
     }
 
     private func apply(_ envelope: ThreadCommandEnvelope) throws {
-        let id = envelope.command.thread
+        guard let id = envelope.command.thread else {
+            // `stop`: the intake is being trashed or discarded. Folded like any command, so the
+            // cursor moves past it and a runner started after Put Back doesn't stop on it again.
+            stopRequested = true
+            return
+        }
         switch envelope.command {
+        case .stop: return
         case .open(_, let anchor, let title, let agent, let model, let effort):
             guard store.thread(id) == nil else { return }
             let head = tapeStore.headPlanCheckpoint(in: tapeStore.loadTape()) ?? 0

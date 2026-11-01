@@ -28,6 +28,7 @@ final class ThreadWorkspaceTests: XCTestCase {
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-workspace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         store = TapeStore(intakeDirectory: root)
         let created = Date(timeIntervalSince1970: 1_790_000_000)
         var t = Tape()

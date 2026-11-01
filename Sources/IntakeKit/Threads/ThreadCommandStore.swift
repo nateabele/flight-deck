@@ -20,7 +20,7 @@ public struct ThreadCommandStore: Sendable {
     /// Appends `command` as one line and returns its seq.
     @discardableResult
     public func append(_ command: ThreadCommand) throws -> Int {
-        try FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.create(threadsDirectory, in: intakeDirectory)
         // Read-max-then-write under a lock on a sibling file: the app and ThreadRunner append here.
         return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
             let seq = (lines().compactMap { try? Self.decoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1

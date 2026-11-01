@@ -17,6 +17,9 @@ import Foundation
 ///   `applyThreadDiff` on the tape; this is how the diff's own state (`threads/`, written only
 ///   by ThreadRunner) learns of either answer.
 /// - `repropose` runs one turn against the newest checkpoint for a stale diff.
+/// - `stop` addresses no thread: the intake is being trashed or discarded, so ThreadRunner
+///   cancels its running turns, runs no more, and exits (A-I1). The app follows it with SIGTERM
+///   after a grace period, so an older runner that drops the line still stops.
 public enum ThreadCommand: Codable, Equatable, Sendable {
     case open(ThreadID, ThreadAnchor, title: String, agent: AgentID, model: String, effort: String)
     case message(ThreadID, text: String, messageID: String, source: String?, elementID: String?, subjectRevision: String?)
@@ -27,22 +30,24 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
     case reopen(ThreadID)
     case repropose(ThreadID, diff: UUID)
     case decideDiff(ThreadID, diff: UUID, accept: Bool)
+    case stop
 
     /// The `messageID` of the first message in a thread the phone opened with `token` (see
     /// `ThreadID.opened(byToken:)`): the token's string, so a retried send runs no second turn.
     public static func firstMessageID(token: UUID) -> String { token.uuidString }
 
-    /// The thread every command addresses.
-    public var thread: ThreadID {
+    /// The thread the command addresses; nil for `stop`, which is the whole runner's.
+    public var thread: ThreadID? {
         switch self {
         case .open(let t, _, _, _, _, _), .message(let t, _, _, _, _, _), .answer(let t, _, _), .setAutoAccept(let t, _),
              .setAgent(let t, _, _, _), .resolve(let t), .reopen(let t), .repropose(let t, _), .decideDiff(let t, _, _):
             t
+        case .stop: nil
         }
     }
 
     private enum Kind: String, Codable {
-        case open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff
+        case open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff, stop
     }
     private enum CodingKeys: String, CodingKey {
         case kind, thread, anchor, title, agent, model, effort, text, messageID, source, elementID, subjectRevision
@@ -51,8 +56,11 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        if kind == .stop { self = .stop; return }
         let thread = try c.decode(ThreadID.self, forKey: .thread)
-        switch try c.decode(Kind.self, forKey: .kind) {
+        switch kind {
+        case .stop: self = .stop
         case .open:
             self = .open(thread, try c.decodeIfPresent(ThreadAnchor.self, forKey: .anchor) ?? .wholePlan,
                          title: try c.decode(String.self, forKey: .title), agent: try c.decode(AgentID.self, forKey: .agent),
@@ -81,8 +89,10 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(thread, forKey: .thread)
+        try c.encodeIfPresent(thread, forKey: .thread)
         switch self {
+        case .stop:
+            try c.encode(Kind.stop, forKey: .kind)
         case .open(_, let anchor, let title, let agent, let model, let effort):
             try c.encode(Kind.open, forKey: .kind)
             try c.encode(anchor, forKey: .anchor)

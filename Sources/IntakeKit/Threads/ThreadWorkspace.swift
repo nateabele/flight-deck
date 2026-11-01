@@ -35,6 +35,8 @@ public struct ThreadWorkspace: Equatable, Sendable {
     public static func build(in directory: URL, anchor: ThreadAnchor, checkpoint: Int, plan: String, tape: Tape,
                              store: TapeStore, intake: Intake?) throws -> ThreadWorkspace {
         let fm = FileManager.default
+        // A trashed intake's thread gets no workspace (A-I1): this would recreate it at the old path.
+        try IntakeDirectory.require(store.intakeDirectory)
         if fm.fileExists(atPath: directory.path) { try fm.removeItem(at: directory) }
         try fm.createDirectory(at: directory.appendingPathComponent("sections", isDirectory: true),
                                withIntermediateDirectories: true)

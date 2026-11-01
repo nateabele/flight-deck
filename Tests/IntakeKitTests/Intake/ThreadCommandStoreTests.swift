@@ -11,6 +11,7 @@ final class ThreadCommandStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ThreadCommandStore-\(UUID())", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     override func tearDown() {

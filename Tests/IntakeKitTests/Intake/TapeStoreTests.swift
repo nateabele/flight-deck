@@ -3,7 +3,11 @@ import IntakeKit
 
 final class TapeStoreTests: XCTestCase {
     var root: URL!
-    override func setUp() { root = FileManager.default.temporaryDirectory.appendingPathComponent("tapes-\(UUID())") }
+    override func setUp() {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("tapes-\(UUID())")
+        // The intake's folder, as `IntakeStore` makes it: no store write creates it (A-I1).
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
     override func tearDown() { try? FileManager.default.removeItem(at: root) }
 
     // MARK: - tape.json

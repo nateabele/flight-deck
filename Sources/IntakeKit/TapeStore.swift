@@ -9,6 +9,30 @@ import Foundation
 /// `SeatActivity`, replaced atomically by `ActivityPublisher` — see `activities(forRound:)`) and
 /// `result.json` (the seat's `SeatResult`, once its output parses — see `seatResult(run:)`).
 /// Not a single index file — the directory is the unit, same rationale as `IntakeStore`.
+/// The rule for every runner and store write under an intake (A-I1): it may make a folder
+/// inside the intake's directory, never the intake's directory itself. Trash and Discard move or
+/// delete that directory while a runner may still be writing; recreating it would spend the
+/// runner's next write on a ghost intake at the old path, and Finder's Put Back would then fail
+/// because the name is taken. Only `IntakeStore` creates an intake's directory.
+public enum IntakeDirectory {
+    public struct Gone: Error, Equatable {
+        public let path: String
+    }
+
+    /// Throws `Gone` unless `intake` exists.
+    public static func require(_ intake: URL) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: intake.path, isDirectory: &isDirectory), isDirectory.boolValue
+        else { throw Gone(path: intake.path) }
+    }
+
+    /// Creates `directory`, a folder inside `intake`, while `intake` exists.
+    public static func create(_ directory: URL, in intake: URL) throws {
+        try require(intake)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+}
+
 public struct TapeStore: Sendable {
     public let intakeDirectory: URL
     public init(intakeDirectory: URL) {
@@ -53,7 +77,7 @@ public struct TapeStore: Sendable {
     /// Replaced atomically, like `activity.json`: the app's poller may read it at any moment.
     func writeSeatResult(_ result: SeatResult, run: String) throws {
         let dir = runDirectory(run)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeDirectory.create(dir, in: intakeDirectory)
         try IntakeJSON.encoder.encode(result).write(to: dir.appendingPathComponent("result.json"), options: .atomic)
     }
 
@@ -79,7 +103,7 @@ public struct TapeStore: Sendable {
     }
 
     public func saveTape(_ t: Tape) throws {
-        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.require(intakeDirectory)
         try IntakeJSON.encoder.encode(t).write(to: tapeURL, options: .atomic)
     }
 
@@ -88,7 +112,7 @@ public struct TapeStore: Sendable {
     /// `commands(after:)`'s torn-line tolerance exists specifically to cover a reader catching
     /// this write mid-flight.
     public func appendCommand(_ c: TapeCommand) throws -> Int {
-        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.require(intakeDirectory)
         // The seq is the highest on file plus one, so reading it and writing the line must be one
         // step across processes: the app, the phone path and the runner all append here.
         return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) { try appendUnlocked(c) }
@@ -102,7 +126,7 @@ public struct TapeStore: Sendable {
     /// `compose` runs holding the lock: it must not append itself, or it waits on itself.
     @discardableResult
     public func appendCommand(composing compose: (_ current: [CommandEnvelope]) throws -> TapeCommand?) throws -> Int? {
-        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.require(intakeDirectory)
         return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
             guard let command = try compose(readCommandLines()) else { return nil }
             return try appendUnlocked(command)
@@ -179,7 +203,7 @@ public struct TapeStore: Sendable {
         if fm.fileExists(atPath: dir.path) {
             try fm.removeItem(at: dir)
         }
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeDirectory.create(dir, in: intakeDirectory)
         for (name, data) in files {
             // Names are relative paths (a draft round writes `drafts/<i>.md`), so each file's
             // own parent may not exist yet.

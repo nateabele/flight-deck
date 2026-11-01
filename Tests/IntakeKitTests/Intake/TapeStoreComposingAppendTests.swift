@@ -9,6 +9,8 @@ final class TapeStoreComposingAppendTests: XCTestCase {
     override func setUp() {
         store = TapeStore(intakeDirectory: FileManager.default.temporaryDirectory
             .appendingPathComponent("fd-compose-\(UUID().uuidString)"))
+        // The intake's folder, as `IntakeStore` makes it: no store write creates it (A-I1).
+        try? FileManager.default.createDirectory(at: store.intakeDirectory, withIntermediateDirectories: true)
     }
 
     override func tearDown() { try? FileManager.default.removeItem(at: store.intakeDirectory) }

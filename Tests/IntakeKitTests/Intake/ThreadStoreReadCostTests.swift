@@ -10,6 +10,7 @@ final class ThreadStoreReadCostTests: XCTestCase {
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-thread-cost-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let store = ThreadStore(intakeDirectory: root)
         ids = (0..<20).map { _ in ThreadID() }
         for (n, id) in ids.enumerated() {

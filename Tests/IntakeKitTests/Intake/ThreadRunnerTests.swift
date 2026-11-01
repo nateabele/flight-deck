@@ -178,6 +178,64 @@ final class ThreadRunnerTests: XCTestCase {
         }
     }
 
+    // MARK: - Trash and Discard (A-I1)
+
+    /// Trash moves the intake's folder away while a turn runs and another waits. The runner runs
+    /// no further turn, and nothing it writes afterwards recreates the folder at the old path,
+    /// which would make Finder's Put Back fail.
+    func testATrashedIntakeRunsNoQueuedTurnAndRecreatesNothing() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try send(id, "GATED first")
+        try send(id, "And a second one")
+        let done = Flag()
+        let run = Task { await runner(agent).run(); done.set() }
+        try await until("the first turn to start") { agent.gate.entered == 1 }
+
+        let trash = root.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: directory, to: trash.appendingPathComponent(intakeID.uuidString))
+        agent.gate.open()
+        try await until("the runner to exit") { done.value }
+        run.cancel()
+
+        XCTAssertEqual(agent.requests.count, 1, "the queued turn never ran")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "nothing recreated at the old path")
+    }
+
+    /// Discard (or Trash with the folder still there): a `stop` in the thread log cancels the
+    /// running turn and ends the runner before the queued one runs.
+    func testAStopEndsTheRunnerBeforeAQueuedTurn() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try send(id, "GATED first")
+        try send(id, "And a second one")
+        let done = Flag()
+        let run = Task { await runner(agent).run(); done.set() }
+        try await until("the first turn to start") { agent.gate.entered == 1 }
+
+        try commands.append(.stop)
+        try await until("the runner to stop") { done.value }
+        agent.gate.open()
+        run.cancel()
+        _ = await run.value
+
+        XCTAssertEqual(agent.requests.count, 1, "the queued turn never ran")
+        XCTAssertEqual(store.cursor(), 4, "the stop is folded, so a later runner doesn't stop on it again")
+        XCTAssertNil(store.heartbeat())
+    }
+
+    /// No store write creates a missing intake folder; inside an existing one, folders are made.
+    func testStoreWritesNeverCreateTheIntakeFolder() throws {
+        let gone = root.appendingPathComponent("gone-\(UUID().uuidString)", isDirectory: true)
+        XCTAssertThrowsError(try TapeStore(intakeDirectory: gone).appendCommand(.step))
+        XCTAssertThrowsError(try ThreadCommandStore(intakeDirectory: gone).append(.resolve(ThreadID())))
+        XCTAssertThrowsError(try ThreadStore(intakeDirectory: gone).saveCursor(1))
+        ThreadStore(intakeDirectory: gone).saveHeartbeat(ThreadRunnerHeartbeat(pid: 1, heartbeat: Date()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gone.path))
+        XCTAssertNoThrow(try ThreadStore(intakeDirectory: directory).saveCursor(0))
+    }
+
     // MARK: - One turn
 
     func testAMessageRunsOneTurnAndStoresTheReply() async throws {

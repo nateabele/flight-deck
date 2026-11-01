@@ -12,6 +12,8 @@ final class LockedAppendTests: XCTestCase {
     override func setUp() {
         super.setUp()
         root = FileManager.default.temporaryDirectory.appendingPathComponent("LockedAppend-\(UUID())", isDirectory: true)
+        // The intake's folder, as `IntakeStore` makes it: no store write creates it (A-I1).
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     override func tearDown() {

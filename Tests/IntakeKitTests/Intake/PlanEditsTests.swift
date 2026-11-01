@@ -6,7 +6,11 @@ import IntakeKit
 /// per-hunk revert, anchor re-location, and the prompt rendering every stage shares.
 final class PlanEditsTests: XCTestCase {
     var root: URL!
-    override func setUp() { root = FileManager.default.temporaryDirectory.appendingPathComponent("PlanEditsTests-\(UUID())") }
+    override func setUp() {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("PlanEditsTests-\(UUID())")
+        // The intake's folder, as `IntakeStore` makes it: no store write creates it (A-I1).
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
     override func tearDown() { try? FileManager.default.removeItem(at: root) }
     var store: TapeStore { TapeStore(intakeDirectory: root) }
 

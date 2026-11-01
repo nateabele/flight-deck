@@ -96,6 +96,7 @@ final class ThreadTurnExecutorTests: XCTestCase {
     /// old word for a task.
     func testThreadPromptsCarryTheVocabularyRule() throws {
         let root = dir.appendingPathComponent("intake")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let store = TapeStore(intakeDirectory: root)
         var tape = Tape()
         try store.writeCheckpoint(Checkpoint(id: 1, stage: .refine, round: 1, major: false, createdAt: Date()),
