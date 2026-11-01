@@ -1,11 +1,11 @@
 [
  {
   "name": "qartez_map",
-  "description": "Start here. Returns the codebase skeleton: files ranked by importance (PageRank), their exports, and blast radii. Use boost_files/boost_terms to focus on areas relevant to your current task.",
+  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. To locate a known name use qartez_find; to rank around a task pass boost_terms or boost_files.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -18,7 +18,7 @@
    "properties": {
     "all_files": {
      "default": null,
-     "description": "If true, return all files sorted by PageRank (ignores top_n). Watch for token-budget truncation on large repos.",
+     "description": "Rank every file, tests and files without symbols included (ignores top_n).",
      "type": [
       "boolean",
       "null"
@@ -26,7 +26,7 @@
     },
     "boost_files": {
      "default": null,
-     "description": "File paths to boost in ranking (e.g., recently edited or mentioned files)",
+     "description": "Paths to rank higher (x10), e.g. files named in the task.",
      "items": {
       "type": "string"
      },
@@ -37,7 +37,7 @@
     },
     "boost_terms": {
      "default": null,
-     "description": "Search terms to boost files containing matching symbols",
+     "description": "Words; files whose path or symbol names contain one rank higher (x5).",
      "items": {
       "type": "string"
      },
@@ -47,7 +47,7 @@
      ]
     },
     "by": {
-     "description": "Ranking axis. Must be one of: 'files' (default) shows top files by PageRank; 'symbols' shows top symbols by symbol-level PageRank + their defining file. Unknown values are rejected with a list of valid options.",
+     "description": "files (default) or symbols.",
      "enum": [
       "files",
       "symbols"
@@ -66,11 +66,11 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = file list only, 'detailed' (default) = files + exported symbols"
+     "description": "concise: file rows only. detailed (default): plus up to 6 exported signatures per file."
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -80,7 +80,7 @@
     },
     "top_n": {
      "default": null,
-     "description": "Number of top-ranked files to include. Default: 20. `top_n=0` follows the tool-wide no-cap convention (same as qartez_unused / qartez_context `limit=0`) and is equivalent to `all_files=true`. Watch for token-budget truncation on large repos; the response adds a `raise token_budget=` footer when the render is clipped.",
+     "description": "Files to show (default 20; 0 = all).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -90,7 +90,7 @@
     },
     "with_health": {
      "default": null,
-     "description": "When true, annotate each top-ranked file row with its max cyclomatic complexity (`CC=N`) and a smell tag when one fires (`god_function` / `long_params`). Same heuristics as qartez_health: CC>=15 with body>=50 lines = god_function, signature with >=5 params = long_params. Lets a single qartez_map call surface hotspot pressure on top of PageRank without a follow-up qartez_health round-trip. Default false.",
+     "description": "Accepted and ignored.",
      "type": [
       "boolean",
       "null"
@@ -109,11 +109,11 @@
  },
  {
   "name": "qartez_find",
-  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, and visibility for every match. Use kind filter to disambiguate (e.g., kind='struct').",
+  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private. Takes qualified names (Type.method, Module.fn, stem::fn). For part of a name use qartez_grep; for its uses, qartez_refs.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -133,10 +133,10 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = name + file only, 'detailed' (default) = full info with signatures"
+     "description": "concise: name and file. detailed (default): plus signature."
     },
     "kind": {
-     "description": "Filter by symbol kind (function, struct, class, etc.)",
+     "description": "Only this kind: function, method, struct, class, extension, …",
      "type": [
       "string",
       "null"
@@ -144,7 +144,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Maximum number of results to return in regex mode. Default 100. Ignored for exact-name lookups.",
+     "description": "Max matches (default 100).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -153,12 +153,12 @@
      ]
     },
     "name": {
-     "description": "Exact symbol name to search for (or regex when regex=true). Accepts aliases `symbol`, `symbol_name`, and `query`.",
+     "description": "Exact or qualified name, or a regex with regex=true. Aliases: symbol, symbol_name.",
      "type": "string"
     },
     "regex": {
      "default": null,
-     "description": "If true, interpret `name` as a regex applied to indexed symbol names. Uses `regex::Regex::is_match` (find anywhere, not anchored - prepend `^` for start-anchored, `$` for end-anchored, both for full-match). Case-insensitive by default; prepend `(?-i)` to force case-sensitive. Default false (exact name lookup).",
+     "description": "Treat name as an unanchored, case-insensitive regex.",
      "type": [
       "boolean",
       "null"
@@ -180,11 +180,11 @@
  },
  {
   "name": "qartez_grep",
-  "description": "Search indexed symbols by name, kind, or file path using FTS5. Prefix matching is anchored to the symbol name column (e.g. 'Config*' matches symbols whose name starts with 'Config', not file paths that happen to contain it). Use the `kind` param to filter results by symbol kind (function / struct / method / etc.). Returns symbol locations with export status. Faster than Grep because it searches the pre-built index, not disk.",
+  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -204,10 +204,10 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = names only, 'detailed' (default) = names + kind + file + lines"
+     "description": "concise: names only. detailed (default): kind, file and lines."
     },
     "kind": {
-     "description": "Filter results by symbol kind (e.g., 'function', 'struct', 'method', 'class'). Applied after the FTS/regex match so it narrows name-search results down to one category without changing the query grammar.",
+     "description": "Only this kind: function, method, struct, …",
      "type": [
       "string",
       "null"
@@ -215,7 +215,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max number of results (default: 200). The active governor is `token_budget`; raise `limit` only if you need more than 200 rows.",
+     "description": "Max rows (default 200).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -224,12 +224,12 @@
      ]
     },
     "query": {
-     "description": "FTS5 search query. Prefix matching is anchored to the symbol name column (e.g. `Parser*` only matches symbols whose name starts with `Parser`, not file paths that happen to contain `parser`). Accepts the alias `pattern` for parity with Grep. Interpreted as a regex when regex=true.",
+     "description": "Name prefix (Foo = Foo*), a regex with regex=true, or text with search_bodies=true. Alias: pattern.",
      "type": "string"
     },
     "regex": {
      "default": null,
-     "description": "If true, interpret query as a regex applied to indexed symbol names (not bodies). Default false (FTS5 prefix).",
+     "description": "Treat query as an unanchored, case-insensitive regex.",
      "type": [
       "boolean",
       "null"
@@ -237,7 +237,7 @@
     },
     "search_bodies": {
      "default": null,
-     "description": "If true, search pre-indexed function bodies via FTS5 instead of symbol names. Useful for finding strings/comments/identifiers that don't appear in declarations. Default false.",
+     "description": "Search the text of function bodies, not names: rows are path:line in function: text.",
      "type": [
       "boolean",
       "null"
@@ -245,7 +245,7 @@
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -269,13 +269,13 @@
  },
  {
   "name": "qartez_read",
-  "description": "Read one or more symbols' source code from disk with line numbers. Faster than Read \u2014 jumps directly to the symbol without scanning. Pass `symbol_name` for a single symbol, or `symbols=[...]` to batch-fetch multiple in one call. Use file_path to disambiguate. Passing just `file_path` (no symbol) reads the whole file or a slice via start_line/end_line/limit \u2014 replaces the built-in Read for module headers, imports, and small files.",
+  "description": "Source of one or more symbols, or a file's line range, with line numbers. Use after qartez_find or qartez_grep instead of reading whole files. For a file's list of symbols use qartez_outline.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "context_lines": {
      "default": null,
-     "description": "Lines of source context to include BEFORE the symbol's own range (default: 0). Use when you need to see surrounding use-blocks or comments.",
+     "description": "Extra lines around the symbol (default 0).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -285,7 +285,7 @@
     },
     "end_line": {
      "default": null,
-     "description": "Partial-body end line (inclusive). Pairs with `start_line`.",
+     "description": "Last line of the range (inclusive).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -294,7 +294,7 @@
      ]
     },
     "file_path": {
-     "description": "Filter all symbols to a specific file path. When set without any symbol, reads the raw file contents - the whole file by default, or the slice defined by start_line/end_line/limit. max_bytes still bounds the output. Aliases: `file`, `path`.",
+     "description": "Alone: read this file (or start_line..end_line). With a symbol: pick it from this file. Aliases: file, path.",
      "type": [
       "string",
       "null"
@@ -302,7 +302,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Partial-body line count. Alternative to `end_line`: when set, reads `limit` lines starting at `start_line` (defaults to 1). Mirrors the built-in Read tool's `limit` parameter so callers can copy-paste the same shape.",
+     "description": "Lines to read from start_line.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -312,7 +312,7 @@
     },
     "max_bytes": {
      "default": null,
-     "description": "Max response size in bytes (default: 25000). Symbols past the cap are omitted with a truncation marker.",
+     "description": "Output cap in bytes (default 25000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -322,7 +322,7 @@
     },
     "start_line": {
      "default": null,
-     "description": "Read partial body: 1-based start line. Combined with `end_line` or `limit`. When set together with `file_path` but without any symbol, dumps that raw line range from the file - lets you read non-symbol code (imports, module headers) without falling back to Read. Alias: `offset`.",
+     "description": "First line of the range (1-based). Alias: offset.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -331,7 +331,7 @@
      ]
     },
     "symbol_name": {
-     "description": "Name of a single symbol to read. For batch reads, use `symbols` instead. Accepts the aliases `symbol` and `name`.",
+     "description": "One symbol to read. Aliases: symbol, name.",
      "type": [
       "string",
       "null"
@@ -339,7 +339,7 @@
     },
     "symbols": {
      "default": null,
-     "description": "Batch mode: list of symbol names to read in one call. Results are concatenated in order. Cheaper than multiple qartez_read calls. Either `symbols` or `symbol_name` must be set.",
+     "description": "Several symbols to read in one call.",
      "items": {
       "type": "string"
      },
@@ -361,11 +361,11 @@
  },
  {
   "name": "qartez_outline",
-  "description": "List every symbol in a file grouped by kind (functions, classes, structs, etc.) with line numbers and signatures. Like a table of contents for the file.",
+  "description": "Every symbol in one file, grouped by kind, with line ranges and signatures. Use to see a file's structure before reading it; for a symbol's code use qartez_read.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -377,7 +377,7 @@
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "file_path": {
-     "description": "File path (absolute, or relative to the caller's working directory) to get outline for. Aliases: `file`, `path`.",
+     "description": "The file. Aliases: file, path.",
      "type": "string"
     },
     "format": {
@@ -389,11 +389,11 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = names + lines only, 'detailed' (default) = grouped by kind with signatures"
+     "description": "concise: names and lines. detailed (default): plus signatures."
     },
     "offset": {
      "default": null,
-     "description": "Skip the first N non-field symbols before rendering. Pair with token_budget to page through very large files.",
+     "description": "Skip this many symbols (pages of 100; the output gives next_offset).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -403,7 +403,7 @@
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -427,11 +427,11 @@
  },
  {
   "name": "qartez_deps",
-  "description": "Show a file's dependency graph: what it imports (outgoing) and what imports it (incoming). Reveals coupling and helps plan safe changes.",
+  "description": "A file's direct imports and direct importers. Use for one file's coupling; for everything a change could break (transitive, co-change) use qartez_impact.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -443,7 +443,7 @@
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "file_path": {
-     "description": "File path (absolute, or relative to the caller's working directory) to show dependencies for. Aliases: `file`, `path`.",
+     "description": "The file. Aliases: file, path.",
      "type": "string"
     },
     "format": {
@@ -455,11 +455,11 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = file paths only, 'detailed' (default) = paths + edge kinds, 'mermaid' = dependency graph as a Mermaid diagram (use only when the user asks for a visual)"
+     "description": "concise: paths. detailed (default): with import specifiers. mermaid: a diagram, only if asked for one."
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -483,12 +483,12 @@
  },
  {
   "name": "qartez_stats",
-  "description": "Codebase metrics at a glance: files, symbols, edges by language, most connected files, and index coverage percentage.",
+  "description": "Counts: files, LOC, symbols and edges by language, and the most imported files. With file_path: that file's LOC, symbols, imports, importers and PageRank.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "file_path": {
-     "description": "Optional file path (absolute, or relative to the caller's working directory) for per-file stats: LOC, symbol count, imports, importers. Aliases: `file`, `path`.",
+     "description": "Optional file for per-file numbers. Aliases: file, path.",
      "type": [
       "string",
       "null"
@@ -507,11 +507,11 @@
  },
  {
   "name": "qartez_impact",
-  "description": "MUST call before modifying any file with exports. Shows direct importers, transitive dependents, and co-change partners \u2014 the full set of files that could break.",
+  "description": "What a change to a file could break: direct importers, transitive dependents, files that change with it in git, its hot symbols. Call before editing a widely imported file (the edit guard asks for it). One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -523,7 +523,7 @@
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "file_path": {
-     "description": "File path (absolute, or relative to the caller's working directory) to analyze blast radius for. Aliases: `file`, `path`, `name`.",
+     "description": "The file. Aliases: file, path, name.",
      "type": "string"
     },
     "format": {
@@ -535,11 +535,11 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = counts only, 'detailed' (default) = full file lists"
+     "description": "concise: counts. detailed (default): lists."
     },
     "include_tests": {
      "default": null,
-     "description": "Include test files in the transitive blast radius (default: false)",
+     "description": "Count test files as dependents (default false).",
      "type": [
       "boolean",
       "null"
@@ -547,7 +547,7 @@
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -571,11 +571,11 @@
  },
  {
   "name": "qartez_refs",
-  "description": "Trace all usages of a symbol: which files import it, and (with transitive=true) the full dependency chain. Essential before renaming, moving, or deleting a symbol.",
+  "description": "Every reference to a symbol (calls, type uses, imports), grouped by file with line and enclosing function. Use before renaming or deleting, or to see all uses. Calls only, or chains past one hop: qartez_calls. A whole file: qartez_impact.",
   "inputSchema": {
    "$defs": {
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -595,23 +595,23 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = file paths only (duplicate paths collapsed to `path xN`), 'detailed' (default) = full import chain grouped per importer"
+     "description": "concise: files only. detailed (default): each reference."
     },
     "include_tests": {
      "default": null,
-     "description": "Include refs from test files in the listing. Default true for back-compat. Set false when investigating production usages of a hub symbol whose test imports would otherwise dominate the output.",
+     "description": "Include references from test files (default true).",
      "type": [
       "boolean",
       "null"
      ]
     },
     "symbol": {
-     "description": "Symbol name to find references for. Accepts aliases `name` and `symbol_name`.",
+     "description": "Symbol name; Type.member narrows. Aliases: name, symbol_name.",
      "type": "string"
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -621,7 +621,7 @@
     },
     "transitive": {
      "default": null,
-     "description": "Include transitive dependents (default: false)",
+     "description": "Also list the files that depend on the referencing files.",
      "type": [
       "boolean",
       "null"
@@ -643,11 +643,11 @@
  },
  {
   "name": "qartez_calls",
-  "description": "Show call hierarchy for a function: who calls it (callers) and what it calls (callees). Uses tree-sitter AST analysis. Distinguishes actual calls from type annotations, unlike qartez_refs.",
+  "description": "Callers and callees of a function, up to 10 hops. Use to follow a call chain; for every kind of use (types, imports) use qartez_refs. A name with several definitions needs file_path or kind.",
   "inputSchema": {
    "$defs": {
     "CallDirection": {
-     "description": "Call hierarchy direction for `qartez_calls`. `Both` is the default because it\nis the most useful on a cold exploration.",
+     "description": "Which edges to walk.",
      "enum": [
       "callers",
       "callees",
@@ -656,7 +656,7 @@
      "type": "string"
     },
     "Format": {
-     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "description": "Output detail.",
      "enum": [
       "detailed",
       "concise",
@@ -669,7 +669,7 @@
    "properties": {
     "depth": {
      "default": null,
-     "description": "Max depth for call chain traversal. Default 1, max 10. Values above 10 are clamped. `depth=0` is the seed-only mode: prints the resolved target symbol header without expanding callers or callees.",
+     "description": "Hops to follow (default 1, max 10; 0 = resolve the target only).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -686,10 +686,10 @@
        "type": "null"
       }
      ],
-     "description": "Which edges to walk. `both` is the default and shows callers and callees."
+     "description": "callers, callees or both (default)."
     },
     "file_path": {
-     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory. Required together with or instead of `kind` when the name has multiple function-like candidates.",
+     "description": "File that defines the function, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -704,18 +704,18 @@
        "type": "null"
       }
      ],
-     "description": "'concise' = names only, 'detailed' (default) = with file paths and lines, 'mermaid' = call graph as a Mermaid diagram (use only when the user asks for a visual). Mermaid output honours `token_budget`: nodes beyond the budget are replaced with a `truncated` marker."
+     "description": "concise: names. detailed (default): with paths and lines. mermaid: a diagram, only if asked for one."
     },
     "include_tests": {
      "default": null,
-     "description": "Include test-file callers in the listing (default: false). Tests are excluded by default so hub-function output stays focused on production callers.",
+     "description": "Include callers in test files (default false).",
      "type": [
       "boolean",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name resolves to multiple definitions (e.g. 'function' vs 'method'). Required together with or instead of `file_path` when the name has multiple function-like candidates; without it the tool refuses to count callers or list callees because the counts would not be attributable to a single definition.",
+     "description": "Kind of the definition (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -723,7 +723,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows per caller/callee section (default: 50). Rows beyond the cap are truncated with a `... +N more, raise limit=` footer.",
+     "description": "Max rows per section (default 50).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -732,12 +732,12 @@
      ]
     },
     "name": {
-     "description": "Function/method name to analyze call hierarchy for. Accepts aliases `symbol` and `symbol_name`.",
+     "description": "Function or method name. Aliases: symbol, symbol_name.",
      "type": "string"
     },
     "token_budget": {
      "default": null,
-     "description": "Approximate token budget for output (default: 4000)",
+     "description": "Output cap in tokens (default 4000).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -761,38 +761,38 @@
  },
  {
   "name": "qartez_replace_symbol",
-  "description": "Replace a symbol's whole source range (lines L[line_start..line_end]) with `new_code`. Caller supplies the new definition including its signature - this is a precise line-range rewrite, not a body-only splice. The tool refuses to run when `new_code` does not start with a recognised definition introducer (`fn`, `pub fn`, `struct`, `class`, `def`, etc.). Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "description": "Replace a symbol's whole definition, signature included, with new_code. To add code beside it use qartez_insert_before_symbol or qartez_insert_after_symbol. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the replace. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "new_code": {
-     "description": "Full new source for the symbol (replaces lines L[line_start..line_end] inclusive). Must include the signature - this is a whole-symbol replace, not a body-only splice.",
+     "description": "The full new definition, starting with its signature.",
      "type": "string"
     },
     "symbol": {
-     "description": "Symbol name to replace. Accepts aliases `name` and `symbol_name`.",
+     "description": "Symbol name. Aliases: name, symbol_name.",
      "type": "string"
     }
    },
@@ -812,38 +812,38 @@
  },
  {
   "name": "qartez_insert_before_symbol",
-  "description": "Insert `new_code` on the line immediately before the anchor symbol's first line. Use to add helpers, tests, or new items next to related code without needing the exact surrounding context. Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "description": "Insert new_code on the line above a symbol's definition. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the insert. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "new_code": {
-     "description": "Source text to insert. A trailing newline is added if missing so the anchor symbol stays on its own line.",
+     "description": "Code to insert; a trailing newline is added if missing.",
      "type": "string"
     },
     "symbol": {
-     "description": "Anchor symbol name. New code is inserted before (or after) its line range. Accepts aliases `name` and `symbol_name`.",
+     "description": "Anchor symbol. Aliases: name, symbol_name.",
      "type": "string"
     }
    },
@@ -863,38 +863,38 @@
  },
  {
   "name": "qartez_insert_after_symbol",
-  "description": "Insert `new_code` on the line immediately after the anchor symbol's last line. Use to add helpers, tests, or new items next to related code without needing the exact surrounding context. Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "description": "Insert new_code on the line below a symbol's definition. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the insert. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "new_code": {
-     "description": "Source text to insert. A trailing newline is added if missing so the anchor symbol stays on its own line.",
+     "description": "Code to insert; a trailing newline is added if missing.",
      "type": "string"
     },
     "symbol": {
-     "description": "Anchor symbol name. New code is inserted before (or after) its line range. Accepts aliases `name` and `symbol_name`.",
+     "description": "Anchor symbol. Aliases: name, symbol_name.",
      "type": "string"
     }
    },
@@ -914,13 +914,13 @@
  },
  {
   "name": "qartez_rename",
-  "description": "Rename a symbol across the entire codebase: definition, imports, and all usages. Uses tree-sitter AST matching when available, falls back to word-boundary matching. When the name is shared by multiple kinds or defined in multiple files, pass `kind` and/or `file_path` to disambiguate - the tool refuses to run otherwise. Set `allow_collision=true` to proceed when `new_name` already exists as a defined symbol in a touched file. Preview by default; set apply=true to execute.",
+  "description": "Rename a symbol everywhere: definition, resolved references, import and exposing lists; strings and comments are left alone. For a file use qartez_rename_file. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "allow_collision": {
      "default": null,
-     "description": "If true, allow the rename even when `new_name` already exists as a defined symbol in one of the files that will be rewritten. Default false refuses to apply when a collision is detected.",
+     "description": "Rename even if new_name is already defined in a file it rewrites.",
      "type": [
       "boolean",
       "null"
@@ -928,32 +928,32 @@
     },
     "apply": {
      "default": null,
-     "description": "If true, apply the rename. If false (default), show a preview of changes.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory. Required when the old_name is defined in multiple files unless the matches collapse to a single symbol via `kind`.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method'). Required when the old_name matches multiple symbol kinds unless `file_path` is set.",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "new_name": {
-     "description": "New name for the symbol",
+     "description": "The new name.",
      "type": "string"
     },
     "old_name": {
-     "description": "Current symbol name to rename",
+     "description": "The current name; Type::name narrows.",
      "type": "string"
     }
    },
@@ -973,38 +973,38 @@
  },
  {
   "name": "qartez_move",
-  "description": "Move a symbol to another file and update all import paths automatically. Handles extraction, insertion, and importer rewrites in one step. Importer count is sourced from the full symbol reference graph (same data as `qartez_refs`), not just the file-level `use` edges. Use `kind` / `file_path` to disambiguate when the name is shared. Preview by default; set apply=true to execute.",
+  "description": "Move a top-level symbol to another file and repoint its importers (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the move. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method'). Accepts the kinds returned by qartez_find.",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "symbol": {
-     "description": "Symbol name to move. Accepts aliases `name` and `symbol_name`.",
+     "description": "Symbol name. Aliases: name, symbol_name.",
      "type": "string"
     },
     "to_file": {
-     "description": "Target file path (absolute, or relative to the caller's working directory). Created if it doesn't exist.",
+     "description": "Destination file; created if missing.",
      "type": "string"
     }
    },
@@ -1024,20 +1024,20 @@
  },
  {
   "name": "qartez_safe_delete",
-  "description": "Delete a symbol after reporting every file that still references it. Preview by default, always listing importers that would break. Apply refuses to run when importers exist unless `force=true`; the caller is then responsible for fixing the dangling uses. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "description": "Delete a symbol, listing every reference that would break; refuses while any remain unless force=true. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the delete. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "file_path": {
-     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "description": "File that defines the symbol, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -1045,21 +1045,21 @@
     },
     "force": {
      "default": null,
-     "description": "If true, delete even when the symbol still has importers (they will be left dangling for the caller to fix). Default false refuses to apply when importers exist.",
+     "description": "Delete even with references left; you fix them.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "kind": {
-     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
      "type": [
       "string",
       "null"
      ]
     },
     "symbol": {
-     "description": "Symbol name to delete. Accepts aliases `name` and `symbol_name`.",
+     "description": "Symbol name. Aliases: name, symbol_name.",
      "type": "string"
     }
    },
@@ -1078,24 +1078,24 @@
  },
  {
   "name": "qartez_rename_file",
-  "description": "Rename/move a file and rewrite all import paths pointing to it in one atomic operation. Also rewrites the `mod <stem>;` declaration in the parent module file so renaming a .rs file keeps the crate compiling. Refuses to rename `mod.rs` (module root) or to create a `mod.rs` over an existing one. Preview by default; set apply=true to execute.",
+  "description": "Rename or move a file and rewrite the imports that name it (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "apply": {
      "default": null,
-     "description": "If true, apply the rename. If false (default), show a preview.",
+     "description": "true writes the change; default false shows the diff only.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "from": {
-     "description": "Current file path (absolute, or relative to the caller's working directory)",
+     "description": "Current path.",
      "type": "string"
     },
     "to": {
-     "description": "New file path (absolute, or relative to the caller's working directory)",
+     "description": "New path.",
      "type": "string"
     }
    },
@@ -1115,24 +1115,24 @@
  },
  {
   "name": "qartez_add_root",
-  "description": "Hint that a directory will be queried soon, so the index starts building its view now. It never changes what queries can see: any path is indexed on demand. Returns without waiting for the build.",
+  "description": "Start indexing a directory now so later queries need not wait. Optional: any path is indexed when first asked about.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
     "alias": {
-     "description": "Accepted for compatibility and ignored.",
+     "description": "Ignored.",
      "type": [
       "string",
       "null"
      ]
     },
     "path": {
-     "description": "Directory to start building (default: the caller's working directory). Absolute, or relative to the caller's working directory.",
+     "description": "Directory (default: the launch directory).",
      "type": "string"
     },
     "persist": {
      "default": null,
-     "description": "Accepted for compatibility and ignored.",
+     "description": "Ignored.",
      "type": [
       "boolean",
       "null"
@@ -1140,7 +1140,7 @@
     },
     "watch": {
      "default": null,
-     "description": "Accepted for compatibility and ignored.",
+     "description": "Ignored.",
      "type": [
       "boolean",
       "null"
@@ -1159,7 +1159,7 @@
  },
  {
   "name": "qartez_workspace",
-  "description": "Hint that a directory will be queried soon (action=add starts building its view now). It never changes what queries can see; action=remove does nothing.",
+  "description": "As qartez_add_root: action=add starts indexing path now; action=remove does nothing.",
   "inputSchema": {
    "$defs": {
     "WorkspaceAction": {
@@ -1174,14 +1174,14 @@
    "properties": {
     "action": {
      "$ref": "#/$defs/WorkspaceAction",
-     "description": "add: start building the view of `path`. remove: accepted, does nothing."
+     "description": "add or remove."
     },
     "alias": {
-     "description": "Accepted for compatibility and ignored.",
+     "description": "Ignored.",
      "type": "string"
     },
     "path": {
-     "description": "Directory (default: the caller's working directory).",
+     "description": "Directory (default: the launch directory).",
      "type": [
       "string",
       "null"
