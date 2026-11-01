@@ -15,6 +15,7 @@ pub mod git;
 pub mod graph;
 pub mod guard;
 pub mod history;
+pub mod indexstore;
 pub mod lang;
 pub mod near;
 pub mod links;

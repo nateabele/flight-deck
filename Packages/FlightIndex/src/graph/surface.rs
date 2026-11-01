@@ -27,6 +27,11 @@ use std::hash::{Hash, Hasher};
 /// * `swift_ref`, `swift_keys`: candidates' names, `kind`, `parent` and parent name (the keys come
 ///   from the referencing file's own imports and paths).
 ///
+/// * Swift receiver types (`facts.types`, read through `GraphData::swift_types`): not hashed. A
+///   change to what another file's property or return type says is found by `with_changes`
+///   itself (`SwiftTypes::changed_names`), which re-resolves every Swift file whose receivers
+///   mention it, whatever this hash says about the importers.
+///
 /// Left out on purpose: positions, signatures, `line_count`, the file's own references, and
 /// import line numbers. No resolution reads them from another file; queries read positions live
 /// from the target's facts. If a future `RefRes` stores something line-dependent (a target line),
@@ -77,6 +82,7 @@ mod tests {
             imports: vec![Import { specifier: "./x".into(), alias: None, names: vec![ImportName::plain("y")], line: 1, kind: ImportKind::Reexport }],
             refs: vec![],
             hierarchy: vec![],
+            types: Default::default(),
             name_bound: 0,
         }
     }

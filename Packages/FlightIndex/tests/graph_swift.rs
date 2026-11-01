@@ -79,11 +79,11 @@ fn resolution_is_exact_when_the_module_decides_and_marked_when_it_guesses() {
     assert!(refs.iter().any(|h| h.path.ends_with("Store.swift") && h.confidence == Confidence::Exact), "Loader.fetch: {refs:?}");
     let helper = g.find_symbols(&NameMatch::Exact("helper".into()), None, 5).data;
     assert!(g.references(helper[0].id).data.iter().all(|h| h.confidence == Confidence::Exact), "a unique top-level function in the module");
-    // `Store().reload()` has an expression for a receiver: a unique member name is a guess.
+    // `Store().reload()` has an expression for a receiver, typed `Store` by its initialiser.
     let reload = g.find_symbols(&NameMatch::Exact("reload".into()), None, 5).data;
     let refs = g.references(reload[0].id).data;
     let from_test = refs.iter().find(|h| h.path.ends_with("StoreTests.swift")).expect("reload called from the test");
-    assert_eq!(from_test.confidence, Confidence::Fallback);
+    assert_eq!(from_test.confidence, Confidence::Inferred);
     // `reload()` inside the extension is a member of the enclosing type, in another file.
     let from_ext = refs.iter().find(|h| h.path.ends_with("Store+More.swift")).expect("reload called from the extension");
     assert_eq!(from_ext.confidence, Confidence::Exact);
@@ -130,4 +130,268 @@ fn overlay_adding_a_file_to_a_module_resolves_names_that_had_no_definition() {
     commit_all(&r.root, "init");
     let g = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Later.swift", "struct Later {}\n"));
     assert_eq!(deps(&g, &r, "Sources/App/A.swift", Direction::Out), ["Sources/App/Later.swift"]);
+}
+
+// ---- receiver typing ---------------------------------------------------------------------
+//
+// `recv.m()` with an expression receiver: the ladder types `recv` from the file's own
+// declarations (self, a local or parameter binding, an implicit-self property, a chain through
+// property and return types) and looks `m` up on that type and its supertypes.
+
+const MODELS: &str = "\
+final class Engine {
+    func start() {}
+    static func make() -> Engine { Engine() }
+}
+final class Car {
+    let engine: Engine
+    var spare = Engine()
+    func drive() {}
+    func wash() {}
+}
+final class Boat {
+    func start() {}
+    func drive() {}
+}
+protocol Vehicle {}
+extension Vehicle {
+    func honk() {}
+}
+struct Bike: Vehicle {}
+final class Garage {
+    var cars: [Car] = []
+    let car: Car
+    func makeCar() -> Car { car }
+}
+";
+
+const USES: &str = "\
+func param(c: Car) {
+    c.drive() // @param
+}
+func local() {
+    let c = Car(engine: Engine())
+    c.drive() // @init
+    let b = Boat.init()
+    b.drive() // @dotinit
+    let e = Engine.make()
+    e.start() // @static_ret
+}
+func guarded(o: Car?) {
+    guard let c = o else { return }
+    c.drive() // @guard
+}
+func loop(g: Garage) {
+    for c in g.cars {
+        c.drive() // @for
+    }
+}
+extension Car {
+    func viaSelfProp() {
+        engine.start() // @implicit_self
+        self.spare.start() // @self_chain
+    }
+}
+func chain(g: Garage) {
+    g.car.engine.start() // @chain
+}
+func returned(g: Garage) {
+    let c = g.makeCar()
+    c.drive() // @ret
+}
+func shadow(c: Boat) {
+    [1].forEach { c in c.wash() } // @shadow
+}
+func external(d: Date) {
+    d.wash() // @external
+}
+func proto(b: Bike) {
+    b.honk() // @proto
+}
+";
+
+fn line_of(src: &str, marker: &str) -> u32 {
+    src.lines().position(|l| l.contains(marker)).unwrap_or_else(|| panic!("no {marker}")) as u32 + 1
+}
+
+/// Where the reference named `name` on `line` of `file` resolved: `Owner.member` and confidence.
+fn resolved(g: &ViewGraph, r: &Repo, file: &str, line: u32, name: &str) -> (Option<String>, Confidence) {
+    let f = g.file_idx(&r.root.join(file)).expect("file indexed");
+    let node = g.file(f);
+    let i = node.facts.refs.iter().position(|x| x.line == line && g.name(x.name) == name).unwrap_or_else(|| panic!("no ref {name} at {file}:{line}"));
+    let rr = &g.resolution(f).refs[i];
+    let target = rr.target.map(|id| {
+        let t = g.file(id.file);
+        let s = t.symbol(id.local);
+        let owner = s.parent.map(|p| t.symbol(p).name.clone()).unwrap_or_default();
+        format!("{owner}.{}", s.name)
+    });
+    (target, rr.confidence)
+}
+
+fn receiver_fixture() -> Repo {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Models.swift", MODELS);
+    write(&r.root, "Sources/App/Uses.swift", USES);
+    commit_all(&r.root, "init");
+    r
+}
+
+fn assert_typed(g: &ViewGraph, r: &Repo, marker: &str, name: &str, want: &str) {
+    let got = resolved(g, r, "Sources/App/Uses.swift", line_of(USES, marker), name);
+    assert_eq!(got, (Some(want.to_string()), Confidence::Inferred), "{marker}");
+}
+
+#[test]
+fn a_parameter_type_types_the_receiver() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@param", "drive", "Car.drive");
+}
+
+#[test]
+fn a_local_initialised_with_a_type_types_the_receiver() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@init", "drive", "Car.drive");
+    assert_typed(&g, &r, "@dotinit", "drive", "Boat.drive");
+}
+
+#[test]
+fn guard_let_and_for_over_an_array_type_the_binding() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@guard", "drive", "Car.drive");
+    assert_typed(&g, &r, "@for", "drive", "Car.drive");
+}
+
+#[test]
+fn an_implicit_self_property_and_a_chain_type_the_receiver() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@implicit_self", "start", "Engine.start");
+    assert_typed(&g, &r, "@self_chain", "start", "Engine.start");
+    assert_typed(&g, &r, "@chain", "start", "Engine.start");
+}
+
+#[test]
+fn a_function_return_type_types_the_receiver() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@ret", "drive", "Car.drive");
+    assert_typed(&g, &r, "@static_ret", "start", "Engine.start");
+}
+
+#[test]
+fn a_closure_parameter_shadows_the_outer_binding_and_stays_untyped() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    // Typed as the outer `c: Boat` it would find no `wash` and give nothing; untyped, the unique
+    // member name is the labelled guess it always was.
+    let got = resolved(&g, &r, "Sources/App/Uses.swift", line_of(USES, "@shadow"), "wash");
+    assert_eq!(got, (Some("Car.wash".into()), Confidence::Fallback));
+}
+
+#[test]
+fn a_receiver_of_a_type_the_repository_does_not_define_has_no_target() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    let got = resolved(&g, &r, "Sources/App/Uses.swift", line_of(USES, "@external"), "wash");
+    assert_eq!(got.0, None, "`Date` has no `wash`; the unique `Car.wash` is not it");
+}
+
+#[test]
+fn a_member_from_a_protocol_extension_is_found_through_the_conformance() {
+    let r = receiver_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    assert_typed(&g, &r, "@proto", "honk", "Vehicle.honk");
+}
+
+#[test]
+fn an_extension_in_a_module_the_file_cannot_see_is_not_a_member() {
+    let r = init_repo();
+    write(&r.root, "Packages/Kit/Sources/Kit/Handle.swift", "import Foundation\nextension FileHandle {\n    func pump() {}\n}\n");
+    write(&r.root, "Sources/App/A.swift", "import Foundation\nfunc a(f: FileHandle) {\n    f.pump()\n}\n");
+    write(&r.root, "Sources/Tools/T.swift", "import Kit\nfunc t(f: FileHandle) {\n    f.pump()\n}\n");
+    commit_all(&r.root, "init");
+    let (_d, _e, g) = graph_of(&r);
+    assert_eq!(resolved(&g, &r, "Sources/App/A.swift", 3, "pump").0, None, "App does not import Kit");
+    assert_eq!(resolved(&g, &r, "Sources/Tools/T.swift", 3, "pump"), (Some("FileHandle.pump".into()), Confidence::Inferred));
+}
+
+#[test]
+fn a_receiver_guess_keeps_its_reference_but_draws_no_file_edge() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Car.swift", "final class Car {\n    func wash() {}\n}\n");
+    write(&r.root, "Sources/App/Guess.swift", "func g() {\n    unknown().wash()\n}\n");
+    commit_all(&r.root, "init");
+    let (_d, _e, g) = graph_of(&r);
+    assert_eq!(resolved(&g, &r, "Sources/App/Guess.swift", 2, "wash"), (Some("Car.wash".into()), Confidence::Fallback));
+    assert!(deps(&g, &r, "Sources/App/Guess.swift", Direction::Out).is_empty(), "a name guess is not a dependency");
+}
+
+#[test]
+fn overlay_changing_a_property_type_retypes_receivers_in_other_files() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Models.swift", MODELS);
+    write(&r.root, "Sources/App/Holder.swift", "final class Holder {\n    let item: Car\n}\n");
+    write(&r.root, "Sources/App/Use.swift", "func f(h: Holder) {\n    h.item.drive()\n}\n");
+    commit_all(&r.root, "init");
+    let g = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Holder.swift", "final class Holder {\n    let item: Boat\n}\n"));
+    assert_eq!(resolved(&g, &r, "Sources/App/Use.swift", 2, "drive"), (Some("Boat.drive".into()), Confidence::Inferred));
+}
+
+#[test]
+fn super_is_the_superclass_and_a_platform_superclass_gives_no_target() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Views.swift", "\
+class Base {
+    func paint() {}
+}
+final class Fancy: Base {
+    override func paint() {
+        super.paint()
+    }
+}
+final class Field: NSTextView {
+    override func moveLeft(_ s: Any?) {
+        super.moveLeft(s)
+    }
+}
+");
+    commit_all(&r.root, "init");
+    let (_d, _e, g) = graph_of(&r);
+    let p = "Sources/App/Views.swift";
+    assert_eq!(resolved(&g, &r, p, 6, "paint"), (Some("Base.paint".into()), Confidence::Inferred), "the superclass's, not the override");
+    assert_eq!(resolved(&g, &r, p, 11, "moveLeft").0, None, "AppKit's `moveLeft`, not the override it is called from");
+}
+
+#[test]
+fn a_member_of_a_type_the_repository_does_not_declare_is_not_a_repository_member() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Card.swift", "\
+struct Card {
+    func frame() {}
+    func make() {
+        Text(\"x\").font(.body).frame()
+    }
+}
+");
+    commit_all(&r.root, "init");
+    let (_d, _e, g) = graph_of(&r);
+    // `Text(..).font(..)` is SwiftUI's; its `frame` is SwiftUI's, not the unique `Card.frame`.
+    assert_eq!(resolved(&g, &r, "Sources/App/Card.swift", 4, "frame").0, None);
+}
+
+#[test]
+fn overlay_declaring_a_type_a_property_already_named_retypes_receivers_through_it() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Card.swift", "struct Card {\n    func frame() {}\n}\n");
+    write(&r.root, "Sources/App/Holder.swift", "final class Holder {\n    let item: Label\n}\n");
+    write(&r.root, "Sources/App/Use.swift", "func f(h: Holder) {\n    h.item.font().frame()\n}\n");
+    commit_all(&r.root, "init");
+    // `Label` was the platform's (no target for `frame`); once the repository declares it, its
+    // `font()` is unknown and `frame` is a labelled guess again, in the overlay as in a rebuild.
+    let g = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Label.swift", "struct Label {}\n"));
+    assert_eq!(resolved(&g, &r, "Sources/App/Use.swift", 2, "frame"), (Some("Card.frame".into()), Confidence::Fallback));
 }

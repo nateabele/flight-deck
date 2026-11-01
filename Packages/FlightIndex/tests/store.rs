@@ -21,6 +21,16 @@ fn sample() -> BlobFacts {
         }],
         refs: vec![Reference { name: "f".into(), qualifier: Some("X".into()), line: 5, enclosing: Some(1), kind: RefKind::Call }],
         hierarchy: vec![TypeRelation { symbol: 0, target: "Base".into(), kind: HierarchyKind::Implements }],
+        types: TypeFacts {
+            bindings: vec![
+                Binding { name: "c".into(), ty: Some(TypeSource::Named("Car".into())), decl_line: 4, scope_start: 4, scope_end: 6, enclosing: Some(1) },
+                Binding { name: "d".into(), ty: Some(TypeSource::Expr("c.make()".into())), decl_line: 5, scope_start: 5, scope_end: 6, enclosing: None },
+                Binding { name: "e".into(), ty: Some(TypeSource::Each("c.all".into())), decl_line: 5, scope_start: 5, scope_end: 6, enclosing: None },
+                Binding { name: "f".into(), ty: None, decl_line: 6, scope_start: 6, scope_end: 6, enclosing: None },
+            ],
+            members: vec![MemberType { owner: "T".into(), member: "c".into(), ty: "Car".into() }],
+            returns: vec![ReturnType { owner: String::new(), name: "make".into(), ty: None }],
+        },
     }
 }
 

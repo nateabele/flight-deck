@@ -7,6 +7,8 @@ use crate::facts::*;
 use std::collections::HashSet;
 use tree_sitter::Node;
 
+mod types;
+
 pub struct Swift;
 
 impl Language for Swift {
@@ -14,8 +16,9 @@ impl Language for Swift {
         "swift"
     }
 
+    /// 2: type facts (`BlobFacts::types`) for the receiver ladder.
     fn parser_version(&self) -> u32 {
-        1
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -28,6 +31,7 @@ impl Language for Swift {
         let Some(tree) = parse(&lang, source) else { return facts };
         let mut w = Walker { src: source, facts: &mut facts };
         w.decls(tree.root_node(), &Scope { parent: None, exported: true, generics: HashSet::new() });
+        types::prune(&mut facts);
         facts
     }
 }
@@ -224,6 +228,11 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// The type a member declared in scope `sc` belongs to (an extension's is the extended type).
+    fn owner_name(&self, sc: &Scope) -> Option<String> {
+        if self.in_type(sc) { sc.parent.map(|p| self.facts.symbols[p as usize].name.clone()) } else { None }
+    }
+
     fn in_type(&self, sc: &Scope) -> bool {
         sc.parent.is_some_and(|p| {
             matches!(
@@ -236,6 +245,12 @@ impl<'a> Walker<'a> {
     fn function(&mut self, n: Node, name: &str, sc: &Scope) {
         let kind = if self.in_type(sc) { SymbolKind::Method } else { SymbolKind::Function };
         let id = self.define(n, name, kind, sc, is_visible(n, self.src));
+        if matches!(n.kind(), "function_declaration" | "protocol_function_declaration") {
+            let owner = if sc.parent.is_none() { Some(String::new()) } else { self.owner_name(sc) };
+            if let Some(owner) = owner {
+                types::returns(n, self.src, &owner, name, &mut self.facts.types);
+            }
+        }
         let scope = Scope { generics: self.generics_of(n, sc), ..sc.clone() };
         let bound = bound_names(n, self.src);
         let name_node = n.child_by_field_name("name");
@@ -274,6 +289,9 @@ impl<'a> Walker<'a> {
                     stack.extend(x.named_children(&mut c2));
                 }
             }
+        }
+        if let Some(owner) = self.owner_name(sc) {
+            types::member(n, src, &owner, &mut self.facts.types);
         }
         // A computed property's accessors and an initial value are the symbol's own references.
         self.refs(n, first.or(sc.parent), sc, &bound_names(n, src));
@@ -343,6 +361,7 @@ impl<'a> Walker<'a> {
         let src = self.src;
         let mut stack: Vec<Node> = vec![root];
         while let Some(n) = stack.pop() {
+            types::binding(n, src, enclosing, &mut self.facts.types);
             match n.kind() {
                 // Attributes name property wrappers and macros, which are never repository code
                 // worth an edge, and modifiers hold nothing else.

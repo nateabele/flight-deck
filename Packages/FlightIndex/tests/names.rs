@@ -65,6 +65,7 @@ fn sample() -> BlobFacts {
             Reference { name: "List".into(), qualifier: None, line: 4, enclosing: Some(0), kind: RefKind::Type },
         ],
         hierarchy: vec![],
+        types: Default::default(),
     }
 }
 

@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 /// 3: symbols, imports, references and relations are one columnar chunk per blob (`chunks`,
 /// format `chunk::FORMAT`) instead of a row each; `facts` records the symbol count.
 /// 4: tree maps are interned integers: `paths`, `blobs` (raw object-id bytes) and `languages`
-/// tables, and `trees` gets an integer id that `tree_entries` points at.
+/// tables, and `trees` gets an integer id that `tree_entries` points at. The Swift `type_facts`
+/// table (one row per blob with receiver-type facts) is part of 4.
 pub const SCHEMA_VERSION: i64 = 4;
 
 /// Where the index lives by default: `~/Library/Application Support/FlightDeck/index` on macOS,
@@ -136,6 +137,13 @@ CREATE TABLE names (id INTEGER PRIMARY KEY, s TEXT NOT NULL UNIQUE);
 CREATE TABLE chunks (
     facts_id INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
     data BLOB NOT NULL
+);
+-- Swift type facts (`BlobFacts::types`, in `TypeFacts::encode`'s form), one row per blob that has
+-- any. The receiver ladder in `graph::swift_types` reads them; apart from `chunks` so the chunk
+-- format stays the one q17 measured, and so a repository without Swift pays nothing.
+CREATE TABLE type_facts (
+    facts_id INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+    data TEXT NOT NULL
 );
 -- Tree maps. Every commit repeats most of its neighbours' paths and blobs, so a row holds only
 -- integers: the path, blob id and language are interned once per store. `blobs.oid` holds a hex
@@ -395,6 +403,7 @@ impl Writer {
                 Ok(NameId(id as u32))
             };
             let mut ins_chunk = tx.prepare_cached("INSERT INTO chunks (facts_id, data) VALUES (?1, ?2)")?;
+            let mut ins_types = tx.prepare_cached("INSERT INTO type_facts VALUES (?1, ?2)")?;
             for p in batch {
                 let (status, module, lines, nsyms) = match &p.facts {
                     Some(f) => (0, f.module_name.as_deref(), f.line_count, f.symbols.len()),
@@ -416,6 +425,9 @@ impl Writer {
                     sites.push(RefSite::new(intern(&r.name)?, qual, r.line, r.enclosing, r.kind));
                 }
                 ins_chunk.execute(params![id, chunk::encode(&f.symbols, &f.imports, &sites, &f.hierarchy)])?;
+                if !f.types.is_empty() {
+                    ins_types.execute(params![id, f.types.encode()])?;
+                }
             }
         }
         tx.commit()?;
@@ -683,6 +695,7 @@ impl Reader {
             imports: f.imports,
             refs,
             hierarchy: f.hierarchy,
+            types: f.types,
         }))
     }
 
@@ -693,14 +706,15 @@ impl Reader {
         let row = self
             .conn
             .prepare_cached(
-                "SELECT f.status, f.module_name, f.line_count, c.data FROM facts f LEFT JOIN chunks c ON c.facts_id = f.id
+                "SELECT f.status, f.module_name, f.line_count, c.data, t.data FROM facts f
+                   LEFT JOIN chunks c ON c.facts_id = f.id LEFT JOIN type_facts t ON t.facts_id = f.id
                  WHERE f.blob_id = ?1 AND f.language = ?2 AND f.parser_version = ?3",
             )?
             .query_row(params![blob_id, language, parser_version], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, u32>(2)?, r.get::<_, Option<Vec<u8>>>(3)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, u32>(2)?, r.get::<_, Option<Vec<u8>>>(3)?, r.get::<_, Option<String>>(4)?))
             })
             .optional()?;
-        let Some((status, module_name, line_count, data)) = row else { return Ok(None) };
+        let Some((status, module_name, line_count, data, types)) = row else { return Ok(None) };
         let mut facts = InternedFacts { module_name, line_count, ..Default::default() };
         if status != 0 {
             return Ok(Some(facts));
@@ -709,6 +723,9 @@ impl Reader {
         // it as empty rather than failing every graph of the repository.
         let Some(data) = data else { return Ok(Some(facts)) };
         let d = chunk::decode(&data)?;
+        if let Some(t) = types {
+            facts.types = TypeFacts::decode(&t);
+        }
         facts.name_bound = d.refs.iter().map(|r| r.name.0.max(r.qualifier().map_or(0, |q| q.0)) + 1).max().unwrap_or(0);
         facts.symbols = d.symbols;
         facts.imports = d.imports;
