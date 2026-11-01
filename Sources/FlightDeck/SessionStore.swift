@@ -11243,6 +11243,15 @@ final class SessionStore: ObservableObject {
         // count at 0 already, so no later status tick would tell a phone the tree is gone.
         applySubagents(tabID, .empty)
 
+        // The conversation this tab left ended with a `SessionEnd` (reason `clear`/`resume`)
+        // that folded the tab to `.absent` — but the process is the same one, still up. The new
+        // conversation's `SessionStart` was logged before this repin, so it reached no tab and
+        // the watcher now remembers it as `.live`: every later event for it compares equal and
+        // is never emitted. Without this reset the tab refuses every phone prompt and rename for
+        // the life of the process (2026-10-31). Back to `.unknown` — the screen grammar — until
+        // the new conversation's next hook event reports `.live` as news.
+        resetComposerReadiness(for: tabID, conversation: conversationID)
+
         stopWatching(tabID)
 
         // Derived from the session as just mutated above, so the directory is the registry
