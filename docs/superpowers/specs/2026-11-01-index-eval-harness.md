@@ -1,0 +1,54 @@
+# fdindex relevance evaluation harness
+
+The harness measures whether `map`, `find` and `grep` (and any ranking variant) put the code that a change really touched near the top. It is the "evaluation harness" of [the code index research report](../research/reports/Code%20index%20research%20leads.md). Code: [`Packages/FlightIndex/src/eval.rs`](../../../Packages/FlightIndex/src/eval.rs) behind the `eval` cargo feature, and the CLI [`examples/eval.rs`](../../../Packages/FlightIndex/examples/eval.rs). The shipped `fdindex` binary does not contain it.
+
+## Tasks
+- **Source.** The newest non-merge commits of a rev (`--skip N` holds out the newest N eligible commits).
+- **Filter.** The commit has exactly one parent, changes at most 25 files, and modifies at least 1 and at most 12 indexable files. Docs-only and lockfile-only commits fall out, because they modify no indexable file.
+- **Task text.** The commit subject. `--message full` adds the body. Bodies in these repos often name the exact symbols, so the subject is the default to limit leakage.
+- **Gold files.** The indexable files the commit modified (`M`, or the old path of a rename), that exist in the parent's index. Added files are not gold: they are not in the parent tree.
+- **Gold symbols.** Function-like symbols (function, method, constructor, macro, port) in the parent tree that overlap the old side of a `git diff -U0` hunk. A pure insertion counts against the symbol that encloses it.
+- **Cache.** The mined tasks are saved to `<out>/tasks-<repo>-<head>-<n>-<skip>.json` and reused.
+
+## Index
+Each task is answered from its parent commit's tree, indexed directly from git's object store: the view's listing is `git ls-tree <parent>`, blobs come from `git cat-file`, and nothing is checked out. The harness runs the engine in process with one store (`--store`). The store is blob-keyed, so each distinct blob is parsed once across all tasks and all later runs. Only the graph is rebuilt per parent commit. The harness runs no git command that writes, so a read-only repository is safe.
+
+## Strategies
+A strategy is `Fn(&Probe, &Task) -> Option<Ranking>`. `Probe` holds the parent's `ViewGraph` and runs the real tool code (`Probe::tool`, through `tools::run`) with an unlimited token budget. `Probe::ranking_from` reads the locations back out of the tool's text, so the score is for the output that an agent sees. `None` means the strategy does not apply to the task.
+
+| name | what it does |
+|---|---|
+| `map` | `map top_n=20` for files, `map by=symbols top_n=20` for symbols. No seed. |
+| `map_terms` | `map` with `boost_terms` = the task's terms, in lowercase. |
+| `map_open` | `map` with `boost_files` = the first gold file (the simulated open file). It applies only to tasks with 2 or more gold files. The seed file is removed from the ranking and from the gold set. |
+| `find` | `find name=<term>` per term, merged round-robin. |
+| `grep` | `grep query=<term>` (prefix) per term, merged round-robin. |
+| `bm25` | Harness-side reference: BM25 (k1 1.2, b 0.75) over one document per symbol. The document is the symbol's name, its parent's name, its file path and its Elm module, all split on camelCase, snake_case and separators. It is the report's tier 3, as a yardstick for `find` and `grep`. |
+
+**Terms** are the identifier-shaped words of the task text: 3 or more characters, not stopwords, de-duplicated without regard to case, at most 12.
+
+## Metrics
+File@1/5/10 and Function@5/10 for each task: the fraction of the gold set in the top k, divided by `min(k, |gold|)`, so a perfect ranking scores 100. The table gives the means. `tasks` counts the tasks that the strategy answered. `ftasks` counts those with at least 1 gold symbol, which are the only tasks that Function@k uses. `ms/task` is the strategy's own time per task.
+
+## Run it
+```
+cd Packages/FlightIndex
+cargo build --release --features eval --example eval
+./target/release/examples/eval \
+  --repo tessera=/Users/me/Projects/Tessera/tessera@master \
+  --repo fd=/Users/me/Projects/flight-deck@master \
+  --tasks 200 --store <scratch>/store --out <scratch>/out --label baseline
+```
+The output files are `<out>/<label>-summary.json` (repo → strategy → means) and `<out>/<label>-tasks.jsonl` (one row per task and strategy: gold files, top 10 files, scores).
+
+## Score a variant without editing the harness
+1. **Behind a tool argument.** Add the variant to the tool behind a new argument, such as `map`'s `ppr: true`. Then run `--only map_terms --args 'map_terms={"ppr":true}' --label ppr --compare <out>/baseline-summary.json`. `--args` merges the JSON into every tool call that the strategy makes. `--compare` prints each score with its delta from the earlier summary.
+2. **As a function.** Write `examples/eval_<name>.rs` with `required-features = ["eval"]`. It calls `flightindex::eval::main_with(vec![("<name>".into(), Arc::new(|p, t| { … Some(ranking) }))])`. The new strategy runs next to the built-ins, and the same flags apply.
+
+Run the variant from your own worktree's build against the same `--store` and `--out`. The cached tasks and parsed blobs are reused, so the only cost of a rerun is the per-commit graph and the strategies.
+
+## Known limits (first version)
+- `map` skips test files unless `all_files` is set, so a gold test file is never found by `map`. The scores keep this, because it is the tool's real behaviour.
+- `grep search_bodies` and `read` read from the worktree on disk, which is not the parent tree. No built-in strategy uses them.
+- `impact` is not scored yet.
+- Tasks run one after another. Each graph takes 0.3 s (flight-deck) to about 1 s (tessera) at load 10–16.
