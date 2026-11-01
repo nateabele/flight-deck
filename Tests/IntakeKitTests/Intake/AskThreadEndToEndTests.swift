@@ -155,4 +155,25 @@ final class AskThreadEndToEndTests: XCTestCase {
         gone.old = "Nowhere in the plan"
         XCTAssertEqual(try ThreadAccept.append(gone, editedMarkdown: nil, to: tapeStore), .stale)
     }
+    /// The UI fixture's shape exactly (`PlanningUIFixture`, `threads`): one draft checkpoint with
+    /// only `drafts/0.md`, paused, notes pending, and a diff on the opening sentence anchored with
+    /// the prefix and suffix a real selection captures. A ✓ there must append the edit.
+    func testAnAcceptOnADraftOnlyPlanAppendsTheEdit() throws {
+        var plan = "# Fixture Plan\n\nA synthetic plan for the planning inspector UI test.\n\n"
+        for section in 1...3 { plan += "## \(section). Fixture section \(section)\n\n1. Step 1 of section \(section).\n\n" }
+        var tape = tapeStore.loadTape()
+        try tapeStore.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date()),
+                                      files: ["drafts/0.md": Data(plan.utf8)], into: &tape)
+        tape.pendingNotes = [PlanNote(note: "Say more.")]
+        tape.status = .paused
+        try tapeStore.saveTape(tape)
+        let old = "A synthetic plan for the planning inspector UI test."
+        let anchor = NoteAnchor(checkpoint: 1, selecting: plan.range(of: old)!, in: plan)
+        let diff = ThreadDiff(thread: ThreadID(), turn: 1, checkpoint: 1, anchor: anchor, old: old,
+                              new: "A synthetic plan that an ask thread has edited.")
+        XCTAssertEqual(try ThreadAccept.append(diff, editedMarkdown: nil, to: tapeStore), .appended)
+        guard case .applyThreadDiff(_, diff.id, 1, let markdown) = try XCTUnwrap(tapeStore.commands(after: 0).last).command
+        else { return XCTFail("no applyThreadDiff") }
+        XCTAssertTrue(markdown.contains("an ask thread has edited"))
+    }
 }
