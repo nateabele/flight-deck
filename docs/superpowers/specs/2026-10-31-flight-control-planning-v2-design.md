@@ -637,6 +637,57 @@ build.
 - **The unit gate.** A full, unfiltered `scripts/test-unit.sh` runs `scripts/test-logic.sh` first
   and fails if it fails; a filtered run does not (C-I2).
 
+## 18. Errata from P2a (what was built where the spec differs)
+
+These bind over the sections above. V-R1–V-R6 are the P2a plan's rulings
+([plan](../plans/2026-10-31-planning-v2-p2a-visual-foundations.md)); the rest are rulings made
+during the build.
+
+- **V-R1, the block in the editor (§8).** Not an `NSTextAttachment`: the styler hides the
+  block's source lines at a fixed paragraph height and `VisualBlockOverlay` lays a
+  `VisualBlockView` over them, as tables are laid. The text view lists the views among its
+  accessibility children.
+- **V-R2, loading (§8).** No `loadFileURL`: a `WKURLSchemeHandler` serves `fdvisual://<id>/r<n>/…`,
+  only files the revision's manifest lists, from a non-persistent store, and cancels every other
+  scheme, which turns networking off.
+- **V-R3, fidelity references (§12).** Written by code, not the agent: `NewBead.visualRefs`,
+  `BeadWriter` appends the section, and `ChangeSetValidator` refuses `unknownVisual`.
+- **V-R4, the export commit (§12).** `RepoCommitter`: `git status` on the folder (any change
+  refuses), write, `git add -- <folder>`, `git commit -- <folder>`. It runs in `runRelease` before
+  `ApplyPlanner`. Deletes, writes and rollbacks go through directory descriptors opened without
+  following links; ignored, hidden (`assume-unchanged`, `skip-worktree`) and symlinked paths refuse,
+  and a folder without this intake's `.flightdeck-intake` marker is never taken over (the slug
+  moves to `-2`). An identical re-release is not an error.
+- **V-R5, Mermaid (§8).** Vendored at `Resources/Visuals/mermaid/mermaid.min.js`, Mermaid 12.2.0,
+  checked against the SHA-256 in `manifest.json` at load. It adds about 5.5 MB, not 3.
+- **V-R6, fetch (§10).** Not `visual.fetch(part: snapshot|bundle)`: `intake.visualFetch(id,
+  visualID, revision, part, offset, limit)` answered with `WireFileChunk`, gated by the `visuals`
+  flag.
+- **No bundle (R-I3).** A revision is a set of files. `WireVisualRef.files` lists each with its
+  size and SHA-256; `part` is `file:<path>` or `snapshot@<state>-<size>`; the phone caches by
+  `(visual, revision, path)` after checking the hash. `WireVisualRef` also carries `sizes` and
+  `aspect` (from the default snapshot's PNG header). A revision's files add up to at most 10 MB,
+  64 files at most on the phone.
+- **Visual ids (R-I5)** are lowercase ASCII `[a-z0-9][a-z0-9._-]*`, at most 64 characters: an id
+  is a folder name.
+- **The store hands out bytes, not paths.** `VisualStoreReading.read` returns a slice read from a
+  confined, `fstat`-checked descriptor; it refuses hard links, a size that differs from the
+  manifest's, and files over 10 MB.
+- **Checkpoint block states (§7, R-I7)** are `checkpoints/<n>/visuals.json`, keyed by id, written
+  by IntakeRunner when it lands a checkpoint, absent for an intake with no visuals.
+- **`knownVisuals`.** Every change-set check passes the head plan's stored, non-pending visual ids,
+  `Set()` for none (triage included), and the strict op schema lists `visualRefs` on every op.
+  Encode alone gets the catalogue.
+- **Release exports only a plan with visuals.** A plan with no `fd-visual` block and no citing
+  task writes nothing to the repo, so a release without visuals never touches git.
+- **Comps (for P2b, agreed with the canvas session).** A comp revision is final only once
+  export-checkpoint has written `r<n>/export/` and its snapshots are stored. Release, the phone and
+  thumbnails read the stored export and never re-export; export-checkpoint refuses
+  `version_missing` once the app's renderer moves on. Re-rendering old checkpoints is a follow-up.
+- **The phone's viewer** blocks every non-`fdvisual` load with a `WKContentRuleList` and keeps
+  JavaScript off. The Mac's live view needs the same rule list before P2b serves any page an
+  agent wrote.
+
 ## Errata: P3 core (2026-11-01)
 
 What was built differs from §9 in these ways. The code and `docs/ARCHITECTURE.md` ("Visual providers") are the truth.

@@ -2544,6 +2544,33 @@ flagged as most likely to differ from the tests. The maintainer's to run.
 - **Runner refusals of `viewing` and `host.list`** (Stream B): revisit if a runner ever needs a read.
 - **The P1 GUI is unverified** until the maintainer runs `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P1.
 
+## Visual blocks, planning v2 P2a (2026-11-01)
+
+**Before P2b serves any page an agent wrote:**
+- **The Mac `VisualWebView` needs a block-everything `WKContentRuleList`.** Today the scheme
+  handler serves only manifest-listed `fdvisual://` files and cancels every other navigation, and
+  Mermaid is the only page. A page a provider or an agent writes could still ask for an `http`
+  subresource; the phone's viewer already blocks every non-`fdvisual` load with a rule list. Do
+  the same on the Mac before P2b.
+
+**Open, from the P2a reviews and rulings:**
+- **Rendering an old checkpoint from pinned blobs.** A comp revision is final only once its
+  export and snapshots are stored, and release, the phone and thumbnails read the stored export,
+  never re-export (the canvas session's ruling: export-checkpoint refuses `version_missing` once the
+  app's renderer moves on). Drawing an old revision again from its pinned sources is not built.
+- **Release exports only a plan with visuals.** A plan with no `fd-visual` block and no task
+  citing one is not written to `docs/plans/` (so a release without visuals never touches git).
+  Spec §12 reads as exporting every plan; revisit if plans without visuals should land in the repo too.
+- **Encode alone reads the visuals catalogue.** Polish, fresh eyes and dedup are held to the same
+  `knownVisuals` check but are not given the catalogue, so a polisher that rewrites a task may
+  drop its `visualRefs`.
+- **The release export reads every exported byte** (up to 10 MB a file) whenever the release sheet
+  loads its preview. It runs off the main actor, but the sheet re-reads on each rating, drop or
+  confirm.
+- **Adapters that cannot read images** get the snapshot path in the catalogue anyway; the
+  `image.read` cell in `test-adapters.sh` (spec §11) is not built.
+- **The P2a GUI is unverified** until the maintainer runs `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P2a.
+
 ## Plan comments from the phone (2026-09-30)
 
 - **Phone comments never reached the agent — FIXED.** Plannotator's `POST /api/deny` gives the

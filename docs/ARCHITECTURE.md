@@ -2716,6 +2716,43 @@ decision since the last round, so a refine round keeps the change.
 summaries and pending diffs on `intake.plan`, the conversation on demand (`intake.thread.get`),
 and sends `intake.thread.*` and `intake.diff.decide` only while the detail's `threads` flag is set.
 
+### Visual blocks (planning v2 P2a, `Sources/IntakeKit/Visuals/`, `Intake/Planning/Visuals/`)
+
+A plan names a visual with a fenced block, ```` ```fd-visual id=<id> ```` and a caption line, so the
+plan stays plain text. Each revision is a folder, `visuals/<id>/r<n>/`, with a `manifest.json`
+that lists every file it serves (path, size, SHA-256); `visuals/<id>/block.json` names the
+representations in filmstrip order and the ★ primary. Spec:
+[planning v2](superpowers/specs/2026-10-31-flight-control-planning-v2-design.md) §7–§8, §10–§12,
+and its errata (V-R1–V-R6).
+
+*One writer per file, visuals:*
+
+| File | Writer | What |
+|---|---|---|
+| `visuals/<id>/r<n>/…`, `visuals/<id>/block.json` | ThreadRunner (none yet; the `visuals` UI fixture seeds one) | a revision, final once written; the block's representations and primary |
+| `checkpoints/<n>/visuals.json` | IntakeRunner | the block states the checkpoint saw (`CheckpointBlockStates`), so an old plan shows its visuals as they were |
+| `docs/plans/<slug>/` in the user's repo | release (`RepoCommitter`) | the exported plan and its visuals, committed by path |
+
+**Reading is bytes, never paths.** Everything reads `visuals/` through `VisualStoreReading`
+(`DiskVisualStore`): only manifest-listed files, each opened `O_NOFOLLOW` one component at a
+time, `fstat`-checked (a regular file, one link, the manifest's size, at most 10 MB), and read by
+`pread` on that descriptor. The Mac editor's web view (`VisualSchemeHandler`, `fdvisual://`), the
+phone's fetch (`intake.visualFetch` → `VisualFetch.serve`, off the main actor) and the release
+export all go through it.
+
+**Drawing.** On the Mac the block is a view laid over the block's hidden source lines, as tables
+are (V-R1), with Mermaid 12.2.0 vendored and hash-checked (V-R5) in a web view that loads nothing
+but `fdvisual://` (V-R2). On the phone the plan projection lists each block's primary, kinds,
+alternates, states, sizes, aspect and files (`IntakeVisualProjection`), and the card fetches and
+hash-checks them into a cache keyed by `(visual, revision, path)`, which never needs to expire
+because a revision never changes.
+
+**Rounds and release.** Encode reads a visuals catalogue and may cite visuals on new tasks
+(`NewBead.visualRefs`); every change-set check refuses an id the plan does not have
+(`knownVisuals`). Release, for a plan with visuals, writes `docs/plans/<slug>/` through
+`PlanExporter` (pure) and `RepoCommitter`, which commits that folder only and refuses a folder with
+uncommitted changes, then writes the tasks, each citing its visuals' exported folder.
+
 ## Visual providers (`Packages/HostKit/.../Providers/`, `Sources/ProviderKit/`)
 
 A provider is a folder with `provider.toml`. P3 core is the loader, trust, sandbox, checker and

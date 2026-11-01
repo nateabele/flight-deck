@@ -56,6 +56,35 @@ Every item is unverified until the maintainer checks it in the GUI.
 - [ ] Unverified. ✓ a diff on the phone: the Mac's plan editor shows the new words, and typing there afterwards keeps them.
 - [ ] Unverified. Send an ask with the Mac unreachable, wait over a minute, reconnect and tap Retry: only one thread opens and one turn runs.
 
+## P2a: visual blocks
+
+Every item is unverified until the maintainer checks it in the GUI. Items 6 and 7 of the V4
+addendum (Find inside a block, snapshot timing, the shared render host, edit marks on hidden
+lines, and the phone's alternate files) land in parallel V4b; check them once it merges.
+
+### Mac
+
+- [ ] Unverified. A plan with an ```` ```fd-visual id=… ```` block shows the diagram inline, full width, with its title, kind chip, and states and sizes controls when it has more than one.
+- [ ] Unverified. Switching the size redraws the diagram at that size (`VisualSizeUITests` covers the click).
+- [ ] Unverified. A block whose id has no stored revision shows a quiet "missing visual" placeholder of fixed height; the text below it does not move.
+- [ ] Unverified. Typing just above or below a block, or deleting its fence, never leaves the block painted over text.
+- [ ] Unverified. A Mermaid source that fails to parse shows Mermaid's error text in the block.
+- [ ] Unverified. Scrolling a plan with several diagrams keeps at most three live; the rest show their snapshots.
+- [ ] Unverified. An older checkpoint shows its visuals as that checkpoint recorded them.
+- [ ] Unverified. VoiceOver reaches a block and its size control.
+- [ ] Unverified. Release on a plan with visuals: the sheet lists the files under `docs/plans/<slug>/`, any it removes, and the commit "docs: plan <slug> for release".
+- [ ] Unverified. After release, `git log -1` in the project is that commit and holds only `docs/plans/<slug>/`; your own uncommitted edits elsewhere are still uncommitted.
+- [ ] Unverified. A task released from a plan with a cited visual has a "Fidelity references" section naming `docs/plans/<slug>/visuals/<id>/`.
+- [ ] Unverified. With an uncommitted change inside the plan's own `docs/plans/<slug>/`, Release is refused with that folder named, and no task is written.
+- [ ] Unverified. Releasing a plan with no visuals changes nothing in the repo.
+
+### Phone
+
+- [ ] Unverified. A plan's visual block is a card the right shape before its picture arrives, then shows the snapshot with a filmstrip of states.
+- [ ] Unverified. Tapping the card opens the full-screen viewer; switching state and size works with the phone offline from the internet.
+- [ ] Unverified. A second open of the same visual draws from the cache at once.
+- [ ] Unverified. Against a Mac without visuals, the block reads as plain text and nothing is fetched.
+
 ## P3 core: visual providers
 
 Needs a real Mac. Settings → Flight Control → Providers, a repo with `.flightdeck/visual-providers/`, a terminal and Codex.

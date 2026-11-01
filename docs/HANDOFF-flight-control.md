@@ -289,15 +289,40 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
 - **`ChangeSetValidator`** checks for unknown ids, undefined or duplicate temp ids, self edges,
   cycles, missing delivery ratings and precondition mismatches. An edge from an existing task
   onto a new one is held to the end of the release (`heldOpIndices`).
+  - **Visuals (planning v2 P2a).** A new task may carry `visualRefs` (`[{visualID, states}]`), the
+    visuals it is built to match. Every caller passes `knownVisuals`: the head plan's stored,
+    non-pending `fd-visual` ids (`PlanVisualFence.knownVisuals`). It is `Set()`, never nil, for a
+    plan with none and at triage (no plan yet), so a cited id there is `unknownVisual`. The
+    callers are `RoundExecutor.changeSetSeat` and `patchSeat`, triage, `reviewModel` and both
+    `runRelease` checks. The strict op schema (`Triage.op`) lists `visualRefs` on every op.
+  - **Encode reads the visuals catalogue** (`VisualCatalogue`, `RoundPrompts.visualsCatalogue`):
+    each visual's id, kind, section, states, and its source and default-snapshot paths. The
+    encoder may read `visuals/`. A plan with no visuals gets exactly the old prompt.
 - **`DriftClassifier`** compares each op's precondition with the live graph. The result is
   `holds`, `drifted` or `impossible`.
 - **Release** (`IntakeService.runRelease`):
   1. Re-read the graph and classify drift.
   2. Apply the person's drift confirmations and drops, then re-validate.
-  3. `ApplyPlanner.plan` orders the steps: creates, edges, edits, reopens, held edges.
-  4. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
-  5. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
-  6. `ReleaseRecord` is saved into the intake.
+  3. **Export the plan** (spec §12, V-R4; `IntakeService+Visuals.swift`). Only when the plan has
+     an `fd-visual` block or a task cites one; any other release never touches git.
+     `PlanExporter` (pure, run off the main actor) builds `docs/plans/<slug>/`: `plan.md` with
+     each block as an image link plus a folder link, `visuals/<id>/` with the primary's files and
+     a `README.md`, `_unused-alternates/<n>/README.md`, and the `.flightdeck-intake` marker. The
+     slug comes from the intake's title, with `-2`, `-3`, … past a folder that is not this
+     intake's. `RepoCommitter` then commits that folder only (`git commit -- <pathspec>`).
+     Uncommitted, ignored or hidden changes in the folder, a symlink, or a folder this intake
+     does not own refuse the release with the path named, and nothing is written, tasks included.
+     The block states exported are the ones the plan's checkpoint recorded.
+  4. `ApplyPlanner.plan` orders the steps: creates, edges, edits, reopens, held edges.
+  5. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
+     With an export, a task with `visualRefs` gets a "Fidelity references" section in its
+     description, written by code (V-R3), naming `docs/plans/<slug>/visuals/<id>/` and its states.
+  6. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
+  7. `ReleaseRecord` is saved into the intake. The export's warnings (a cited visual with
+     nothing stored) are among its `warnings`.
+- **Checkpoints record block states.** IntakeRunner writes `checkpoints/<n>/visuals.json`
+  (`CheckpointBlockStates`) from `visuals/` whenever it lands a checkpoint, so an old plan shows
+  its visuals as they were. An intake with no visuals gets no file.
 
 ### 2.11 Ask threads (planning v2 P1)
 
@@ -501,6 +526,19 @@ the heatmap.
   - On the plan, a drop inserts `[path](path)` links at the drop point as one undo step. Paths are relative to the project, or start with `~`. Several items become a list on an empty line.
   - On the new-note draft, a text question's answer and the Other field of a choice question,
     `.dropsFilePaths` appends plain paths. Option rows and toggles take no drop.
+- **Visual blocks** (planning v2 P2a, `Intake/Planning/Visuals/`). A ```` ```fd-visual id=<id> ```` fence
+  is a block (`MarkdownBlock.Kind.visual`). The styler hides its source lines and holds them to a
+  fixed paragraph height. `VisualBlockOverlay` lays a `VisualBlockView` over them, as tables are
+  laid (V-R1). The view has a header, the body, a filmstrip when there is more than one
+  representation, Compare, and the states and sizes controls (`visual-sizes`). Mermaid draws in a
+  `WKWebView` that loads only `fdvisual://<id>/r<n>/…` through `VisualSchemeHandler`: manifest-listed
+  files, a non-persistent store, every other scheme cancelled (V-R2). Mermaid 12.2.0 is vendored
+  in `Resources/Visuals/mermaid/` with its SHA-256 (V-R5). At most 3 web views are live; an
+  off-screen block shows its snapshot (`VisualRenderHost`). A block whose id has no stored revision
+  is a fixed-height "missing visual" placeholder; a parse error shows Mermaid's own message. An
+  older checkpoint shows the block states it recorded. The open V1 items (Find inside a hidden
+  block, snapshot timing and caching, one shared render host, edit marks on hidden lines) are
+  being done in parallel V4b.
 - **Links** (`PlanLinks.swift`): ⌘-click opens a link. Holding ⌘ shows a tip with the target. `:42` and `#L42` suffixes are stripped. In-document `#anchor` links are not supported.
 - **Outline and breadcrumb:** `PlanReadingPosition` shows "§ Title" in the pinned board's footer, and a click jumps there. `PlanFocus` is how a heatmap cell asks for a Diff at a section.
 
@@ -535,6 +573,9 @@ Ask threads (spec §6, files under `Intake/Planning/Threads/`):
   - The footer shows "N notes carried into task notes".
   - The Release button text comes from `UIText.releaseButton`.
 - `ReleaseSheetModel.swift` holds the text and counts. `ReleaseSummary.swift` (IntakeKit) holds the count line.
+- For a plan with visuals, the sheet lists what release writes to the repo, what a re-release
+  removes, and the commit (`ReleaseReview.export`, from `RepoCommitter.preview`; spec §12
+  "Confirmation").
 - The sheet closes only on `released` or `partiallyReleased`.
 - Not verified: that `confirmedDrift`, `droppedOps` and `ratingOverrides` are saved to `intake.json` through `mutate`. It is likely, but `mutate` was not read.
 
@@ -544,6 +585,9 @@ Ask threads (spec §6, files under `Intake/Planning/Threads/`):
 -FlightDeckResetState YES` to seed a temp state dir with one paused Feature plan that has notes.
 `PlanningInspectorUITests` uses it. `-FlightDeckPlanningFixture synthesized` seeds a draft, a synthesis that
 consumed notes, and two refines, each a long plan with tables (`NotesToolbarUITests`).
+`-FlightDeckPlanningFixture visuals` seeds the shaping plan with one Mermaid `fd-visual` block
+stored `wide` and `narrow`, and no ThreadRunner (`VisualSizeUITests`:
+`FD_UITEST_ONLY=FlightDeckUITests/VisualSizeUITests ./scripts/smoke-remote.sh`).
 
 ### 3.11 The sidebar status
 
@@ -602,6 +646,7 @@ fidelity". Several working plans get a line each.
 | Round detail | `RoundDetailScreen.swift`, `RoundFacts.swift` | One landed round: facts, agents, sections changed (each links to the reader's changes), notes consumed |
 | Plan outline | `PlanOutlineScreen.swift` | Sections with churn and note counts |
 | Plan reader | `PlanReaderScreen.swift`, `PlanTableView.swift` (shared grid renderer) | Blocks from `PlanBlocks.split`, tables as grids, a Changes toggle, notes, other-version groups |
+| Visual blocks | `VisualBlockCard.swift`, `VisualViewerScreen.swift`, `VisualCache.swift`, `VisualLoader.swift` | An `fd-visual` block is a card: the snapshot, a filmstrip of states and alternates, the caption, sized from `WireVisualRef.aspect` before its bytes arrive. Tapping opens a full-screen live viewer built from the cached, hash-checked files, with networking off. Only when the detail's `visuals` flag is true; otherwise the block is plan text. |
 | Note sheet | `NoteSheet.swift`, `NoteComposer.swift` (`NoteComposer`, `NoteOutbox`) | Quote, kind chips, text. The outbox keeps sent notes visible until the plan shows them. |
 | Clarifications | `ClarificationsScreen.swift` | Answered Q&A, read-only |
 | Model | `FlightControlModel.swift`, `IntakeCommands.swift` | Banners, one detail and one command model per intake, a plan cache of 4. Commands time out after 10 s and reuse their token within 60 s. |
@@ -614,8 +659,12 @@ Control.
 ### 4.2 Wire (`Sources/FleetKit/`)
 
 - **Requests** (`TimelineFrames.swift`): `intake.detail(id, ifNot: etag)`,
-  `intake.plan(id, checkpoint?, changes)` and `intake.thread.get(id, threadID, since?)` (answered
-  by `ServerFrame.intakeThread` with a `WireThreadPage`). A request is safe on any Mac: an unknown
+  `intake.plan(id, checkpoint?, changes)`, `intake.thread.get(id, threadID, since?)` (answered
+  by `ServerFrame.intakeThread` with a `WireThreadPage`) and `intake.visualFetch(id, visualID,
+  revision, part, offset, limit)` (V-R6; answered with `fileChunk`). `part` is `file:<path>` or
+  `snapshot[@<state>-<size>]`; `VisualFetch.serve` serves only manifest-listed files, off the main
+  actor, and refuses `visuals_unavailable`, `unknown_visual`, `unknown_revision`, `bad_part`,
+  `bad_range`, `unknown_file`, `too_large`, `bad_manifest` or `unreadable`. A request is safe on any Mac: an unknown
   request gets `err unsupported`.
 - **Replies:** `WireIntakeDetail` and `WireIntakePlan`.
 - **Event:** `project.intakes`, which carries `WireProject.intakes`.
@@ -641,12 +690,20 @@ Control.
   - The core: `WireIntakeSummary`, `WireIntakeDetail`, `WireBoard`, `WireControls`, `WireRound`, `WireNote` (with optional `checkpoint` and `version`).
   - Rounds: `WireRoundConfig`, `WireRoundsMenu`, `WireRoundsLock`, `RoundsRefusal`.
   - Questions: `WireQuestions` (with `round`, `structured` and `digest` for the open round), `WireStructuredQuestion`, `WireOption`, `WireStructuredAnswer`.
-  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan` (with `threads` and `pendingDiffs`).
+  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan` (with `threads`, `pendingDiffs` and
+    `visuals`).
+  - Visuals (`VisualWire.swift`): `WireVisualRef` (id, primary `revision`, `kinds`, `alternates`,
+    `states`, `sizes`, `aspect`, `files` with size and SHA-256), `WireVisualAlternate`,
+    `WireVisualFile`, `WireVisualPart`. `IntakeVisualProjection` fills `WireIntakePlan.visuals`
+    from the same read the Mac editor makes (`VisualBlockModel.load`), as the checkpoint
+    recorded it; `aspect` comes from the default snapshot's PNG header. A plan with no block
+    carries no list.
   - Threads (`ThreadWire.swift`): `WireThreadSummary` (with `readsFilesOnly`), `WireThreadAnchor`,
     `WireThreadCounts`, `WireThreadTurn`, `WirePendingDiff`, `WireThreadPage`;
     `WireIntakeSummary.threadsNeedingYou`.
 - **Capability flags** are all on `WireIntakeDetail`:
-  - The flags are `steer`, `choose`, `noteKind`, `editRounds`, `structuredQuestions` and `threads`.
+  - The flags are `steer`, `choose`, `noteKind`, `editRounds`, `structuredQuestions`, `threads`
+    and `visuals` (on while `VisualFetch.gateOpen`).
   - The payloads are `roundConfig`, `roundsMenu` (while choosing or shaping) and `roundsLock` (while shaping).
   - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (the flags at lines 155 to 166; `structuredQuestions` and `threads` at 163 to 166).
   - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make`, `AnswerFormModel.openRound` and `ThreadGate`.
