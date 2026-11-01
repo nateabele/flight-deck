@@ -113,6 +113,71 @@ final class AskThreadEndToEndTests: XCTestCase {
         """), reviewer)
     }
 
+    /// A-I2: a thread decided, and its diff accepted, while round 2 runs. Round 2 already read
+    /// its plan, so round 3 is the first that can hear it: its seats get the decision (keyed on
+    /// round 2's START, not its landing) and the accepted edit's source, carried forward onto
+    /// round 2's checkpoint with the edit itself.
+    func testAThreadDecidedMidRoundReachesTheNextRound() async throws {
+        _ = try tapeStore.appendCommand(.step)
+        let drafted = await round(ScriptedHarnessRunner(Self.seats))
+        XCTAssertEqual(drafted, .paused)
+
+        let thread = ThreadID()
+        let diff = ThreadDiff(thread: thread, turn: 1, checkpoint: 1,
+                              anchor: NoteAnchor(checkpoint: 1, quote: "One", section: "Scope"), old: "One", new: "One, Mac only")
+        let dir = directory, tapes = tapeStore
+        final class Count: @unchecked Sendable { var reviews = 0 }
+        let count = Count()
+        let midRound: @Sendable (ScriptedHarnessRunner.Call) -> CommandResult = { call in
+            if call.role == "reviewer" {
+                count.reviews += 1
+                if count.reviews == 1 {
+                    // The thread's turn ends now, mid round 2, and the human accepts its diff.
+                    let store = ThreadStore(intakeDirectory: dir)
+                    try! store.save(ThreadRecord(id: thread, title: "Why one target?",
+                                                 anchor: ThreadAnchor(note: NoteAnchor(checkpoint: 1, quote: "One", section: "Scope")),
+                                                 status: .open, agent: .claude, model: "m", effort: "e",
+                                                 followsCheckpoint: 1, createdAt: Date()))
+                    try! store.save(turns: [ThreadTurn(seq: 1, messageID: "m1", you: "Why only one?", reply: "Small v1.",
+                                                       decision: "Mac only for v1.", checkpoint: 1,
+                                                       startedAt: Date(), endedAt: Date())], of: thread)
+                    var accepted = diff
+                    accepted.state = .accepted
+                    try! store.save(accepted)
+                    _ = try! ThreadAccept.append(diff, editedMarkdown: nil, to: tapes)
+                }
+            }
+            if call.role == "integrator", count.reviews == 1 {
+                // Let the round's command watcher fold the accept before the round lands.
+                let deadline = Date().addingTimeInterval(5)
+                while tapes.threadEditSources(checkpoint: 1).isEmpty, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+                // Away from the accepted line, so the carry merges cleanly.
+                let plan = call.cwd.appendingPathComponent("plan.md")
+                let before = (try? String(contentsOf: plan, encoding: .utf8)) ?? ""
+                try! before.replacingOccurrences(of: "# Plan\n", with: "# Plan\n\nIntro.\n")
+                    .write(to: plan, atomically: true, encoding: .utf8)
+                return ok(call, "int", json(IntegrateOutput(agree: 1, somewhat: 0, disagree: 0, notes: "applied")))
+            }
+            return Self.seats(call)
+        }
+
+        _ = try tapeStore.appendCommand(.step)
+        let second = await round(ScriptedHarnessRunner(midRound))
+        XCTAssertEqual(second, .paused)
+        XCTAssertEqual(tapeStore.threadEditSources(checkpoint: 2), [ThreadEditSource(thread: thread, diff: diff.id)],
+                       "the source rides with the carried edit")
+
+        _ = try tapeStore.appendCommand(.step)
+        let third = ScriptedHarnessRunner(midRound)
+        let thirdStatus = await round(third)
+        XCTAssertEqual(thirdStatus, .paused)
+        let reviewer = try XCTUnwrap(third.calls("reviewer").first).prompt
+        XCTAssertTrue(reviewer.contains("""
+        - "Why one target?", on "One" (Scope): Mac only for v1.
+          Its change is already in the plan, among the human's edits.
+        """), reviewer)
+    }
+
     /// An accept composes on the newest version there is under the commands lock: a hand edit
     /// still queued for the head is kept, a diff from an older checkpoint applies to the head
     /// only where its passage still is, and an edited accept carries the human's text as it is,

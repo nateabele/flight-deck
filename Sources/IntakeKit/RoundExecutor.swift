@@ -847,11 +847,15 @@ public struct RoundExecutor: Sendable {
                             threadDecisions: threadDecisions(inputs))
     }
 
-    /// The ask threads' decisions since the last round landed (spec §11), read fresh from
-    /// `threads/` (ThreadRunner's, read-only here), with the head plan's accepted diffs.
+    /// The ask threads' decisions since the last round STARTED (spec §11; ruling A-I2), read
+    /// fresh from `threads/` (ThreadRunner's, read-only here), with the head plan's accepted
+    /// diffs. Keyed on the start, not the landing: that round read its plan when it started, so
+    /// a turn that ended while it ran reached no round yet, and this one is the first to hear it.
+    /// A checkpoint from before rounds recorded their start falls back to its landing.
     private func threadDecisions(_ inputs: RoundInputs) -> [ThreadDecision] {
         let accepted = inputs.store.headPlanCheckpoint(in: inputs.tape).map { inputs.store.threadEditSources(checkpoint: $0) } ?? []
-        return ThreadDecisions.since(inputs.tape.head?.createdAt, reader: ThreadStore(intakeDirectory: inputs.store.intakeDirectory),
+        let lastRound = inputs.tape.head.map { $0.startedAt ?? $0.createdAt }
+        return ThreadDecisions.since(lastRound, reader: ThreadStore(intakeDirectory: inputs.store.intakeDirectory),
                                      accepted: accepted)
     }
 

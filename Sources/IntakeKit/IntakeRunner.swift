@@ -212,6 +212,11 @@ public struct IntakeRunner: Sendable {
         case .merged(let plan):
             guard Data(plan.utf8) != ours else { return }
             files[PlanLayers.userName] = Data(plan.utf8)
+            // The threads whose accepts landed mid-round ride with their edit (A-I2): without them
+            // the next round would see the change as the human's and never name its thread.
+            if !carry.sources.isEmpty, let data = try? IntakeJSON.encoder.encode(carry.sources) {
+                files[keeper.store.threadEditSourcesURL(checkpoint: cp.id).lastPathComponent] = data
+            }
             let n = PlanLayers.userDiff(generated: carry.base, edited: carry.theirs).count
             note = "Carried your \(n) edit\(n == 1 ? "" : "s") forward from checkpoint \(carry.checkpoint)."
         case .conflicted:
@@ -236,7 +241,9 @@ private actor TapeKeeper {
     private(set) var stopRequested = false
     /// The head plan checkpoint the round in flight read, and the effective plan it read there
     /// — the base a mid-round edit is carried forward from (see `carryCandidate`).
-    private var roundInput: (checkpoint: Int, plan: String)?
+    /// The thread sources already in that plan (`plan.user.threads.json`): a source recorded
+    /// after them is an accept that landed mid-round, carried forward with its edit.
+    private var roundInput: (checkpoint: Int, plan: String, sources: [ThreadEditSource])?
 
     init(store: TapeStore, now: @escaping @Sendable () -> Date, hooks: IntakeRunner.Hooks) {
         self.store = store
@@ -336,7 +343,9 @@ private actor TapeKeeper {
     }
 
     func startRound(_ next: PlannedRound) -> Tape {
-        roundInput = store.headPlanCheckpoint(in: tape).flatMap { id in store.effectivePlan(checkpoint: id).map { (id, $0) } }
+        roundInput = store.headPlanCheckpoint(in: tape).flatMap { id in
+            store.effectivePlan(checkpoint: id).map { (id, $0, store.threadEditSources(checkpoint: id)) }
+        }
         tape.status = .running
         tape.pauseDiagnosis = nil
         tape.roundInProgress = next
@@ -352,10 +361,11 @@ private actor TapeKeeper {
     /// ran). nil when nothing changed. `base` is what the round read — for a head with no edits
     /// at round start that is its generated `plan.md`; with edits, the edited plan the round
     /// already built on, so only the NEW edits are merged in.
-    func carryCandidate() -> (checkpoint: Int, base: String, theirs: String)? {
+    func carryCandidate() -> (checkpoint: Int, base: String, theirs: String, sources: [ThreadEditSource])? {
         guard let input = roundInput, let now = store.effectivePlan(checkpoint: input.checkpoint),
               now != input.plan else { return nil }
-        return (input.checkpoint, input.plan, now)
+        let fresh = store.threadEditSources(checkpoint: input.checkpoint).filter { !input.sources.contains($0) }
+        return (input.checkpoint, input.plan, now, fresh)
     }
 
     /// Appends the checkpoint, consumes the notes the round used, clears `roundInProgress`
