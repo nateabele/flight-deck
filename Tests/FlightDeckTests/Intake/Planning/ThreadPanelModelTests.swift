@@ -135,7 +135,7 @@ final class ThreadPanelModelTests: XCTestCase {
 
     /// Wording: refusals the panel can get read as words, never as a code.
     func testEveryPanelRefusalReadsAsWords() {
-        for code in ["unknown_checkpoint", "unknown_block", "stale_questions", "out_of_scope"] {
+        for code in ["unknown_checkpoint", "unknown_block", "stale_questions", "out_of_scope", "already_accepted"] {
             let words = ThreadPanelModel.words(for: ThreadRefusal(code: code))
             XCTAssertFalse(words.contains(code), "\(code): \(words)")
         }

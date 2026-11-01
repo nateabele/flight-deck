@@ -687,6 +687,7 @@ final class ThreadPanelModel: ObservableObject {
         case "no_agents", "no_agent": "No agent is available on this Mac to answer."
         case "thread_resolved": "That thread is resolved. Reopen it to ask again."
         case "diff_decided": "That edit was already answered the other way."
+        case "already_accepted": "You already accepted that edit."
         case "write_failed": "Flight Deck couldn't save that. Check the disk, then try again."
         case "unknown_checkpoint": "That version of the plan is gone. Select the passage again in the current one."
         case "unknown_block": "That passage is no longer in the plan. Select it again."
