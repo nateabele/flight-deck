@@ -61,7 +61,10 @@ public enum PlanRebase {
         var starts: [Range<String.Index>] = []
         var from = theirs.startIndex
         while let range = theirs.range(of: old, range: from..<theirs.endIndex) {
-            if range.lowerBound == theirs.startIndex || theirs[theirs.index(before: range.lowerBound)].isNewline { starts.append(range) }
+            let startsLine = range.lowerBound == theirs.startIndex || theirs[theirs.index(before: range.lowerBound)].isNewline
+            // A last line with no break must end where its line ends, or "The plan" would match "The planner".
+            let endsLine = old.last?.isNewline == true || range.upperBound == theirs.endIndex || theirs[range.upperBound].isNewline
+            if startsLine && endsLine { starts.append(range) }
             from = theirs.index(after: range.lowerBound)
         }
         guard starts.count == 1, let range = starts.first else { return nil }

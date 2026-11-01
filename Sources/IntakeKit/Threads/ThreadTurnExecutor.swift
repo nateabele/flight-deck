@@ -80,7 +80,9 @@ public struct ThreadTurnExecutor: ThreadTurnExecuting {
         try Task.checkCancellation()
         let fm = FileManager.default
         if fm.fileExists(atPath: r.runDirectory.path) { try? fm.removeItem(at: r.runDirectory) }
-        try fm.createDirectory(at: r.runDirectory, withIntermediateDirectories: true)
+        // Inside the thread's own folder only: a trashed intake's folders are not made again (A-I1).
+        let threadFolder = r.runDirectory.deletingLastPathComponent().deletingLastPathComponent()
+        try IntakeDirectory.create(r.runDirectory, in: threadFolder)
         let schemaFile = r.runDirectory.appendingPathComponent("schema.json")
         try Data(ThreadActions.schemaJSON.utf8).write(to: schemaFile, options: .atomic)
 

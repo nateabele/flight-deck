@@ -8,6 +8,22 @@ final class ThreadTurnExecutorTests: XCTestCase {
 
     override func setUpWithError() throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("fd-thread-exec-\(UUID().uuidString)")
+        // The thread's folder, as ThreadRunner leaves it; the run folder is made inside it.
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    /// A trashed intake's turn makes no folders (A-I1 minor): with the thread's folder gone, the
+    /// run directory is not created, and nothing reappears.
+    func testARunWhoseThreadFolderIsGoneCreatesNothing() async throws {
+        try FileManager.default.removeItem(at: dir)
+        let runner = Spy(CommandResult(stdout: Self.stream("{}"), stderr: "", exitCode: 0))
+        do {
+            _ = try await ThreadTurnExecutor(runner: runner, environment: [:], userHome: URL(fileURLWithPath: "/nonexistent-fd-home"))
+                .run(request())
+            XCTFail("expected the run to refuse")
+        } catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+        XCTAssertTrue(runner.calls.isEmpty)
     }
 
     override func tearDown() { try? FileManager.default.removeItem(at: dir) }

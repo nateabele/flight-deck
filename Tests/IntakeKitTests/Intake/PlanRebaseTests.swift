@@ -16,6 +16,13 @@ final class PlanRebaseTests: XCTestCase {
         XCTAssertEqual(PlanRebase.replay(base: base, ours: base, onto: "anything"), "anything", "no change to replay")
     }
 
+    /// The plan's last line with no line break matches only as the whole line, never as the
+    /// start of a longer one.
+    func testReplayMatchesALastLineWithNoBreakOnlyWhole() {
+        XCTAssertNil(PlanRebase.replay(base: "a\nThe plan", ours: "a\nThe plan, v2", onto: "a\nThe planner"))
+        XCTAssertEqual(PlanRebase.replay(base: "a\nThe plan", ours: "a\nThe plan, v2", onto: "b\nThe plan"), "b\nThe plan, v2")
+    }
+
     /// Nil when the human changed the same line, when it is there twice, or mid-line only.
     func testReplayRefusesARealConflict() {
         let base = "We ship on Friday.\n", ours = "We ship on Monday.\n"
