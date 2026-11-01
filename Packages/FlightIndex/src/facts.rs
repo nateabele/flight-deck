@@ -239,6 +239,121 @@ pub struct BlobFacts {
     pub imports: Vec<Import>,
     pub refs: Vec<Reference>,
     pub hierarchy: Vec<TypeRelation>,
+    /// What the file's declarations say about the types of names (Swift only, empty elsewhere):
+    /// the receiver ladder in `graph::swift_types` reads it to type `recv` in `recv.m()`.
+    #[serde(default, skip_serializing_if = "TypeFacts::is_empty")]
+    pub types: TypeFacts,
+}
+
+/// How a binding's type is known, as written: still unresolved, because `Expr` and `Each` need the
+/// view's property and return-type tables, which depend on other files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeSource {
+    /// A written type, normalised to its bare name (`Car` for `Car?`, `[Car]` for an array).
+    Named(String),
+    /// An initialiser or `if let` condition, as receiver text: `Car(…)`, `g.makeCar()`, `o`.
+    Expr(String),
+    /// The element of a `for … in <expr>` collection.
+    Each(String),
+}
+
+/// A local name with what types it, visible over `scope_start..=scope_end` (lines) from
+/// `decl_line`. `ty: None` still matters: a closure parameter `c` hides an outer typed `c`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub name: String,
+    pub ty: Option<TypeSource>,
+    pub decl_line: u32,
+    pub scope_start: u32,
+    pub scope_end: u32,
+    /// The symbol the binding sits in, as for a `Reference`: its container is `self`'s type.
+    pub enclosing: Option<u32>,
+}
+
+/// A stored or computed property's type, from its annotation or a `T(...)` initialiser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberType {
+    pub owner: String,
+    pub member: String,
+    pub ty: String,
+}
+
+/// A function's declared return type; `owner` is empty for a top-level function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReturnType {
+    pub owner: String,
+    pub name: String,
+    pub ty: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeFacts {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<Binding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<MemberType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns: Vec<ReturnType>,
+}
+
+impl TypeFacts {
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty() && self.members.is_empty() && self.returns.is_empty()
+    }
+
+    /// The store's form: one tab-separated line per fact (`b`inding, `m`ember, `r`eturn), a
+    /// third the size of the JSON (11 MB → under 4 MB for Flight Deck's 1,800 Swift files). No
+    /// field can hold a tab or newline: names are identifiers, types are normalised and
+    /// expressions went through `one_line`.
+    pub fn encode(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for b in &self.bindings {
+            let (k, t) = match &b.ty {
+                None => ("-", ""),
+                Some(TypeSource::Named(t)) => ("n", t.as_str()),
+                Some(TypeSource::Expr(t)) => ("e", t.as_str()),
+                Some(TypeSource::Each(t)) => ("f", t.as_str()),
+            };
+            let enc = b.enclosing.map(|e| e.to_string()).unwrap_or_default();
+            let _ = writeln!(out, "b\t{}\t{k}\t{t}\t{}\t{}\t{}\t{enc}", b.name, b.decl_line, b.scope_start, b.scope_end);
+        }
+        for m in &self.members {
+            let _ = writeln!(out, "m\t{}\t{}\t{}", m.owner, m.member, m.ty);
+        }
+        for r in &self.returns {
+            let _ = writeln!(out, "r\t{}\t{}\t{}", r.owner, r.name, r.ty.as_deref().unwrap_or("-"));
+        }
+        out
+    }
+
+    /// Inverse of `encode`; a malformed line is skipped (the facts are derived, never precious).
+    pub fn decode(s: &str) -> TypeFacts {
+        let mut t = TypeFacts::default();
+        for line in s.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            match f.as_slice() {
+                ["b", name, k, ty, decl, start, end, enc] => {
+                    let ty = match *k {
+                        "n" => Some(TypeSource::Named(ty.to_string())),
+                        "e" => Some(TypeSource::Expr(ty.to_string())),
+                        "f" => Some(TypeSource::Each(ty.to_string())),
+                        _ => None,
+                    };
+                    let (Ok(decl_line), Ok(scope_start), Ok(scope_end)) = (decl.parse(), start.parse(), end.parse()) else { continue };
+                    t.bindings.push(Binding { name: name.to_string(), ty, decl_line, scope_start, scope_end, enclosing: enc.parse().ok() });
+                }
+                ["m", owner, member, ty] => t.members.push(MemberType { owner: owner.to_string(), member: member.to_string(), ty: ty.to_string() }),
+                ["r", owner, name, ty] => {
+                    let ty = (*ty != "-").then(|| ty.to_string());
+                    t.returns.push(ReturnType { owner: owner.to_string(), name: name.to_string(), ty });
+                }
+                _ => {}
+            }
+        }
+        t
+    }
 }
 
 impl BlobFacts {

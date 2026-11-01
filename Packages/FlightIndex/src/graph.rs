@@ -23,6 +23,7 @@
 mod elixir;
 mod python;
 mod swift;
+mod swift_types;
 
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
@@ -43,6 +44,9 @@ pub enum Confidence {
     Exact,
     /// The only symbol with this name in the view; no import justified it.
     Fallback,
+    /// A member looked up on a receiver whose type the file's own declarations give (a parameter,
+    /// a `let x = T(...)`, a property's declared type): typed by declaration, not by a compiler.
+    Inferred,
 }
 
 /// Where an imported name points outside the worktree: a file (relative to the worktree root, see
@@ -145,6 +149,8 @@ pub struct GraphData {
     pub(crate) symbol_rank: Vec<Vec<f64>>,
     resolver: Arc<Resolver>,
     elm_modules: HashMap<String, Vec<u32>>,
+    /// Property, return and supertype tables of the view's Swift files (the receiver ladder).
+    swift_types: Arc<swift_types::SwiftTypes>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -183,6 +189,7 @@ impl ViewGraph {
             symbol_rank: Vec::new(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
+            swift_types: Arc::default(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -204,6 +211,10 @@ impl ViewGraph {
         let mut old_names: HashSet<String> = HashSet::new();
         let mut new_names: HashSet<String> = HashSet::new();
         let names_of = |n: &FileNode| -> Vec<String> { n.facts.symbols.iter().map(|s| s.name.clone()).collect() };
+        // Swift members whose owner changed: `x.drive()` may now mean another type's `drive`.
+        let mut old_members: HashSet<(String, String)> = HashSet::new();
+        let mut new_members: HashSet<(String, String)> = HashSet::new();
+        let swift_members = |n: &FileNode| if n.language == "swift" { swift_types::member_pairs(&n.facts) } else { HashSet::new() };
 
         for ch in changes {
             match ch {
@@ -213,6 +224,8 @@ impl ViewGraph {
                         Some(i) => {
                             let old = &g.files[i as usize];
                             old_names.extend(names_of(old));
+                            old_members.extend(swift_members(old));
+                            new_members.extend(swift_members(&node));
                             structural |= old.facts.module_name != node.facts.module_name;
                             new_names.extend(names_of(&node));
                             g.files[i as usize] = node;
@@ -221,6 +234,7 @@ impl ViewGraph {
                         None => {
                             structural = true;
                             new_names.extend(names_of(&node));
+                            new_members.extend(swift_members(&node));
                             g.files.push(node);
                             let i = g.files.len() as u32 - 1;
                             g.index.insert(f.path.clone(), i);
@@ -232,6 +246,7 @@ impl ViewGraph {
                     if let Some(i) = g.index.remove(&path) {
                         structural = true;
                         old_names.extend(names_of(&g.files[i as usize]));
+                        old_members.extend(swift_members(&g.files[i as usize]));
                         g.files[i as usize] = g.files[i as usize].tombstone();
                         g.res[i as usize] = FileRes::default();
                         changed.insert(i);
@@ -242,6 +257,26 @@ impl ViewGraph {
         g.res.resize(g.files.len(), FileRes::default());
         let changed_names: HashSet<String> = old_names.symmetric_difference(&new_names).cloned().collect();
         g.reindex();
+        // Receivers typed through a table entry an edit changed must be typed again, wherever
+        // they are: one file's `let item: Car` types `h.item` in every other file.
+        let type_change = match swift_types::SwiftTypes::changed_names(&self.data.swift_types, &g.swift_types) {
+            swift_types::TypeChange::None => {
+                // Unchanged tables: share the base's rather than hold a second copy per overlay.
+                g.swift_types = self.data.swift_types.clone();
+                swift_types::TypeChange::Names(HashSet::new())
+            }
+            c => c,
+        };
+        let type_change = match type_change {
+            swift_types::TypeChange::Names(mut names) => {
+                names.extend(old_members.symmetric_difference(&new_members).map(|(_, m)| m.clone()));
+                names.extend(self.data.swift_types.typed_as(&changed_names).cloned());
+                names.extend(g.swift_types.typed_as(&changed_names).cloned());
+                names.extend(changed_names.iter().cloned());
+                if names.is_empty() { swift_types::TypeChange::None } else { swift_types::TypeChange::Names(names) }
+            }
+            c => c,
+        };
 
         let mut dirty: HashSet<u32> = changed.iter().copied().filter(|i| g.files[*i as usize].alive).collect();
         if self.data.location_sensitive && self.data.root != label.worktree {
@@ -269,8 +304,15 @@ impl ViewGraph {
                                 changed_names.contains(q) || changed_names.contains(&format!("{q}.{}", fr.name))
                             }))
                 });
+            let node = &g.files[i as usize];
+            let retyped = node.language == "swift"
+                && match &type_change {
+                    swift_types::TypeChange::None => false,
+                    swift_types::TypeChange::All => true,
+                    swift_types::TypeChange::Names(names) => swift_types::mentions(&node.facts, names),
+                };
             // A removed file's importers resolved into it; they are in `dirty` via `importers`.
-            if unresolved_import || soft_hit {
+            if unresolved_import || soft_hit || retyped {
                 dirty.insert(i);
             }
         }
@@ -307,6 +349,8 @@ impl GraphData {
                 self.elm_modules.entry(m.clone()).or_default().push(fi as u32);
             }
         }
+        let swift = self.files.iter().filter(|f| f.alive && f.language == "swift").map(|f| &*f.facts);
+        self.swift_types = Arc::new(swift_types::SwiftTypes::build(swift));
     }
 
     /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks.
@@ -667,9 +711,15 @@ impl GraphData {
         }
         // No import is needed to call `Shop.Order.total()` or to use a type from the same Swift
         // module, so for these languages a resolved reference is itself the dependency.
+        // A Swift member matched only by its unique name on a receiver nothing typed stays a
+        // labelled reference, but is no dependency: such guesses measured 0.79 precise against
+        // the compiler's index, typed ones 0.995 at file level.
         if matches!(lang, "elixir" | "swift") {
-            for t in refs.iter().filter_map(|rr| rr.target) {
-                add_edge(&mut edges, t.file);
+            for (rr, fr) in refs.iter().zip(&facts.refs) {
+                let guess = lang == "swift" && rr.confidence == Confidence::Fallback && fr.qualifier.as_deref().is_some_and(swift::is_receiver);
+                if let (Some(t), false) = (rr.target, guess) {
+                    add_edge(&mut edges, t.file);
+                }
             }
         }
         FileRes { imports, refs, edges }
@@ -859,6 +909,14 @@ pub fn facts_bytes(f: &BlobFacts) -> usize {
             .map(|i| st(&i.specifier) + ost(&i.alias) + i.names.len() * size_of::<ImportName>() + i.names.iter().map(|n| st(&n.name) + ost(&n.alias)).sum::<usize>())
             .sum::<usize>();
     n += f.hierarchy.len() * size_of::<TypeRelation>() + f.hierarchy.iter().map(|h| st(&h.target)).sum::<usize>();
+    let t = &f.types;
+    let src = |s: &Option<TypeSource>| match s {
+        Some(TypeSource::Named(x) | TypeSource::Expr(x) | TypeSource::Each(x)) => st(x),
+        None => 0,
+    };
+    n += t.bindings.len() * size_of::<Binding>() + t.bindings.iter().map(|b| st(&b.name) + src(&b.ty)).sum::<usize>();
+    n += t.members.len() * size_of::<MemberType>() + t.members.iter().map(|m| st(&m.owner) + st(&m.member) + st(&m.ty)).sum::<usize>();
+    n += t.returns.len() * size_of::<ReturnType>() + t.returns.iter().map(|r| st(&r.owner) + st(&r.name) + ost(&r.ty)).sum::<usize>();
     n
 }
 

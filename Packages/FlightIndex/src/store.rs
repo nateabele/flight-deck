@@ -153,6 +153,17 @@ CREATE INDEX facts_blob ON facts(blob_id);
 CREATE INDEX tree_entries_blob ON tree_entries(blob_id);
 ";
 
+/// Swift type facts (`BlobFacts::types`, in `TypeFacts::encode`'s form), one row per blob that has any. Additive: created in
+/// a database of the current schema version that predates it, rather than bumping the version and
+/// rebuilding every repository; the Swift parser version moved with it, so no Swift blob parsed
+/// without these facts is ever read back as if it had none.
+const TYPE_FACTS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS type_facts (
+    facts_id INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+    data TEXT NOT NULL
+);
+";
+
 /// What the parse step hands the writer. `facts` is `None` when the blob was skipped (not UTF-8).
 pub struct ParsedBlob {
     pub blob_id: String,
@@ -275,6 +286,7 @@ impl Writer {
             conn.execute("INSERT INTO meta VALUES ('schema_version', ?1)", params![SCHEMA_VERSION.to_string()])?;
             conn.execute("INSERT INTO meta VALUES ('repo', ?1)", params![repo.to_string_lossy()])?;
         }
+        conn.execute_batch(TYPE_FACTS_TABLE)?;
         Ok(Writer { reader: Reader { conn, path: path.to_path_buf() } })
     }
 
@@ -293,6 +305,7 @@ impl Writer {
             let mut ins_imp = tx.prepare_cached("INSERT INTO imports VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
             let mut ins_ref = tx.prepare_cached("INSERT INTO refs VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
             let mut ins_h = tx.prepare_cached("INSERT INTO hierarchy VALUES (?1, ?2, ?3, ?4, ?5)")?;
+            let mut ins_t = tx.prepare_cached("INSERT INTO type_facts VALUES (?1, ?2)")?;
             for p in batch {
                 let (status, module, lines) = match &p.facts {
                     Some(f) => (0, f.module_name.as_deref(), f.line_count),
@@ -327,6 +340,9 @@ impl Writer {
                 }
                 for (i, h) in f.hierarchy.iter().enumerate() {
                     ins_h.execute(params![id, i as i64, h.symbol, h.target, h.kind.as_str()])?;
+                }
+                if !f.types.is_empty() {
+                    ins_t.execute(params![id, f.types.encode()])?;
                 }
             }
         }
@@ -591,6 +607,15 @@ impl Reader {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
+        // A reader may open a database no writer of this version has touched yet.
+        let types = match self.conn.prepare_cached("SELECT data FROM type_facts WHERE facts_id = ?1") {
+            Ok(mut st) => st.query_row(params![id], |r| r.get::<_, String>(0)).optional()?,
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => None,
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(t) = types {
+            facts.types = TypeFacts::decode(&t);
+        }
         Ok(Some(facts))
     }
 

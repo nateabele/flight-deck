@@ -21,6 +21,12 @@ fn is_type_qualifier(q: &str) -> bool {
     q.split('.').all(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')) && last.starts_with(|c: char| c.is_uppercase())
 }
 
+/// Is `q` an expression receiver (not `self`, not a type used as a namespace)? Its type is what
+/// the receiver ladder works out.
+pub(super) fn is_receiver(q: &str) -> bool {
+    !matches!(q, "self" | "Self") && !is_type_qualifier(q)
+}
+
 /// Member names the standard library and Foundation define on nearly every receiver. When a
 /// repository also defines exactly one member of such a name, `x.contains(..)` is still almost
 /// certainly the library's, so a unique-name guess would be wrong more often than right.
@@ -52,6 +58,7 @@ impl GraphData {
     pub(super) fn swift_ref(&self, f: u32, r: &Reference, keys: &[String]) -> RefRes {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
         let guess = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Fallback, external: None };
+        let inferred = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Inferred, external: None };
         let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
 
         // Definitions of this name in visible modules, with how near their module is (0 = own).
@@ -167,10 +174,22 @@ impl GraphData {
                     None => none,
                 }
             }
-            // A receiver expression: its type is unknown to a syntax-only index.
-            Some(_) => {
-                unique_member().unwrap_or_else(|| global(true))
-            }
+            // A receiver expression: typed by the ladder, the member is looked up on that type and
+            // its supertypes among the modules this file sees. A typed receiver without such a
+            // member (a platform type, a library-inherited method) has no target, rather than a
+            // same-named member of an unrelated type. Only an untyped one falls back to a guess.
+            Some(q) => match self.swift_receiver_type(f, q, r.line, r.enclosing) {
+                Some(ty) => self
+                    .swift_types
+                    .lineage(&ty)
+                    .iter()
+                    .find_map(|t| {
+                        let here: Vec<_> = cands.iter().copied().filter(|(id, _)| parent_name(*id) == Some(t.as_str()) && sym(*id).kind != SymbolKind::Extension).collect();
+                        best(here).map(|(id, _)| inferred(id))
+                    })
+                    .unwrap_or(none),
+                None => unique_member().unwrap_or_else(|| global(true)),
+            },
         }
     }
 }
