@@ -5,6 +5,7 @@
 //! extractor (and its version) re-parses only that language's blobs.
 
 mod ecma;
+mod elixir;
 mod elm;
 mod javascript;
 mod python;
@@ -28,6 +29,7 @@ pub trait Language: Sync + Send {
 
 static REGISTRY: &[&dyn Language] = &[
     &elm::Elm,
+    &elixir::Elixir,
     &rust::Rust,
     &typescript::TypeScript,
     &typescript::Tsx,

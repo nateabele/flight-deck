@@ -20,6 +20,7 @@
 //! PageRank is recomputed from scratch on every graph (microseconds-to-milliseconds at this size)
 //! rather than reusing the base's ranks, so ranks are exact for the view.
 
+mod elixir;
 mod python;
 
 use crate::facts::*;
@@ -214,7 +215,13 @@ impl ViewGraph {
             let unresolved_import = structural && r.imports.iter().any(|x| matches!(x, Resolved::Unresolved));
             let soft_hit = !changed_names.is_empty()
                 && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
-                    (rr.target.is_none() || rr.confidence == Confidence::Fallback) && changed_names.contains(&fr.name)
+                    // `Shop.Order.total()` names the module in its qualifier, and a `%Shop.Item{}` splits
+                    // the module name across qualifier and name; either may be what just appeared.
+                    (rr.target.is_none() || rr.confidence == Confidence::Fallback)
+                        && (changed_names.contains(&fr.name)
+                            || fr.qualifier.as_ref().is_some_and(|q| {
+                                changed_names.contains(q) || changed_names.contains(&format!("{q}.{}", fr.name))
+                            }))
                 });
             // A removed file's importers resolved into it; they are in `dirty` via `importers`.
             if unresolved_import || soft_hit {
@@ -495,6 +502,9 @@ impl ViewGraph {
                     r = Resolved::File { path: self.files[*only as usize].path.clone(), rest: vec![] };
                 }
             }
+            if lang == "elixir" && matches!(r, Resolved::Unresolved) {
+                r = self.elixir_import(&imp.specifier);
+            }
             if let Some(t) = self.file_of(&r) {
                 add_edge(&mut edges, t);
             }
@@ -548,6 +558,7 @@ impl ViewGraph {
                         qualifiers.insert(last, r.clone());
                     }
                 }
+                "elixir" => self.elixir_bindings(imp, &r, &mut qualifiers, &mut locals, &mut globs),
                 "python" => {
                     self.python_bindings(&node.path, imp, &r, &mut edges, &mut qualifiers, &mut locals, &mut globs);
                 }
@@ -572,6 +583,13 @@ impl ViewGraph {
         let mut refs = Vec::with_capacity(facts.refs.len());
         for r in &facts.refs {
             refs.push(self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs));
+        }
+        // No import is needed to call `Shop.Order.total()` or to use a type from the same Swift
+        // module, so for these languages a resolved reference is itself the dependency.
+        if matches!(lang, "elixir" | "swift") {
+            for t in refs.iter().filter_map(|rr| rr.target) {
+                add_edge(&mut edges, t.file);
+            }
         }
         FileRes { imports, refs, edges }
     }
@@ -609,6 +627,11 @@ impl ViewGraph {
             }
         };
 
+        if lang == "elixir"
+            && let Some(rr) = self.elixir_ref(r, qualifiers)
+        {
+            return rr;
+        }
         match r.qualifier.as_deref() {
             None => {
                 if let Some(id) = self.unqualified_visible(f, &r.name) {
