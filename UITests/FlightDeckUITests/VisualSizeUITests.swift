@@ -39,36 +39,43 @@ final class VisualSizeUITests: XCTestCase {
         return app
     }
 
-    /// Scrolls the detail pane until the block is in the window: the board sits above the plan.
+    /// Scrolls the detail pane until `target`'s top is inside the window, down or back up: the
+    /// board sits above the plan.
     private func scrollTo(_ target: XCUIElement, in app: XCUIApplication) {
         let detail = app.scrollViews["intake-detail"].firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 5), "no detail pane")
-        for _ in 0..<12 where !(target.exists && target.isHittable) {
-            detail.scroll(byDeltaX: 0, deltaY: -300)
+        let window = app.windows.firstMatch.frame
+        for _ in 0..<20 {
+            let y = target.frame.minY
+            if y > window.minY + 120, y < window.maxY - 120 { break }
+            detail.scroll(byDeltaX: 0, deltaY: y > window.midY ? -200 : 200)
             pause(0.3)
         }
         pause(1)
     }
 
+    private func isOn(_ button: XCUIElement) -> Bool { (button.value as? Int) == 1 || button.isSelected }
+
     func testOpenAPlanWithADiagramAndSwitchItsSize() {
         let app = launch()
         let block = element(app, "visual-block-\(Self.visualID)")
         XCTAssertTrue(block.waitForExistence(timeout: 20), "the plan's diagram block never appeared")
-        let sizes = app.segmentedControls["visual-sizes"].firstMatch
+        // An NSSegmentedControl in select-one mode reads as a radio group.
+        let sizes = app.radioGroups["visual-sizes"].firstMatch
         scrollTo(sizes, in: app)
         XCTAssertTrue(sizes.waitForExistence(timeout: 10), "the block has no size control")
         // Mermaid draws in a web view: give it its first draw before looking.
         pause(3)
         shot(app, "wide")
-        let wide = sizes.buttons["wide"], narrow = sizes.buttons["narrow"]
+        let wide = sizes.radioButtons["wide"], narrow = sizes.radioButtons["narrow"]
         XCTAssertTrue(wide.exists && narrow.exists, "the size control does not offer both sizes")
-        XCTAssertTrue(wide.isSelected, "the first size is not the one shown")
+        XCTAssertTrue(isOn(wide), "the first size is not the one shown")
 
         narrow.click()
         pause(3)
         shot(app, "narrow")
-        XCTAssertTrue(narrow.isSelected, "choosing narrow did not switch the block's size")
-        XCTAssertFalse(wide.isSelected)
+        XCTAssertTrue(isOn(narrow), "choosing narrow did not switch the block's size")
+        XCTAssertFalse(isOn(wide))
         XCTAssertFalse(element(app, "visual-placeholder").exists, "the block fell back to its missing placeholder")
     }
 }

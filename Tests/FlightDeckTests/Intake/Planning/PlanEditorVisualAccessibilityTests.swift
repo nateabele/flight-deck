@@ -11,8 +11,9 @@ final class PlanEditorVisualAccessibilityTests: XCTestCase {
         let view = PlanNSTextView(usingTextLayoutManager: true)
         let block = VisualBlockView(model: VisualBlockModel(id: "flow", content: .missing), caption: "Flow", store: nil)
         view.addSubview(block)
-        XCTAssertTrue((view.accessibilityChildren() ?? []).contains { ($0 as AnyObject) === block })
+        XCTAssertEqual((view.accessibilityChildren() ?? []).filter { ($0 as AnyObject) === block }.count, 1)
         let byAttribute = view.accessibilityAttributeValue(.children) as? [Any] ?? []
-        XCTAssertTrue(byAttribute.contains { ($0 as AnyObject) === block }, "the server asks by attribute")
+        XCTAssertEqual(byAttribute.filter { ($0 as AnyObject) === block }.count, 1,
+                       "the server asks by attribute, and lists each block once")
     }
 }

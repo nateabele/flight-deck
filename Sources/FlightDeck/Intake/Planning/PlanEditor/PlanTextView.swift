@@ -1745,17 +1745,21 @@ class PlanNSTextView: NSTextView {
     /// is a view laid over its hidden source lines, which a text view does not list on its own, so
     /// without this VoiceOver (and XCUITest) never reaches a block's size or state controls.
     override func accessibilityChildren() -> [Any]? {
-        (super.accessibilityChildren() ?? []) + tables.accessibilityTables() + visualBlockViews
+        withVisualBlocks((super.accessibilityChildren() ?? []) + tables.accessibilityTables())
     }
 
-    private var visualBlockViews: [Any] { subviews.filter { $0 is VisualBlockView } }
+    /// `children` plus each visual block view it does not already list, once.
+    private func withVisualBlocks(_ children: [Any]) -> [Any] {
+        let listed = Set(children.compactMap { ($0 as? NSView).map(ObjectIdentifier.init) })
+        return children + subviews.filter { $0 is VisualBlockView && !listed.contains(ObjectIdentifier($0)) }
+    }
 
     /// The accessibility server asks for children by attribute, which a text view answers its own
     /// way, not through `accessibilityChildren()`.
     override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
         let value = super.accessibilityAttributeValue(attribute)
         guard attribute == .children else { return value }
-        return ((value as? [Any]) ?? []) + tables.accessibilityTables() + visualBlockViews
+        return withVisualBlocks(((value as? [Any]) ?? []) + tables.accessibilityTables())
     }
 
     override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
