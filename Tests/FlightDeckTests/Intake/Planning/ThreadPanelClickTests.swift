@@ -109,7 +109,7 @@ extension ThreadPanelClickTests {
         var sent: [String] = []
         ThreadPanelModel.forgetSession()
         let model = ThreadPanelModel(intakeID: UUID(), reader: store,
-                                     actions: .init(send: { _, text in sent.append(text); return nil }))
+                                     actions: .init(send: { _, text, _ in sent.append(text); return nil }))
         model.refresh()
         model.open(thread.id)
         model.composer = "A stashed reply"

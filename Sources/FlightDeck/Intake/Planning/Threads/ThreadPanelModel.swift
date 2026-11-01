@@ -117,8 +117,9 @@ final class ThreadPanelModel: ObservableObject {
     /// (a render, a test of something else) cannot send by accident.
     struct Actions {
         var open: @MainActor (ThreadAnchor, String, String, ThreadDefaults) -> Result<ThreadID, ThreadRefusal>
-        var send: @MainActor (ThreadID, String) -> ThreadRefusal?
-        var answer: @MainActor (ThreadID, [StructuredAnswer]) -> ThreadRefusal?
+        /// The last argument is the draft's messageID (A-7): the same on every press until one lands.
+        var send: @MainActor (ThreadID, String, String) -> ThreadRefusal?
+        var answer: @MainActor (ThreadID, [StructuredAnswer], String) -> ThreadRefusal?
         var setAutoAccept: @MainActor (ThreadID, Bool) -> ThreadRefusal?
         var resolve: @MainActor (ThreadID) -> ThreadRefusal?
         var reopen: @MainActor (ThreadID) -> ThreadRefusal?
@@ -127,8 +128,8 @@ final class ThreadPanelModel: ObservableObject {
         var repropose: @MainActor (ThreadID, UUID) -> ThreadRefusal?
 
         init(open: @escaping @MainActor (ThreadAnchor, String, String, ThreadDefaults) -> Result<ThreadID, ThreadRefusal> = { _, _, _, _ in .failure(ThreadPanelModel.unavailable) },
-             send: @escaping @MainActor (ThreadID, String) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable },
-             answer: @escaping @MainActor (ThreadID, [StructuredAnswer]) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable },
+             send: @escaping @MainActor (ThreadID, String, String) -> ThreadRefusal? = { _, _, _ in ThreadPanelModel.unavailable },
+             answer: @escaping @MainActor (ThreadID, [StructuredAnswer], String) -> ThreadRefusal? = { _, _, _ in ThreadPanelModel.unavailable },
              setAutoAccept: @escaping @MainActor (ThreadID, Bool) -> ThreadRefusal? = { _, _ in ThreadPanelModel.unavailable },
              resolve: @escaping @MainActor (ThreadID) -> ThreadRefusal? = { _ in ThreadPanelModel.unavailable },
              reopen: @escaping @MainActor (ThreadID) -> ThreadRefusal? = { _ in ThreadPanelModel.unavailable },
@@ -152,8 +153,8 @@ final class ThreadPanelModel: ObservableObject {
                 open: { anchor, title, text, d in
                     binding.open(anchor: anchor, title: title, text: text, agent: d.agent, model: d.model, effort: d.effort)
                 },
-                send: { binding.send($0, text: $1) },
-                answer: { binding.answer($0, answers: $1) },
+                send: { binding.send($0, text: $1, messageID: $2) },
+                answer: { binding.answer($0, answers: $1, messageID: $2) },
                 setAutoAccept: { binding.setAutoAccept($0, $1) },
                 resolve: { binding.resolve($0) },
                 reopen: { binding.reopen($0) },
@@ -594,7 +595,8 @@ final class ThreadPanelModel: ObservableObject {
                 selected = id
             }
         } else if let current = selected {
-            if let refusal = actions.send(current, text) { return fail(refusal) }
+            if let refusal = actions.send(current, text, draftMessageID(current, .reply)) { return fail(refusal) }
+            draftMessageIDs[DraftKey(thread: current, kind: .reply)] = nil
             thread = current
         } else {
             return
@@ -639,10 +641,27 @@ final class ThreadPanelModel: ObservableObject {
     }
 
     /// The picks for the open question, in the order it was asked.
+    /// A-7: one messageID per draft, minted at its first press and kept until a send lands, so a
+    /// second press (double, or after a refusal) is the same message and runs one turn.
+    private enum DraftKind { case reply, answer }
+    private struct DraftKey: Hashable { let thread: ThreadID; let kind: DraftKind }
+    private var draftMessageIDs: [DraftKey: String] = [:]
+
+    private func draftMessageID(_ thread: ThreadID, _ kind: DraftKind) -> String {
+        let key = DraftKey(thread: thread, kind: kind)
+        if let id = draftMessageIDs[key] { return id }
+        let id = UUID().uuidString
+        draftMessageIDs[key] = id
+        return id
+    }
+
     func submitAnswers(_ id: ThreadID) {
         let answers = openQuestions(id).compactMap { answerDrafts[$0.id] }
         guard !answers.isEmpty else { return }
-        run(actions.answer(id, answers)) { self.answerDrafts = [:] }
+        run(actions.answer(id, answers, draftMessageID(id, .answer))) {
+            self.answerDrafts = [:]
+            self.draftMessageIDs[DraftKey(thread: id, kind: .answer)] = nil
+        }
     }
 
     private func run(_ refusal: ThreadRefusal?, then done: () -> Void = {}) {

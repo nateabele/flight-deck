@@ -163,6 +163,41 @@ final class ThreadPanelModelTests: XCTestCase {
         XCTAssertEqual(heard, [ThreadPanelModel.words(for: ThreadRefusal(code: "diff_stale"))])
     }
 
+    /// A-7: a reply or an answer keeps one messageID from the press that first sends it until a
+    /// send lands, so pressing again (a double press, or a retry after a refusal) is the same
+    /// message, and ThreadRunner runs one turn. The next draft gets a new one.
+    func testADraftKeepsOneMessageIDUntilItsSendLands() {
+        let t = store.add("Why?")
+        store.addTurn(t.id, you: "Why?", reply: "Because.")
+        var sent: [String] = [], answered: [String] = []
+        var refuse = true
+        let m = model(.init(send: { _, _, id in sent.append(id); return refuse ? ThreadRefusal(code: "write_failed") : nil },
+                            answer: { _, _, id in answered.append(id); return refuse ? ThreadRefusal(code: "write_failed") : nil }))
+        m.refresh()
+        m.open(t.id)
+        m.composer = "And then?"
+        m.send()
+        m.send()
+        refuse = false
+        m.send()
+        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(Set(sent).count, 1, "every press of one draft is one message")
+        m.composer = "Another question"
+        m.send()
+        XCTAssertNotEqual(sent.last, sent.first, "a new draft is a new message")
+
+        let q = StructuredQuestion(id: "q1", text: "Which?", kind: .single, options: [.init(id: "a", label: "A")])
+        store.addTurn(t.id, reply: "Pick.", actions: [.askQuestion(q)])
+        m.refresh()
+        refuse = true
+        m.answerDrafts = ["q1": StructuredAnswer(questionID: "q1", selected: ["a"])]
+        m.submitAnswers(t.id)
+        refuse = false
+        m.submitAnswers(t.id)
+        XCTAssertEqual(answered.count, 2)
+        XCTAssertEqual(Set(answered).count, 1, "a retried answer is the same message")
+    }
+
     // MARK: A thread just started
 
     /// Concern 2: after ✦ Ask's first send the thread exists only as a queued open until
@@ -429,7 +464,7 @@ final class ThreadPanelModelTests: XCTestCase {
     func testSendAndResolveSendsThenResolves() {
         let t = store.add("Why?")
         var calls: [String] = []
-        let m = model(.init(send: { _, text in calls.append("send \(text)"); return nil },
+        let m = model(.init(send: { _, text, _ in calls.append("send \(text)"); return nil },
                             resolve: { _ in calls.append("resolve"); return nil }))
         m.refresh()
         m.open(t.id)
@@ -441,7 +476,7 @@ final class ThreadPanelModelTests: XCTestCase {
 
     func testARefusedSendKeepsWhatTheHumanTyped() {
         let t = store.add("Why?")
-        let m = model(.init(send: { _, _ in IntakeService.unavailable }))
+        let m = model(.init(send: { _, _, _ in IntakeService.unavailable }))
         m.refresh()
         m.open(t.id)
         m.composer = "Words I do not want to lose"
@@ -453,7 +488,7 @@ final class ThreadPanelModelTests: XCTestCase {
     func testAnEmptyComposerSendsNothing() {
         let t = store.add("Why?")
         var sends = 0
-        let m = model(.init(send: { _, _ in sends += 1; return nil }))
+        let m = model(.init(send: { _, _, _ in sends += 1; return nil }))
         m.refresh()
         m.open(t.id)
         m.composer = "  \n "
