@@ -183,6 +183,35 @@ fn an_elm_move_creates_the_module_and_follows_every_importer() {
 }
 
 #[test]
+fn an_elm_move_exposes_the_neighbours_the_moved_code_reaches_back_for_and_keeps_the_gap() {
+    let (_d, svc) = service();
+    let r = init_repo();
+    write(&r.root, "elm.json", r#"{"type":"application","source-directories":["src"]}"#);
+    write(&r.root, "src/Lib.elm", "module Lib exposing (last, outer)\n\n\nouter : Int\nouter =\n    inner 1\n\n\ninner : Int -> Int\ninner n =\n    n\n\n\nlast : Int\nlast =\n    0\n");
+    commit_all(&r.root, "init");
+    ok(&svc, &r.root, "move", json!({"symbol": "outer", "to_file": "src/Out.elm", "apply": true}));
+    let lib = read(&r.root, "src/Lib.elm");
+    // Without the extra export, Out's `import Lib exposing (inner)` would not compile.
+    assert!(lib.starts_with("module Lib exposing (last, inner)\n"), "{lib}");
+    assert!(lib.contains("\n\n\ninner : Int -> Int") && !lib.contains("\n\n\n\n"), "the gap between declarations is kept: {lib:?}");
+    assert!(read(&r.root, "src/Out.elm").contains("import Lib exposing (inner)"));
+}
+
+#[test]
+fn an_elm_move_that_would_make_two_modules_import_each_other_is_refused() {
+    let (_d, svc) = service();
+    let r = init_repo();
+    write(&r.root, "elm.json", r#"{"type":"application","source-directories":["src"]}"#);
+    write(&r.root, "src/Lib.elm", "module Lib exposing (a, b)\n\n\na : Int\na =\n    b\n\n\nb : Int\nb =\n    a2\n\n\na2 : Int\na2 =\n    a\n");
+    commit_all(&r.root, "init");
+    // `b` uses `a2`, which uses `a`: moving `a2` would need `Lib` for nothing, but moving `b` away
+    // while `a` still calls it back creates the cycle.
+    let e = refused(&svc, &r.root, "move", json!({"symbol": "b", "to_file": "src/Other.elm", "apply": true}));
+    assert!(e.contains("import each other"), "{e}");
+    assert!(!r.root.join("src/Other.elm").exists());
+}
+
+#[test]
 fn an_elm_rename_file_rewrites_the_module_line_importers_and_qualified_uses() {
     let (_d, svc) = service();
     let r = elm_project();
