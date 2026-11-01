@@ -452,3 +452,34 @@ fn overlay_body_edit_in_a_swift_file_re_resolves_only_that_file() {
     let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Loader.swift", "enum Loader {\n    static func fetch() { print(1) }\n}\n"));
     assert_eq!(g.resolved_files(), 1);
 }
+
+// ---- soft hits: references that bind by name alone, re-resolved when that name's definitions move
+
+#[test]
+fn overlay_defining_a_name_in_place_makes_an_unrelated_fallback_ambiguous() {
+    // No path appears or disappears and a.ts imports nothing, so only the name rule (by the
+    // reference's own name) can reach it.
+    let r = init_repo();
+    write(&r.root, "a.ts", "export function main() { stray(); }\n");
+    write(&r.root, "b.js", "function stray() {}\n");
+    write(&r.root, "c.js", "function other() {}\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "c.js", "function stray() {}\n"));
+    assert!(g.calls(exact(&g, "main"), Direction::Out, 1).data.is_empty());
+}
+
+#[test]
+fn overlay_renaming_an_elixir_module_in_place_binds_a_split_qualified_mention() {
+    // `%Other.Mod{}` arrives as qualifier `Other` + name `Mod`, so the name rule must match the
+    // new module name against "qualifier.name" (`b.ex` covers the plain qualifier key).
+    let r = init_repo();
+    write(&r.root, "lib/a.ex", "defmodule A do\n  def go, do: %Other.Mod{}\nend\n");
+    write(&r.root, "lib/b.ex", "defmodule B do\n  def go, do: Other.Mod.run()\nend\n");
+    write(&r.root, "lib/z.ex", "defmodule Unrelated do\n  defstruct [:a]\n  def run, do: 1\nend\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "lib/z.ex", "defmodule Other.Mod do\n  defstruct [:a]\n  def run, do: 1\nend\n"));
+    for user in ["lib/a.ex", "lib/b.ex"] {
+        let deps = g.file_deps(&r.root.join(user), Direction::Out, 1).data.unwrap();
+        assert!(deps.iter().any(|d| d.path.ends_with("lib/z.ex")), "{user}: {deps:?}");
+    }
+}
