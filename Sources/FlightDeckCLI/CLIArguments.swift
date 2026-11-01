@@ -74,6 +74,9 @@ public enum CLICommand: Equatable {
     case delegate(DelegateCommand)
     /// `infra up|down|ls|doctor|extend`: cloud machines (`InfraCommands.swift`).
     case infra(InfraCommand)
+    /// `index ARGS…`: everything after `index`, for `fdindex` (`IndexCommand`). Local: `main.swift`
+    /// runs it before any transport exists.
+    case index([String])
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -104,6 +107,13 @@ public enum CLIArguments {
     /// - Parameter args: argv with argv[0] already stripped.
     public static func parse(_ args: [String]) throws -> CLIInvocation {
         if args.isEmpty { return CLIInvocation(command: .help()) }
+
+        // `index` hands every argument to `fdindex`, so it is decided before the globals pass
+        // below could take `--json`, `--socket` or `--help` for flightdeck's own. Bare `index`
+        // and `index --help` fall through to the help page.
+        if args[0] == "index", args.count > 1, !["--help", "-h", "help"].contains(args[1]) {
+            return CLIInvocation(command: .index(Array(args.dropFirst())))
+        }
 
         // Globals may appear anywhere, so they're stripped in a first pass rather than
         // threaded through every verb's own cursor — each verb below sees only its operands.
@@ -354,6 +364,9 @@ public enum CLIArguments {
 
         case "infra":
             return try InfraArguments.parse(&c)
+        case "index":
+            // Only the bare word gets here (see `parse`): its page.
+            return .help(topic: "index")
         case "account":
             return try parseAccount(&c)
 

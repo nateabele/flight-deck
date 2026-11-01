@@ -97,6 +97,19 @@ targets:
         # Re-signed with the app's identity on copy. The prebuilt binary carries only the
         # linker's ad-hoc signature, which notarization rejects.
         attributes: [CodeSignOnCopy]
+      # `fdindex` (Packages/FlightIndex; scripts/build-fdindex.sh → vendor/fdindex-artifacts/fdindex,
+      # run by the pre-build script below) is the code index's daemon, MCP shim and query CLI in one
+      # Mach-O. It lands in `Contents/MacOS/fdindex` beside `flightdeck`, which is where
+      # `flightdeck index …` looks for it first (`IndexCommand.locate`). Plain Copy Files like
+      # fd-abduco, and `optional` for the same reason: the file is written by the script at build
+      # time, so it may not exist when xcodegen runs.
+      - path: vendor/fdindex-artifacts/fdindex
+        optional: true
+        buildPhase:
+          copyFiles:
+            destination: executables
+            subpath: ""
+        attributes: [CodeSignOnCopy]
       # A folder reference, not a plain group — a plain group flattens subdirectories,
       # which would destroy `.claude-plugin/` and `hooks/`. This is the Claude Code
       # plugin Flight Deck loads into its own sessions to receive lifecycle hooks.
@@ -132,6 +145,12 @@ targets:
           copyFiles:
             destination: wrapper
             subpath: Contents/Library/LaunchAgents
+    # Cargo-builds the code index's binary (see the `fdindex` source above). Always runs: cargo's
+    # own incremental build is what decides there is nothing to do, in a quarter of a second.
+    preBuildScripts:
+      - name: Build fdindex
+        script: '"${SRCROOT}/scripts/build-fdindex.sh"'
+        basedOnDependencyAnalysis: false
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false

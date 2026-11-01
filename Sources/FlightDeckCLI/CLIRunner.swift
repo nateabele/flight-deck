@@ -321,8 +321,8 @@ final class CLIRunner {
                                         out: out, err: err, finish: { self.finish($0) }))
             infraRunner = runner
             runner.start()
-        case .providerCheck:
-            // Local, like `intakeRun`: main.swift runs it before a transport exists.
+        case .providerCheck, .index:
+            // Local, like `intakeRun`: main.swift runs them before a transport exists.
             break
         case .intakeRun, .intakeThreads:
             // main.swift intercepts `intake run` and `intake threads` right after the usage check, before a

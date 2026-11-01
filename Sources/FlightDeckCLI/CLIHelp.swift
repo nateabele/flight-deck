@@ -616,6 +616,55 @@ public enum CLIHelp {
             ]
         ),
         Section(
+            title: "Code index",
+            blurb: """
+            One machine-wide index of your code, kept by a background daemon that any session or
+            script can ask. It runs without Flight Deck open and is not reached over its control socket.
+            """,
+            pages: [
+                Page(
+                    name: "index", summary: "query and manage the code index",
+                    usage: ["flightdeck index COMMAND [ARGUMENTS]"],
+                    about: """
+                    Passes everything after index to fdindex, the index's own command, so its flags are \
+                    used as they are (--json and --help here are fdindex's). It starts the daemon when \
+                    a query finds none running. Results begin with a view: line naming the worktree and \
+                    commit that answered, and every path in them is absolute.
+
+                    Queries run against the repository holding the current directory; give a path \
+                    (absolute or relative) to ask about another. When the daemon cannot be reached \
+                    the answer is state: UNAVAILABLE on stderr and exit status 3.
+
+                    The fdindex used is $FLIGHTDECK_FDINDEX, else the one next to flightdeck, else the \
+                    first on PATH. Exit status 127 means there is none.
+                    """,
+                    arguments: [
+                        ("find NAME", "where a symbol is defined"),
+                        ("grep PREFIX", "symbols by name prefix (--regex for a pattern, --search-bodies for text)"),
+                        ("read SYMBOL|FILE", "a symbol's source, or a file or slice of one, with line numbers"),
+                        ("outline FILE", "a file's symbols"),
+                        ("refs SYMBOL", "every use of a symbol"),
+                        ("calls NAME", "callers and callees"),
+                        ("deps FILE", "what a file imports and what imports it"),
+                        ("impact FILE", "what a change to a file could break"),
+                        ("map", "the repository's most important files"),
+                        ("stats [FILE]", "size and shape of the repository, or of one file"),
+                        ("status", "the daemon: pid, version, uptime, views, builds, memory, store size"),
+                        ("start | stop | restart", "run, stop or restart the daemon"),
+                        ("install | uninstall", "keep the daemon running at login (a launchd agent), or stop doing so"),
+                        ("build PATH", "index a worktree now and wait for it"),
+                        ("gc PATH", "garbage-collect and vacuum that repository's store"),
+                    ],
+                    options: [
+                        ("--cwd DIR", "ask as if run from DIR"),
+                        ("--json", "print the raw reply"),
+                        ("--store DIR", "use another store (its own daemon and socket), for a scratch run"),
+                    ],
+                    examples: ["flightdeck index find traverseStep", "flightdeck index refs update --cwd ~/Projects/app", "flightdeck index status"]
+                ),
+            ]
+        ),
+        Section(
             title: "Plumbing",
             blurb: "For Flight Deck itself and for scripts that need an operation with no verb yet.",
             pages: [

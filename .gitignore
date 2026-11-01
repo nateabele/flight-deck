@@ -6,6 +6,7 @@ build/
 vendor/ghostty-artifacts
 vendor/boringssl-artifacts
 vendor/fd-abduco-artifacts
+vendor/fdindex-artifacts
 DerivedData/
 *.xcodeproj
 # Written to disk by `xcodegen generate` from project.yml's FlightDeckMobile `info:` block

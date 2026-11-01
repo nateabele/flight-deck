@@ -827,6 +827,35 @@ the current count, and Codex's shared summary uses the same singular/plural text
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
 
+## Index Service (`Packages/FlightIndex/`, `fdindex`)
+
+The machine-wide code index. One `fdindex daemon` per machine owns every index: it parses with
+tree-sitter, keeps facts in SQLite keyed by git blob, builds the import/call graph in memory, and
+answers every session, so two agents (or a Codex run on a box with no app) see the same code the
+same way. It is a Rust crate, **never in the Xcode project**; the app build only runs
+`scripts/build-fdindex.sh` (cargo `--release`, arm64, incremental) and embeds the result.
+
+- **Daemon and socket.** Newline-delimited JSON over a Unix socket, mode 0600, `v`/`id`/`cwd`/`seq`/
+  `tool`/`args` in, `ok`/`text`/`error`/`state` out. One daemon per store: a pidfile `flock`, so
+  a second one exits cleanly. Clients start it detached when it is absent. Wire protocol and tools:
+  `docs/superpowers/specs/2026-11-01-index-tool-contract.md`.
+- **Store.** `~/Library/Application Support/FlightDeck/index/` on macOS (`$XDG_DATA_HOME/flightdeck/
+  index` on Linux): `fdindex.sock`, `daemon.pid`, `daemon.log`, `launchd.log`, and one `.db` per
+  repository. `--store`, `--socket`, `FLIGHTDECK_INDEX_DIR` and `FLIGHTDECK_INDEX_SOCKET` move it,
+  which gives a fully separate daemon (tests and scratch runs). Facts are derived data: any `.db`
+  can be deleted and is rebuilt from git.
+- **Clients.** `fdindex <tool>` is the CLI. `fdindex mcp` is the stdio MCP shim: it holds no index,
+  sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
+  answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
+  (a symlink, installed at switch-over) it is the qartez alias with the same tool names.
+- **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
+  Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
+  Flight Deck app; without the unit, the first client starts the daemon.
+- **`flightdeck index …`.** A verb of the `flightdeck` CLI (`Sources/FlightDeckCLI/IndexCommand.swift`)
+  that `exec`s `fdindex` with the rest of the line. Local like `provider check`: no control socket,
+  works with the app closed. `fdindex` is `$FLIGHTDECK_FDINDEX`, else `Contents/MacOS/fdindex`
+  beside `flightdeck`, else `PATH`.
+
 ## Vendored layout (git-ignored build inputs/outputs)
 
 - `vendor/ghostty` — submodule, pinned **v1.3.1** (`332b2ae`), pristine (never modified).
@@ -837,6 +866,9 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/boringssl-artifacts/BoringSSL.xcframework` — build output of
   `scripts/build-boringssl.sh`; same shape as `ghostty-artifacts`, built from the submodule
   rather than committed after an earlier attempt (54 MB) was reverted — see docs/FOLLOWUPS.md.
+- `vendor/fdindex-artifacts/fdindex` — build output of `scripts/build-fdindex.sh` (cargo release of
+  `Packages/FlightIndex`); the FlightDeck target's pre-build script writes it and a Copy Files phase
+  signs it into `Contents/MacOS/fdindex`.
 
 ## Sidebar structure
 

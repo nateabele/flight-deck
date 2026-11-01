@@ -44,6 +44,13 @@ if case .help(let topic) = invocation.command {
     exit(0)
 }
 
+// `index` is `fdindex` under flightdeck's name: the code index is its own daemon with its own
+// socket, so this runs before any control-socket setup and works with Flight Deck closed.
+// `exec` replaces this process; it comes back only when there is no `fdindex` to run.
+if case .index(let args) = invocation.command {
+    exit(IndexCommand.run(args, environment: env, executable: Bundle.main.executableURL?.resolvingSymlinksInPath(), report: writeStderr))
+}
+
 // `provider check` reads a folder and runs a sandboxed sample; it asks Flight Deck nothing, so it
 // is intercepted here, before the socket setup, and works with the app closed. Exit 0 valid,
 // 1 problems, 2 usage error (above).

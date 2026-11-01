@@ -144,12 +144,8 @@ impl Shim {
         if self.conn.is_some() {
             return Ok(());
         }
-        if self.opts.auto_start {
-            if let Some((at, reason)) = &self.down {
-                if at.elapsed() < START_RETRY {
-                    return Err(reason.clone());
-                }
-            }
+        if let Some((_, reason)) = self.down.as_ref().filter(|(at, _)| self.opts.auto_start && at.elapsed() < START_RETRY) {
+            return Err(reason.clone());
         }
         let attempt = if self.opts.auto_start {
             connect_or_start(&self.opts.paths, &self.opts.daemon_args)
