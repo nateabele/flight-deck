@@ -103,10 +103,10 @@ final class AskThreadUITests: XCTestCase {
         composer.click()
         composer.typeText("Why this step, and not a smaller one?")
         composer.typeKey(.return, modifierFlags: .command)
-        // Accepted: the composer empties (a refusal keeps the words and says why). The thread itself
-        // appears once ThreadRunner folds its open, which this fixture never starts.
-        // The new-thread composer goes away with the send; one that stays still holds the words.
-        XCTAssertTrue(eventually(10) { !composer.exists || (composer.value as? String ?? "").isEmpty }, "the Ask was not sent")
+        // Sent: the thread shows at once with the words and "answering…", before any runner folds
+        // its open (this fixture starts none) — never "No thread open".
+        XCTAssertTrue(element(app, "thread-pending").waitForExistence(timeout: 10), "the started thread is not shown")
+        XCTAssertTrue(text(app, containing: "Why this step, and not a smaller one?").exists, "the sent words are not shown")
         shot(app, "asked")
 
         // The seeded thread's reply, read in the panel. At the inspector's width the index is a page.
