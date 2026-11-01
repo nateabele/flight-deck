@@ -563,6 +563,76 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertEqual(result, .outputTooLarge("file"))
     }
 
+    // MARK: - Round 3
+
+    /// `ulimit -f` counts 1024-byte blocks in bash but 512 in dash and zsh, and `/bin/sh` may be
+    /// either: under dash a 1 MiB cap stopped files at 512 KiB. The launcher is bash, named.
+    func testLauncherIsBash() async throws {
+        let runner = CaptureRecordingRunner()
+        _ = try? await sandbox(runner: runner).run(try provider(["/usr/bin/true"]), outputDirectory: try output())
+        XCTAssertEqual(runner.executable, "/bin/bash")
+    }
+
+    /// Live: a program that ignores SIGXFSZ writes 4 MiB under a 1 MiB cap, then reports how far
+    /// it got and removes the file. It must reach the cap, not half of it, and stop within a block.
+    func testFileCapStopsAtTheCapNotHalfOfIt() async throws {
+        let cap = 1 << 20
+        let limits = ProviderSandbox.Limits(stdout: 1 << 20, output: 64 << 20, temp: 64 << 20, file: cap)
+        let perl = "$SIG{XFSZ} = 'IGNORE'; my $p = \"$ENV{TMPDIR}/big\"; open(my $f, '>', $p) or die; "
+            + "syswrite($f, '0' x 65536) for 1..64; close $f; print -s $p; unlink $p"
+        let result = try await sandbox(limits: limits).run(try provider(["/usr/bin/perl", "-e", perl]),
+                                                           outputDirectory: try output())
+        guard case .exited(0, let stdout, _, _) = result else { return XCTFail("\(result)") }
+        let reached = Int(String(decoding: stdout, as: UTF8.self)) ?? -1
+        XCTAssertGreaterThanOrEqual(reached, cap)
+        XCTAssertLessThanOrEqual(reached, cap + 1024)
+    }
+
+    /// A well-behaved file of exactly the cap is delivered, not reported as too large.
+    func testFileOfExactlyTheCapIsDelivered() async throws {
+        let out = try output()
+        let limits = ProviderSandbox.Limits(stdout: 1 << 20, output: 64 << 20, temp: 64 << 20, file: 1 << 20)
+        let result = try await sandbox(limits: limits).run(
+            try provider(["/bin/dd", "if=/dev/zero", "of={out}/big", "bs=65536", "count=16"]), outputDirectory: out)
+        guard case .exited(0, _, _, let outputs) = result else { return XCTFail("\(result)") }
+        XCTAssertEqual(outputs, ["big"])
+        let size = try FileManager.default.attributesOfItem(atPath: out.appendingPathComponent("big").path)[.size] as? Int
+        XCTAssertEqual(size, 1 << 20)
+    }
+
+    /// The same class as /private/tmp: /private/var/tmp and /Users/Shared are world-writable
+    /// scratch space other sessions leave files in, and the user's cache folder (`C/`) is theirs.
+    func testSharedScratchFoldersAndTheUserCacheAreUnreadable() async throws {
+        let secret = "secret-\(UUID().uuidString)"
+        var planted = [URL(fileURLWithPath: "/private/var/tmp/fd-sandbox-probe-\(UUID().uuidString)"),
+                       URL(fileURLWithPath: "/Users/Shared/fd-sandbox-probe-\(UUID().uuidString)")]
+        let cache = URL(fileURLWithPath: try ProviderSandbox.userVarFolder()).appendingPathComponent("C")
+        planted.append(cache.appendingPathComponent("fd-sandbox-probe-\(UUID().uuidString)"))
+        defer { for url in planted { try? FileManager.default.removeItem(at: url) } }
+        for url in planted {
+            try Data(secret.utf8).write(to: url)
+            let result = try await sandbox().run(try provider(["/bin/cat", url.path]), outputDirectory: try output())
+            guard case .exited(let code, let stdout, _, _) = result else { return XCTFail("\(result)") }
+            XCTAssertNotEqual(code, 0, url.path)
+            XCTAssertFalse(String(decoding: stdout, as: UTF8.self).contains(secret), url.path)
+        }
+    }
+
+    /// Every `/usr/bin` shim runs xcrun, which keeps its lookups in `$TMPDIR/xcrun_db`. A fresh
+    /// run folder made every call cold (git --version ~1 s); the run starts with a copy of the
+    /// user's cache instead.
+    func testXcrunCacheIsWarm() async throws {
+        let userCache = URL(fileURLWithPath: try ProviderSandbox.userTempFolder()).appendingPathComponent("xcrun_db")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: userCache.path), "this user has no xcrun cache")
+        let probe = try await sandbox().run(try provider(["/bin/sh", "-c", "test -s \"$TMPDIR/xcrun_db\""]),
+                                            outputDirectory: try output())
+        XCTAssertEqual(exited(probe).code, 0, "the run's TMPDIR has no xcrun cache")
+        let start = Date()
+        let git = try await sandbox().run(try provider(["/usr/bin/git", "--version"]), outputDirectory: try output())
+        print("[measure] testXcrunCacheIsWarm git --version \(String(format: "%.3f", Date().timeIntervalSince(start))) s")
+        XCTAssertEqual(exited(git).code, 0, exited(git).stderr)
+    }
+
     // MARK: - Refusals
 
     func testMissingSandboxExecIsRefusedAndNothingRuns() async throws {
@@ -697,7 +767,9 @@ private final class SpawnCountingRunner: CommandRunner, @unchecked Sendable {
 private final class CaptureRecordingRunner: CommandRunner, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: Int?
+    private var launched: String?
     var capture: Int? { lock.lock(); defer { lock.unlock() }; return recorded }
+    var executable: String? { lock.lock(); defer { lock.unlock() }; return launched }
 
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
@@ -707,7 +779,7 @@ private final class CaptureRecordingRunner: CommandRunner, @unchecked Sendable {
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
              onStdout: (@Sendable (Data) -> Void)?, stdoutCapture: Int?) async throws -> CommandResult {
-        lock.lock(); recorded = stdoutCapture; lock.unlock()
+        lock.lock(); recorded = stdoutCapture; launched = executable; lock.unlock()
         return CommandResult(stdout: Data(), stderr: "", exitCode: 0)
     }
 }

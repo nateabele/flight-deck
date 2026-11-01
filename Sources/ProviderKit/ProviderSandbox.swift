@@ -91,6 +91,9 @@ public struct ProviderSandbox: Sendable {
 
     /// The system's directories first, then Homebrew's (Apple silicon, then Intel), so
     /// `#!/usr/bin/env node` works without a provider shadowing a system tool.
+    /// Runs the `ulimit` script. Bash, never `/bin/sh`: see `runOnClock`.
+    static let launcher = "/bin/bash"
+
     public static let environmentPath = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 
     /// Paths are read at run time with `-D`, not spliced into the text, so no path can break
@@ -109,6 +112,8 @@ public struct ProviderSandbox: Sendable {
     ///   runs, its `C/` the user's caches) and of `/private/tmp` (other sessions' scratch files);
     /// - `signal`: a generator could `kill -TERM` any process of the same user, Flight Deck
     ///   included. Now only its own processes, so it can still stop its children.
+    /// Round three: `/private/var/tmp` and `/Users/Shared`, world-writable scratch space like
+    /// `/private/tmp`, where other sessions and apps leave files.
     /// All of that stays readable only where the run itself lives and where its input is: the
     /// allow comes after every read deny.
     public static let profile = """
@@ -121,7 +126,8 @@ public struct ProviderSandbox: Sendable {
           (subpath (param "TEMP_DIR"))
           (literal "/dev/null"))
         (deny file-read* (subpath (param "HOME_DIR")))
-        (deny file-read* (subpath (param "USER_VAR_DIR")) (subpath "/private/tmp"))
+        (deny file-read* (subpath (param "USER_VAR_DIR")) (subpath "/private/tmp")
+          (subpath "/private/var/tmp") (subpath "/Users/Shared"))
         (allow file-read*
           (subpath (param "RUN_ROOT"))
           (subpath (param "INPUT_DIR")))
@@ -165,6 +171,7 @@ public struct ProviderSandbox: Sendable {
         let run = try RunFolder(root: snapshotRoot)
         defer { run.remove() }
         try snapshot(provider, into: run)
+        seedXcrunCache(into: run.temp)
 
         let profileURL = run.root.appendingPathComponent("profile.sb")
         // Real paths: `$TMPDIR` is under /var, a link to /private/var, and the sandbox matches
@@ -190,8 +197,9 @@ public struct ProviderSandbox: Sendable {
             + ["-f", profileURL.path, program] + args
         // Nothing inherited: the app's environment holds tokens and socket paths a generator
         // has no business reading.
-        // USER and LOGNAME because `getpwuid` needs a Mach service the profile denies: without
-        // them `id -un`, Python's `getpass` and the like fail inside the sandbox.
+        // USER and LOGNAME because `getpwuid` needs a Mach service the profile denies: Python's
+        // `getpass`, `whoami`-style scripts that read `$USER` and the like answer from them.
+        // `id -un` does not read them and still prints the uid (501).
         let user = Self.userName
         let environment = ["PATH": Self.environmentPath, "HOME": tempPath, "TMPDIR": tempPath,
                            "USER": user, "LOGNAME": user]
@@ -212,6 +220,24 @@ public struct ProviderSandbox: Sendable {
         }
         try Self.write(collected, to: outputDirectory)
         return .exited(code: code, stdout: stdout, stderr: stderr, outputs: collected.files.map(\.path).sorted())
+    }
+
+    /// Every `/usr/bin` developer shim (git, swift, clang, make) is xcrun, which caches its
+    /// lookups in `$TMPDIR/xcrun_db`. Each run's TMPDIR is new, so every shim call was cold:
+    /// `git --version` took about 1 s, 0.15 s warm (measured). The run starts with a COPY of
+    /// the user's cache: the user's own file stays unreadable and unwritable from the sandbox,
+    /// and a lookup the copy lacks is computed and saved to the copy only. Skipped when it
+    /// would take more than a quarter of the temp cap, or is not a plain file.
+    private func seedXcrunCache(into temp: URL) {
+        guard let folder = try? Self.userTempFolder() else { return }
+        let source = open(folder + "/xcrun_db", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard source >= 0 else { return }
+        defer { close(source) }
+        var info = stat()
+        let budget = limits.temp / 4
+        guard fstat(source, &info) == 0, Self.isType(info, S_IFREG), Int(info.st_size) <= budget,
+              let data = try? Self.readAll(source, budget: budget) else { return }
+        try? data.write(to: temp.appendingPathComponent("xcrun_db"))
     }
 
     // MARK: - The checked copy
@@ -321,14 +347,18 @@ public struct ProviderSandbox: Sendable {
     /// The per-user `/private/var/folders/<xx>/<yy>`, the parent of `confstr`'s temp folder
     /// rather than of `$TMPDIR`, which the app's environment could have moved.
     static func userVarFolder() throws -> String {
+        (try userTempFolder() as NSString).deletingLastPathComponent
+    }
+
+    /// `confstr`'s per-user temp folder (`.../T`), resolved.
+    static func userTempFolder() throws -> String {
         var temp = FileManager.default.temporaryDirectory.path
         let size = confstr(_CS_DARWIN_USER_TEMP_DIR, nil, 0)
         if size > 0 {
             var buffer = [CChar](repeating: 0, count: size)
             if confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, size) > 0 { temp = String(cString: buffer) }
         }
-        let resolved = try realPath(URL(fileURLWithPath: temp, isDirectory: true))
-        return (resolved as NSString).deletingLastPathComponent
+        return try realPath(URL(fileURLWithPath: temp, isDirectory: true))
     }
 
     static func realPath(_ url: URL) throws -> String {
@@ -353,16 +383,18 @@ public struct ProviderSandbox: Sendable {
         let stop = StopReason()
         let stdoutBytes = ByteCount()
         let runner = self.runner, grace = killGrace, limits = self.limits
-        // `ulimit -f` has the kernel stop any one file at the cap, which the disk watchdog
-        // (every 250 ms) would only notice after the fact. The unit is 1024 bytes in bash,
-        // macOS's /bin/sh; dash counts 512, which only halves the cap. The shell runs our fixed
-        // script and is replaced by `env`, then sandbox-exec, so the leader's pid is unchanged.
-        // `env -u`: the shell exports PWD and SHLVL, and `unset` cannot drop SHLVL.
-        let blocks = max(1, limits.file / 1024)
+        // `ulimit -f` has the kernel stop any one file near the cap, which the disk watchdog
+        // (every 250 ms) would only notice after the fact. Bash, named: its unit is 1024 bytes,
+        // while dash and zsh count 512, and `/bin/sh` can be either (under dash a 1 MiB cap
+        // stopped files at 512 KiB, measured). The limit is one block ABOVE the cap, so a file of
+        // exactly the cap is written whole and anything larger is caught below by its size.
+        // The shell runs our fixed script and is replaced by `env`, then sandbox-exec, so the
+        // leader's pid is unchanged. `env -u`: bash exports PWD and SHLVL; `unset` cannot drop SHLVL.
+        let blocks = limits.file / 1024 + 1
         let launch = ["-c", "ulimit -f \(blocks) || exit 126; exec /usr/bin/env -u PWD -u OLDPWD -u SHLVL \"$@\"",
-                      "sh", sandboxExecPath] + arguments
+                      "bash", sandboxExecPath] + arguments
         let work = Task {
-            try await runner.run(executable: "/bin/sh", arguments: launch, cwd: cwd, environment: environment,
+            try await runner.run(executable: Self.launcher, arguments: launch, cwd: cwd, environment: environment,
                                  processGroup: true, onSpawn: { pid in group.set(pid); onSpawn?(pid) },
                                  onStdout: { chunk in
                                      if stdoutBytes.add(chunk.count) > limits.stdout, stop.set(.tooLarge("stdout")) {
@@ -413,12 +445,13 @@ public struct ProviderSandbox: Sendable {
         case nil: break
         }
         let done = try result.get()
+        // The counter above stops the group first; this catches a flood from outside it.
+        if done.stdoutTruncated { return .outputTooLarge("stdout") }
         // SIGXFSZ, the per-file cap, as a signal death or as the shell's 128 + signal exit.
         if done.exitCode == 128 + SIGXFSZ { return .outputTooLarge("file") }
         // A program that ignores SIGXFSZ (Python, node) gets EFBIG and exits on its own terms;
-        // a file left at the cap is how the cap shows.
-        let fileCap = blocks * 1024
-        if Self.largestFile(output) >= fileCap || Self.largestFile(temp) >= fileCap { return .outputTooLarge("file") }
+        // a file past the cap is how the cap shows. Exactly the cap is allowed.
+        if Self.largestFile(output) > limits.file || Self.largestFile(temp) > limits.file { return .outputTooLarge("file") }
         return .exited(code: done.exitCode, stdout: done.stdout, stderr: done.stderr, outputs: [])
     }
 
