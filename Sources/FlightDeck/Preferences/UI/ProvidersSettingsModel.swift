@@ -41,6 +41,12 @@ final class ProvidersSettingsModel: ObservableObject {
     private let repo: URL?
     private let defaults: UserDefaults
     private var resolved: [ResolvedProvider] = []
+    /// True until the first resolve lands, so the pane does not say "No providers found." early.
+    @Published private(set) var isLoading = true
+    /// Where the last resolve ran. Read by a test that pins it off the main thread.
+    private(set) var lastResolveWasOnMainThread: Bool?
+    /// The newest resolve. Each one waits for the one before, so they land in order.
+    private var pending: Task<Void, Never>?
 
     init(registry: ProviderRegistry, repo: URL?, defaults: UserDefaults = .standard) {
         self.registry = registry
@@ -57,11 +63,44 @@ final class ProvidersSettingsModel: ObservableObject {
         return "Repo providers come from \(repo.lastPathComponent) (\(ProviderRegistry.repoSubpath))."
     }
 
+    /// Resolves off the main actor and publishes on it. A repo is untrusted input: its
+    /// manifests are parsed and its generator providers digested, which reads files the repo
+    /// chose, so none of it may hold up the Settings window.
     func refresh() {
-        resolved = registry.resolve(repo: repo)
-        trustProblem = registry.trustStore.isUnreadable
+        resolve(then: nil)
+    }
+
+    /// Waits until every resolve started so far has landed.
+    func settle() async {
+        await pending?.value
+    }
+
+    /// `work`, if any, runs first on the same background task (an approval digests the folder).
+    /// Its result is a message for `approvalError`.
+    private func resolve(then work: (@Sendable () -> String?)?) {
+        let registry = registry, repo = repo, previous = pending
+        pending = Task { @MainActor [weak self] in
+            await previous?.value
+            let outcome = await Task.detached(priority: .userInitiated) {
+                let message = work?()
+                return (message, registry.resolve(repo: repo), registry.trustStore.isUnreadable, pthread_main_np() != 0)
+            }.value
+            self?.publish(error: outcome.0, resolved: outcome.1, trustUnreadable: outcome.2, onMain: outcome.3)
+        }
+    }
+
+    private func publish(error: String?, resolved: [ResolvedProvider], trustUnreadable: Bool, onMain: Bool) {
+        if let error { approvalError = error }
+        self.resolved = resolved
+        lastResolveWasOnMainThread = onMain
+        trustProblem = trustUnreadable
             ? "Approvals are saved in a file Flight Deck cannot read. Move it aside to start a new list; providers that run code will ask again."
             : nil
+        republish()
+        isLoading = false
+    }
+
+    private func republish() {
         let disabled = disabledIDs
         rows = resolved.map { row($0, disabled: disabled) }
     }
@@ -72,6 +111,8 @@ final class ProvidersSettingsModel: ObservableObject {
         var disabled = disabledIDs
         if enabled { disabled.remove(entry) } else { disabled.insert(entry) }
         defaults.set(disabled.sorted(), forKey: Self.disabledKey)
+        // The switch moves now, from what is already resolved; the fresh resolve follows.
+        republish()
         refresh()
     }
 
@@ -79,17 +120,21 @@ final class ProvidersSettingsModel: ObservableObject {
         approvalError = nil
         guard let repo, let provider = resolved.first(where: { Self.rowID($0) == rowID }),
               let digest = provider.digest else { return }
-        let id = provider.id
-        do {
-            try registry.approve(provider, shownDigest: digest, repo: repo)
-        } catch ProviderRegistry.ApprovalError.changedSinceShown {
-            approvalError = "\(provider.manifest?.name ?? id) changed while you were looking at it. Check it again, then approve."
-        } catch ProviderTrustStore.StoreError.trustFileUnreadable {
-            approvalError = "Nothing was approved: the approvals file is damaged. Move it aside first."
-        } catch {
-            approvalError = "Could not approve \(provider.manifest?.name ?? id). Check that Flight Deck can read the provider's folder, then try again."
-        }
-        refresh()
+        let name = provider.manifest?.name ?? provider.id
+        let registry = registry
+        // `approve` digests the folder again, so it runs off the main actor with the resolve.
+        resolve(then: {
+            do {
+                try registry.approve(provider, shownDigest: digest, repo: repo)
+                return nil
+            } catch ProviderRegistry.ApprovalError.changedSinceShown {
+                return "\(name) changed while you were looking at it. Check it again, then approve."
+            } catch ProviderTrustStore.StoreError.trustFileUnreadable {
+                return "Nothing was approved: the approvals file is damaged. Move it aside first."
+            } catch {
+                return "Could not approve \(name). Check that Flight Deck can read the provider's folder, then try again."
+            }
+        })
     }
 
     func moveTrustFileAside() {

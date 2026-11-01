@@ -22,7 +22,7 @@ final class ProvidersSettingsRenderTests: XCTestCase {
         if generator { try Data("print(1)".utf8).write(to: dir.appendingPathComponent("gen.py")) }
     }
 
-    func testRenderProvidersPane() throws {
+    func testRenderProvidersPane() async throws {
         // Always renders, so a blank or failed render fails the suite; FD_PROVIDERS_RENDER_DIR
         // keeps the PNGs where they can be looked at.
         let out = ProcessInfo.processInfo.environment["FD_PROVIDERS_RENDER_DIR"]
@@ -45,18 +45,22 @@ final class ProvidersSettingsRenderTests: XCTestCase {
         let size = NSSize(width: 720, height: 460)
 
         let model = ProvidersSettingsModel(registry: registry, repo: repo, defaults: defaults)
+        await model.settle()
         model.setEnabled(model.key("sketch"), false)
+        await model.settle()
         for (suffix, appearance) in [("", NSAppearance.Name.darkAqua), ("-light", .aqua)] {
             try PlanningRender.write(ProvidersPane(model: model), size: size,
                                      to: dir.appendingPathComponent("providers\(suffix).png"), appearance: appearance)
         }
         model.approve(model.key("charts"))
+        await model.settle()
         try PlanningRender.write(ProvidersPane(model: model), size: size,
                                  to: dir.appendingPathComponent("providers-approved.png"))
 
         try FileManager.default.createDirectory(at: trust, withIntermediateDirectories: true)
         try Data("{oops".utf8).write(to: trust.appendingPathComponent("provider-trust.json"))
         let corrupt = ProvidersSettingsModel(registry: registry, repo: repo, defaults: defaults)
+        await corrupt.settle()
         for (suffix, appearance) in [("", NSAppearance.Name.darkAqua), ("-light", .aqua)] {
             try PlanningRender.write(ProvidersPane(model: corrupt), size: NSSize(width: 720, height: 560),
                                      to: dir.appendingPathComponent("providers-corrupt\(suffix).png"), appearance: appearance)

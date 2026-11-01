@@ -35,8 +35,13 @@ struct ProvidersPane: View {
                         .accessibilityIdentifier("providers-approval-error")
                 }
                 if model.rows.isEmpty {
-                    Text("No providers found.").foregroundStyle(.secondary)
-                        .accessibilityIdentifier("providers-empty")
+                    if model.isLoading {
+                        ProgressView().controlSize(.small)
+                            .accessibilityIdentifier("providers-loading")
+                    } else {
+                        Text("No providers found.").foregroundStyle(.secondary)
+                            .accessibilityIdentifier("providers-empty")
+                    }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.rows) { row in ProviderRow(row: row, model: model) }
