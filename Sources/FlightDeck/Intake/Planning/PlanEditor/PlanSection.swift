@@ -125,6 +125,9 @@ struct PlanSectionBody: View {
     @State private var incoming: Loaded?
     /// `incoming` is the human's own choice of round, not a head that landed — see `reload`.
     @State private var incomingIsNavigation = false
+    /// `incoming` is the checkpoint on screen with an accept or a merge in it, not a new round:
+    /// the editor applies it in place (N4).
+    @State private var incomingIsAccept = false
     /// The selection the last reload saw, to tell a round chosen on the timeline apart from
     /// a new head arriving while the view follows the head.
     @State private var loadedSelection: Int??
@@ -310,7 +313,8 @@ struct PlanSectionBody: View {
         router.env = PlanEditRouter.Env(tape: { live?() ?? latest }, loadFile: loadFile, send: onSend,
                                         onConflict: hooks.onConflict,
                                         deliver: { checkpoint, plan in deliver(plan, to: checkpoint) },
-                                        runner: hooks.runner, queued: hooks.queuedPlan)
+                                        runner: hooks.runner, queued: hooks.queuedPlan,
+                                        typingWon: hooks.typingWon)
     }
 
     /// A merge's plan for `checkpoint`: offered to the editor as `incoming` — never written
@@ -319,6 +323,7 @@ struct PlanSectionBody: View {
     private func deliver(_ plan: String, to checkpoint: Int) {
         if let next = PlanSectionBody.offer(plan, for: checkpoint, shown: shown, incoming: incoming) {
             incomingIsNavigation = false
+            incomingIsAccept = next.checkpoint == shown?.checkpoint
             incoming = next
         }
     }
@@ -353,7 +358,7 @@ struct PlanSectionBody: View {
                              self.incoming = nil
                              incomingIsNavigation = false
                          },
-                         incomingIsNavigation: incomingIsNavigation)
+                         incomingIsNavigation: incomingIsNavigation, incomingIsAccept: incomingIsAccept)
                 .editLayer(generated: generated[shown.checkpoint])
                 .handle(editor)
                 .folds(hooks.folds)
@@ -515,6 +520,7 @@ struct PlanSectionBody: View {
             // hold it behind the banner. A round the human chose is never held — the editor
             // commits their edit to its own checkpoint and loads the choice.
             incomingIsNavigation = navigated
+            incomingIsAccept = !navigated && loaded.checkpoint == shown?.checkpoint
             incoming = loaded
         }
     }

@@ -71,6 +71,14 @@ struct PlanEditSession {
         return true
     }
 
+    /// An accepted edit was applied in place (N4): `incoming` is now what is committed, and
+    /// `showing` — it with any uncommitted typing on top — is what the editor holds.
+    mutating func took(_ incoming: String, showing: String) {
+        committed = incoming
+        current = showing
+        held = nil
+    }
+
     /// The parent withdrew its offer (the human went back to the checkpoint on screen).
     mutating func dropHeld() { held = nil }
 
@@ -105,6 +113,10 @@ struct PlanTextView: NSViewRepresentable {
     let incoming: String?
     let onShowIncoming: () -> Void
     var incomingIsNavigation = false
+    /// `incoming` is the same checkpoint's plan with an accepted thread edit (or a merge) in it,
+    /// not a new round: applied in place as an edit, keeping caret, selection and undo (N4), and
+    /// named "Accepted edit applied" when it has to wait behind the banner.
+    var incomingIsAccept = false
     var theme: PlanTheme = .standard
     /// The agents' plan under `text` — set, the human's edits over it draw as a layer
     /// (`EditLayer`); nil draws none.
@@ -144,7 +156,7 @@ struct PlanTextView: NSViewRepresentable {
     var fillHeight: CGFloat = 0
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
-         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false,
+         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false, incomingIsAccept: Bool = false,
          theme: PlanTheme = .standard, compact: Bool = false, focusOnAppear: Bool = false, identifier: String = "plan-editor") {
         self.theme = theme
         self.compact = compact
@@ -156,6 +168,7 @@ struct PlanTextView: NSViewRepresentable {
         self.incoming = incoming
         self.onShowIncoming = onShowIncoming
         self.incomingIsNavigation = incomingIsNavigation
+        self.incomingIsAccept = incomingIsAccept
     }
 
     /// Draws the human's edits over `generated`, the agents' plan for the same checkpoint.
@@ -286,7 +299,8 @@ struct PlanTextView: NSViewRepresentable {
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
-        coordinator.receive(incoming, navigation: incomingIsNavigation)
+        coordinator.receive(incoming, navigation: incomingIsNavigation, accept: incomingIsAccept)
+        container.bannerAccept = incomingIsAccept
         container.bannerVisible = coordinator.session.held != nil
         coordinator.layEditLayer(over: generated)
         coordinator.jump(to: jump)
@@ -409,7 +423,7 @@ struct PlanTextView: NSViewRepresentable {
             resumeReading(reading, in: text, firstLoad: firstLoad)
         }
 
-        func receive(_ incoming: String?, navigation: Bool) {
+        func receive(_ incoming: String?, navigation: Bool, accept: Bool = false) {
             guard let incoming else { return session.dropHeld() }
             guard incoming != taking else { return }
             if navigation {
@@ -422,6 +436,7 @@ struct PlanTextView: NSViewRepresentable {
             }
             guard incoming != session.held else { return }
             session.editing = isFirstResponder
+            if accept, incoming != session.current, applyInPlace(incoming) { return }
             // Typed text identical to the new head loses nothing by being replaced by it.
             if incoming == session.current || EditPolicy.shouldReplace(editing: session.editing, dirty: session.dirty) {
                 // Commit anything unfocused-but-uncommitted before it is replaced.
@@ -439,6 +454,43 @@ struct PlanTextView: NSViewRepresentable {
             guard let held = session.held else { return }
             if let text = session.flush() { commit(text) }
             takeIncoming(held)
+        }
+
+        /// N4: the same checkpoint's plan with an accepted edit in it, put into the text as an
+        /// edit — the smallest one, through the editor's own change path — rather than loaded, so
+        /// the caret and selection follow their text and the undo stack is kept. With typing not
+        /// yet committed, the accept's lines are replayed onto it (`PlanRebase.replay`); when they
+        /// can't be (the typing touched them), false, and the banner holds it as before.
+        private func applyInPlace(_ incoming: String) -> Bool {
+            guard let textView, let storage = textView.textStorage, !textView.hasMarkedText() else { return false }
+            let showing: String
+            if session.dirty {
+                guard let replayed = PlanRebase.replay(base: session.committed, ours: incoming, onto: session.current) else { return false }
+                showing = replayed
+            } else {
+                showing = incoming
+            }
+            let old = textView.string as NSString, new = showing as NSString
+            if old != new {
+                var front = 0
+                while front < old.length, front < new.length, old.character(at: front) == new.character(at: front) { front += 1 }
+                var back = 0
+                while back < old.length - front, back < new.length - front,
+                      old.character(at: old.length - 1 - back) == new.character(at: new.length - 1 - back) { back += 1 }
+                let range = NSRange(location: front, length: old.length - front - back)
+                let replacement = new.substring(with: NSRange(location: front, length: new.length - front - back))
+                textView.breakUndoCoalescing()
+                guard textView.shouldChangeText(in: range, replacementString: replacement) else { return false }
+                storage.replaceCharacters(in: range, with: replacement)
+                textView.didChangeText()
+                undo.setActionName("Accepted Edit")
+                textView.breakUndoCoalescing()
+            }
+            session.took(incoming, showing: showing)
+            // The parent moves `incoming` into `text`; that is no load — it is on screen already.
+            lastBound = incoming
+            takeIncoming(incoming)
+            return true
         }
 
         private func takeIncoming(_ text: String) {
@@ -1132,6 +1184,14 @@ final class PlanEditorContainer: NSView {
     private var observers: [NSObjectProtocol] = []
 
     override var isFlipped: Bool { true }
+
+    /// The banner names an accepted edit rather than a new round (N4).
+    var bannerAccept = false {
+        didSet {
+            guard bannerAccept != oldValue else { return }
+            banner.rootView = IncomingBanner(onShow: banner.rootView.onShow, accept: bannerAccept)
+        }
+    }
 
     var bannerVisible: Bool {
         get { !banner.isHidden }
@@ -1957,11 +2017,14 @@ extension EnvironmentValues {
 /// Review Focus 3's banner: a round landed while the human was typing, so it waits.
 struct IncomingBanner: View {
     let onShow: () -> Void
+    var accept = false
+
+    static func title(accept: Bool) -> String { accept ? "Accepted edit applied" : "A new round landed" }
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
-            Text("A new round landed").font(.callout.weight(.semibold))
+            Text(Self.title(accept: accept)).font(.callout.weight(.semibold))
             Spacer(minLength: 0)
             Button("Show it", action: onShow)
                 .accessibilityIdentifier("plan-show-incoming")
