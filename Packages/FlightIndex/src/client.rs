@@ -28,6 +28,12 @@ impl Client {
         Ok(Client { writer, reader, next_id: 1 })
     }
 
+    /// Bound every later read and write on this connection, for callers that must not hang (hooks).
+    pub fn set_timeout(&self, t: Duration) -> std::io::Result<()> {
+        self.writer.set_read_timeout(Some(t))?;
+        self.writer.set_write_timeout(Some(t))
+    }
+
     pub fn call(&mut self, cwd: &str, seq: u64, tool: &str, args: Map<String, Value>) -> Result<Response> {
         let req = Request { v: Some(PROTOCOL_VERSION), id: json!(self.next_id), cwd: cwd.to_string(), seq, tool: tool.to_string(), args };
         self.next_id += 1;

@@ -314,6 +314,7 @@ impl Service {
                 ..Default::default()
             }),
             "status" => Ok(self.status()),
+            "guard" => self.guard(req),
             "gc" | "build" | "add_root" | "workspace" => self.admin(name, req).map(|t| Response::text(Value::Null, t)),
             other if tools::mutate::canonical(other).is_some() => {
                 let tool = tools::mutate::canonical(other).expect("checked");
@@ -358,11 +359,75 @@ impl Service {
         let cochange = || self.cochange_for(&view);
         let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange };
         let body = tools::run(tool, &ctx)?;
+        if tool == "impact" {
+            self.acknowledge(&graph, &args);
+        }
         let mut head = tools::header(&view.label, view.overlay.len(), building);
         for m in &members {
             head.push_str(&format!("\n{}", member_line(m)));
         }
         Ok(format!("{head}\n{body}"))
+    }
+
+    /// `impact` is how an agent acknowledges the risk of editing a load-bearing file: leave the ack
+    /// `fdindex guard` (and the old `qartez-guard`) look for in the view's worktree. A failure to
+    /// write it costs the agent a retry of `impact`, not the answer it just got.
+    fn acknowledge(&self, graph: &crate::graph::ViewGraph, args: &Args) {
+        let Some(fi) = args.path(tools::args::FILE).and_then(|p| graph.file_idx(&p)) else { return };
+        let rel = &graph.file(fi).path;
+        if let Err(e) = crate::ack::write(&graph.label.worktree, rel) {
+            log::info(&format!("could not write the ack for {rel} in {}: {e}", graph.label.worktree.display()));
+        }
+    }
+
+    /// What `fdindex guard` and `fdindex session-start` ask: is the project of `file_path` (else of
+    /// the caller's cwd) indexed, and, for a file, how load-bearing is it. It starts the view's build
+    /// when there is none, without waiting more than `build_wait_ms` for it, so the first Glob or
+    /// session in a repository is also what warms it. The answer is `data`:
+    ///
+    /// ```text
+    /// {"state":"NONE"}                                         not in a repository or project
+    /// {"state":"BUILDING","done":3,"total":90,"worktree":..}   the view has no complete index yet
+    /// {"state":"READY","worktree":..,"in_index":false}         indexed; the file is not in it
+    /// {"state":"READY","worktree":..,"in_index":true,"rel":"src/a.rs","pagerank":0.12,"blast":34,
+    ///  "hot":[{"name":"f","pr":0.4}]}                          indexed; the file's standing
+    /// ```
+    fn guard(self: &Arc<Self>, req: &Request) -> std::result::Result<Response, ToolError> {
+        if req.cwd.is_empty() || !Path::new(&req.cwd).is_absolute() {
+            return Err(ToolError::bad("cwd must be an absolute path"));
+        }
+        let args = Args::new(req.args.clone(), PathBuf::from(&req.cwd));
+        let file = args.path(tools::args::FILE);
+        let anchor = file.clone().unwrap_or_else(|| PathBuf::from(&req.cwd));
+        let answer = |data: Value| Ok(Response { ok: true, data: Some(data), ..Default::default() });
+        let located = match git::locate(&anchor) {
+            Ok(l) if check_indexable(&l, &anchor).is_ok() => l,
+            _ => return answer(json!({"state": "NONE"})),
+        };
+        let gate = self.gate(&located.root);
+        let _reading = gate.read().unwrap_or_else(|e| e.into_inner());
+        let view = self.view(&anchor)?;
+        self.touch(&view);
+        let worktree = view.label.worktree.clone();
+        let wait = if file.is_some() { self.wait_bound(&args) } else { Duration::ZERO };
+        if let Readiness::Building { done, total } = self.ensure_built(&view, &[], false, Some(wait))? {
+            return answer(json!({"state": "BUILDING", "done": done, "total": total, "worktree": worktree}));
+        }
+        let Some(file) = file else { return answer(json!({"state": "READY", "worktree": worktree})) };
+        let graph = self.engine.graph(&view)?;
+        let Some(fi) = graph.file_idx(&file) else { return answer(json!({"state": "READY", "worktree": worktree, "in_index": false})) };
+        let blast = crate::links::Views::new(&graph, &[]).blast_radius(0, fi).len();
+        let mut hot: Vec<crate::query::SymbolHit> = graph
+            .file(fi)
+            .facts
+            .symbols
+            .iter()
+            .filter(|s| !matches!(s.kind, crate::facts::SymbolKind::Field | crate::facts::SymbolKind::Impl))
+            .map(|s| graph.hit(crate::graph::SymId { file: fi, local: s.local_id }))
+            .collect();
+        hot.sort_by(|a, b| b.rank.partial_cmp(&a.rank).unwrap_or(std::cmp::Ordering::Equal).then(a.start_line.cmp(&b.start_line)));
+        let hot: Vec<Value> = hot.iter().take(3).map(|h| json!({"name": h.name, "pr": h.rank})).collect();
+        answer(json!({"state": "READY", "worktree": worktree, "in_index": true, "rel": graph.file(fi).path, "pagerank": graph.file_rank[fi as usize], "blast": blast, "hot": hot}))
     }
 
     fn gate(&self, worktree: &Path) -> Arc<RwLock<()>> {

@@ -7,6 +7,8 @@
 //! fdindex mcp [--no-start]                                                  stdio MCP server (a client of the daemon)
 //! fdindex service install|uninstall|start|stop|status|restart [--label L]   keep it running at login
 //! (install, uninstall, start, restart are also top-level verbs; started as `qartez` this is the qartez alias)
+//! fdindex guard | session-start                                            the PreToolUse / SessionStart hooks (replace qartez-guard, qartez-setup)
+//! fdindex switchover [--dry-run | --apply | --rollback | --list-old-dbs]   move this machine's agents from qartez to fdindex
 //! fdindex <tool> [first-arg] [--flag value]...                              query it
 //!
 //! tools: map find grep read outline deps stats impact refs calls
@@ -27,6 +29,8 @@ use flightindex::client::{connect_or_start, Client};
 use flightindex::daemon;
 use flightindex::mcp;
 use flightindex::error::{Error, Result};
+use flightindex::guard;
+use flightindex::session_start;
 use flightindex::proto::state;
 use flightindex::runtime::Paths;
 use flightindex::service::Config;
@@ -38,7 +42,7 @@ use std::time::Duration;
 
 /// Flags that never take a value, so `find --regex foo` reads `foo` as the name, not as regex's value.
 const BOOLEAN_FLAGS: &[&str] = &[
-    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start", "no_watch", "now",
+    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start", "no_watch", "now", "dry_run", "rollback", "list_old_dbs", "no_service",
 ];
 
 fn main() {
@@ -197,6 +201,20 @@ fn run() -> Result<i32> {
         "service" => return service_install::run(cli.positional.first().map_or("status", String::as_str), paths, label),
         "install" | "uninstall" | "start" | "restart" => return service_install::run(&cli.verb, paths, label),
         "status" if !cli.json => return service_install::run("status", paths, label),
+        // Hooks: they answer on stdin/stdout and never fail (the old `qartez-guard` and `qartez-setup`).
+        "guard" => {
+            let settings = guard::Settings::from(&cli.args, &|k| std::env::var(k).ok());
+            let verdict = guard::decide(&read_stdin(), &settings, &guard::Env::current(), std::time::SystemTime::now(), &mut guard::Socket { paths });
+            print!("{}", verdict.stdout);
+            eprint!("{}", verdict.stderr);
+            return Ok(0);
+        }
+        "session-start" => {
+            let project_dir = std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|v| !v.is_empty());
+            let here = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            print!("{}", session_start::run(&paths, &daemon_args(&cli), &read_stdin(), project_dir, here));
+            return Ok(0);
+        }
         "mcp" => {
             let cwd = absolute_cwd(&cli)?;
             let auto_start = !cli.args.contains_key("no_start") && std::env::var_os("FLIGHTDECK_INDEX_NO_START").is_none();
@@ -257,6 +275,16 @@ fn run() -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// The hook's stdin, or nothing when it is a terminal (a person running the hook by hand).
+fn read_stdin() -> String {
+    use std::io::{IsTerminal, Read};
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().read_to_string(&mut input);
+    }
+    input
 }
 
 /// Daemon tuning a client forwards when it is the one starting the daemon.

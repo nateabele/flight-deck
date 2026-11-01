@@ -14,7 +14,8 @@ const IGNORED_SWITCHES: &[&str] = &["--reindex", "--no-watch"];
 
 /// True when `argv0` names the `qartez` alias.
 pub fn is_alias(argv0: &str) -> bool {
-    std::path::Path::new(argv0).file_name().is_some_and(|n| n == "qartez")
+    // `qartez-mcp` is the name the old install also linked to the binary.
+    std::path::Path::new(argv0).file_name().is_some_and(|n| n == "qartez" || n == "qartez-mcp")
 }
 
 /// `args` is argv without the program name. Returned unchanged unless started as `qartez`.
@@ -71,6 +72,11 @@ mod tests {
     #[test]
     fn other_names_are_left_alone() {
         assert_eq!(norm("/usr/bin/fdindex", &["--root", "/x", "find", "a"]), ["--root", "/x", "find", "a"]);
+    }
+
+    #[test]
+    fn qartez_mcp_is_the_alias_too() {
+        assert_eq!(norm("/home/n/.local/bin/qartez-mcp", &[]), ["mcp"]);
     }
 
     #[test]
