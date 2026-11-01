@@ -156,6 +156,13 @@ impl ViewGraph {
                 if let Some(c) = self.name_index.get(name) {
                     ids.extend(c.iter().copied().filter(|id| qual.is_none_or(|q| self.qualifier_matches(*id, q))));
                 }
+                // Elixir module symbols carry dots in their own name (`Shop.Order`), so the whole
+                // string can be a definition rather than a qualified lookup.
+                if qual.is_some() && let Some(c) = self.name_index.get(n.as_str()) {
+                    ids.extend(c.iter().copied());
+                    ids.sort();
+                    ids.dedup();
+                }
             }
             NameMatch::Prefix(_) | NameMatch::Regex(_) => {
                 for (fi, f) in self.files.iter().enumerate().filter(|(_, f)| f.alive) {

@@ -1,4 +1,4 @@
-//! Print a file's tree-sitter tree with field names: `cargo run --example dump -- <elm|rust|ts|tsx|js> <file>`.
+//! Print a file's tree-sitter tree with field names: `cargo run --example dump -- <elm|rust|ts|tsx|js|elixir|swift|python> <file>`.
 //! The way to find the node kinds a new language extractor needs.
 use tree_sitter::{Node, Parser};
 fn walk(n: Node, src: &[u8], depth: usize, field: Option<&str>) {
@@ -16,6 +16,9 @@ fn main() {
     let lang: tree_sitter::Language = match a[1].as_str() {
         "elm" => tree_sitter_elm::LANGUAGE.into(),
         "rust" => tree_sitter_rust::LANGUAGE.into(),
+        "elixir" => tree_sitter_elixir::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
+        "python" => tree_sitter_python::LANGUAGE.into(),
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         _ => tree_sitter_javascript::LANGUAGE.into(),

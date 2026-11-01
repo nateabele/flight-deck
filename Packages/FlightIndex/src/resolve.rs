@@ -13,6 +13,11 @@
 //! of them; each worktree makes it absolute against its own root (`absolute`). `links.rs` turns
 //! that path into a file of the linked view.
 
+mod python;
+mod swift;
+
+pub use swift::swift_module_key;
+
 use crate::facts::Import;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +47,8 @@ pub struct Resolver {
     /// worktree stands (`../lib` is a different directory from each), so a graph resolved by this
     /// resolver is exact only for the root it was resolved under.
     probed_outside: AtomicBool,
+    /// Swift module name -> the module keys (directories) bearing it.
+    swift_modules: HashMap<String, Vec<String>>,
 }
 
 const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -57,7 +64,8 @@ impl Resolver {
                 rust_crates.insert(name.replace('-', "_"), p.clone());
             }
         }
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false) }
+        let swift_modules = swift::swift_module_names(paths.iter());
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -73,6 +81,7 @@ impl Resolver {
         use crate::facts::ImportKind;
         match language {
             "elm" => self.elm_module(from, &imp.specifier),
+            "python" => self.python_module(from, &imp.specifier),
             "typescript" | "tsx" | "javascript" => self.ts_specifier(from, &imp.specifier),
             "rust" => {
                 if imp.kind == ImportKind::ModDecl {

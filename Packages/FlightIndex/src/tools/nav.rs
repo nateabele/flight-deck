@@ -233,6 +233,8 @@ fn group(k: SymbolKind) -> (u8, &'static str) {
         SymbolKind::Macro => (7, "Macros:"),
         SymbolKind::Const => (8, "Consts:"),
         SymbolKind::Field => (9, "Fields:"),
+        SymbolKind::Extension => (10, "Extensions:"),
+        SymbolKind::Variable => (11, "Variables:"),
     }
 }
 

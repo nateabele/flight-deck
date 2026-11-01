@@ -30,6 +30,11 @@ pub enum SymbolKind {
     Impl,
     Port,
     Macro,
+    /// Swift `extension Foo`: adds members to a type declared elsewhere, so it is not a second
+    /// class named `Foo`.
+    Extension,
+    /// A mutable module-level binding (Python `counter = 0`); `Const` is for constants.
+    Variable,
 }
 
 impl SymbolKind {
@@ -50,6 +55,8 @@ impl SymbolKind {
             SymbolKind::Impl => "impl",
             SymbolKind::Port => "port",
             SymbolKind::Macro => "macro",
+            SymbolKind::Extension => "extension",
+            SymbolKind::Variable => "variable",
         }
     }
 
@@ -70,6 +77,8 @@ impl SymbolKind {
             "impl" => SymbolKind::Impl,
             "port" => SymbolKind::Port,
             "macro" => SymbolKind::Macro,
+            "extension" => SymbolKind::Extension,
+            "variable" => SymbolKind::Variable,
             _ => return None,
         })
     }
