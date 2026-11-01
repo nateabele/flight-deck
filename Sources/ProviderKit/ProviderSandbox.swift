@@ -65,6 +65,8 @@ public struct ProviderSandbox: Sendable {
     /// Seconds between SIGTERM and SIGKILL once the timeout expires.
     public let killGrace: TimeInterval
     public let limits: Limits
+    /// Where Flight Deck warms the xcrun cache each run starts with a copy of.
+    public let xcrunSeedFolder: URL
     /// Tests only: runs after the generator and every process holding its pipes are gone, and
     /// before delivery reads the output, standing in for a process that escaped both and
     /// rewrites the folder at the worst moment.
@@ -89,11 +91,18 @@ public struct ProviderSandbox: Sendable {
         public static let standard = Limits(stdout: 1 << 20, output: 10 << 20, temp: 256 << 20, file: 64 << 20)
     }
 
-    /// The system's directories first, then Homebrew's (Apple silicon, then Intel), so
-    /// `#!/usr/bin/env node` works without a provider shadowing a system tool.
+    /// Flight Deck's own xcrun cache: `~/Library/Caches/dev.flightdeck/xcrun-seed`, 0700.
+    public static var defaultXcrunSeedFolder: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? userHome.appendingPathComponent("Library/Caches", isDirectory: true)
+        return caches.appendingPathComponent("dev.flightdeck/xcrun-seed", isDirectory: true)
+    }
+
     /// Runs the `ulimit` script. Bash, never `/bin/sh`: see `runOnClock`.
     static let launcher = "/bin/bash"
 
+    /// The system's directories first, then Homebrew's (Apple silicon, then Intel), so
+    /// `#!/usr/bin/env node` works without a provider shadowing a system tool.
     public static let environmentPath = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 
     /// Paths are read at run time with `-D`, not spliced into the text, so no path can break
@@ -140,12 +149,13 @@ public struct ProviderSandbox: Sendable {
 
     public init(sandboxExecPath: String = "/usr/bin/sandbox-exec", runner: any CommandRunner = SystemCommandRunner(),
                 snapshotRoot: URL = FileManager.default.temporaryDirectory, killGrace: TimeInterval = 2,
-                limits: Limits = .standard) {
+                limits: Limits = .standard, xcrunSeedFolder: URL = ProviderSandbox.defaultXcrunSeedFolder) {
         self.sandboxExecPath = sandboxExecPath
         self.runner = runner
         self.snapshotRoot = snapshotRoot
         self.killGrace = killGrace
         self.limits = limits
+        self.xcrunSeedFolder = xcrunSeedFolder
     }
 
     /// Runs `provider`'s generator once. On exit 0 the generator's output folder is copied into
@@ -171,7 +181,7 @@ public struct ProviderSandbox: Sendable {
         let run = try RunFolder(root: snapshotRoot)
         defer { run.remove() }
         try snapshot(provider, into: run)
-        seedXcrunCache(into: run.temp)
+        await seedXcrunCache(into: run.temp)
 
         let profileURL = run.root.appendingPathComponent("profile.sb")
         // Real paths: `$TMPDIR` is under /var, a link to /private/var, and the sandbox matches
@@ -225,12 +235,17 @@ public struct ProviderSandbox: Sendable {
     /// Every `/usr/bin` developer shim (git, swift, clang, make) is xcrun, which caches its
     /// lookups in `$TMPDIR/xcrun_db`. Each run's TMPDIR is new, so every shim call was cold:
     /// `git --version` took about 1 s, 0.15 s warm (measured). The run starts with a COPY of
-    /// the user's cache: the user's own file stays unreadable and unwritable from the sandbox,
-    /// and a lookup the copy lacks is computed and saved to the copy only. Skipped when it
-    /// would take more than a quarter of the temp cap, or is not a plain file.
-    private func seedXcrunCache(into temp: URL) {
-        guard let folder = try? Self.userTempFolder() else { return }
-        let source = open(folder + "/xcrun_db", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    /// Flight Deck's own cache (`XcrunSeed`), never the user's, which keys every HOME and temp
+    /// folder xcrun ever ran under. A lookup the copy lacks is saved to the copy only, and the
+    /// copy dies with the run, so no generator can write what a later one loads. Skipped when
+    /// it would take more than a quarter of the temp cap, or is not a plain file.
+    private func seedXcrunCache(into temp: URL) async {
+        let seedFolder = xcrunSeedFolder
+        let seed: URL? = await withCheckedContinuation { done in
+            DispatchQueue.global().async { done.resume(returning: XcrunSeed.shared.database(in: seedFolder)) }
+        }
+        guard let seed else { return }
+        let source = open(seed.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard source >= 0 else { return }
         defer { close(source) }
         var info = stat()
@@ -619,6 +634,57 @@ public struct ProviderSandbox: Sendable {
             current = next
         }
         return current
+    }
+}
+
+/// Flight Deck's own xcrun cache, warmed once per process per folder by `xcrun --find` of the
+/// common shims, outside any sandbox and with no provider code: HOME, TMPDIR and `xcrun_db`
+/// all point at the 0700 folder, so the db names nothing but it and the toolchain (measured:
+/// 3.4 KB, one path, against the user's 2.1 MB and 13k paths).
+private final class XcrunSeed: @unchecked Sendable {
+    static let shared = XcrunSeed()
+    static let tools = ["git", "swift", "python3", "clang", "make"]
+    private let lock = NSLock()
+    private var warmed: Set<String> = []
+
+    /// The seed db, warmed first if this process has not yet. Nil when the folder is not a
+    /// plain 0700 folder of this user's, or there is no developer directory to ask.
+    func database(in folder: URL) -> URL? {
+        lock.lock(); defer { lock.unlock() }
+        guard Self.prepare(folder) else { return nil }
+        if warmed.insert(folder.path).inserted, Self.run("/usr/bin/xcode-select", ["-p"], folder) == 0 {
+            // `xcode-select -p` first: with no developer directory `xcrun` offers to install one.
+            for tool in Self.tools { _ = Self.run("/usr/bin/xcrun", ["--find", tool], folder) }
+        }
+        return folder.appendingPathComponent("xcrun_db")
+    }
+
+    private static func prepare(_ folder: URL) -> Bool {
+        try? FileManager.default.createDirectory(at: folder.deletingLastPathComponent(), withIntermediateDirectories: true)
+        _ = mkdir(folder.path, 0o700)
+        var info = stat()
+        guard lstat(folder.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == getuid() else { return false }
+        return chmod(folder.path, 0o700) == 0
+    }
+
+    /// Exit status, or -1. Bounded: a wedged lookup is stopped after 30 s.
+    private static func run(_ tool: String, _ arguments: [String], _ folder: URL) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        process.environment = ["PATH": ProviderSandbox.environmentPath, "HOME": folder.path, "TMPDIR": folder.path,
+                               "xcrun_db": folder.appendingPathComponent("xcrun_db").path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return -1 }
+        if exited.wait(timeout: .now() + 30) == .timedOut {
+            process.terminate()
+            guard exited.wait(timeout: .now() + 2) == .success else { return -1 }
+        }
+        return process.terminationStatus
     }
 }
 

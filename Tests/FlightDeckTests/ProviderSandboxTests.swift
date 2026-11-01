@@ -633,6 +633,24 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertEqual(exited(git).code, 0, exited(git).stderr)
     }
 
+    // MARK: - Round 4
+
+    /// The user's own xcrun_db keys every HOME and temp folder xcrun ever ran under (project
+    /// paths, other sessions' scratch folders). The cache a generator sees must name none of
+    /// them: only Flight Deck's own seed folder and the toolchain.
+    func testXcrunCacheNamesNoUserPaths() async throws {
+        // Every user-folder or temp-folder path in the copy, one per line, inside the sandbox.
+        let grep = "test -s \"$TMPDIR/xcrun_db\" || exit 3; "
+            + "/usr/bin/grep -a -o -E '(/Users/|/var/folders/|/private/var/folders/|/private/tmp/|/tmp/)[^|[:cntrl:]]*' "
+            + "\"$TMPDIR/xcrun_db\" | /usr/bin/sort -u | /usr/bin/head -c 500000; exit 0"
+        let result = try await sandbox().run(try provider(["/bin/sh", "-c", grep]), outputDirectory: try output())
+        guard case .exited(0, let stdout, _, _) = result else { return XCTFail("no seeded cache: \(result)") }
+        let seed = try ProviderSandbox.realPath(ProviderSandbox.defaultXcrunSeedFolder)
+        let foreign = String(decoding: stdout, as: UTF8.self).split(separator: "\n").map(String.init)
+            .filter { !$0.hasPrefix(seed) }
+        XCTAssertEqual(foreign, [], "the generator's xcrun cache names \(foreign.count) user or temp paths")
+    }
+
     // MARK: - Refusals
 
     func testMissingSandboxExecIsRefusedAndNothingRuns() async throws {
