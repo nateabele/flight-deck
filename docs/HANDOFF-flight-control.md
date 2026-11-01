@@ -294,32 +294,38 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
     non-pending `fd-visual` ids (`PlanVisualFence.knownVisuals`). It is `Set()`, never nil, for a
     plan with none and at triage (no plan yet), so a cited id there is `unknownVisual`. The
     callers are `RoundExecutor.changeSetSeat` and `patchSeat`, triage, `reviewModel` and both
-    `runRelease` checks. The strict op schema (`Triage.op`) lists `visualRefs` on every op.
-  - **Encode reads the visuals catalogue** (`VisualCatalogue`, `RoundPrompts.visualsCatalogue`):
-    each visual's id, kind, section, states, and its source and default-snapshot paths. The
-    encoder may read `visuals/`. A plan with no visuals gets exactly the old prompt.
+    `runRelease` checks. A visual counts only with a block state on the released (head plan)
+    checkpoint, its `visuals.json` first and `block.json` as the fallback. The strict op schema (`Triage.op`) lists `visualRefs` on every op.
+  - **Encode, polish, fresh eyes and dedup read the visuals catalogue** (`VisualCatalogue`,
+    `RoundPrompts.visualsCatalogue`): each visual's id, kind, section, states, and its source and
+    default-snapshot paths. The seat may read `visuals/`. A polish-family `replace` of a create that
+    leaves `visualRefs` null keeps the refs its tempId had (`ChangeSetPatch.apply`); `[]` drops them. A plan with no visuals gets exactly the old prompt.
 - **`DriftClassifier`** compares each op's precondition with the live graph. The result is
   `holds`, `drifted` or `impossible`.
 - **Release** (`IntakeService.runRelease`):
   1. Re-read the graph and classify drift.
   2. Apply the person's drift confirmations and drops, then re-validate.
-  3. **Export the plan** (spec §12, V-R4; `IntakeService+Visuals.swift`). Only when the plan has
-     an `fd-visual` block or a task cites one; any other release never touches git.
-     `PlanExporter` (pure, run off the main actor) builds `docs/plans/<slug>/`: `plan.md` with
+  3. **Export the plan** (D14, spec §12, V-R4; `IntakeService+Visuals.swift`). Every release of an
+     intake with a plan exports it, visuals or not; an identical re-release is a no-change, not an
+     error. Only Single-task intakes, which have no plan, skip it. `PlanExporter` (pure; it and
+     every disk read before it run off the main actor) builds `docs/plans/<slug>/`: `plan.md` with
      each block as an image link plus a folder link, `visuals/<id>/` with the primary's files and
      a `README.md`, `_unused-alternates/<n>/README.md`, and the `.flightdeck-intake` marker. The
      slug comes from the intake's title, with `-2`, `-3`, … past a folder that is not this
      intake's. `RepoCommitter` then commits that folder only (`git commit -- <pathspec>`).
      Uncommitted, ignored or hidden changes in the folder, a symlink, or a folder this intake
      does not own refuse the release with the path named, and nothing is written, tasks included.
-     The block states exported are the ones the plan's checkpoint recorded.
+     So does a block whose visual has nothing stored (the export would mark it missing): the
+     release is refused with the visual's id named, so no task cites a folder that is not
+     written. The block states exported are the ones the plan's checkpoint recorded, with
+     `block.json` as the fallback; `knownVisuals` and the catalogue use the same rule. A cancel
+     after the commit would leave the plan committed with no tasks; nothing cancels a release today.
   4. `ApplyPlanner.plan` orders the steps: creates, edges, edits, reopens, held edges.
   5. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
      With an export, a task with `visualRefs` gets a "Fidelity references" section in its
      description, written by code (V-R3), naming `docs/plans/<slug>/visuals/<id>/` and its states.
   6. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
-  7. `ReleaseRecord` is saved into the intake. The export's warnings (a cited visual with
-     nothing stored) are among its `warnings`.
+  7. `ReleaseRecord` is saved into the intake.
 - **Checkpoints record block states.** IntakeRunner writes `checkpoints/<n>/visuals.json`
   (`CheckpointBlockStates`) from `visuals/` whenever it lands a checkpoint, so an old plan shows
   its visuals as they were. An intake with no visuals gets no file.

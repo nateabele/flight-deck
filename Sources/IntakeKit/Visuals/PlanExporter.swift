@@ -28,8 +28,11 @@ public struct PlanExport: Equatable, Sendable {
     public var files: [ExportedFile]
     /// Things the human should know that did not stop the export (a cited visual that is gone).
     public var warnings: [String]
-    public init(slug: String, files: [ExportedFile], warnings: [String]) {
-        self.slug = slug; self.files = files; self.warnings = warnings
+    /// The ids of blocks with nothing stored to export, in plan order: the plan carries a note in
+    /// their place. Release refuses such a plan, so no task cites a folder that is not written.
+    public var missing: [String] = []
+    public init(slug: String, files: [ExportedFile], warnings: [String], missing: [String] = []) {
+        self.slug = slug; self.files = files; self.warnings = warnings; self.missing = missing
     }
 
     /// Repo-relative, with no trailing slash: also the one pathspec git is given.
@@ -125,6 +128,7 @@ public enum PlanExporter {
         var visualFiles: [ExportedFile] = []
         var exported = Set<VisualID>()
         var decided: [VisualID: Rendered] = [:]
+        var missing: [String] = []
 
         func render(_ id: VisualID) throws -> Rendered? {
             if let d = decided[id] { return d }
@@ -158,6 +162,7 @@ public enum PlanExporter {
                     md.append("[\(text): files](visuals/\(id.rawValue)/)")
                 } else {
                     warnings.append("visual \(id.rawValue) has no stored revision, so the plan carries a note instead")
+                    if !missing.contains(id.rawValue) { missing.append(id.rawValue) }
                     md.append("> Visual `\(id.rawValue)` was not available when this plan was released.")
                 }
             } else {
@@ -170,7 +175,7 @@ public enum PlanExporter {
         var all = [ExportedFile(path: "plan.md", data: Data(md.joined(separator: "\n").utf8)),
                    ExportedFile(path: markerName, data: Data((intakeID + "\n").utf8))]
         all += visualFiles
-        return PlanExport(slug: slug, files: all, warnings: warnings)
+        return PlanExport(slug: slug, files: all, warnings: warnings, missing: missing)
     }
 
     // MARK: Pieces

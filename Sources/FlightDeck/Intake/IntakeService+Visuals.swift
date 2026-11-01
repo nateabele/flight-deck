@@ -28,46 +28,63 @@ extension IntakeService {
 
 // MARK: - Release export (spec §12, V-R4)
 
+/// The plan release exports, read from disk off the main actor: the head plan checkpoint's
+/// effective plan and the block states it recorded (falling back to `block.json`).
+struct ReleasePlan: Sendable {
+    let checkpoint: Int
+    let markdown: String
+
+    /// nil for an intake with no plan (Single-task fidelity). `tape` is the service's cached copy
+    /// when it has one; otherwise it is read here.
+    nonisolated static func read(_ tapes: TapeStore, cached tape: Tape?) -> ReleasePlan? {
+        let tape = tape ?? tapes.loadTape()
+        guard let head = tapes.headPlanCheckpoint(in: tape), let markdown = tapes.effectivePlan(checkpoint: head) else { return nil }
+        return ReleasePlan(checkpoint: head, markdown: markdown)
+    }
+}
+
 extension IntakeService {
-    /// The plan release exports and encode validated against: the head plan checkpoint's
-    /// effective plan. nil for an intake with no plan (Single-task fidelity).
-    func releasePlan(_ id: UUID) -> (checkpoint: Int, markdown: String)? {
-        let tapes = tapeStore(id)
-        guard let head = tapes.headPlanCheckpoint(in: storedTape(id)), let markdown = tapes.effectivePlan(checkpoint: head)
-        else { return nil }
-        return (head, markdown)
+    /// The tape store and whatever copy of the tape is already in memory, taken on the main actor
+    /// so the disk work that follows can run off it.
+    private func releaseSources(_ id: UUID) -> (TapeStore, Tape?, any VisualStoreReading) {
+        (tapeStore(id), tapes[id] ?? latestTapes[id], visualReader(id))
     }
 
-    /// The visual ids `id`'s change set may cite (`ChangeSetValidator`'s `knownVisuals`): `Set()`,
-    /// never nil, for a plan with none, or for no plan at all.
-    func knownVisuals(_ id: UUID) -> Set<String> {
-        PlanVisualFence.knownVisuals(plan: releasePlan(id)?.markdown, store: visualReader(id))
+    /// The visual ids `id`'s change set may cite (`ChangeSetValidator`'s `knownVisuals`), by the
+    /// released checkpoint's block states: `Set()`, never nil, for a plan with none or no plan.
+    func knownVisuals(_ id: UUID) async -> Set<String> {
+        let (tapes, cached, reader) = releaseSources(id)
+        return await Task.detached {
+            guard let plan = ReleasePlan.read(tapes, cached: cached) else { return Set<String>() }
+            return PlanVisualFence.knownVisuals(plan: plan.markdown, store: reader, checkpoint: plan.checkpoint)
+        }.value
     }
 
-    /// What release writes to `docs/plans/<slug>/`, or nil when it writes nothing: a plan with no
-    /// `fd-visual` block and no task citing one is not exported, so a release without visuals
-    /// never touches the user's repo. Built off the main actor: it reads every exported byte.
+    /// What release writes to `docs/plans/<slug>/` (D14, §12: every plan), or nil for an intake
+    /// with no plan. A block with nothing stored refuses, naming its id, so no task is written
+    /// beside a plan that says its visual is missing. Everything here, the slug's folder checks
+    /// included, runs off the main actor.
     func releaseExport(_ i: Intake) async -> Result<PlanExport, ReleaseExportRefusal>? {
-        let cites = i.changeSet?.ops.contains { op in
-            if case .createBead(let b) = op { return !(b.visualRefs ?? []).isEmpty }
-            return false
-        } ?? false
-        guard let plan = releasePlan(i.id), cites || !PlanVisualFence.blocks(in: plan.markdown).isEmpty else { return nil }
-        let reader = visualReader(i.id)
-        var states: [VisualID: BlockState] = [:]
-        for block in PlanVisualFence.blocks(in: plan.markdown) {
-            states[block.id] = reader.blockState(block.id, checkpoint: plan.checkpoint)
-        }
+        let (tapes, cached, reader) = releaseSources(i.id)
         let repo = URL(fileURLWithPath: i.projectPath, isDirectory: true)
         let intakeID = i.id.uuidString
-        let slug = PlanExporter.resolveSlug(title: IntakeTitle(intent: i.intent).title, intakeID: intakeID) {
-            RepoCommitter.owner(of: $0, repo: repo)
-        }
-        let markdown = plan.markdown, blockStates = states
-        return await Task.detached {
+        let title = IntakeTitle(intent: i.intent).title
+        return await Task.detached { () -> Result<PlanExport, ReleaseExportRefusal>? in
+            guard let plan = ReleasePlan.read(tapes, cached: cached) else { return nil }
+            var states: [VisualID: BlockState] = [:]
+            for block in PlanVisualFence.blocks(in: plan.markdown) {
+                states[block.id] = reader.blockState(block.id, checkpoint: plan.checkpoint)
+            }
+            let slug = PlanExporter.resolveSlug(title: title, intakeID: intakeID) { RepoCommitter.owner(of: $0, repo: repo) }
             do {
-                return .success(try PlanExporter.export(plan: markdown, slug: slug, intakeID: intakeID, store: reader,
-                                                        blockStates: blockStates))
+                let export = try PlanExporter.export(plan: plan.markdown, slug: slug, intakeID: intakeID, store: reader,
+                                                     blockStates: states)
+                guard export.missing.isEmpty else {
+                    let ids = export.missing.map { "`\($0)`" }.joined(separator: ", ")
+                    return .failure(ReleaseExportRefusal(message: "The plan names visuals with nothing stored (\(ids)). "
+                        + "Release would leave tasks citing folders it cannot write; make or remove them, then release again."))
+                }
+                return .success(export)
             } catch {
                 return .failure(ReleaseExportRefusal(message: IntakeService.exportMessage(error)))
             }

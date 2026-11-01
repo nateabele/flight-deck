@@ -372,7 +372,7 @@ final class IntakeService: ObservableObject {
     /// Kept apart from `tapes` because a running tape's heartbeat changes every second, and
     /// republishing for that alone re-rendered every view observing this service each second
     /// of a run for nothing it draws.
-    private var latestTapes: [UUID: Tape] = [:]
+    private(set) var latestTapes: [UUID: Tape] = [:]
 
     private let store: IntakeStore
     private let headless: HeadlessRunner
@@ -2116,7 +2116,7 @@ final class IntakeService: ObservableObject {
     func reviewModel(_ id: UUID) async -> ReleaseReview? {
         guard let i = intake(id), let cs = i.changeSet,
               let triaged = triageGraph(id),
-              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged, knownVisuals: knownVisuals(id)),
+              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged, knownVisuals: await knownVisuals(id)),
               let current = try? await graphReader.read(project: i.projectPath)
         else { return nil }
         let drift = DriftClassifier.classify(v, current: current)
@@ -2172,7 +2172,7 @@ final class IntakeService: ObservableObject {
         let current: GraphSnapshot
         do { current = try await graphReader.read(project: i.projectPath) }
         catch { return fail(id, backTo: .review, "Could not read the task graph before release: \(error)") }
-        let known = knownVisuals(id)
+        let known = await knownVisuals(id)
         guard let triaged = triageGraph(id) else {
             return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
         }
@@ -2243,6 +2243,8 @@ final class IntakeService: ObservableObject {
             planSlug = export.slug
             exportWarnings = export.warnings
         }
+        // A cancel here leaves the plan committed with no tasks written. Nothing cancels a release
+        // today (`discard` refuses one in flight); see FOLLOWUPS if that changes.
         guard !Task.isCancelled else { return }
 
         let actor = "flightdeck-intake:\(id.uuidString)"

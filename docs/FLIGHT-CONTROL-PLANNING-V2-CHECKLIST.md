@@ -76,7 +76,8 @@ lines, and the phone's alternate files) land in parallel V4b; check them once it
 - [ ] Unverified. After release, `git log -1` in the project is that commit and holds only `docs/plans/<slug>/`; your own uncommitted edits elsewhere are still uncommitted.
 - [ ] Unverified. A task released from a plan with a cited visual has a "Fidelity references" section naming `docs/plans/<slug>/visuals/<id>/`.
 - [ ] Unverified. With an uncommitted change inside the plan's own `docs/plans/<slug>/`, Release is refused with that folder named, and no task is written.
-- [ ] Unverified. Releasing a plan with no visuals changes nothing in the repo.
+- [ ] Unverified. Releasing a plan with no visuals still commits `docs/plans/<slug>/plan.md`; releasing it again unchanged makes no second commit.
+- [ ] Unverified. A plan naming a visual with nothing stored is refused at Release with the visual's id named.
 
 ### Phone
 

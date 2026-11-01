@@ -675,11 +675,13 @@ during the build.
   manifest's, and files over 10 MB.
 - **Checkpoint block states (§7, R-I7)** are `checkpoints/<n>/visuals.json`, keyed by id, written
   by IntakeRunner when it lands a checkpoint, absent for an intake with no visuals.
-- **`knownVisuals`.** Every change-set check passes the head plan's stored, non-pending visual ids,
-  `Set()` for none (triage included), and the strict op schema lists `visualRefs` on every op.
-  Encode alone gets the catalogue.
-- **Release exports only a plan with visuals.** A plan with no `fd-visual` block and no citing
-  task writes nothing to the repo, so a release without visuals never touches git.
+- **`knownVisuals`.** Every change-set check passes the head plan's non-pending visual ids that
+  have a block state on that checkpoint (`visuals.json` first, `block.json` as the fallback) and a
+  primary that loads, `Set()` for none (triage included). The strict op schema lists `visualRefs`
+  on every op. Encode and the polish family get the catalogue; a polish `replace` that leaves
+  `visualRefs` null keeps the task's refs, and `[]` drops them.
+- **Release refuses a missing visual.** A block whose visual has nothing stored refuses the
+  release with its id named, instead of exporting a note and writing tasks beside it.
 - **Comps (for P2b, agreed with the canvas session).** A comp revision is final only once
   export-checkpoint has written `r<n>/export/` and its snapshots are stored. Release, the phone and
   thumbnails read the stored export and never re-export; export-checkpoint refuses

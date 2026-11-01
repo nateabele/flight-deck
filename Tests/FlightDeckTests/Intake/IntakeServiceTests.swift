@@ -675,7 +675,7 @@ final class IntakeServiceTests: XCTestCase {
 
     /// An intake in review whose encode carried a plan with one visual, and one new task that
     /// cites `cites` — what a shaped intake looks like when it reaches the release sheet.
-    private func reviewIntake(project: URL, cites: String?) throws -> UUID {
+    private func reviewIntake(project: URL, cites: String?, plan: String = visualPlan, installVisual: Bool = true) throws -> UUID {
         var i = Intake(projectPath: project.path, intent: "Pair the phone")
         i.state = .review
         i.recommended = .fullPlan
@@ -693,8 +693,8 @@ final class IntakeServiceTests: XCTestCase {
         let tapes = TapeStore(intakeDirectory: intakes.directory(for: i.id))
         var tape = tapes.loadTape()
         try tapes.writeCheckpoint(Checkpoint(id: 1, stage: .encode, round: 0, major: true, createdAt: Date()),
-                                  files: ["plan.md": Data(Self.visualPlan.utf8)], into: &tape)
-        try VisualDiskFixture.install(tapes, id: "pairing")
+                                  files: ["plan.md": Data(plan.utf8)], into: &tape)
+        if installVisual { try VisualDiskFixture.install(tapes, id: "pairing") }
         return i.id
     }
 
@@ -768,6 +768,34 @@ final class IntakeServiceTests: XCTestCase {
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .review)
         XCTAssertTrue(i.failure?.contains("ghost") == true, i.failure ?? "nil")
+        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] })
+        XCTAssertEqual(try git(repo, "log", "--format=%s"), "init\n")
+    }
+
+    /// Every plan is exported at release (D14, §12), visuals or not.
+    func testReleaseExportsAPlanWithNoVisualsToo() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\nJust words.\n", installVisual: false)
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: releaseBr)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released, intake(svc, id).failure ?? "")
+        XCTAssertEqual(try git(repo, "log", "-1", "--format=%s").trimmingCharacters(in: .whitespacesAndNewlines),
+                       "docs: plan pair-the-phone for release")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("docs/plans/pair-the-phone/plan.md").path))
+    }
+
+    /// A block whose visual the export would mark missing refuses the release, naming the id:
+    /// no task is written beside a plan that says the visual is not there.
+    func testReleaseRefusesAPlanWithAMissingVisual() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\n```fd-visual id=gone\nGone\n```\n",
+                                  installVisual: false)
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .review)
+        XCTAssertTrue(i.failure?.contains("gone") == true, i.failure ?? "nil")
         XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] })
         XCTAssertEqual(try git(repo, "log", "--format=%s"), "init\n")
     }

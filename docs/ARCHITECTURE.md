@@ -2749,7 +2749,7 @@ because a revision never changes.
 
 **Rounds and release.** Encode reads a visuals catalogue and may cite visuals on new tasks
 (`NewBead.visualRefs`); every change-set check refuses an id the plan does not have
-(`knownVisuals`). Release, for a plan with visuals, writes `docs/plans/<slug>/` through
+(`knownVisuals`). Release writes every plan to `docs/plans/<slug>/` through
 `PlanExporter` (pure) and `RepoCommitter`, which commits that folder only and refuses a folder with
 uncommitted changes, then writes the tasks, each citing its visuals' exported folder.
 

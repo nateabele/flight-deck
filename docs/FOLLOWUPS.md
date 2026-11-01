@@ -2558,12 +2558,12 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   export and snapshots are stored, and release, the phone and thumbnails read the stored export,
   never re-export (the canvas session's ruling: export-checkpoint refuses `version_missing` once the
   app's renderer moves on). Drawing an old revision again from its pinned sources is not built.
-- **Release exports only a plan with visuals.** A plan with no `fd-visual` block and no task
-  citing one is not written to `docs/plans/` (so a release without visuals never touches git).
-  Spec §12 reads as exporting every plan; revisit if plans without visuals should land in the repo too.
-- **Encode alone reads the visuals catalogue.** Polish, fresh eyes and dedup are held to the same
-  `knownVisuals` check but are not given the catalogue, so a polisher that rewrites a task may
-  drop its `visualRefs`.
+- **Every release commits a docs folder** (`docs/plans/<slug>/`, D14 and §12, ruled for V4): one
+  commit in the user's repo per release that changes the plan. A project that is not a git repo
+  cannot be released until it is one.
+- **A cancel after the export commit** would leave the plan committed with no tasks written
+  (`IntakeService.runRelease`). Nothing cancels a release today; if something starts to, it must
+  either finish the tasks or say the plan is committed without them.
 - **The release export reads every exported byte** (up to 10 MB a file) whenever the release sheet
   loads its preview. It runs off the main actor, but the sheet re-reads on each rating, drop or
   confirm.
