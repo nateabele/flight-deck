@@ -103,6 +103,7 @@ final class VisualBlockOverlayTests: XCTestCase {
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.onFindMatch = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.isFocused = focused
         // What `makeNSView` does before its first load.
         container.textView.visualBlocks.store = store
@@ -237,11 +238,15 @@ final class VisualBlockOverlayTests: XCTestCase {
         defer { e.close() }
         XCTAssertEqual(e.blocks.count, 1)
         let caption = e.offset("handshake: phone")
-        // The caret alone, in an editor that is not focused, reveals nothing (an unfocused plan reads rendered).
+        let match = NSRange(location: caption, length: "handshake".count)
+        // The caret alone, in an editor that is not focused, reveals nothing.
         e.view.setSelectedRange(NSRange(location: caption, length: 0))
         XCTAssertEqual(e.blocks.count, 1, "a bare caret in an unfocused plan reveals nothing")
-        // A match does.
-        e.view.setSelectedRange(NSRange(location: caption, length: "handshake".count))
+        // A selection left behind when focus moved away is not a Find match.
+        e.view.setSelectedRange(match)
+        XCTAssertEqual(e.blocks.count, 1, "an arbitrary selection left on blur does not make the layout jump")
+        // Find selects its match and shows the indicator.
+        e.view.showFindIndicator(for: match)
         XCTAssertTrue(e.blocks.isEmpty, "the match is in the block, so its source shows and the view goes")
         let font = e.view.textStorage?.attribute(.font, at: caption, effectiveRange: nil) as? NSFont
         XCTAssertGreaterThan(font?.pointSize ?? 0, 5, "the matched words are readable text")
@@ -250,7 +255,9 @@ final class VisualBlockOverlayTests: XCTestCase {
         e.view.setSelectedRange(NSRange(location: e.offset("exchange fails"), length: "exchange".count))
         XCTAssertEqual(e.blocks.count, 1)
         // A match in text outside a block reveals no block.
-        e.view.setSelectedRange(NSRange(location: e.offset("SPAKE2"), length: 6))
+        let outside = NSRange(location: e.offset("SPAKE2"), length: 6)
+        e.view.setSelectedRange(outside)
+        e.view.showFindIndicator(for: outside)
         XCTAssertEqual(e.blocks.count, 1)
     }
 

@@ -103,6 +103,12 @@ final class VisualBlockGateTests: XCTestCase {
         XCTAssertEqual(opened?.sizes, ["wide", "phone"])
         XCTAssertEqual(opened?.aspect, 2)
         XCTAssertEqual(opened?.alternates, [], "an alternate has no alternates of its own")
+        // A state whose name ends in another size's suffix is not mistaken for that size.
+        let tricky = WireVisualAlternate(revision: 6, kind: "x", files: [WireVisualFile(path: "snapshot@a-phone-wide.png", size: 1, sha256: "a")])
+        let trickyRef = WireVisualRef(id: "flow", revision: 3, states: ["a-phone", "a"], sizes: ["phone", "wide"])
+        let opened2 = VisualBlockStyle.ref(opening: tricky, of: trickyRef)
+        XCTAssertEqual(opened2?.states, ["a-phone"], "state a-phone at size wide; no state a")
+        XCTAssertEqual(opened2?.sizes, ["wide"], "no picture at size phone")
         XCTAssertNil(VisualBlockStyle.ref(opening: WireVisualAlternate(revision: 5, kind: "flow"), of: ref), "no files: only a chip")
         XCTAssertNil(VisualBlockStyle.ref(opening: WireVisualAlternate(revision: 5, kind: "flow", files: []), of: ref))
     }

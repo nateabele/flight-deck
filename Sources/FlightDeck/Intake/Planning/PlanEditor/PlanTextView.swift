@@ -263,6 +263,7 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.textView = container.textView
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.onFindMatch = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
         if let folds { coordinator.foldStore = folds }
         coordinator.readingMemory = scrollMemory
@@ -548,8 +549,9 @@ struct PlanTextView: NSViewRepresentable {
             guard let index = MarkdownStyler.blockIndex(at: selection.location, in: blocks) else { return nil }
             if !textView.isFocused {
                 // A Find match is selected while the find field has focus. A hidden visual block
-                // has the match under its view, so it shows its source; the caret alone does not.
-                guard selection.length > 0, case .visual = blocks[index].kind else { return nil }
+                // has the match under its view, so it shows its source. The caret alone does not, and nor
+                // does a selection left behind when focus moved elsewhere: only Find's own match.
+                guard selection.length > 0, textView.findMatch == selection, case .visual = blocks[index].kind else { return nil }
                 return index
             }
             // A table never shows its source: the caret in it reveals nothing.
@@ -1406,6 +1408,16 @@ final class PlanEditorContainer: NSView {
 class PlanNSTextView: NSTextView {
     var isFocused = false
     var onFocusChange: (() -> Void)?
+    /// The range Find last showed its indicator for: the one selection an unfocused plan reveals a
+    /// hidden visual block for. Cleared when the plan takes focus.
+    private(set) var findMatch: NSRange?
+    var onFindMatch: (() -> Void)?
+
+    override func showFindIndicator(for charRange: NSRange) {
+        findMatch = charRange
+        super.showFindIndicator(for: charRange)
+        onFindMatch?()
+    }
     /// The text container took a new width: what the tables are laid out in.
     var onContainerWidth: (() -> Void)?
     /// How much of the page's top edge something is drawn over — the pinned control bar and
@@ -2059,6 +2071,7 @@ class PlanNSTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
         isFocused = true
+        findMatch = nil
         onFocusChange?()
         tables.focusChanged()
         return true

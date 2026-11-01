@@ -259,7 +259,7 @@ final class VisualBlockView: NSView {
     }
 
     private func picture(_ rep: VisualBlockModel.Representation, into pane: VisualPane) {
-        pane.image = (pane === mainPane && !comparing ? fitted(rep) : nil) ?? storedOrCached(rep)
+        pane.image = (pane === mainPane && !comparing && !hasStored(rep) ? fitted(rep) : nil) ?? storedOrCached(rep)
         if pane.image == nil { pane.message = wantsPictures ? "Drawing…" : nil }
         fetch(rep) { [weak pane] image in pane?.image = image; if image == nil { pane?.message = "No picture of this visual yet." } }
     }
@@ -271,6 +271,13 @@ final class VisualBlockView: NSView {
 
     private func cacheKey(_ rep: VisualBlockModel.Representation, _ store: any VisualStoreReading, fit: Bool = false) -> VisualSnapshotCache.Key {
         VisualSnapshotCache.Key(store: VisualStoreIdentity.of(store), id: rep.revision.id, r: rep.revision.r, snapshot: snapshotKey(rep), fit: fit)
+    }
+
+    /// Whether the revision's manifest lists a stored snapshot for this state and size, which is
+    /// then the picture; a live capture only stands in where there is none.
+    private func hasStored(_ rep: VisualBlockModel.Representation) -> Bool {
+        let name = snapshotKey(rep).fileName
+        return rep.revision.manifest.files.contains { $0.path == name }
     }
 
     /// What the live view last drew, fitted to the body (`goSnapshot`), if it is still held.
@@ -330,20 +337,19 @@ final class VisualBlockView: NSView {
         self.web = nil
         VisualLivePool.shared.release(self)
         var key: VisualSnapshotCache.Key?
-        if let rep = shown, let store, case .rendered = liveStatus, fitted(rep) == nil { key = cacheKey(rep, store, fit: true) }
+        if let rep = shown, let store, case .rendered = liveStatus, !hasStored(rep), fitted(rep) == nil { key = cacheKey(rep, store, fit: true) }
         guard let key else {
             retire(web)
             rebuildBody()
             return
         }
         retiring.append(web)
-        web.view.takeSnapshot(with: nil) { [weak self] image, _ in
-            MainActor.assumeIsolated {
-                if let image { VisualSnapshotCache.shared.put(image, for: key) }
-                guard let self else { return }
-                self.retire(web)
-                self.rebuildBody()
-            }
+        snapshotter(web) { [weak self] image in
+            // A blank or empty capture (a view that had left its window) is not the block's picture.
+            if let image, !Self.isBlank(image) { VisualSnapshotCache.shared.put(image, for: key) }
+            guard let self else { return }
+            self.retire(web)
+            self.rebuildBody()
         }
         // A web view that never answers (the block left its window) must not be kept for ever.
         Task { @MainActor [weak self] in
@@ -352,6 +358,31 @@ final class VisualBlockView: NSView {
         }
         rebuildBody()
     }
+
+    /// Takes the live view's picture; replaceable so a test can hand back a blank one.
+    var snapshotter: (VisualWebView, @escaping (NSImage?) -> Void) -> Void = { web, done in
+        web.view.takeSnapshot(with: nil) { image, _ in MainActor.assumeIsolated { done(image) } }
+    }
+
+    /// True for a picture with nothing in it: no size, or one colour throughout (sampled on a grid).
+    static func isBlank(_ image: NSImage) -> Bool {
+        guard image.size.width >= 1, image.size.height >= 1,
+              let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+              rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return true }
+        var first: NSColor?
+        let stepX = max(1, rep.pixelsWide / 24), stepY = max(1, rep.pixelsHigh / 24)
+        for y in stride(from: 0, to: rep.pixelsHigh, by: stepY) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: stepX) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                guard let f = first else { first = c; continue }
+                if abs(c.redComponent - f.redComponent) + abs(c.greenComponent - f.greenComponent) + abs(c.blueComponent - f.blueComponent) > 0.02 { return false }
+            }
+        }
+        return true
+    }
+
+    /// The picture in the body pane (tests).
+    var bodyImage: NSImage? { mainPane.image }
 
     private func retire(_ web: VisualWebView) {
         retiring.removeAll { $0 === web }

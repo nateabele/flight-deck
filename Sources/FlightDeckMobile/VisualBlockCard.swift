@@ -57,13 +57,18 @@ enum VisualBlockStyle {
     /// has nothing to fetch. Its states and sizes are those of the primary that it has pictures of.
     static func ref(opening alternate: WireVisualAlternate, of ref: WireVisualRef) -> WireVisualRef? {
         guard let files = alternate.files, !files.isEmpty else { return nil }
-        func has(_ prefix: String? = nil, _ suffix: String? = nil) -> Bool {
-            files.contains { ($0.path.hasPrefix(prefix ?? "snapshot@")) && $0.path.hasSuffix(suffix ?? ".png") }
-        }
+        // Which (state, size) pairs have a picture: the file name is matched against the known names,
+        // never split at a hyphen or matched by suffix, since a state or size may contain one.
+        let names = Set(files.map(\.path))
+        // A manifest that lists none draws as `default` (`VisualSnapshotPlan`).
+        let states = ref.states.isEmpty ? ["default"] : ref.states
+        let sizes = (ref.sizes ?? []).isEmpty ? ["default"] : ref.sizes!
+        func pictured(_ state: String, _ size: String) -> Bool { names.contains("snapshot@\(state)-\(size).png") }
+        let statesOut = states.filter { s in sizes.contains { pictured(s, $0) } }
+        let sizesOut = sizes.filter { z in states.contains { pictured($0, z) } }
         return WireVisualRef(
             id: ref.id, revision: alternate.revision, kinds: [alternate.kind], alternates: [],
-            states: ref.states.filter { has("snapshot@\($0)-") },
-            sizes: ref.sizes.map { $0.filter { z in has(nil, "-\(z).png") } },
+            states: ref.states.isEmpty ? [] : statesOut, sizes: ref.sizes == nil ? nil : sizesOut,
             aspect: ref.aspect, files: files)
     }
 

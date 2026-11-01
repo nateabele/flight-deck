@@ -81,7 +81,8 @@ final class VisualBlockPicturesTests: XCTestCase {
                     store: other.store) { results.append($0) }
         wait("both drawn") { results.count == 2 }
         XCTAssertTrue(results.allSatisfy { $0 != nil })
-        XCTAssertEqual(host.drawCount - before, 2, "both intakes drew through the one host")
+        // Other blocks of earlier tests may still be drawing through the same host: at least these two.
+        XCTAssertGreaterThanOrEqual(host.drawCount - before, 2, "both intakes drew through the one host")
         XCTAssertEqual(host.peakConcurrentDraws, 1, "never two web content processes drawing at once")
     }
 
@@ -111,5 +112,66 @@ final class VisualBlockPicturesTests: XCTestCase {
         wait("then the view went") { !block.holdsWebView }
         XCTAssertNil(VisualSnapshotCache.shared.image(fullKey),
                      "the live view is fitted to the body: it is not the full-size picture and is not filed as one")
+    }
+
+    // MARK: - A blank live capture is never kept
+
+    private func image(_ width: Int, _ height: Int, ink: Bool) -> NSImage {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: width, height: height).fill()
+        if ink { NSColor.black.setFill(); NSRect(x: width / 4, y: height / 4, width: width / 2, height: height / 2).fill() }
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.addRepresentation(rep)
+        return image
+    }
+
+    func testBlankAndZeroSizeImagesAreRecognised() {
+        XCTAssertTrue(VisualBlockView.isBlank(image(60, 40, ink: false)))
+        XCTAssertTrue(VisualBlockView.isBlank(NSImage(size: .zero)))
+        XCTAssertFalse(VisualBlockView.isBlank(image(60, 40, ink: true)))
+    }
+
+    private func liveBlock(_ id: String, store: any VisualStoreReading, snapshotter: @escaping (VisualWebView, @escaping (NSImage?) -> Void) -> Void) -> (VisualBlockView, NSWindow) {
+        let block = VisualBlockView(model: VisualBlockModel.load(id: id, pending: false, store: store), caption: "c", store: store)
+        block.snapshotter = snapshotter
+        block.frame = NSRect(x: 0, y: 0, width: 640, height: VisualBlockLayout.height(for: block.model))
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 640, height: 500), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = block
+        window.orderFrontRegardless()
+        block.goLive()
+        return (block, window)
+    }
+
+    func testABlankLiveCaptureIsNotCached() throws {
+        try fixture.revision("blank", r: 1, source: VisualFixture.sequence)
+        let store = fixture.store
+        let (block, window) = liveBlock("blank", store: store) { _, done in done(self.image(80, 50, ink: false)) }
+        defer { window.orderOut(nil); window.contentView = nil }
+        wait("the page drew") { if case .rendered = block.liveStatus { true } else { false } }
+        block.goSnapshot()
+        wait("the view went") { !block.holdsWebView }
+        let key = VisualSnapshotCache.Key(store: VisualStoreIdentity.of(store), id: block.model.representations[0].revision.id, r: 1,
+                                          snapshot: VisualSnapshotKey(state: "default", size: "default"), fit: true)
+        XCTAssertNil(VisualSnapshotCache.shared.image(key), "a blank capture is not the block's picture")
+    }
+
+    func testAStoredSnapshotIsShownInPreferenceToALiveCapture() throws {
+        let stored = image(40, 24, ink: true)
+        let data = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(stored.tiffRepresentation))?.representation(using: .png, properties: [:]))
+        try fixture.revision("kept", r: 1, source: VisualFixture.sequence, extra: ["snapshot@default-default.png": data])
+        let store = fixture.store
+        let (block, window) = liveBlock("kept", store: store) { _, done in done(self.image(200, 120, ink: true)) }
+        defer { window.orderOut(nil); window.contentView = nil }
+        wait("the page drew") { if case .rendered = block.liveStatus { true } else { false } }
+        block.goSnapshot()
+        wait("the view went") { !block.holdsWebView }
+        block.setWantsPictures(true)
+        XCTAssertEqual(block.bodyImage?.size.width ?? 0, 40, accuracy: 1, "the stored PNG, not the 200 pt live capture")
     }
 }
