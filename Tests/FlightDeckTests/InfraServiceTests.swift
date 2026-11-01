@@ -116,11 +116,18 @@ final class InfraServiceTests: XCTestCase {
                        "the destroy's failure is progress, not the up's failure")
     }
 
-    /// Nothing was applied, so nothing is destroyed: the record is left as it always was.
-    func testAFailureBeforeTheApplyDestroysNothing() async throws {
+    /// Nothing was applied, so nothing is destroyed and nothing is left behind: no record to
+    /// project into the session budget or list in `infra doctor`, no host, no work directory.
+    func testAFailureBeforeTheApplyDestroysNothingAndLeavesNoRecord() async throws {
         h.tofu.failInit = TofuError.failed(step: "init", message: "registry unreachable")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() } catch {}
-        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .failed)
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
+        XCTAssertNil(h.registry.machine(named: "gpu"))
+        XCTAssertTrue(h.registry.machines.isEmpty)
+        if case .success = h.hosts.registry.resolve(name: "gpu") { XCTFail("the enrolled host is forgotten") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: h.registry.workdir(for: "gpu").path))
+        XCTAssertEqual(h.ledger.spent(name: "gpu", now: h.now.addingTimeInterval(3600)), 0)
+        XCTAssertTrue(h.events.contains { if case .failed(let why) = $0 { return why.contains("registry unreachable") }; return false },
+                      "the failure is still reported")
         XCTAssertFalse(h.tofu.calls.contains("destroy"))
     }
 

@@ -177,15 +177,23 @@ final class InfraService {
             try await provision(&machine, plan: plan, client: client, account: account, applyBegan: &applyBegan, events: events)
         } catch {
             let message = Self.failureText(error)
-            machine.state = .failed
-            machine.failure = message
-            do { try registry.upsert(machine) } catch {
-                Self.logger.error("\(name, privacy: .public): could not record the failure: \(String(describing: error), privacy: .public)")
+            if applyBegan {
+                machine.state = .failed
+                machine.failure = message
+                do { try registry.upsert(machine) } catch {
+                    Self.logger.error("\(name, privacy: .public): could not record the failure: \(String(describing: error), privacy: .public)")
+                }
+            } else {
+                // Nothing was created and no cost segment was opened, so there is nothing for
+                // `down` to find: the record, its host and its work directory go, and the
+                // session budget never counts it.
+                do { try discard(machine) } catch {
+                    Self.logger.error("\(name, privacy: .public): could not remove the unapplied record: \(String(describing: error), privacy: .public)")
+                }
             }
             events(.failed(message))
             // Once an apply began, something may be running and billing, and nothing will use
-            // it: destroyed now, under this `up`'s claim. Before that nothing was created, and
-            // the failed record is left for the user, as it always was.
+            // it: destroyed now, under this `up`'s claim.
             if applyBegan { await rollBack(name, events: events) }
             throw error
         }
