@@ -8,6 +8,7 @@
 //! a pure function of a graph that tests can drive without a daemon.
 
 mod analysis;
+mod calltree;
 pub mod args;
 pub mod mutate;
 mod nav;

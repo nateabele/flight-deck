@@ -347,6 +347,20 @@
       "array",
       "null"
      ]
+    },
+    "with": {
+     "default": null,
+     "description": "[\"callers\"] adds up to 5 callers with signature and call-site line, saving a calls + read round trip. Off by default.",
+     "items": {
+      "enum": [
+       "callers"
+      ],
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
     }
    },
    "type": "object"
@@ -669,7 +683,7 @@
    "properties": {
     "depth": {
      "default": null,
-     "description": "Hops to follow (default 1, max 10; 0 = resolve the target only).",
+     "description": "Hops to follow (default 1, max 10; 0 = target only). 2 or more returns a signature-only call tree.",
      "format": "uint32",
      "minimum": 0,
      "type": [
