@@ -90,8 +90,8 @@ impl<'a> Walker<'a> {
                 if let Some(body) = n.child_by_field_name("body") {
                     let mut c = body.walk();
                     for f in body.named_children(&mut c) {
-                        if f.kind() == "field_declaration" {
-                            if let Some(fname) = field_text(f, "name", src) {
+                        if f.kind() == "field_declaration"
+                            && let Some(fname) = field_text(f, "name", src) {
                                 self.facts.push_symbol(symbol(
                                     f,
                                     fname,
@@ -101,7 +101,6 @@ impl<'a> Walker<'a> {
                                     Self::is_pub(f),
                                 ));
                             }
-                        }
                     }
                 }
                 self.walk_except_name(n, parent, Some(id));
@@ -113,8 +112,8 @@ impl<'a> Walker<'a> {
                 if let Some(body) = n.child_by_field_name("body") {
                     let mut c = body.walk();
                     for v in body.named_children(&mut c) {
-                        if v.kind() == "enum_variant" {
-                            if let Some(vname) = field_text(v, "name", src) {
+                        if v.kind() == "enum_variant"
+                            && let Some(vname) = field_text(v, "name", src) {
                                 let vid = self.facts.push_symbol(symbol(
                                     v,
                                     vname,
@@ -125,7 +124,6 @@ impl<'a> Walker<'a> {
                                 ));
                                 self.walk_except_name(v, Some(id), Some(vid));
                             }
-                        }
                     }
                 }
             }

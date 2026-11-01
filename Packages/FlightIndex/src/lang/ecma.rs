@@ -159,8 +159,8 @@ impl<'a> Walker<'a> {
         let Some(name_node) = d.child_by_field_name("name") else { return };
         let value = d.child_by_field_name("value");
         // `const x = require('./x')` is an import, not a definition.
-        if let Some(v) = value {
-            if let Some(spec) = require_specifier(v, src) {
+        if let Some(v) = value
+            && let Some(spec) = require_specifier(v, src) {
                 let mut names = Vec::new();
                 let mut alias = None;
                 match name_node.kind() {
@@ -190,7 +190,6 @@ impl<'a> Walker<'a> {
                 });
                 return;
             }
-        }
         if name_node.kind() != "identifier" {
             if let Some(v) = value {
                 self.refs(v, None);

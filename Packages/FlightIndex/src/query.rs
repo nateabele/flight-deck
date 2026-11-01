@@ -189,11 +189,10 @@ impl ViewGraph {
                 return true;
             }
             // `Module.Type.member`
-            if let Some((m, t)) = qual.rsplit_once('.').or_else(|| qual.rsplit_once("::")) {
-                if t == p && module.is_none_or(|fm| fm == m) {
+            if let Some((m, t)) = qual.rsplit_once('.').or_else(|| qual.rsplit_once("::"))
+                && t == p && module.is_none_or(|fm| fm == m) {
                     return true;
                 }
-            }
         }
         // Path-shaped qualifier (`store::open` -> `…/store.rs`).
         let tail = qual.rsplit(['.', ':']).next().unwrap_or(qual);
@@ -238,11 +237,10 @@ impl ViewGraph {
             };
             if dir == Direction::Out {
                 for r in &self.res[f as usize].imports {
-                    if let Resolved::External(p) = r {
-                        if externals.insert(p.clone()) {
+                    if let Resolved::External(p) = r
+                        && externals.insert(p.clone()) {
                             out.push(DepEntry { path: p.clone(), depth: d + 1, external: true });
                         }
-                    }
                 }
             }
             for n in next {
@@ -356,6 +354,20 @@ impl ViewGraph {
         }
         out.sort_by(|a, b| b.rank.partial_cmp(&a.rank).unwrap_or(std::cmp::Ordering::Equal).then(a.path.cmp(&b.path)));
         self.answer(Some(out))
+    }
+
+    /// How many references resolved exactly, by unique-name fallback, or not at all: the quick
+    /// health check of a resolver on a real repository.
+    pub fn resolution_counts(&self) -> (u64, u64, u64) {
+        let (mut exact, mut fallback, mut none) = (0, 0, 0);
+        for r in self.res.iter().flat_map(|r| &r.refs) {
+            match (r.target, r.confidence) {
+                (Some(_), Confidence::Exact) => exact += 1,
+                (Some(_), Confidence::Fallback) => fallback += 1,
+                (None, _) => none += 1,
+            }
+        }
+        (exact, fallback, none)
     }
 
     pub fn file_rank_of(&self, path: &Path) -> Option<f64> {

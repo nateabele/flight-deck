@@ -80,6 +80,12 @@ impl Language for Elm {
                         None,
                         exposing.exports_value(name),
                     ));
+                    // A reader of this symbol wants the type annotation above the body too.
+                    if let Some(a) = annotation {
+                        let sym = &mut facts.symbols[id as usize];
+                        sym.start_line = a.start_position().row as u32 + 1;
+                        sym.start_col = a.start_position().column as u32;
+                    }
                     let bound = bound_names(child, source);
                     if let Some(a) = annotation {
                         collect_refs(a, source, Some(id), &bound, &mut facts.refs);

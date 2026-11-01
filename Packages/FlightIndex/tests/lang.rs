@@ -75,7 +75,8 @@ fn elm_definitions_and_kinds() {
     assert_eq!(f.symbols[node.parent.unwrap() as usize].name, "Value");
     assert_eq!(sym(&f, "a").kind, SymbolKind::Field);
     assert_eq!(sym(&f, "a").parent, Some(sym(&f, "Alias").local_id));
-    assert_eq!(sym(&f, "toString").start_line, 17);
+    assert_eq!(sym(&f, "toString").start_line, 16, "the span starts at the type annotation");
+    assert_eq!(sym(&f, "toString").end_line, 23);
 }
 
 #[test]

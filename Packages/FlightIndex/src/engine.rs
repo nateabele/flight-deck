@@ -197,13 +197,11 @@ impl Engine {
                     let f = &files[i];
                     let Some(facts) = w.get_facts(&f.blob_id, f.language, version(f.language))? else { continue };
                     for imp in &facts.imports {
-                        if let Resolved::File { path, .. } = resolver.resolve_import(&f.path, f.language, imp) {
-                            if let Some(&t) = by_path.get(path.as_str()) {
-                                if priority_set.insert(t) {
+                        if let Resolved::File { path, .. } = resolver.resolve_import(&f.path, f.language, imp)
+                            && let Some(&t) = by_path.get(path.as_str())
+                                && priority_set.insert(t) {
                                     imports.push(t);
                                 }
-                            }
-                        }
                     }
                 }
             }
@@ -255,11 +253,10 @@ impl Engine {
                 match overlay_paths.get(path.as_str()).filter(|f| f.blob_id == key.blob_id) {
                     Some(_) => {
                         sources[n] = std::fs::read(view.abs(path)).ok();
-                        if let Some(bytes) = &sources[n] {
-                            if git::blob_id(bytes) != key.blob_id {
+                        if let Some(bytes) = &sources[n]
+                            && git::blob_id(bytes) != key.blob_id {
                                 report.changed_during_build += 1;
                             }
-                        }
                     }
                     None => git_ids.push((n, key.blob_id.as_str())),
                 }

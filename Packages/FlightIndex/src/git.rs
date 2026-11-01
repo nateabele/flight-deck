@@ -261,11 +261,10 @@ fn read_overlay(root: &Path) -> Result<(Vec<Overlay>, bool)> {
             }
             _ => continue, // ignored files, headers
         };
-        if let Some(orig) = deleted_origin {
-            if lang::for_path(Path::new(&orig)).is_some() {
+        if let Some(orig) = deleted_origin
+            && lang::for_path(Path::new(&orig)).is_some() {
                 overlay.push(Overlay::Deleted(orig));
             }
-        }
         // `? dir/` is an untracked nested repository: its own view, not ours.
         if path.ends_with('/') {
             continue;

@@ -405,15 +405,18 @@ impl ViewGraph {
         }
         // Re-exports: an import in the target that brings in `name` (TS `export { x } from`,
         // Rust `pub use`, Elm has none).
-        for (imp, res) in f.facts.imports.iter().zip(&self.res[file as usize].imports) {
+        // Resolved afresh rather than read from `self.res`: that file's own resolution may not
+        // have been computed yet, and a result that depends on build order is a result that
+        // differs between a full build and an incremental one.
+        for imp in &f.facts.imports {
             let matches = imp.names.iter().find(|n| n.local() == name || n.name == "*");
-            if let (Some(n), Some(t)) = (matches, self.file_of(res)) {
+            let res = self.resolver.resolve_import(&f.path, f.language, imp);
+            if let (Some(n), Some(t)) = (matches, self.file_of(&res)) {
                 let orig = if n.name == "*" { name } else { n.name.as_str() };
-                if t != file {
-                    if let Some(found) = self.lookup_in_file(t, orig, depth - 1) {
+                if t != file
+                    && let Some(found) = self.lookup_in_file(t, orig, depth - 1) {
                         return Some(found);
                     }
-                }
             }
         }
         None
@@ -611,18 +614,16 @@ impl ViewGraph {
                 }
                 // Elm `exposing (Type(..))`: the constructors come with the type.
                 for (res, ty) in subs_types {
-                    if let Some(t) = self.file_of(res) {
-                        if let Some(id) = self.member_of(t, ty, &r.name) {
+                    if let Some(t) = self.file_of(res)
+                        && let Some(id) = self.member_of(t, ty, &r.name) {
                             return exact(id);
                         }
-                    }
                 }
                 for g in globs {
-                    if let Some(t) = self.file_of(g) {
-                        if let Some(id) = self.lookup_in_file(t, &r.name, 3) {
+                    if let Some(t) = self.file_of(g)
+                        && let Some(id) = self.lookup_in_file(t, &r.name, 3) {
                             return exact(id);
                         }
-                    }
                 }
                 match self.fallback(f, &r.name, r.kind, false) {
                     Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
@@ -647,11 +648,10 @@ impl ViewGraph {
                         let mut segs = vec!["self".to_string()];
                         segs.extend(rest);
                         segs.push(r.name.clone());
-                        if let Resolved::File { path, .. } = res {
-                            if let Resolved::File { path: p2, rest } = self.resolver.rust_path(path, &segs) {
+                        if let Resolved::File { path, .. } = res
+                            && let Resolved::File { path: p2, rest } = self.resolver.rust_path(path, &segs) {
                                 return self.rust_item(&p2, &rest, &r.name).map(exact).unwrap_or(none);
                             }
-                        }
                         return none;
                     }
                     return through(res, &r.name);
@@ -669,17 +669,15 @@ impl ViewGraph {
                     return none;
                 }
                 // `Type::method`, `obj.method`, `Class.method`.
-                if self.unqualified_visible(f, q).is_some() {
-                    if let Some(id) = self.member_of(f, q, &r.name) {
+                if self.unqualified_visible(f, q).is_some()
+                    && let Some(id) = self.member_of(f, q, &r.name) {
                         return exact(id);
                     }
-                }
                 if let Some((res, orig)) = locals.get(q) {
-                    if let Some(t) = self.file_of(res) {
-                        if let Some(id) = self.member_of(t, orig, &r.name) {
+                    if let Some(t) = self.file_of(res)
+                        && let Some(id) = self.member_of(t, orig, &r.name) {
                             return exact(id);
                         }
-                    }
                     if !matches!(res, Resolved::File { .. }) {
                         return none; // a member of something from a package
                     }
