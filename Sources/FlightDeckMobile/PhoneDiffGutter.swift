@@ -59,9 +59,12 @@ enum PhoneDiffGutter {
 
 /// Proposed or old plan text, rendered as Markdown the way a reply is (the passages are plan
 /// source, so `**bold**` must show as bold). The one place every diff surface draws its text.
+/// `serif` in the plan reader, where the proposed words read as plan prose does; the thread's
+/// conversation keeps the system sans.
 struct DiffText: View {
     let text: String
     var old = false
+    var serif = false
 
     /// `text` as it should be read aloud: inline Markdown interpreted and its markers dropped.
     static func spoken(_ text: String) -> String {
@@ -71,8 +74,12 @@ struct DiffText: View {
     }
 
     var body: some View {
-        let rendered = Markdown(text).markdownTheme(TimelineMarkdown.theme)
-        if old { rendered.strikethrough().foregroundStyle(.secondary) } else { rendered }
+        let rendered = Markdown(text).markdownTheme(serif ? TimelineMarkdown.planTheme : TimelineMarkdown.theme)
+        // Struck through by the theme's own text style: a SwiftUI `.strikethrough()` on the view
+        // reaches only `Text` that reads it from the environment, which MarkdownUI's text need not.
+        if old {
+            rendered.markdownTextStyle { StrikethroughStyle(.single); ForegroundColor(.secondary) }
+        } else { rendered }
     }
 }
 
@@ -105,18 +112,20 @@ struct PhoneDiffSheet: View {
     let deciding: Bool
     let onDecide: (Bool) -> Void
     let onOpenThread: () -> Void
+    /// Opened from the plan reader: the passages read in the plan's serif.
+    var serif = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Proposed change").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                 if !diff.old.isEmpty {
-                    DiffText(text: diff.old, old: true)
+                    DiffText(text: diff.old, old: true, serif: serif)
                         .accessibilityLabel("Old text: \(DiffText.spoken(diff.old))")
                 }
                 HStack(alignment: .top, spacing: 8) {
                     Capsule().fill(Color.green).frame(width: 3)
-                    DiffText(text: diff.new)
+                    DiffText(text: diff.new, serif: serif)
                         .accessibilityLabel("New text: \(DiffText.spoken(diff.new))")
                 }
                 .fixedSize(horizontal: false, vertical: true)

@@ -96,7 +96,6 @@ struct PlanReaderScreen: View {
                                     ForEach(Array(PlanReaderStyle.segments(of: gutter.text).enumerated()), id: \.offset) { _, segment in
                                         segmentView(segment, block: block.index, plan: plan)
                                     }
-                                    ForEach(unsent) { d in unsentCard(d) }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 if !notes.isEmpty {
@@ -113,7 +112,9 @@ struct PlanReaderScreen: View {
                                     : notes.isEmpty ? Color.clear : Color.yellow.opacity(0.06)))
                                 .id(block.index)
                             // Full width, under the passage rather than beside its buttons: at the largest
-                            // text size the column next to them is a few letters wide.
+                            // text size the column next to them is a few letters wide. Unsent notes and
+                            // unsent asks alike, so a draft of either sits in the same place.
+                            ForEach(unsent) { d in unsentCard(d).padding(.horizontal, 6) }
                             ForEach(gutter.loose) { d in looseDiffCard(d).padding(.horizontal, 6) }
                             ForEach(threads.filter { $0.anchor?.block == block.index }) { t in askCard(t).padding(.horizontal, 6) }
                             ForEach(unsentAsks(block: block.index)) { d in unsentAskCard(d).padding(.horizontal, 6) }
@@ -196,7 +197,7 @@ struct PlanReaderScreen: View {
             }, onOpenThread: {
                 openDiff = nil
                 openThread = diff.thread
-            })
+            }, serif: true)
         }
         .navigationDestination(item: $openThread) { thread in
             ThreadScreen(intake: intake, threadID: thread, flightControl: flightControl)
@@ -447,12 +448,16 @@ struct PlanReaderScreen: View {
             HStack(alignment: .top, spacing: 8) {
                 Capsule().fill(d.state == "pending" ? Color.green : Color.orange).frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
-                    DiffText(text: d.new)
+                    DiffText(text: d.new, serif: true)
                     Text(ThreadStyle.diffWords(d.state)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
             .frame(minHeight: 44)
+            .padding(8)
+            // A card like the ask and note cards beside it, tinted by state, so it reads as a
+            // proposal about the passage above and not as more of the plan.
+            .background(RoundedRectangle(cornerRadius: 6).fill((d.state == "pending" ? Color.green : Color.orange).opacity(0.08)))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Proposed change, \(ThreadStyle.diffWords(d.state)): \(DiffText.spoken(d.new))")

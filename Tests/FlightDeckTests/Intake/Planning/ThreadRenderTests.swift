@@ -156,6 +156,20 @@ final class ThreadRenderTests: XCTestCase {
         XCTAssertEqual(model.selected, s.why.id)
     }
 
+    /// The header of a thread whose agent has no shell (grok): "reads files only" beside the agent.
+    func testRenderTheThreadPanelForAnAgentThatReadsFilesOnly() throws {
+        let out = try dir()
+        ThreadPanelModel.forgetSession()
+        let s = scene()
+        s.store.records[0].agent = .grok
+        let model = try XCTUnwrap(s.controller.threadPanel)
+        model.open(s.why.id)
+        model.refresh()
+        let view = layout(s, width: 560, rail: NotesRail(controller: s.controller, roundName: { _ in "Refine 2" }, focusesDraft: false))
+        try PlanningRender.write(view, size: NSSize(width: 1240, height: 780), to: out.appendingPathComponent("threads-panel-grok.png"), appearance: .aqua)
+        XCTAssertEqual(model.header(for: s.why.id)?.readsFilesOnly, true)
+    }
+
     // MARK: Diff
 
     private func editorView(_ s: Scene) -> some View {

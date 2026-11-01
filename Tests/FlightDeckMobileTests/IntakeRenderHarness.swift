@@ -391,9 +391,12 @@ final class IntakeRenderHarness: XCTestCase {
             WireThreadSummary(id: asking, title: "Who gets paged?", anchor: WireThreadAnchor(checkpoint: 3, block: 8, quote: "resume the producers"),
                               status: "open", counts: WireThreadCounts(turns: 1), excerpt: "The on-call for the queue."),
         ]
+        // A diff a newer round made stale: no new text to read in place, so a card under its block.
+        let stale = WirePendingDiff(id: UUID(), thread: asking, checkpoint: 2, blockIndex: 8,
+                                    old: "resume the producers", new: "resume the producers **one at a time**", state: "stale")
         var plan = Fixture.plan
         plan.threads = summaries
-        plan.pendingDiffs = [diff]
+        plan.pendingDiffs = [diff, stale]
         for style in [UIUserInterfaceStyle.light, .dark] {
             let fetcher = stub(detail)
             fetcher.plan = plan
@@ -425,8 +428,11 @@ final class IntakeRenderHarness: XCTestCase {
         let question = WireStructuredQuestion(id: "q1", text: "Should a late producer be retried or dropped?", kind: "single",
                                               options: [WireOption(id: "retry", label: "Retry it"), WireOption(id: "drop", label: "Drop it")],
                                               recommended: ["retry"])
+        // A grok thread: the header says it reads files only.
+        var grokSummary = summaries[0]
+        grokSummary.readsFilesOnly = true
         let page = WireThreadPage(
-            thread: summaries[0],
+            thread: grokSummary,
             turns: [
                 WireThreadTurn(seq: 1, messageID: "m1", you: "Is it safe to wait only for the queue to drain?",
                                reply: "Not quite. A producer can enqueue **after** the pause, so the queue can look empty and then fill again.",
@@ -444,6 +450,13 @@ final class IntakeRenderHarness: XCTestCase {
             let screen = NavigationStack { ThreadScreen(intake: id, threadID: thread, flightControl: flightControl) }
             try write(screenImage(of: screen, style: style, size: nil, height: 1500),
                       to: "thread-\(Self.styleName(style)).png")
+        }
+        // A diff opened from the reader: the old text struck through by MarkdownUI's own text
+        // style, both passages in the plan's serif.
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let sheet = PhoneDiffSheet(diff: diff, canDecide: true, deciding: false, onDecide: { _ in }, onOpenThread: {},
+                                       serif: true)
+            try write(screenImage(of: sheet, style: style, size: nil, height: 500), to: "diff-sheet-\(Self.styleName(style)).png")
         }
     }
 
