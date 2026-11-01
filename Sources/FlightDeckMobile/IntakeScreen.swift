@@ -45,6 +45,10 @@ struct IntakeScreen: View {
         }
         .intakePresence(id: id, model: model, flightControl: fleet.flightControl)
         .onChange(of: model.detail) { _, detail in answerForm.observe(detail) }
+        // The form model outlives the screen (one per intake), and `onChange` never fires for the
+        // value a pushed screen first shows: a round that moved on while the screen was popped
+        // left "Sending…" up for good. Settle the marker against the detail on every appearance.
+        .onAppear { answerForm.observe(model.detail) }
     }
 
     @ViewBuilder private func content(_ d: WireIntakeDetail) -> some View {

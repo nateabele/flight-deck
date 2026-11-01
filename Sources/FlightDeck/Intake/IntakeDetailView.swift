@@ -44,6 +44,10 @@ struct IntakeDetailView: View {
     /// once at init would still hold the previous round's drafts. Mirrored to
     /// `answer-drafts.json` through the service so a relaunch (a release swap) keeps them.
     @State private var structuredAnswers: [StructuredAnswer] = []
+    /// Why the last Send took nothing (`IntakeService.AnswerRefusal`), in words, under the form;
+    /// cleared by the next edit. Dropped silently, a refused Send looked like a Send that did
+    /// nothing.
+    @State private var answerRefusal: String?
     @State private var selectedPreset: Preset = .bead
     /// Indices into `intake.exchanges` whose Clarifications section is open. Collapsed by
     /// default: answered rounds are there to look back at, not to push the live work down.
@@ -651,6 +655,12 @@ struct IntakeDetailView: View {
                     }
                 }
             }
+            if let answerRefusal {
+                Text(answerRefusal)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("intake.answer.refusal")
+            }
             Text("Triage continues once every question has an answer. Press ⌘↩ to send.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -665,6 +675,7 @@ struct IntakeDetailView: View {
         // Debounced write-through: every keystroke restarts this task, so the file is written
         // once typing pauses. `saveAnswerDrafts` refuses a round already sent, so a write
         // racing Send can't resurrect it.
+        .onChange(of: structuredAnswers) { answerRefusal = nil }
         .task(id: structuredAnswers) { [structuredAnswers, id = intake.id] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, !structuredAnswers.isEmpty else { return }
@@ -1126,11 +1137,20 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// A refused Send in plain words: the raw value is the phone's wire code, not something to read.
+    static func words(_ refusal: IntakeService.AnswerRefusal) -> String {
+        switch refusal {
+        case .notAwaitingAnswers: "These questions were already answered or replaced. Nothing was sent."
+        case .unknownQuestion: "These answers are for questions this round no longer asks. Check them and send again."
+        case .incomplete: "Some answers are incomplete. Finish each one, then send again."
+        }
+    }
+
     private func performPrimary() {
         switch intake.state {
         case .needsAnswers:
             guard Self.canSendAnswers(openQuestions, structuredAnswers) else { return }
-            service.answer(intake.id, structured: structuredAnswers)
+            answerRefusal = service.answer(intake.id, structured: structuredAnswers).map(Self.words)
         case .awaitingChoice, .parked:
             if selectedPreset == .bead { service.choose(intake.id, preset: .bead) } else { startShaping() }
         case .review: onOpenReview()

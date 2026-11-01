@@ -983,7 +983,7 @@ final class IntakeService: ObservableObject {
     }
 
     /// Why `answer(_:structured:)` took nothing. The raw values are the wire codes the phone gets.
-    enum AnswerRefusal: String {
+    enum AnswerRefusal: String, CaseIterable {
         case notAwaitingAnswers = "not_awaiting_answers"
         case unknownQuestion = "unknown_question"
         case incomplete = "invalid_answer"
@@ -1079,7 +1079,16 @@ final class IntakeService: ObservableObject {
             return nil
         }
         let presented = open.presentedQuestions
-        if let structured = drafts.structured { return structured }
+        if let structured = drafts.structured {
+            // Read back from disk, so not trusted to name only this round's options: an id the
+            // question does not offer would make the round refuse the whole send as incomplete.
+            let options = Dictionary(presented.map { ($0.id, Set($0.options.map(\.id))) }, uniquingKeysWith: { a, _ in a })
+            return structured.map { answer in
+                var kept = answer
+                kept.selected = answer.selected.filter { options[answer.questionID]?.contains($0) == true }
+                return kept
+            }
+        }
         guard drafts.answers.count == presented.count else {
             clearAnswerDrafts(id)
             return nil

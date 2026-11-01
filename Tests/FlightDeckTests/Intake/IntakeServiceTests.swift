@@ -469,6 +469,26 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
     }
 
+    /// A drafts file is the app's own, but it is read back from disk: a selection naming an option
+    /// the question does not offer (a hand-edited file, or one written by a build whose options
+    /// differed under the same digest) is dropped on load, so the form never sends an id the
+    /// round would refuse as incomplete. The rest of the answer is kept.
+    func testLoadedDraftsKeepOnlyTheQuestionsOwnOptionIDs() throws {
+        let seeded = try seedStructuredRound()
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                                                              StructuredAnswer(questionID: "when", selected: [], other: "so")])
+        let url = IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json")
+        var file = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        file["structured"] = [["questionID": "scope", "selected": ["any", "gone"]],
+                              ["questionID": "when", "selected": ["stray"], "other": "so"]]
+        try JSONSerialization.data(withJSONObject: file).write(to: url)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0),
+                       [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                        StructuredAnswer(questionID: "when", selected: [], other: "so")])
+    }
+
     /// `retry` clears the exchanges, so a fresh triage's first round is index 0 again — here with
     /// the same question texts but different option ids. Drafts from the old round must not come
     /// back: their ids name options the new round does not have.

@@ -15,6 +15,17 @@ final class IntakeDetailViewTests: XCTestCase {
         IntakeDetailView.canSendAnswers(qs, answers)
     }
 
+    /// A refused Send is shown, never dropped: every refusal has its own plain words, none of
+    /// which is the wire code.
+    func testEveryAnswerRefusalHasItsOwnWords() {
+        let words = IntakeService.AnswerRefusal.allCases.map(IntakeDetailView.words)
+        XCTAssertEqual(Set(words).count, IntakeService.AnswerRefusal.allCases.count)
+        for (refusal, w) in zip(IntakeService.AnswerRefusal.allCases, words) {
+            XCTAssertFalse(w.isEmpty)
+            XCTAssertFalse(w.contains(refusal.rawValue), w)
+        }
+    }
+
     func testNoQuestionsCannotBeSent() {
         XCTAssertFalse(send([], []))
     }
