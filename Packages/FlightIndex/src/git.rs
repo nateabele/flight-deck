@@ -20,6 +20,7 @@ use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 /// Files above this are not parsed. Generated bundles and data dumps dominate parse time and
 /// produce symbols nobody searches for.
@@ -72,7 +73,8 @@ impl Overlay {
 #[derive(Debug, Clone)]
 pub struct View {
     pub label: ViewLabel,
-    pub base: Vec<FileRef>,
+    /// Shared: every worktree on one commit holds the same listing, and the daemon keeps one copy.
+    pub base: Arc<Vec<FileRef>>,
     pub overlay: Vec<Overlay>,
 }
 
@@ -170,44 +172,68 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
+/// Finds the file listing of `(repository, commit)` if the caller already holds one.
+pub type KnownBase<'a> = dyn Fn(&Path, &str) -> Option<Arc<Vec<FileRef>>> + 'a;
+
 /// Build the view for any absolute path.
 pub fn view_for_path(path: &Path) -> Result<View> {
+    view_for_path_with(path, &|_, _| None)
+}
+
+/// Like `view_for_path`, but `known_base(repo, commit)` may hand back a commit's file listing
+/// already held, which skips the `ls-tree` over the whole repository. On a warm request what is
+/// left is one `git status`, which is also what makes the overlay fresh.
+pub fn view_for_path_with(path: &Path, known_base: &KnownBase) -> Result<View> {
     let loc = locate(path)?;
-    if loc.is_git { git_view(&loc.root) } else { plain_view(&loc.root) }
+    if loc.is_git { git_view(&loc.root, known_base) } else { plain_view(&loc.root) }
 }
 
-fn git_view(root: &Path) -> Result<View> {
-    let common = git(root, &["rev-parse", "--git-common-dir"])?;
-    let common = String::from_utf8_lossy(&common).trim().to_string();
-    let common = root.join(common);
-    let repo = common.canonicalize().map_err(|e| Error::io(&common, e))?;
-
-    // A repository with no commits has no HEAD: everything is overlay.
-    let base_commit = git(root, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let base = match &base_commit {
-        Some(_) => list_tree(root)?,
-        None => Vec::new(),
+/// The repository's common git dir, canonical. Read from the `.git` file of a linked worktree
+/// (`gitdir: …/worktrees/x`, whose `commondir` points back at the repository) because spawning
+/// `git rev-parse` just to learn this costs more than the rest of a warm request; any surprise in
+/// those files falls back to asking git.
+fn common_dir(root: &Path) -> Result<PathBuf> {
+    let dot_git = root.join(".git");
+    let quick = || -> Option<PathBuf> {
+        if dot_git.is_dir() {
+            return dot_git.canonicalize().ok();
+        }
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir = root.join(text.trim().strip_prefix("gitdir:")?.trim());
+        let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+        gitdir.join(common.trim()).canonicalize().ok()
     };
-    let (overlay, dirty) = read_overlay(root)?;
-    Ok(View {
-        label: ViewLabel { repo, worktree: root.to_path_buf(), base_commit, dirty, is_git: true },
-        base,
-        overlay,
-    })
+    if let Some(c) = quick() {
+        return Ok(c);
+    }
+    let out = git(root, &["rev-parse", "--git-common-dir"])?;
+    let common = root.join(String::from_utf8_lossy(&out).trim());
+    common.canonicalize().map_err(|e| Error::io(&common, e))
 }
 
-/// `git ls-tree -r -z -l --full-tree HEAD`: `<mode> <type> <oid> <size>\t<path>` per entry.
+fn git_view(root: &Path, known_base: &KnownBase) -> Result<View> {
+    let repo = common_dir(root)?;
+    // One `status` yields both the overlay and the commit it is relative to, so the two cannot
+    // disagree if HEAD moves between two commands.
+    let (overlay, dirty, base_commit) = read_overlay(root)?;
+    let base = match &base_commit {
+        Some(c) => match known_base(&repo, c) {
+            Some(b) => b,
+            None => Arc::new(list_tree(root, c)?),
+        },
+        None => Arc::new(Vec::new()),
+    };
+    Ok(View { label: ViewLabel { repo, worktree: root.to_path_buf(), base_commit, dirty, is_git: true }, base, overlay })
+}
+
+/// `git ls-tree -r -z -l --full-tree <commit>`: `<mode> <type> <oid> <size>\t<path>` per entry.
 ///
 /// Submodules (mode 160000) are skipped on purpose: a submodule is its own repository, found by
 /// its own `.git`, and descending from the parent would index it twice under two identities.
 /// Symlinks (120000) are skipped so a link pointing out of the tree can never pull foreign files
 /// into this view.
-fn list_tree(root: &Path) -> Result<Vec<FileRef>> {
-    let out = git(root, &["ls-tree", "-r", "-z", "-l", "--full-tree", "HEAD"])?;
+fn list_tree(root: &Path, commit: &str) -> Result<Vec<FileRef>> {
+    let out = git(root, &["ls-tree", "-r", "-z", "-l", "--full-tree", commit])?;
     let mut files = Vec::new();
     for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let Some(tab) = rec.iter().position(|b| *b == b'\t') else { continue };
@@ -228,14 +254,20 @@ fn list_tree(root: &Path) -> Result<Vec<FileRef>> {
     Ok(files)
 }
 
-/// `git status --porcelain=v2 -z --untracked-files=all` -> overlay of the working tree against HEAD.
-fn read_overlay(root: &Path) -> Result<(Vec<Overlay>, bool)> {
-    let out = git(root, &["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
+/// `git status --porcelain=v2 --branch -z --untracked-files=all` -> overlay of the working tree
+/// against HEAD, whether it is dirty, and HEAD's commit (`None` before the first commit).
+fn read_overlay(root: &Path) -> Result<(Vec<Overlay>, bool, Option<String>)> {
+    let out = git(root, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])?;
+    let mut head: Option<String> = None;
     let mut recs = out.split(|b| *b == 0).filter(|r| !r.is_empty());
     let mut overlay = Vec::new();
     let mut dirty = false;
     while let Some(rec) = recs.next() {
         let line = String::from_utf8_lossy(rec).to_string();
+        if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            head = Some(oid.to_string()).filter(|o| o != "(initial)");
+            continue;
+        }
         let mut deleted_origin: Option<String> = None;
         let path = match line.as_bytes()[0] {
             b'1' | b'2' | b'u' => {
@@ -278,7 +310,7 @@ fn read_overlay(root: &Path) -> Result<(Vec<Overlay>, bool)> {
             None => Overlay::Deleted(path),
         });
     }
-    Ok((overlay, dirty))
+    Ok((overlay, dirty, head))
 }
 
 /// Hash a working-tree file for the overlay; `None` when it is gone, a symlink, or too large.
@@ -323,7 +355,7 @@ fn plain_view(root: &Path) -> Result<View> {
     let dirty = !overlay.is_empty();
     Ok(View {
         label: ViewLabel { repo: root.to_path_buf(), worktree: root.to_path_buf(), base_commit: None, dirty, is_git: false },
-        base: Vec::new(),
+        base: Arc::new(Vec::new()),
         overlay,
     })
 }

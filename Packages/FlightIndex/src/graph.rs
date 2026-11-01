@@ -46,7 +46,9 @@ pub struct RefRes {
     pub target: Option<SymId>,
     pub confidence: Confidence,
     /// The reference resolved into a file outside this worktree (cross-repo link, step 7).
-    pub external: Option<PathBuf>,
+    /// Boxed: nearly every reference leaves it empty, and an inline `Option<PathBuf>` is 24 bytes
+    /// a reference (16 MB on a 650k-reference repository).
+    pub external: Option<Box<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -606,7 +608,7 @@ impl GraphData {
     ) -> RefRes {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
         let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
-        let external = |p: &PathBuf| RefRes { target: None, confidence: Confidence::Exact, external: Some(p.clone()) };
+        let external = |p: &PathBuf| RefRes { target: None, confidence: Confidence::Exact, external: Some(Box::new(p.clone())) };
 
         // Where an imported name lands.
         let through = |res: &Resolved, orig: &str| -> RefRes {
@@ -784,7 +786,7 @@ impl GraphData {
                     Resolved::Unresolved => 0,
                 })
                 .sum::<usize>();
-            n += r.refs.iter().filter_map(|x| x.external.as_ref()).map(|p| p.as_os_str().len() + ALLOC).sum::<usize>();
+            n += r.refs.iter().filter_map(|x| x.external.as_deref()).map(|p| p.as_os_str().len() + ALLOC).sum::<usize>();
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
         n += self.name_index.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<SymId>>() + v.len() * size_of::<SymId>() + 8).sum::<usize>();

@@ -78,12 +78,18 @@ pub fn connect_or_start(paths: &Paths, extra_daemon_args: &[String]) -> Result<C
             }
             Err(e) => {
                 // A daemon that died on startup (unwritable store, bad socket path) will never
-                // open the socket; say so now instead of after the full wait. Exit 0 means it
-                // found another daemon already holding the lock, so that one is about to answer.
-                if let Ok(Some(status)) = child.try_wait()
-                    && !status.success()
-                {
-                    return Err(Error::Msg(format!("the daemon exited on startup ({status}); see {} or run `fdindex daemon` to see why", paths.log.display())));
+                // open the socket; say so now instead of after the full wait.
+                if let Ok(Some(status)) = child.try_wait() {
+                    if !status.success() {
+                        return Err(Error::Msg(format!("the daemon exited on startup ({status}); see {} or run `fdindex daemon` to see why", paths.log.display())));
+                    }
+                    // It found the lock held. If that daemon is still answering, the next connect
+                    // succeeds; if it was on its way out (a `stop` a moment ago) nobody is left to
+                    // open the socket, so try again.
+                    std::thread::sleep(Duration::from_millis(50));
+                    if Client::connect(&paths.socket).is_err() {
+                        child = cmd.spawn().map_err(|e| Error::Msg(format!("could not start the daemon: {e}")))?;
+                    }
                 }
                 if Instant::now() >= until {
                     return Err(Error::Msg(format!("started the daemon but it did not open {} within {START_WAIT:?}: {e} (see {})", paths.socket.display(), paths.log.display())));

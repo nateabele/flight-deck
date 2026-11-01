@@ -166,6 +166,11 @@ fn run() -> Result<i32> {
         return match Client::connect(&paths.socket) {
             Ok(mut c) => {
                 let _ = c.call(&cwd, 0, "shutdown", Map::new());
+                // Return only once the daemon is really gone, so `stop` then any query starts a
+                // fresh daemon instead of racing the dying one for the lock.
+                if !flightindex::runtime::wait_until_stopped(&paths.pidfile, Duration::from_secs(10)) {
+                    return Err(Error::Msg("asked the daemon to stop but it is still running after 10s".into()));
+                }
                 println!("stopped");
                 Ok(0)
             }

@@ -223,3 +223,30 @@ fn a_warm_view_needs_no_build_until_a_file_changes() {
     assert_eq!((rep.parsed, rep.already_stored), (1, 5));
     assert!(e.is_ready(&dirty).unwrap());
 }
+
+#[test]
+fn concurrent_builds_of_one_repository_parse_each_blob_once() {
+    let (d, e) = engine();
+    let r = init_repo();
+    for i in 0..150 {
+        write(&r.root, &format!("src/m{i}.ts"), &format!("export function f{i}() {{ return {i}; }}\n"));
+    }
+    commit_all(&r.root, "one");
+    write(&r.root, "src/m0.ts", "export function f0() { return 'changed'; }\n");
+    commit_all(&r.root, "two");
+    let wt = d.path().canonicalize().unwrap().join("old");
+    git(&r.root, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD~1"]);
+    let (a, b) = (e.view_for_path(&r.root).unwrap(), e.view_for_path(&wt).unwrap());
+    assert_ne!(a.label.base_commit, b.label.base_commit);
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|s| {
+        for v in [&a, &b] {
+            s.spawn(|| {
+                barrier.wait();
+                e.build(v, &[], |_| {}).unwrap();
+            });
+        }
+    });
+    // 150 blobs shared by both commits, plus the one file that differs: 151 distinct.
+    assert_eq!(e.parse_count(), 151, "builds ran one after the other, so the second found the first's blobs");
+}

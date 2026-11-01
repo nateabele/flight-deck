@@ -162,3 +162,17 @@ fn a_daemon_that_cannot_start_reports_unavailable() {
     assert_eq!(o.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&o.stderr).contains("state: UNAVAILABLE"));
 }
+
+#[test]
+fn a_query_straight_after_stop_gets_a_fresh_daemon_not_a_race_with_the_dying_one() {
+    // `stop` used to return while the daemon still held its lock; the next client's new daemon
+    // then found the lock held, exited, and the client waited out its timeout for a socket that
+    // never came.
+    let d = Daemon::new();
+    let r = repo();
+    for round in 0..12 {
+        let out = d.stdout(&r.root, &["find", "entry"]);
+        assert!(out.contains("entry (function)"), "round {round}: {out}");
+        d.stdout(&r.root, &["stop"]);
+    }
+}

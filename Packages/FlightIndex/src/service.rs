@@ -89,6 +89,7 @@ struct ViewInfo {
 pub struct Service {
     pub engine: Engine,
     cfg: Config,
+    freshness: Freshness,
     builds: Mutex<HashMap<PathBuf, Arc<Job>>>,
     views: Mutex<HashMap<PathBuf, ViewInfo>>,
     cochange: Mutex<HashMap<PathBuf, (String, CoChangeCell)>>,
@@ -107,6 +108,7 @@ impl Service {
         Ok(Arc::new(Service {
             engine,
             cfg,
+            freshness: Freshness::default(),
             builds: Mutex::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),
             cochange: Mutex::new(HashMap::new()),
@@ -178,7 +180,7 @@ impl Service {
                 anchor.path.display()
             )));
         }
-        let view = Freshness::view(&self.engine, &anchor.path)?;
+        let view = self.freshness.view(&self.engine, &anchor.path)?;
         self.touch(&view);
 
         let readiness = self.ensure_built(&view, &anchor.priority, anchor.slice_ok, anchor.needs_index.then_some(wait))?;
@@ -337,7 +339,7 @@ impl Service {
             return Ok("workspace remove: nothing to do. The daemon indexes any path on demand, so there is no scope to shrink.".into());
         }
         let path = args.path(&["path", "root", "dir", "file_path"]).or_else(|| (!req.cwd.is_empty()).then(|| PathBuf::from(&req.cwd))).ok_or_else(|| ToolError::bad(format!("{tool} requires a path")))?;
-        let view = Freshness::view(&self.engine, &path)?;
+        let view = self.freshness.view(&self.engine, &path)?;
         self.touch(&view);
         if tool == "gc" {
             let stats = self.engine.gc(&view.label.repo)?;
@@ -431,13 +433,92 @@ impl Service {
     }
 }
 
-/// Where a request's view comes from. Today: git, recomputed on every request. The watcher step
+/// Where a request's view comes from. Today: git, recomputed per request. The watcher step
 /// replaces this with a view kept current by file events and a ref watcher; callers do not change.
-pub struct Freshness;
+///
+/// Concurrent requests for one worktree share a recomputation, but never an older one: a request
+/// that arrives while a `git status` is running waits for the *next* one to start and finish, so
+/// whatever it returns was computed after the request arrived (an edit made just before it is in
+/// it). Under N simultaneous clients that is two statuses per round instead of N, which matters
+/// because `git status` is 20 ms on a quiet checkout and several times that on a busy one.
+#[derive(Default)]
+pub struct Freshness {
+    slots: Mutex<HashMap<PathBuf, Arc<Slot>>>,
+}
+
+#[derive(Default)]
+struct Slot {
+    state: Mutex<SlotState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct SlotState {
+    running: bool,
+    /// Computations started so far; the next one to start has this number.
+    started: u64,
+    /// Computations finished so far, and the newest result.
+    finished: u64,
+    latest: Option<std::result::Result<View, String>>,
+}
+
+/// A computation in progress. If it ends without `finish` (a panic), `Drop` still clears
+/// `running` and wakes the waiters, so one bad computation cannot wedge a worktree's slot.
+struct Leader<'a> {
+    slot: &'a Slot,
+    finished: bool,
+}
+
+impl Leader<'_> {
+    fn finish(mut self, result: std::result::Result<View, String>) {
+        self.end(result);
+        self.finished = true;
+    }
+
+    fn end(&self, result: std::result::Result<View, String>) {
+        let mut st = self.slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.running = false;
+        st.finished = st.started;
+        st.latest = Some(result);
+        drop(st);
+        self.slot.cv.notify_all();
+    }
+}
+
+impl Drop for Leader<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.end(Err("the view computation panicked".into()));
+        }
+    }
+}
 
 impl Freshness {
-    pub fn view(engine: &Engine, path: &Path) -> Result<View> {
-        engine.view_for_path(path)
+    pub fn view(&self, engine: &Engine, path: &Path) -> Result<View> {
+        let root = git::locate(path)?.root;
+        let slot = self.slots.lock().unwrap().entry(root).or_default().clone();
+        let mut st = slot.state.lock().unwrap();
+        // A computation that started before now may have missed an edit; only one that starts at
+        // or after `want` is good enough.
+        let want = st.started;
+        loop {
+            if st.finished > want
+                && let Some(r) = &st.latest
+            {
+                return r.clone().map_err(Error::Msg);
+            }
+            if st.running {
+                st = slot.cv.wait(st).unwrap();
+                continue;
+            }
+            st.running = true;
+            st.started += 1;
+            drop(st);
+            let leader = Leader { slot: &slot, finished: false };
+            let computed = engine.view_for_path(path);
+            leader.finish(computed.as_ref().map(|v| v.clone()).map_err(|e| e.to_string()));
+            return computed;
+        }
     }
 }
 

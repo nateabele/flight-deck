@@ -79,6 +79,14 @@ pub struct Engine {
     /// Commits of a repository whose whole tree has facts stored, so a request against a clean
     /// worktree on one needs no per-file check and no build, only its overlay looked at.
     complete: Mutex<HashSet<(PathBuf, String)>>,
+    /// One build at a time per repository. Worktrees of a repository share most of their blobs, so
+    /// two concurrent builds would each parse the shared ones (measured: 10,764 parses for 3,700
+    /// distinct blobs when five worktrees were first queried at once); run one after the other, the
+    /// second finds the first's blobs stored and parses only its own. Parsing already uses every
+    /// core, so nothing is lost by not overlapping them.
+    build_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    /// File listings of recently seen commits (see `view_for_path`).
+    bases: Mutex<HashMap<(PathBuf, String), BaseListing>>,
     /// One lock per graph being built, so two requests for the same cold graph build it once
     /// instead of twice at 100 MB a time.
     key_locks: Mutex<HashMap<GraphKey, Arc<Mutex<()>>>>,
@@ -87,6 +95,12 @@ pub struct Engine {
     /// they share, not ten.
     facts: Mutex<HashMap<(String, &'static str), SharedFacts>>,
 }
+
+/// A commit's indexable files, shared by every view on it.
+type BaseListing = Arc<Vec<FileRef>>;
+
+/// Commits whose listing `Engine::view_for_path` keeps (about 2000 entries each for a large repo).
+const MAX_KNOWN_BASES: usize = 64;
 
 /// A blob's facts as held weakly by the shared cache, with their estimated size.
 type SharedFacts = (Weak<BlobFacts>, usize);
@@ -143,6 +157,8 @@ impl Engine {
             graphs: Mutex::new(GraphCache { budget: DEFAULT_GRAPH_BUDGET, ..Default::default() }),
             complete: Mutex::new(HashSet::new()),
             key_locks: Mutex::new(HashMap::new()),
+            bases: Mutex::new(HashMap::new()),
+            build_locks: Mutex::new(HashMap::new()),
             facts: Mutex::new(HashMap::new()),
         })
     }
@@ -151,8 +167,18 @@ impl Engine {
         &self.store_root
     }
 
+    /// The view of the worktree containing `abs`, as of now. The listing of a commit this engine
+    /// has seen is reused, so a warm call costs one `git status`.
     pub fn view_for_path(&self, abs: &Path) -> Result<View> {
-        git::view_for_path(abs)
+        let view = git::view_for_path_with(abs, &|repo, commit| self.bases.lock().unwrap().get(&(repo.to_path_buf(), commit.to_string())).cloned())?;
+        if let Some(c) = &view.label.base_commit {
+            let mut bases = self.bases.lock().unwrap();
+            if bases.len() >= MAX_KNOWN_BASES {
+                bases.clear(); // listings are cheap to recompute; a bounded cache beats a tidy eviction order
+            }
+            bases.entry((view.label.repo.clone(), c.clone())).or_insert_with(|| view.base.clone());
+        }
+        Ok(view)
     }
 
     /// Total blobs parsed (extractor calls) by this engine since it opened. Tests assert on deltas.
@@ -212,6 +238,8 @@ impl Engine {
     /// imports are parsed first; `progress` is called after every batch.
     pub fn build(&self, view: &View, priority: &[PathBuf], mut progress: impl FnMut(Progress)) -> Result<BuildReport> {
         let started = Instant::now();
+        let repo_lock = self.build_locks.lock().unwrap().entry(view.label.repo.clone()).or_default().clone();
+        let _one_build_per_repo = repo_lock.lock().unwrap();
         let files = view.files();
         let total = files.len();
         let root = &view.label.worktree;
@@ -492,8 +520,9 @@ impl Engine {
     }
 
     fn graph_with(&self, view: &View, complete: bool) -> Result<Arc<ViewGraph>> {
-        let reader = self.reader(&view.label.repo)?;
+        // Opened only when a graph actually has to be built: a cached one needs no connection.
         let load = |files: &[FileRef]| -> Result<Vec<(FileRef, Arc<BlobFacts>)>> {
+            let reader = self.reader(&view.label.repo)?;
             let mut local: HashMap<(&str, &str), Arc<BlobFacts>> = HashMap::new();
             let mut out = Vec::with_capacity(files.len());
             for f in files {
@@ -581,7 +610,14 @@ impl Engine {
         }
         let v = lang::by_id(f.language).map(|l| l.parser_version()).unwrap_or(0);
         match reader.get_facts(&f.blob_id, f.language, v)? {
-            Some(facts) => {
+            Some(mut facts) => {
+                // Rows arrive from SQLite one at a time, so these vectors grew by doubling and
+                // carry up to 2x slack; on a 650k-reference repository that is tens of MB held
+                // for as long as the graph lives.
+                facts.symbols.shrink_to_fit();
+                facts.refs.shrink_to_fit();
+                facts.imports.shrink_to_fit();
+                facts.hierarchy.shrink_to_fit();
                 let bytes = facts_bytes(&facts);
                 let a = Arc::new(facts);
                 self.facts.lock().unwrap().insert(key, (Arc::downgrade(&a), bytes));

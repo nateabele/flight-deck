@@ -86,6 +86,20 @@ impl DaemonLock {
     }
 }
 
+/// Block until no daemon holds the pidfile lock, up to `timeout`. A daemon answers `shutdown` and
+/// then exits a moment later; anything that starts a new daemon straight after a stop must wait for
+/// the lock to be free, or the new one finds it held and exits.
+pub fn wait_until_stopped(pidfile: &Path, timeout: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + timeout;
+    loop {
+        match DaemonLock::acquire(pidfile) {
+            Ok(LockResult::Busy(_)) if std::time::Instant::now() < until => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Ok(LockResult::Busy(_)) => return false,
+            _ => return true,
+        }
+    }
+}
+
 /// Resident set size of this process in bytes, 0 when the platform will not say.
 pub fn rss_bytes() -> u64 {
     #[cfg(target_os = "linux")]

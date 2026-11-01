@@ -346,3 +346,36 @@ fn add_root_and_workspace_are_hints_that_build_early() {
     let t = ok(&svc, &r.root, "qartez_workspace", json!({"action": "remove", "path": "x"}));
     assert!(t.contains("nothing to do"));
 }
+
+#[test]
+fn an_edit_is_visible_even_while_other_clients_hammer_the_same_worktree() {
+    // Concurrent requests share a view computation; none may share one older than itself.
+    let (_d, svc) = service();
+    let r = project();
+    ok(&svc, &r.root, "find", json!({"name": "entry"}));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hammers: Vec<_> = (0..6)
+        .map(|_| {
+            let (svc, root, stop) = (svc.clone(), r.root.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let r = svc.handle(req(&root, "find", json!({"name": "helper"})));
+                    assert!(r.ok, "{:?}", r.error);
+                }
+            })
+        })
+        .collect();
+    let mut missed = Vec::new();
+    for i in 0..25 {
+        let name = format!("raced_{i}");
+        write(&r.root, "web/a.ts", &format!("{TS_A}export function {name}() {{}}\n"));
+        if !ok(&svc, &r.root, "find", json!({"name": name})).contains("Found 1 match(es)") {
+            missed.push(name);
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for h in hammers {
+        h.join().unwrap();
+    }
+    assert!(missed.is_empty(), "edits not visible to the next query: {missed:?}");
+}

@@ -206,6 +206,12 @@ fn read_text(path: &Path) -> std::result::Result<String, ToolError> {
     }
 }
 
+/// A signature's first line, cut at 160 characters: a type alias of a union can be a paragraph.
+fn one_line(sig: &str) -> String {
+    let line = sig.lines().next().unwrap_or("");
+    if line.chars().count() > 160 { format!("{}…", line.chars().take(160).collect::<String>()) } else { line.to_string() }
+}
+
 /// Section order and titles of `outline`.
 fn group(k: SymbolKind) -> (u8, &'static str) {
     match k {
@@ -237,7 +243,7 @@ pub fn outline(c: &Ctx) -> ToolResult {
         let _ = writeln!(out, "{title}");
         for e in rows {
             let h = &e.hit;
-            let sig = h.signature.as_deref().map(|s| format!(" — {}", s.lines().next().unwrap_or(""))).unwrap_or_default();
+            let sig = h.signature.as_deref().map(|s| format!(" — {}", one_line(s))).unwrap_or_default();
             let _ = writeln!(out, "{}{} {} {}{sig}", "  ".repeat(e.depth as usize), if h.exported { "+" } else { "-" }, h.name, range(h));
         }
     }
