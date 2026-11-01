@@ -105,8 +105,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     public var structuredQuestions: Bool?
     /// true from a Mac that accepts the ask-thread ops (`intake.thread.*`, `intake.diff.decide`)
     /// — the phone's licence to offer Ask. Separate from `steer` for the same reason `choose` is:
-    /// an older Mac drops the socket on an op it does not know. nil from such a Mac, and from
-    /// this one until threads ship.
+    /// an older Mac drops the socket on an op it does not know. nil from such a Mac.
     public var threads: Bool?
 
     public init(

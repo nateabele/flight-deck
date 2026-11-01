@@ -3,11 +3,13 @@ import FleetKit
 import IntakeKit
 @testable import FlightDeck
 
-/// What the Mac does with ask threads before they ship (P1 Task 0): every entry point refuses
-/// with `threads_unavailable` and queues nothing, the phone is never told it may ask, and the
-/// thread ops are scoped like the sibling intake ops. The wire bytes are `ThreadWireCodingTests`.
+/// The Mac's ask-thread ops (spec §5, §6) as `IntakeService` applies them: each APPENDS to the
+/// thread log (or, for an accepted diff, the tape's log too) and starts the intake's ThreadRunner;
+/// ThreadRunner and IntakeRunner stay the single writers of `threads/` and the plan. The phone is
+/// told it may ask. The wire bytes are `ThreadWireCodingTests`; the phone's ops
+/// `PhoneThreadCommandTests`.
 @MainActor
-final class ThreadStubRefusalTests: XCTestCase {
+final class IntakeThreadServiceTests: XCTestCase {
     /// One of each thread command. Copied from `ThreadWireCodingTests`, which moved to the
     /// window-free FleetKitTests bundle; this app-hosted bundle can no longer reach it.
     private static func commands(intake: UUID, thread: UUID) -> [(FleetCommand, String)] {
@@ -26,15 +28,20 @@ final class ThreadStubRefusalTests: XCTestCase {
         ]
     }
 
+    private static let plan = "# P\n\n## Scope\n\nWe ship on Friday.\n"
     private let thread = UUID()
+    private let date = Date(timeIntervalSince1970: 1_800_000_000)
     private var root: URL!
     private var harness: FleetTestHarness!
     private var client: FleetClient!
+    private var threadRunner: FakeRunnerController!
 
     override func setUp() {
         super.setUp()
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("ThreadStubs-\(UUID())", isDirectory: true)
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("ThreadService-\(UUID())", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        threadRunner = FakeRunnerController(prefix: "threads-")
+        threadRunner.socketDirectory = root
     }
 
     override func tearDown() {
@@ -45,6 +52,7 @@ final class ThreadStubRefusalTests: XCTestCase {
         super.tearDown()
     }
 
+    /// A shaping intake with one checkpoint whose plan is `plan`.
     private func shapingIntake(projectPath: String = "/p") throws -> Intake {
         var i = Intake(projectPath: projectPath, intent: "Plan the thing")
         i.state = .shaping
@@ -52,6 +60,13 @@ final class ThreadStubRefusalTests: XCTestCase {
         i.chosenPreset = .fullPlan
         i.roundConfig = PresetExpansion.config(for: .fullPlan, available: .defaults)
         try IntakeStore(root: root).save(i)
+        let tapes = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id))
+        var tape = tapes.loadTape()
+        tape.status = .paused
+        tape.checkpoints = [Checkpoint(id: 1, stage: .synthesis, round: 0, major: true, createdAt: date)]
+        try tapes.saveTape(tape)
+        try FileManager.default.createDirectory(at: tapes.checkpointDirectory(1), withIntermediateDirectories: true)
+        try Data(Self.plan.utf8).write(to: tapes.checkpointDirectory(1).appendingPathComponent("plan.md"))
         return i
     }
 
@@ -59,7 +74,8 @@ final class ThreadStubRefusalTests: XCTestCase {
         let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
                                 processRunner: SilentProcessRunner(),
                                 triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
-                                availableModels: .defaults, runner: FakeRunnerController(),
+                                availableModels: .defaults, runner: FakeRunnerController(prefix: "intake-"),
+                                threadRunner: threadRunner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { Date(timeIntervalSince1970: 1_800_000_000) },
                                 readFile: { try? Data(contentsOf: $0) }, announce: { _ in })
@@ -67,9 +83,38 @@ final class ThreadStubRefusalTests: XCTestCase {
         return svc
     }
 
+    private func directory(_ id: UUID) -> URL { IntakeStore(root: root).directory(for: id) }
+    private func threadCommands(_ id: UUID) -> [ThreadCommand] {
+        ThreadCommandStore(intakeDirectory: directory(id)).commands(after: 0).map(\.command)
+    }
+    private func tapeCommands(_ id: UUID) -> [TapeCommand] {
+        TapeStore(intakeDirectory: directory(id)).commands(after: 0).map(\.command)
+    }
+
+    /// Writes a thread (and its diffs) the way ThreadRunner would, so the service reads them back.
+    private func writeThread(_ id: UUID, _ record: ThreadRecord, diffs: [ThreadDiff] = []) throws {
+        let store = ThreadStore(intakeDirectory: directory(id))
+        let dir = store.directory(record.id)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("diffs"), withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(record).write(to: dir.appendingPathComponent("thread.json"))
+        for d in diffs {
+            try IntakeJSON.encoder.encode(d).write(to: dir.appendingPathComponent("diffs/\(d.id.uuidString).json"))
+        }
+    }
+
+    private func record(_ id: ThreadID, status: ThreadStatus = .open) -> ThreadRecord {
+        ThreadRecord(id: id, title: "t", anchor: .wholePlan, status: status, agent: .codex, model: "m", effort: "high",
+                     followsCheckpoint: 1, createdAt: date)
+    }
+
+    private func diff(_ thread: ThreadID, state: DiffState = .pending, checkpoint: Int = 1) -> ThreadDiff {
+        ThreadDiff(thread: thread, turn: 1, checkpoint: checkpoint,
+                   anchor: NoteAnchor(checkpoint: checkpoint, quote: "We ship on Friday."),
+                   old: "We ship on Friday.", new: "We ship on Monday.", state: state)
+    }
+
     // MARK: - Agent defaults and menu (Stream C, D8)
 
-    @MainActor
     func testTheThreadBindingDefaultsToTheIntakesIntegrator() async throws {
         let i = try shapingIntake()
         let svc = await makeService()
@@ -78,7 +123,6 @@ final class ThreadStubRefusalTests: XCTestCase {
         XCTAssertEqual(defaults, ThreadDefaults(agent: integrator.agent, model: integrator.model, effort: integrator.effort))
     }
 
-    @MainActor
     func testTheThreadMenuListsEveryRunnableAgentOnce() async throws {
         let i = try shapingIntake()
         let svc = await makeService()
@@ -89,14 +133,6 @@ final class ThreadStubRefusalTests: XCTestCase {
         let unbound = IntakeThreadBinding(intakeID: UUID(), reader: EmptyThreadStore(), service: nil)
         XCTAssertTrue(unbound.menu().isEmpty)
         XCTAssertEqual(unbound.defaults(), ThreadDefaults())
-    }
-
-    @MainActor
-    func testAnEditedAcceptStillRefusesWhileThreadsAreUnavailable() async throws {
-        let i = try shapingIntake()
-        let svc = await makeService()
-        let refusal = svc.threadBinding(for: i.id).decideDiff(ThreadID(), diff: UUID(), accept: true, editedMarkdown: "# edited")
-        XCTAssertEqual(refusal, IntakeService.unavailable)
     }
 
     // MARK: - Scope
@@ -113,77 +149,161 @@ final class ThreadStubRefusalTests: XCTestCase {
                                            level: .readOnly, caller: .session(me)))
     }
 
-    /// A runner's token names one intake, and that is all it reaches: commands and reads about its
-    /// own intake pass at every level, and anything else gets `out_of_scope`.
-    func testAnIntakeRunnerCallerReachesOnlyItsOwnIntake() {
+    /// Least privilege: a runner's token reaches no thread op, its own intake's included, at
+    /// any level (`out_of_scope`). ThreadRunner writes `threads/` itself; it never asks the socket.
+    func testAnIntakeRunnerCallerReachesNoThreadOp() {
         let own = UUID()
         let runner = ControlCaller.intakeRunner(own)
         for level in ControlScopeLevel.allCases {
-            for (command, _) in Self.commands(intake: own, thread: thread) {
-                XCTAssertTrue(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
-            }
-            for (command, _) in Self.commands(intake: UUID(), thread: thread) {
+            for (command, _) in Self.commands(intake: own, thread: thread) + Self.commands(intake: UUID(), thread: thread) {
                 XCTAssertFalse(ControlScope.permits(command, level: level, caller: runner), "\(level) \(command)")
             }
-            XCTAssertFalse(ControlScope.permits(FleetCommand.viewing(session: nil), level: level, caller: runner))
-            XCTAssertTrue(ControlScope.permits(FleetRequest.intakeThreadGet(id: own, threadID: thread, since: nil),
-                                               level: level, caller: runner), "\(level)")
-            XCTAssertFalse(ControlScope.permits(FleetRequest.intakeThreadGet(id: UUID(), threadID: thread, since: nil),
+            XCTAssertFalse(ControlScope.permits(FleetRequest.intakeThreadGet(id: own, threadID: thread, since: nil),
                                                 level: level, caller: runner), "\(level)")
-            XCTAssertFalse(ControlScope.permits(FleetRequest.hostList, level: level, caller: runner), "\(level)")
         }
     }
 
-    // MARK: - Stubs
+    // MARK: - The Mac's ops
 
-    func testEveryThreadEntryPointIsRefusedUntilThreadsShip() async throws {
+    /// ✦ Ask: the open and its first message land in the thread log, in that order, the intake's
+    /// ThreadRunner is started at once, and the phone is told it may ask.
+    func testAskOpensTheThreadWithItsFirstMessageAndStartsTheThreadRunner() async throws {
         let i = try shapingIntake()
         let svc = await makeService()
-        let unavailable = IntakeService.threadsUnavailable
-        XCTAssertEqual(unavailable, "threads_unavailable")
-        XCTAssertFalse(svc.threadsAvailable)
-        XCTAssertNil(svc.threadReader(i.id))
-        XCTAssertEqual(svc.threadsDirectory(i.id).path, IntakeStore(root: root).directory(for: i.id).appendingPathComponent("threads").path)
+        let anchor = ThreadAnchor(note: NoteAnchor(checkpoint: 1, quote: "We ship on Friday.", section: "Scope"))
+        let opened = svc.openThread(i.id, anchor: anchor, title: "", text: "  Why Friday?\nAnd not Monday? ", agent: .claude,
+                                    model: "opus", effort: "high")
+        let t = try opened.get()
+        let logged = threadCommands(i.id)
+        XCTAssertEqual(logged.count, 2)
+        XCTAssertEqual(logged.first, .open(t, anchor, title: "Why Friday?", agent: .claude, model: "opus", effort: "high"))
+        guard case .message(t, "Why Friday?\nAnd not Monday?", let messageID, nil, nil, nil) = logged.last
+        else { return XCTFail("\(logged)") }
+        XCTAssertFalse(messageID.isEmpty)
+        XCTAssertEqual(threadRunner.started, [i.id])
+        XCTAssertTrue(tapeCommands(i.id).isEmpty, "nothing reaches the tape until a diff is accepted")
 
-        let t = ThreadID(thread)
-        XCTAssertEqual(svc.openThread(i.id, anchor: .wholePlan, title: "T", text: "Why?", agent: .codex, model: "m",
-                                      effort: "high"), .failure(ThreadRefusal(code: unavailable)))
-        XCTAssertEqual(svc.sendThreadMessage(i.id, thread: t, text: "x")?.code, unavailable)
-        XCTAssertEqual(svc.answerThread(i.id, thread: t, answers: [])?.code, unavailable)
-        XCTAssertEqual(svc.setThreadAutoAccept(i.id, thread: t, true)?.code, unavailable)
-        XCTAssertEqual(svc.setThreadAgent(i.id, thread: t, agent: .claude, model: "m", effort: "e")?.code, unavailable)
-        XCTAssertEqual(svc.resolveThread(i.id, thread: t)?.code, unavailable)
-        XCTAssertEqual(svc.reopenThread(i.id, thread: t)?.code, unavailable)
-        XCTAssertEqual(svc.decideDiff(i.id, thread: t, diff: UUID(), accept: true)?.code, unavailable)
-        XCTAssertEqual(svc.reproposeDiff(i.id, thread: t, diff: UUID())?.code, unavailable)
+        // A reply before ThreadRunner folds the open still lands (the thread is queued), and a
+        // live runner is not started twice.
+        threadRunner.running.insert(i.id)
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "One more thing"))
+        XCTAssertEqual(threadRunner.started, [i.id])
+        XCTAssertEqual(threadCommands(i.id).count, 3)
 
-        XCTAssertEqual(svc.phoneThreadSend(i.id, token: UUID(), threadID: nil, anchor: nil, text: "x"), unavailable)
-        XCTAssertEqual(svc.phoneThreadAnswer(i.id, token: UUID(), threadID: thread, answers: []), unavailable)
-        XCTAssertEqual(svc.phoneThreadResolve(i.id, token: UUID(), threadID: thread), unavailable)
-        XCTAssertEqual(svc.phoneDiffDecide(i.id, token: UUID(), threadID: thread, diffID: UUID(), accept: false), unavailable)
-        XCTAssertEqual(svc.phoneThreadGet(i.id, threadID: thread, since: nil), .failure(ThreadRefusal(code: unavailable)))
+        // Through the binding the panel uses: an accepted send reads as accepted (nil), never as
+        // the binding's "no service" refusal.
+        withExtendedLifetime(svc) {
+            let binding = svc.threadBinding(for: i.id)
+            XCTAssertNil(binding.send(t, text: "Through the binding"))
+            XCTAssertNil(binding.setAutoAccept(t, true))
+            XCTAssertNil(binding.resolve(t))
+        }
+        XCTAssertEqual(threadCommands(i.id).count, 6)
 
-        // The Mac UI's binding: an empty reader, and every send refused the same way.
-        let binding = svc.threadBinding(for: i.id)
-        XCTAssertEqual(binding.intakeID, i.id)
-        XCTAssertTrue(binding.reader.threads().isEmpty)
-        XCTAssertEqual(binding.open(anchor: .wholePlan, title: "T", text: "x", agent: .codex, model: "m", effort: "e"),
-                       .failure(ThreadRefusal(code: unavailable)))
-        XCTAssertEqual(binding.send(t, text: "x")?.code, unavailable)
-        XCTAssertEqual(binding.decideDiff(t, diff: UUID(), accept: true)?.code, unavailable)
-
-        // Nothing was queued for either runner to act on.
-        let store = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id))
-        XCTAssertTrue(store.commands(after: 0).isEmpty)
-        XCTAssertTrue(ThreadCommandStore(intakeDirectory: store.intakeDirectory).commands(after: 0).isEmpty)
-
-        // And the phone is never told it may ask.
+        XCTAssertNotNil(svc.threadReader(i.id))
         let detail = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
-        XCTAssertNil(detail.threads)
+        XCTAssertEqual(detail.threads, true)
     }
 
-    /// The real `FleetService` arm over a real socket answers a thread op with the stub's code.
-    func testAThreadOpThroughFleetServiceIsRefusedThreadsUnavailable() async throws {
+    func testRefusalsQueueNothing() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let resolved = ThreadID()
+        try writeThread(i.id, record(resolved, status: .resolved))
+        XCTAssertEqual(svc.sendThreadMessage(i.id, thread: ThreadID(), text: "x")?.code, "unknown_thread")
+        XCTAssertEqual(svc.sendThreadMessage(i.id, thread: resolved, text: "x")?.code, "thread_resolved")
+        XCTAssertEqual(svc.sendThreadMessage(i.id, thread: resolved, text: "  ")?.code, "empty_message")
+        XCTAssertEqual(svc.openThread(i.id, anchor: .wholePlan, title: "", text: " ", agent: .codex, model: "m", effort: "e"),
+                       .failure(ThreadRefusal(code: "empty_message")))
+        XCTAssertEqual(svc.resolveThread(i.id, thread: ThreadID())?.code, "unknown_thread")
+        XCTAssertEqual(svc.decideDiff(i.id, thread: resolved, diff: UUID(), accept: true)?.code, "unknown_diff")
+        XCTAssertEqual(svc.reproposeDiff(i.id, thread: resolved, diff: UUID())?.code, "thread_resolved")
+        XCTAssertTrue(threadCommands(i.id).isEmpty)
+        XCTAssertTrue(threadRunner.started.isEmpty)
+
+        // Reopening a resolved thread is what lets it take turns again.
+        XCTAssertNil(svc.reopenThread(i.id, thread: resolved))
+        XCTAssertEqual(threadCommands(i.id), [.reopen(resolved)])
+    }
+
+    /// ✓ on the Mac: the tape's `applyThreadDiff` first (composed on the head), then the thread's
+    /// `decideDiff`. ✗ writes only the decision. A second ✓ adds no second edit.
+    func testAcceptWritesTheEditThenTheDecisionAndRejectOnlyTheDecision() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t), other = diff(t)
+        try writeThread(i.id, record(t), diffs: [d, other])
+
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        XCTAssertEqual(tapeCommands(i.id), [.applyThreadDiff(thread: t, diff: d.id, checkpoint: 1,
+                                                             markdown: "# P\n\n## Scope\n\nWe ship on Monday.\n")])
+        XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        XCTAssertEqual(tapeCommands(i.id).count, 1, "a retry adds no second edit")
+
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: other.id, accept: false))
+        XCTAssertEqual(tapeCommands(i.id).count, 1)
+        XCTAssertEqual(threadCommands(i.id).last, .decideDiff(t, diff: other.id, accept: false))
+        XCTAssertEqual(threadRunner.started.first, i.id)
+    }
+
+    /// Edit, then Accept edited (ruling): the human's text is the `applyThreadDiff` markdown and
+    /// the decision is an accept, whatever `accept` says.
+    func testAnEditedAcceptCarriesTheHumansTextAsAnAccept() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        let edited = "# P\n\n## Scope\n\nWe ship on Tuesday, after the review.\n"
+        // The binding holds the service weakly, as the views' does: keep it alive across the call.
+        withExtendedLifetime(svc) {
+            XCTAssertNil(svc.threadBinding(for: i.id).decideDiff(t, diff: d.id, accept: false, editedMarkdown: edited))
+        }
+        XCTAssertEqual(tapeCommands(i.id), [.applyThreadDiff(thread: t, diff: d.id, checkpoint: 1, markdown: edited)])
+        XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
+    }
+
+    /// A stale diff is refused, a decided one answers the same decision with no error and the
+    /// other with `diff_decided`, and nothing is written for either.
+    func testStaleAndDecidedDiffs() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), stale = diff(t, state: .stale), done = diff(t, state: .accepted)
+        try writeThread(i.id, record(t), diffs: [stale, done])
+        XCTAssertEqual(svc.decideDiff(i.id, thread: t, diff: stale.id, accept: true)?.code, "diff_stale")
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: done.id, accept: true))
+        XCTAssertEqual(svc.decideDiff(i.id, thread: t, diff: done.id, accept: false)?.code, "diff_decided")
+        XCTAssertTrue(tapeCommands(i.id).isEmpty)
+        XCTAssertTrue(threadCommands(i.id).isEmpty)
+    }
+
+    // MARK: - ThreadRunner liveness
+
+    /// A ThreadRunner that died with work left (a command after the cursor) is brought back by the
+    /// tick; once there is no work, its leftover daemon is collected.
+    func testTheTickBringsBackAThreadRunnerWithWorkAndReapsAnIdleOne() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        try ThreadCommandStore(intakeDirectory: directory(i.id)).append(.resolve(ThreadID()))
+        svc.pollTapes()
+        XCTAssertEqual(threadRunner.started, [i.id])
+        svc.pollTapes()
+        XCTAssertEqual(threadRunner.started, [i.id, i.id], "still not running, still work: started again")
+
+        // The runner folded it (cursor past it) and exited, leaving its daemon's socket behind.
+        let threads = ThreadStore(intakeDirectory: directory(i.id))
+        try Data("1\n".utf8).write(to: threads.cursorURL)
+        FileManager.default.createFile(atPath: threadRunner.socketPath(for: i.id), contents: nil)
+        svc.pollTapes()
+        XCTAssertEqual(threadRunner.started.count, 2)
+        XCTAssertEqual(threadRunner.reaped, [i.id])
+    }
+
+    // MARK: - Wire
+
+    /// The real `FleetService` arm over a real socket reaches the real op: a resolve of a thread
+    /// that doesn't exist is refused as such, not as unavailable.
+    func testAThreadOpThroughFleetServiceReachesTheOp() async throws {
         let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
         let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
                                  preferences: prefs, daemonControl: LiveDaemonControl(), intakesRoot: root)
@@ -199,23 +319,32 @@ final class ThreadStubRefusalTests: XCTestCase {
         client.onFrame = { frame in
             if let cid = frame.correlationID, cid == sent { reply = frame; answered.fulfill() }
         }
-        let command = FleetCommand.intakeThreadSend(id: i.id, token: UUID(), threadID: nil, anchor: nil, text: "Why?")
+        // A refusal on purpose: an accepted op would start a real ThreadRunner from this host.
+        let command = FleetCommand.intakeThreadResolve(id: i.id, token: UUID(), threadID: UUID())
         client.onReady = { [weak self] in sent = self?.client.send(command) ?? 0 }
         client.connect(to: try harness.service.loopbackEndpoint(), lastSeq: 0)
         await fulfillment(of: [answered], timeout: 15)
         guard case .err(_, let code, _) = try XCTUnwrap(reply) else { return XCTFail("expected err, got \(String(describing: reply))") }
-        XCTAssertEqual(code, "threads_unavailable")
+        XCTAssertEqual(code, "unknown_thread")
     }
 }
 
 @MainActor
 private final class FakeRunnerController: IntakeRunnerControlling {
+    let prefix: String
     var socketDirectory: URL = FileManager.default.temporaryDirectory
-    func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError> { .success(()) }
-    func isRunning(_ id: UUID, tape: Tape?) -> Bool { false }
-    func reap(_ id: UUID) {}
+    var running: Set<UUID> = []
+    private(set) var started: [UUID] = []
+    private(set) var reaped: [UUID] = []
+    init(prefix: String) { self.prefix = prefix }
+    func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError> { started.append(id); return .success(()) }
+    func isRunning(_ id: UUID, tape: Tape?) -> Bool { running.contains(id) }
+    func reap(_ id: UUID) {
+        reaped.append(id)
+        try? FileManager.default.removeItem(atPath: socketPath(for: id))
+    }
     func socketPath(for id: UUID) -> String {
-        socketDirectory.appendingPathComponent("intake-\(id.uuidString.lowercased()).sock").path
+        socketDirectory.appendingPathComponent("\(prefix)\(id.uuidString.lowercased()).sock").path
     }
 }
 

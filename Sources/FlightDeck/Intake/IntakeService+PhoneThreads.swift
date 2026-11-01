@@ -8,11 +8,11 @@ import IntakeKit
 /// `String?` like the sibling phone ops: nil is accepted, otherwise the `err` code. They are
 /// token-idempotent through the same memory (`alreadyAccepted` / `accept` / `refuse`).
 ///
-/// Each public op is a gate over an `apply…` twin that takes the reader: the gate keeps a Mac
-/// whose ThreadRunner has not shipped refusing everything (`threadsAvailable`), and the twin
-/// is what the tests drive with a fake store. Handlers only APPEND — the thread's commands to
+/// Each public op hands the intake's live reader to an `apply…` twin, which is what the tests
+/// drive with a fake store. Handlers only APPEND — the thread's commands to
 /// `threads/commands.jsonl`, an accepted diff's `applyThreadDiff` to the tape's — so ThreadRunner
-/// and IntakeRunner stay the single writers of their own state.
+/// and IntakeRunner stay the single writers of their own state; each append starts the intake's
+/// ThreadRunner if none is live (`kickThreads`).
 ///
 /// **New-thread id contract.** `phoneThreadSend` with `threadID: nil` opens thread
 /// `ThreadID.opened(byToken: token)` — `ThreadID(raw: token)` — and its first message's
@@ -23,29 +23,24 @@ import IntakeKit
 /// answers.
 extension IntakeService {
     func phoneThreadSend(_ id: UUID, token: UUID, threadID: UUID?, anchor: WireThreadAnchor?, text: String) -> String? {
-        guard threadsAvailable else { return Self.threadsUnavailable }
         return applyPhoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text, reader: liveReader(id))
     }
 
     /// Answers to a turn's `askQuestion` actions; queues the thread's next turn.
     func phoneThreadAnswer(_ id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer]) -> String? {
-        guard threadsAvailable else { return Self.threadsUnavailable }
         return applyPhoneThreadAnswer(id, token: token, threadID: threadID, answers: answers, reader: liveReader(id))
     }
 
     func phoneThreadResolve(_ id: UUID, token: UUID, threadID: UUID) -> String? {
-        guard threadsAvailable else { return Self.threadsUnavailable }
         return applyPhoneThreadResolve(id, token: token, threadID: threadID, reader: liveReader(id))
     }
 
     /// Refused with `diff_stale` when the diff could not be rebased.
     func phoneDiffDecide(_ id: UUID, token: UUID, threadID: UUID, diffID: UUID, accept: Bool) -> String? {
-        guard threadsAvailable else { return Self.threadsUnavailable }
         return applyPhoneDiffDecide(id, token: token, threadID: threadID, diffID: diffID, accept: accept, reader: liveReader(id))
     }
 
     func phoneThreadGet(_ id: UUID, threadID: UUID, since: Int?) -> Result<WireThreadPage, ThreadRefusal> {
-        guard threadsAvailable else { return .failure(Self.unavailable) }
         return applyPhoneThreadGet(id, threadID: threadID, since: since, reader: liveReader(id))
     }
 
@@ -107,6 +102,7 @@ extension IntakeService {
             do { try store.append(message) } catch { return refuse("write_failed", id) }
         }
         accept(token, for: id)
+        kickThreads(id)
         return nil
     }
 
@@ -147,6 +143,7 @@ extension IntakeService {
         if record.status != .resolved {
             do { try ThreadCommandStore(intakeDirectory: tapeStore(id).intakeDirectory).append(.resolve(thread)) }
             catch { return refuse("write_failed", id) }
+            kickThreads(id)
         }
         accept(token, for: id)
         return nil
@@ -167,6 +164,7 @@ extension IntakeService {
                 .append(.answer(thread, mapped, messageID: token.uuidString))
         } catch { return refuse("write_failed", id) }
         accept(token, for: id)
+        kickThreads(id)
         return nil
     }
 
@@ -201,30 +199,17 @@ extension IntakeService {
         case .pending: break
         }
 
-        if doAccept {
-            if !alreadyQueued {
-                let load: (Int, String) -> Data? = { self.checkpointFile(id, checkpoint: $0, $1) }
-                guard let markdown = PlanSection.effectivePlan(checkpoint: diff.checkpoint, tape: storedTape(id), loadFile: load),
-                      let edited = Self.applying(diff, to: markdown)
-                else { return refuse("diff_stale", id) }
-                do { try tape.appendCommand(.applyThreadDiff(thread: thread, diff: diffID, checkpoint: diff.checkpoint, markdown: edited)) }
-                catch { return refuse("write_failed", id) }
-            }
+        // Composed on the newest version of the head under the commands lock, as the Mac's ✓ is
+        // (`acceptOnTape`): built on the diff's own checkpoint instead, it would replace a hand
+        // edit still queued, or land on a version no round reads any more.
+        if doAccept, !alreadyQueued, let refusal = acceptOnTape(id, diff, editedMarkdown: nil) {
+            return refuse(refusal.code, id)
         }
         do { try ThreadCommandStore(intakeDirectory: tape.intakeDirectory).append(.decideDiff(thread, diff: diffID, accept: doAccept)) }
         catch { return refuse("write_failed", id) }
         accept(token, for: id)
+        kickThreads(id)
         return nil
-    }
-
-    /// `markdown` with the diff's old passage replaced, or nil when the passage is gone or
-    /// ambiguous. Exactly once, never a best guess (R6): an edit to the wrong place is worse
-    /// than a stale diff the person can re-propose.
-    static func applying(_ diff: ThreadDiff, to markdown: String) -> String? {
-        guard !diff.old.isEmpty else { return nil }
-        let parts = markdown.components(separatedBy: diff.old)
-        guard parts.count == 2 else { return nil }
-        return parts[0] + diff.new + parts[1]
     }
 
     // MARK: - get

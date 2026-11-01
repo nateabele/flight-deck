@@ -160,7 +160,10 @@ enum IntakeDetailProjection {
             roundsLock: i.state == .shaping ? i.roundConfig.map {
                 PhoneRoundsEdit.lock(service.shapingEdit(id), config: $0, editing: service.roundConfigEditing(id))
             } : nil,
-            structuredQuestions: true)
+            structuredQuestions: true,
+            // Ask threads (spec §10): this Mac runs a ThreadRunner per shaping intake, so the
+            // phone may offer Ask and send `intake.thread.*` / `intake.diff.decide`.
+            threads: true)
         detail.etag = etag(detail)
         return detail
     }

@@ -211,6 +211,18 @@ final class PhoneThreadCommandTests: XCTestCase {
         XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
     }
 
+    /// `applyThreadDiff` replaces the whole plan, so it is composed on the newest version: a hand
+    /// edit the Mac queued for the head that no runner has folded yet is kept, not overwritten.
+    func testAnAcceptKeepsAHandEditStillQueuedForTheHead() async throws {
+        let i = try seed(); let svc = await makeService(); let t = ThreadID(); let d = diff(t)
+        let edited = Self.plan + "\n\nA hand edit."
+        _ = try TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: i.id)).appendCommand(.editPlan(checkpoint: 1, markdown: edited))
+        let reader = FakeThreadReader(records: [record(t)], diffsByThread: [t: [d]])
+        XCTAssertNil(svc.applyPhoneDiffDecide(i.id, token: UUID(), threadID: t.raw, diffID: d.id, accept: true, reader: reader))
+        guard case .applyThreadDiff(_, _, 1, let markdown) = tapeCommands(i.id).last else { return XCTFail("\(tapeCommands(i.id))") }
+        XCTAssertEqual(markdown, edited.replacingOccurrences(of: "Friday", with: "Monday"))
+    }
+
     /// The thread's side fails (its directory path is a file): the tape's edit is already there,
     /// never the reverse, and the phone is told so it retries.
     func testAFailedSecondAppendLeavesTheEditNotAnAcceptWithoutOne() async throws {

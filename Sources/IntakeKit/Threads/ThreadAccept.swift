@@ -26,14 +26,17 @@ public enum ThreadAccept {
         case appended
         /// An earlier accept of this diff is already on the tape (a retry): nothing appended.
         case already
-        /// The diff doesn't apply to the newest version: it was proposed on an older checkpoint,
-        /// or its passage is gone or ambiguous. Nothing appended; re-propose it.
+        /// The diff doesn't apply to the newest version: its passage is gone or ambiguous there,
+        /// or an edited accept names an older checkpoint. Nothing appended; re-propose it.
         case stale
     }
 
     /// Appends `applyThreadDiff` for `diff`. `editedMarkdown` is the plan the human changed the
-    /// proposal into (Edit, then Accept edited): it is taken as it is, as an accept. Without it
-    /// the diff's own replacement is applied, exactly once, never as a best guess (R6).
+    /// proposal into (Edit, then Accept edited): it is taken as it is, as an accept, when the
+    /// diff is on the head (the plan the editor shows). Without it the diff's own replacement is
+    /// applied to the newest version, exactly once, never as a best guess (R6) — so a diff from
+    /// before a round landed applies when the round left its passage alone (ThreadRunner's
+    /// rebase does the same first, but only on the thread's next turn), and is stale otherwise.
     public static func append(_ diff: ThreadDiff, editedMarkdown: String?, to tapeStore: TapeStore) throws -> Outcome {
         var outcome = Outcome.stale
         try tapeStore.appendCommand(composing: { commands in
@@ -42,10 +45,11 @@ public enum ThreadAccept {
                 return nil
             }
             let tape = tapeStore.loadTape()
-            guard let head = tapeStore.headPlanCheckpoint(in: tape), diff.checkpoint == head,
+            guard let head = tapeStore.headPlanCheckpoint(in: tape),
                   let effective = tapeStore.effectivePlan(checkpoint: head) else { return nil }
             let markdown: String
             if let editedMarkdown {
+                guard diff.checkpoint == head else { return nil }
                 markdown = editedMarkdown
             } else {
                 let latest = commands.filter { $0.seq > tape.ackedCommandSeq }

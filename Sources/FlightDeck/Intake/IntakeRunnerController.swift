@@ -89,6 +89,19 @@ enum RunnerStartError: Error, Equatable {
     case accountUnavailable(String)
 }
 
+/// Which detached runner a controller keeps alive: an intake's round engine
+/// (`flightdeck intake run`, IntakeRunner) or its ask threads (`flightdeck intake threads`,
+/// ThreadRunner, spec §5). One intake has one of each, side by side, on separate sockets.
+enum RunnerKind: Equatable {
+    case rounds
+    case threads
+
+    var subcommand: String { self == .rounds ? "run" : "threads" }
+    /// `intake-<uuid>.sock` / `threads-<uuid>.sock` (R5). Neither stem parses as a bare UUID, so
+    /// both stay invisible to `SessionDaemon.liveSessionIDs()`.
+    var socketPrefix: String { self == .rounds ? "intake-" : "threads-" }
+}
+
 /// Adopts, spawns and reaps the one detached runner process an intake's round engine needs —
 /// the app-side half of Tasks 7-9's `flightdeck intake run`. Owns only the process lifecycle;
 /// `IntakeService` decides when (through `IntakeRunnerControlling`), and `SessionStore` builds it.
@@ -105,6 +118,11 @@ final class IntakeRunnerController {
     /// the runner's `flightdeck` calls reach only its own intake. `nil` (control socket off, or a
     /// test) injects no token and the runner is a plain human-shell caller.
     private let runnerSecret: Data?
+    /// Rounds or threads: the subcommand, the socket name, and which heartbeat `isRunning`
+    /// trusts (`tape.json`'s, or `threads/runner.json`'s). A thread runner resolves no accounts:
+    /// it bills what the round runner's `accounts.json` already says, and must neither rewrite
+    /// nor remove that file.
+    let kind: RunnerKind
     /// Injected so `isRunning`'s heartbeat-freshness check is deterministic under test —
     /// see the doc comment there for why a live socket alone isn't enough.
     private let now: () -> Date
@@ -200,9 +218,11 @@ final class IntakeRunnerController {
         orphanGrace: TimeInterval = 30,
         accounts: AccountResolving? = nil,
         runnerSecret: Data? = nil,
+        kind: RunnerKind = .rounds,
         now: @escaping () -> Date = Date.init
     ) {
-        self.accounts = accounts
+        self.kind = kind
+        self.accounts = kind == .rounds ? accounts : nil
         self.runnerSecret = runnerSecret
         self.daemon = daemon
         self.control = control
@@ -245,7 +265,7 @@ final class IntakeRunnerController {
     /// The `intake-` prefix means `UUID(uuidString:)` on the stem always fails, which is what
     /// keeps it invisible to that walk.
     func socketPath(for id: UUID) -> String {
-        daemon.directory.appendingPathComponent("intake-\(id.uuidString.lowercased()).sock").path
+        daemon.directory.appendingPathComponent("\(kind.socketPrefix)\(id.uuidString.lowercased()).sock").path
     }
 
     /// Whether an intake already has a live runner behind its socket — the check `ensureRunning`
@@ -295,12 +315,12 @@ final class IntakeRunnerController {
         if let spawnedAt = spawnedAt[id], now().timeIntervalSince(spawnedAt) < spawnGrace {
             return true
         }
-        let tape = tape ?? TapeStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).loadTape()
         // No heartbeat at all — as opposed to a STALE one — means this runner never got past
         // its first poll (Task 8's contract makes a heartbeat the very first tape write) or is
         // a genuinely finished one whose tape predates heartbeats entirely; either way there is
         // nothing to give a sleep-survival grace to, so this reads as not running immediately.
-        guard let heartbeat = tape.heartbeat else {
+        // A thread runner beats in `threads/runner.json` and removes it on exit (R5).
+        guard let heartbeat = heartbeat(id, tape: tape) else {
             firstSeenStale.removeValue(forKey: id)
             return false
         }
@@ -315,6 +335,14 @@ final class IntakeRunnerController {
         let firstStale = firstSeenStale[id] ?? now()
         firstSeenStale[id] = firstStale
         return now().timeIntervalSince(firstStale) < staleGrace
+    }
+
+    private func heartbeat(_ id: UUID, tape: Tape?) -> Date? {
+        let directory = IntakeStore(root: intakesRoot).directory(for: id)
+        switch kind {
+        case .rounds: return (tape ?? TapeStore(intakeDirectory: directory).loadTape()).heartbeat
+        case .threads: return ThreadStore(intakeDirectory: directory).heartbeat()?.heartbeat
+        }
     }
 
     /// Starts a runner for `id` unless one is already live (Review Focus 5: never stack two
@@ -345,11 +373,11 @@ final class IntakeRunnerController {
             environment[ControlEnvironment.callerVariable] = ControlEnvironment.intakeRunnerToken(for: id, secret: runnerSecret)
         }
         // Resolved last, after every check that can refuse or defer: a `.notReady` retried each
-        // tick must not lease (and churn) a pool account per tick.
-        if case .failure(let refusal) = resolveAccounts(id) { return .failure(refusal) }
+        // tick must not lease (and churn) a pool account per tick. Rounds only (`kind`).
+        if kind == .rounds, case .failure(let refusal) = resolveAccounts(id) { return .failure(refusal) }
 
         let arguments = [
-            "-n", socketPath(for: id), flightdeckPath, "intake", "run", id.uuidString.lowercased(),
+            "-n", socketPath(for: id), flightdeckPath, "intake", kind.subcommand, id.uuidString.lowercased(),
             "--root", intakesRoot.path,
         ]
         // Set BEFORE calling spawn (fix round 2, Review Focus 2): `fd-abduco` binds the socket

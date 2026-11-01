@@ -1463,8 +1463,8 @@ final class FleetService: ObservableObject {
                 return .err(cid: cid, code: code)
             }
         case .intakeThreadSend(let id, let token, let threadID, let anchor, let text):
-            // Every thread refusal is `IntakeService`'s (`IntakeService+Threads`), as for the
-            // sibling intake ops: `threads_unavailable` until threads ship.
+            // Every thread refusal is `IntakeService`'s (`IntakeService+PhoneThreads`), as for
+            // the sibling intake ops.
             if let code = store.intakeService.phoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text) {
                 return .err(cid: cid, code: code)
             }

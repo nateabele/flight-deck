@@ -419,6 +419,15 @@ final class IntakeService: ObservableObject {
     /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
     /// with that reason instead of leaving it shaping with nothing behind it.
     private let runner: IntakeRunnerControlling?
+    /// Each shaping intake's ThreadRunner (`flightdeck intake threads`, spec §5): started when a
+    /// thread command is appended and brought back by `pollThreads` when one dies with work
+    /// left. nil in a host that cannot run threads: the commands then wait on disk.
+    let threadRunner: IntakeRunnerControlling?
+    /// `IntakeService+Threads`' state: one `ThreadStore` per intake (its read cache must outlive
+    /// a poll), the thread-work memo, and the intakes whose thread daemon may need collecting.
+    var threadStores: [UUID: ThreadStore] = [:]
+    var threadWorkMemo: [UUID: (stamp: ThreadWorkStamp, pending: Bool)] = [:]
+    var threadSockets: Set<UUID> = []
     /// `tape.json`'s modification date at the last read, per intake, so an idle tick costs one
     /// stat per shaping intake rather than a decode.
     private var tapeDates: [UUID: Date] = [:]
@@ -537,6 +546,7 @@ final class IntakeService: ObservableObject {
         availableModels: AvailableModels? = nil,
         clock: WatchClock? = nil,
         runner: IntakeRunnerControlling? = nil,
+        threadRunner: IntakeRunnerControlling? = nil,
         inject: @escaping (String, String, String, UUID) -> Bool,
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
@@ -555,6 +565,7 @@ final class IntakeService: ObservableObject {
         self.triageSettings = triageSettings
         self.availableModelsCache = availableModels
         self.runner = runner
+        self.threadRunner = threadRunner
         self.inject = inject
         self.hasSession = hasSession
         self.now = now
@@ -602,6 +613,12 @@ final class IntakeService: ObservableObject {
                 for i in self.intakes where i.state != .shaping
                     && FileManager.default.fileExists(atPath: runner.socketPath(for: i.id)) {
                     self.pendingReaps.insert(i.id)
+                }
+            }
+            // A thread daemon a previous launch left: `pollThreads` collects it once it is idle.
+            if let threads = self.threadRunner {
+                for i in self.intakes where FileManager.default.fileExists(atPath: threads.socketPath(for: i.id)) {
+                    self.threadSockets.insert(i.id)
                 }
             }
             self.pollTapes()
@@ -1061,8 +1078,8 @@ final class IntakeService: ObservableObject {
             clearAnswerDrafts(id)
             return nil
         }
-        if let structured = drafts.structured { return structured }
         let presented = open.presentedQuestions
+        if let structured = drafts.structured { return structured }
         guard drafts.answers.count == presented.count else {
             clearAnswerDrafts(id)
             return nil
@@ -1719,6 +1736,7 @@ final class IntakeService: ObservableObject {
             if let halt = halts[id], let acked = latestTapes[id]?.ackedCommandSeq, acked >= halt.seq { halts[id] = nil }
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
+        pollThreads(shaping)
         pollTriageActivity()
         settlePending()
         collectPendingTrash()

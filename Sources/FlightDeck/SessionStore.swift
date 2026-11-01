@@ -2502,10 +2502,16 @@ final class SessionStore: ObservableObject {
         let runner = IntakeRunnerController(daemon: daemon, control: daemonControl,
                                             spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts,
                                             runnerSecret: controlSecret)
+        // The intake's ask threads (spec §5): the same detached mechanism and the same runner
+        // token, on its own `threads-<uuid>.sock`. It resolves no accounts (`RunnerKind`).
+        let threadRunner = IntakeRunnerController(daemon: daemon, control: daemonControl,
+                                                  spawner: FdAbducoRunnerSpawner(), intakesRoot: root,
+                                                  runnerSecret: controlSecret, kind: .threads)
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,
             runner: runner,
+            threadRunner: threadRunner,
             inject: { [weak self] project, agent, text, token in
                 guard let self, let session = self.session(project: project, agentName: agent) else { return false }
                 return self.submitPrompt(text, token: token, to: session.id).errorCode == nil

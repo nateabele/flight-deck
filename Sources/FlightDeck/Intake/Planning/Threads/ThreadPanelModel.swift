@@ -329,7 +329,7 @@ final class ThreadPanelModel: ObservableObject {
         return ThreadHeaderModel(title: record.title, agent: "\(record.agent.rawValue) · \(record.model) · \(record.effort)",
                                  follows: "on \(follows)", quote: quote?.isEmpty == false ? quote : nil,
                                  section: record.anchor.note?.section.map(Self.sectionLabel), status: record.status,
-                                 readsFilesOnly: record.agent == .grok || record.agent == .opencode)
+                                 readsFilesOnly: HeadlessCommand.threadReadsFilesOnly(record.agent))
     }
 
     /// The agents and models the header menu offers.
@@ -519,7 +519,10 @@ final class ThreadPanelModel: ObservableObject {
         case "empty_message", "empty_note": "Write something first."
         case "not_allowed": "That isn't possible right now."
         case "unknown_intake", "intake_moved_on": "This intake has moved on."
-        case "no_agents": "No agent is available on this Mac to answer."
+        case "no_agents", "no_agent": "No agent is available on this Mac to answer."
+        case "thread_resolved": "That thread is resolved. Reopen it to ask again."
+        case "diff_decided": "That edit was already answered the other way."
+        case "write_failed": "Flight Deck couldn't save that. Check the disk, then try again."
         default: "Flight Deck couldn't do that (\(refusal.code))."
         }
     }

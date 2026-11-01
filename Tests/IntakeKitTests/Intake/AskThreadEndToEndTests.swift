@@ -114,8 +114,9 @@ final class AskThreadEndToEndTests: XCTestCase {
     }
 
     /// An accept composes on the newest version there is under the commands lock: a hand edit
-    /// still queued for the head is kept, a diff from an older checkpoint is stale (re-propose
-    /// it), and an edited accept carries the human's text as it is.
+    /// still queued for the head is kept, a diff from an older checkpoint applies to the head
+    /// only where its passage still is, and an edited accept carries the human's text as it is,
+    /// on the head only.
     func testAnAcceptComposesOnTheNewestQueuedEditOfTheHead() async throws {
         _ = try tapeStore.appendCommand(.step)
         let drafted = await round(ScriptedHarnessRunner(Self.seats))
@@ -133,7 +134,15 @@ final class AskThreadEndToEndTests: XCTestCase {
         var old = diff
         old.id = UUID()
         old.checkpoint = 0
-        XCTAssertEqual(try ThreadAccept.append(old, editedMarkdown: nil, to: tapeStore), .stale)
+        old.old = "None"
+        old.new = "Some"
+        XCTAssertEqual(try ThreadAccept.append(old, editedMarkdown: nil, to: tapeStore), .appended)
+        guard case .applyThreadDiff(_, old.id, 1, "# Plan\n\n## Scope\nOne, Mac only\n\n## Risks\nSome\n") =
+                try XCTUnwrap(tapeStore.commands(after: 0).last).command
+        else { return XCTFail("an old diff whose passage the head kept lands on the head") }
+        var oldEdited = old
+        oldEdited.id = UUID()
+        XCTAssertEqual(try ThreadAccept.append(oldEdited, editedMarkdown: "# Plan\n", to: tapeStore), .stale)
 
         var edited = diff
         edited.id = UUID()
