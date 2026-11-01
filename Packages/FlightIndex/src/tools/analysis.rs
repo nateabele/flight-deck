@@ -19,6 +19,26 @@ const MAX_CANDIDATES: usize = 10;
 /// symbols) are worth more than its tail, so each list is capped before the token budget can cut
 /// those sections off.
 const LIST_CAP: usize = 30;
+/// Rows of one view in a list that spans several: see `shown`.
+const VIEW_CAP: usize = 40;
+
+/// The rows of a list to print. A list from one view is cut at `cap`; a list that spans several
+/// views is cut at `VIEW_CAP` rows *per view*, so a long list in one view cannot push another
+/// view's rows (the cross-view ones the caller asked about) past the end of the token budget.
+fn shown<'a, T>(rows: &'a [T], view_of: impl Fn(&T) -> usize, cap: usize) -> Vec<&'a T> {
+    let multi = rows.iter().map(&view_of).collect::<HashSet<_>>().len() > 1;
+    if !multi {
+        return rows.iter().take(cap).collect();
+    }
+    let mut per_view: BTreeMap<usize, usize> = BTreeMap::new();
+    rows.iter()
+        .filter(|r| {
+            let n = per_view.entry(view_of(r)).or_default();
+            *n += 1;
+            *n <= VIEW_CAP.min(cap)
+        })
+        .collect()
+}
 
 /// Whether `h` can be called: what `calls` treats as a function-like definition.
 fn function_like(k: SymbolKind) -> bool {
@@ -170,7 +190,7 @@ pub fn deps(c: &Ctx) -> ToolResult {
     // import an `tessera` file are listed, with the view they are in.
     let mut importers: Vec<(PathBuf, String, usize)> =
         views.importers(0, fi).into_iter().map(|(v, f)| (views.graph(v).abs(f), specifier_into(&views, (v, f), (0, fi)), v)).collect();
-    importers.sort();
+    importers.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)));
     importers.dedup();
     if c.format == Format::Mermaid {
         let mut ids: BTreeMap<PathBuf, usize> = BTreeMap::new();
@@ -213,13 +233,17 @@ pub fn deps(c: &Ctx) -> ToolResult {
         };
     }
     let _ = writeln!(out, "Imported by ({}):", importers.len());
-    for (p, spec, v) in &importers {
+    let rows = shown(&importers, |r| r.2, usize::MAX);
+    for (p, spec, v) in rows.iter().map(|r| &**r) {
         let tag = views.tag(*v);
         let _ = if concise {
             writeln!(out, "<- {}{}", p.display(), tag.map(|t| format!("  [view: {t}]")).unwrap_or_default())
         } else {
             writeln!(out, "<- {} ({}import: {spec})", p.display(), tag.map(|t| format!("view: {t}, ")).unwrap_or_default())
         };
+    }
+    if rows.len() < importers.len() {
+        let _ = writeln!(out, "… {} more importer(s); `impact` lists them with their views", importers.len() - rows.len());
     }
     Ok(c.fit(out))
 }
@@ -273,18 +297,20 @@ pub fn impact(c: &Ctx) -> ToolResult {
 
     let mut out = format!("Impact analysis: {}\n", path.display());
     let _ = writeln!(out, "Direct importers ({}):", direct.len());
-    for (v, p) in direct.iter().take(LIST_CAP) {
+    let rows = shown(&direct, |r| r.0, LIST_CAP);
+    for (v, p) in rows.iter().map(|r| &**r) {
         let _ = writeln!(out, "  {}", at(*v, p));
     }
-    if direct.len() > LIST_CAP {
-        let _ = writeln!(out, "  … {} more", direct.len() - LIST_CAP);
+    if rows.len() < direct.len() {
+        let _ = writeln!(out, "  … {} more", direct.len() - rows.len());
     }
     let _ = writeln!(out, "Transitive blast radius: {} file(s)", radius.len());
-    for (v, e) in radius.iter().take(LIST_CAP) {
+    let rows = shown(&radius, |r| r.0, LIST_CAP);
+    for (v, e) in rows.iter().map(|r| &**r) {
         let _ = writeln!(out, "- {} (depth {})", at(*v, &e.path), e.depth);
     }
-    if radius.len() > LIST_CAP {
-        let _ = writeln!(out, "… {} more (`deps` and `refs transitive=true` list the chain)", radius.len() - LIST_CAP);
+    if rows.len() < radius.len() {
+        let _ = writeln!(out, "… {} more (`deps` and `refs transitive=true` list the chain)", radius.len() - rows.len());
     }
 
     match (c.cochange)() {
@@ -340,12 +366,19 @@ pub fn refs(c: &Ctx) -> ToolResult {
         } else {
             let _ = writeln!(out, "References ({} in {} file(s)):", refs.len(), by_file.len());
         }
-        for ((v, p), rs) in by_file {
+        let files: Vec<((usize, &Path), Vec<&crate::query::RefHit>)> = by_file.into_iter().collect();
+        let listed = shown(&files, |f| (f.0).0, usize::MAX);
+        let omitted = files.len() - listed.len();
+        for ((v, p), rs) in listed.into_iter().map(|f| (&f.0, &f.1)) {
+            let (v, p) = (*v, *p);
             let _ = writeln!(out, "{}{}", p.display(), tag_suffix(&views, v));
             for r in rs {
                 let by_name = if r.confidence == Confidence::Fallback { " (matched by name)" } else { "" };
                 let _ = writeln!(out, "  L{} {}{}{by_name}", r.line, ref_kind(r.kind), r.enclosing.as_ref().map(|e| format!(" in {e}")).unwrap_or_default());
             }
+        }
+        if omitted > 0 {
+            let _ = writeln!(out, "… {omitted} more file(s) in the views above; narrow with file_path or include_tests=false");
         }
         if transitive {
             let radius: Vec<_> = views.blast_radius(d.view, d.id.file).into_iter().filter(|(v, e)| include_tests || !is_test(*v, &e.path)).collect();

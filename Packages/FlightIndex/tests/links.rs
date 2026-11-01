@@ -180,6 +180,22 @@ fn deps_and_impact_of_a_linked_file_show_the_importers_that_stand_in_the_callers
 }
 
 #[test]
+fn a_long_list_in_one_view_does_not_push_the_other_views_rows_out() {
+    let (_d, svc) = service();
+    let w = world();
+    for i in 0..60 {
+        write(&w.lib, &format!("src/Many/M{i:02}.elm"), &format!("module Many.M{i:02} exposing (v)\n\nimport Expression.Node as Node\n\n\nv : Int\nv =\n    {i}\n"));
+    }
+    commit_all(&w.lib, "many importers");
+    let node = w.lib.join("src/Expression/Node.elm");
+    let deps = ok(&svc, &w.app, "deps", json!({"file_path": node, "format": "concise", "token_budget": 20000}));
+    assert!(deps.contains("Imported by (62):") && deps.contains("more importer(s)"), "{deps}");
+    assert!(deps.contains(&format!("<- {}  [view: {}]", w.app.join("src/Main.elm").display(), tag(&w.app))), "{deps}");
+    let impact = ok(&svc, &w.app, "impact", json!({"file_path": node, "token_budget": 20000}));
+    assert!(impact.contains("Direct importers (62):") && impact.contains(&format!("{}  [view: {}]", w.app.join("src/Main.elm").display(), tag(&w.app))), "{impact}");
+}
+
+#[test]
 fn calls_cross_the_link_both_ways() {
     let (_d, svc) = service();
     let w = world();
