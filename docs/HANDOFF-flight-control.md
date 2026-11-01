@@ -696,6 +696,9 @@ Settings list and the authoring skill. Nothing in planning calls a provider yet 
 - The Approve button takes the digest the row showed. If the folder changed since, it refuses.
 - Bundled and user providers are trusted, but are re-checked against the folder at run time.
 - Links are refused anywhere in a provider folder. xattrs are not hashed.
+- Size caps, because Settings reads every repo provider: `provider.toml` at most 256 KiB (read
+  through one descriptor, refused from its size); the digest refuses a file over 10 MiB or a folder
+  over 50 MiB before it reads a byte, then streams. Settings resolves off the main actor.
 - The digest does not hide `.DS_Store` or editor swap files. They change the digest and ask again.
 - Approvals live in `~/Library/Application Support/Flight Deck/provider-trust.json`. If that file is
   corrupt, Approve is off and the pane offers "Move damaged file aside".
@@ -706,8 +709,9 @@ temp folders, and cannot read the home folder. It has a timeout, output caps and
 environment. If `/usr/bin/sandbox-exec` is missing, the generator is refused. The summary is in
 `docs/ARCHITECTURE.md`, "Visual providers".
 
-**`--run-samples`.** `provider check` validates the manifest, kinds, instruction files, assets and
-`entry` files. By default it does not run a generator. With `--run-samples` it first prints the
+**`--run-samples`.** `provider check` validates the manifest, kinds, instruction files and assets.
+It checks only the path of `entry`: the agent writes that file in the draft folder (spec §9 step 5),
+so a provider does not ship one. A linked provider folder is refused. By default it does not run a generator. With `--run-samples` it first prints the
 argv, then runs the generator in the sandbox on `samples/<kind>/`, once per kind. This is intent, not
 a security boundary: an agent can already run shell. The skill tells agents to pass the flag only
 when the author asked for a sample run. Exit codes: 0 valid (warnings print), 1 problems or a failed
