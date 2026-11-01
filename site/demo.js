@@ -989,10 +989,10 @@
      at the demo — the demo is just switched on so it's already running as you
      pass it, no launch choreography to sit through. Its sticky hold means it
      stays put at the top for a moment on the way by. */
-  /* Lands on the outcome list rather than the section's top edge — far enough
-     in that the first card is the thing you arrive at, with the tail of the
+  /* Lands on the highlights rather than the section's top edge — far enough
+     in that the first tile is the thing you arrive at, with the tail of the
      heading still above it for context. */
-  const outcomesEl = $("#features .outcomes");
+  const outcomesEl = $("#features .hl-scrolly");
   const featuresEl = $("#features");
   const featuresScroll = () => {
     if (outcomesEl) return Math.max(0, docTop(outcomesEl) - LANDING_GAP - 40);

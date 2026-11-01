@@ -849,162 +849,6 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 
 /* ==========================================================================
-   Feature hierarchy — numbered outcomes with nested capabilities
-   ========================================================================== */
-
-.outcomes { counter-reset: outcome; display: flex; flex-direction: column; gap: 26px; }
-
-.outcome {
-  counter-increment: outcome;
-  background: linear-gradient(180deg, rgba(20, 30, 50, 0.7), rgba(13, 20, 36, 0.55));
-  border: 1px solid var(--hairline-soft);
-  border-radius: var(--radius-lg);
-  padding: 34px 36px;
-  position: relative;
-  overflow: hidden;
-  transition: border-color 0.35s ease, transform 0.35s ease;
-}
-.outcome::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 2px;
-  background: linear-gradient(180deg, var(--glow-cyan), var(--glow-blue) 45%, transparent);
-  opacity: 0.55;
-}
-.outcome:hover { border-color: var(--hairline); }
-
-.outcome-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 20px;
-  margin-bottom: 8px;
-}
-.outcome-num {
-  flex: none;
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--glow-cyan);
-  padding-top: 8px;
-  letter-spacing: 0.04em;
-  opacity: 0.85;
-}
-.outcome-num::before { content: counter(outcome, decimal-leading-zero); }
-
-.outcome-title { flex: 1; min-width: 0; }
-.outcome-title h3 {
-  margin: 0 0 8px;
-  font-size: clamp(22px, 2.7vw, 29px);
-  line-height: 1.2;
-  letter-spacing: -0.025em;
-  font-weight: 660;
-}
-.outcome-title .lede {
-  margin: 0;
-  font-size: 16.5px;
-  color: var(--fg-secondary);
-  line-height: 1.55;
-  max-width: 62ch;
-}
-
-.capabilities {
-  list-style: none;
-  margin: 26px 0 0;
-  padding: 0;
-  display: grid;
-  gap: 2px;
-  counter-reset: cap;
-}
-.capabilities li {
-  counter-increment: cap;
-  display: grid;
-  grid-template-columns: 46px 1fr auto;
-  gap: 14px;
-  align-items: baseline;
-  padding: 13px 14px 13px 4px;
-  border-top: 1px solid var(--hairline-soft);
-}
-.capabilities li:first-child { border-top: none; }
-
-.cap-num {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--fg-tertiary);
-  letter-spacing: 0.03em;
-}
-.cap-num::before { content: counter(outcome) "." counter(cap); }
-
-.cap-body h4 {
-  margin: 0 0 3px;
-  font-size: 15.5px;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-  color: var(--fg);
-}
-.cap-body p {
-  margin: 0;
-  font-size: 14.5px;
-  color: var(--fg-secondary);
-  line-height: 1.52;
-  max-width: 68ch;
-}
-
-/* Shipped / building / planned */
-.tag {
-  flex: none;
-  font-size: 10.5px;
-  font-weight: 660;
-  letter-spacing: 0.055em;
-  text-transform: uppercase;
-  padding: 3px 9px;
-  border-radius: 980px;
-  white-space: nowrap;
-  border: 1px solid;
-  align-self: center;
-}
-.tag-shipped {
-  color: var(--green);
-  border-color: rgba(48, 209, 88, 0.34);
-  background: rgba(48, 209, 88, 0.10);
-}
-.tag-building {
-  color: var(--orange);
-  border-color: rgba(255, 159, 10, 0.34);
-  background: rgba(255, 159, 10, 0.10);
-}
-.tag-planned {
-  color: var(--fg-tertiary);
-  border-color: var(--hairline);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-@media (max-width: 680px) {
-  .outcome { padding: 26px 20px; }
-  .outcome-head { gap: 13px; }
-  .capabilities li {
-    grid-template-columns: 34px 1fr;
-    grid-template-areas: "num body" ".   tag";
-    row-gap: 8px;
-  }
-  .cap-num  { grid-area: num; }
-  .cap-body { grid-area: body; }
-  .tag { grid-area: tag; justify-self: start; }
-}
-
-/* Legend under the section head */
-.legend {
-  display: flex;
-  gap: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin-top: 24px;
-  font-size: 13px;
-  color: var(--fg-tertiary);
-  align-items: center;
-}
-
-/* ==========================================================================
    Foundation strip
    ========================================================================== */
 
@@ -1238,12 +1082,12 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 
 /* ==========================================================================
-   Feature illustrations — one product shot per outcome, between its heading
-   and its capability list. Each panel's rules are scoped under .fviz-NN.
+   Product shots — one per highlight, shown on the features stage (or in
+   its dialog on narrow screens). Each panel's rules are scoped under
+   .fviz-NN; panels are drawn for a 1000px stage and zoomed to fit.
    ========================================================================== */
 
-.fviz { margin: 26px 0 4px; }
-.fviz-cap { margin: 10px 2px 0; font-size: 12.5px; color: var(--fg-tertiary); }
+.fviz { margin: 0; }
 
 /* ==========================================================================
    Feature 01 — "Run a fleet, not a tab"
@@ -2919,22 +2763,40 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 
 /* ==========================================================================
-   Highlights — a grid of tent-pole features, each a small looping
-   illustration over a title and blurb. Tile art is sized in container
-   units so it scales with its box.
+   Features — highlight tiles stacked on the left; the active one's product
+   shot and details on a sticky stage at the right. highlights.js picks the
+   tile crossing the middle of the viewport. Tile art is sized in container
+   units so it scales with its box; its loop runs only on the active tile.
    ========================================================================== */
 
-.hl-grid {
+.hl-wrap { max-width: 1320px; }
+.hl-scrolly {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 44px 28px;
+  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+  gap: 56px;
+  align-items: start;
 }
-/* Six tracks so the eleven tiles fill every row: Flight Control takes a 2×2
-   block, eight tiles take two tracks each, and the last two split the final
-   row at three tracks apiece. */
-.hl-tile { min-width: 0; grid-column: span 2; }
-.hl-tile.hl-01 { grid-column: span 4; grid-row: span 2; display: flex; flex-direction: column; }
-.hl-tile.hl-10, .hl-tile.hl-11 { grid-column: span 3; }
+.hl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 36vh;
+  display: grid;
+  gap: 64px;
+}
+.hl-item { min-width: 0; }
+.hl-tile {
+  display: block;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 18px;
+  outline: none;
+  opacity: 0.42;
+  transition: opacity 0.35s ease;
+}
+.hl-tile:hover, .hl-tile.is-active { opacity: 1; }
+/* Flight Control's loop is composed for a squarer box. */
+.hl-tile.hl-01 .hl-art { aspect-ratio: 5 / 4; }
+.hl-tile:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
 .hl-art {
   position: relative;
   aspect-ratio: 16 / 10;
@@ -2943,23 +2805,125 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
   background: radial-gradient(120% 90% at 50% 0%, rgba(79, 227, 255, 0.07), transparent 60%), var(--bg-inset);
   border: 1px solid var(--hairline-soft);
   container-type: inline-size;
+  transition: border-color 0.35s ease, box-shadow 0.35s ease;
 }
-.hl-tile.hl-01 .hl-art { aspect-ratio: auto; flex: 1; min-height: 0; }
-.hl-tile:not(.in) .hl-art * { animation-play-state: paused !important; }
-@media (prefers-reduced-motion: reduce) { .hl-art * { animation: none !important; } }
+.hl-tile.is-active .hl-art {
+  border-color: rgba(79, 227, 255, 0.45);
+  box-shadow: 0 0 0 1px rgba(79, 227, 255, 0.18), 0 18px 50px -20px rgba(26, 146, 255, 0.45);
+}
+.js .hl-tile:not(.is-active) .hl-art * { animation-play-state: paused !important; }
+@media (prefers-reduced-motion: reduce) {
+  .hl-art * { animation: none !important; }
+  .hl-tile, .hl-art, .hl-detail { transition: none !important; }
+}
 .hl-title { margin: 16px 0 6px; font-size: 17px; font-weight: 620; letter-spacing: -0.015em; }
 .hl-blurb { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--fg-secondary); }
 
+/* The stage: every detail sits in the same grid cell; only the active one shows. */
+.hl-stage {
+  position: sticky;
+  top: max(16px, calc(50vh - 420px));
+  display: grid;
+}
+.hl-detail {
+  grid-area: 1 / 1;
+  min-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  transition: opacity 0.35s ease, transform 0.35s ease, visibility 0s linear 0.35s;
+}
+.hl-detail.is-active {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: opacity 0.35s ease, transform 0.35s ease, visibility 0s;
+}
+.hl-detail:not(.is-active) * { animation-play-state: paused !important; }
+.hl-shot { overflow: hidden; border-radius: 16px; }
+.hl-shot .fviz { width: 1000px; }
+.hl-d-title { display: none; }
+.hl-points {
+  list-style: none;
+  margin: 26px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 32px;
+}
+.hl-points h4 { margin: 0 0 4px; font-size: 15px; font-weight: 600; letter-spacing: -0.012em; color: var(--fg); }
+.hl-points p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--fg-secondary); }
+
+/* No JS: no stage switching, so drop the stage and show each detail under its tile's list. */
+html:not(.js) .hl-scrolly { display: block; }
+html:not(.js) .hl-tile { opacity: 1; cursor: default; }
+html:not(.js) .hl-stage { position: static; gap: 72px; margin-top: 72px; }
+html:not(.js) .hl-detail { grid-area: auto; opacity: 1; visibility: visible; transform: none; }
+html:not(.js) .hl-d-title { display: block; margin: 0 0 14px; font-size: 20px; }
+html:not(.js) .hl-shot .fviz { width: auto; }
+
+/* Narrow: tiles only; each opens its details in the dialog. */
 @media (max-width: 900px) {
-  .hl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .hl-tile, .hl-tile.hl-10, .hl-tile.hl-11 { grid-column: span 1; }
-  .hl-tile.hl-01 { grid-column: span 2; grid-row: auto; }
-  .hl-tile.hl-01 .hl-art { aspect-ratio: 5 / 4; flex: none; }
+  .hl-scrolly { display: block; }
+  .hl-list { padding: 0; gap: 40px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .js .hl-stage { display: none; }
+  .hl-tile { opacity: 1; }
+  .js .hl-tile .hl-title::after {
+    content: "›";
+    margin-left: 6px;
+    color: var(--glow-cyan);
+    font-weight: 500;
+  }
 }
 @media (max-width: 620px) {
-  .hl-grid { grid-template-columns: 1fr; gap: 36px; }
-  .hl-tile.hl-01 { grid-column: span 1; }
-  .hl-tile.hl-01 .hl-art { aspect-ratio: 5 / 4; flex: none; }
+  .hl-list { grid-template-columns: 1fr; gap: 36px; }
+}
+
+.hl-modal {
+  width: min(1040px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 20px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.hl-modal::backdrop { background: rgba(3, 6, 12, 0.72); backdrop-filter: blur(6px); }
+.hl-modal-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px 12px 20px;
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.hl-modal-title { flex: 1; margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -0.015em; }
+.hl-modal-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+.hl-modal-close svg { width: 14px; height: 14px; }
+.hl-modal-body { padding: 16px; }
+.hl-modal .hl-detail { opacity: 1; visibility: visible; transform: none; transition: none; }
+.hl-modal .hl-detail * { animation-play-state: running !important; }
+.hl-modal .hl-points { grid-template-columns: 1fr; margin-top: 20px; }
+@media (max-width: 640px) {
+  /* Panels have their own phone layouts; show those at natural width. */
+  .hl-modal .hl-shot .fviz { width: auto; zoom: 1 !important; }
 }
 
 /* ==== 01 Flight Control — a plan worked over in rounds until it settles (7 s loop) ====
@@ -4527,3 +4491,2853 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
   75%, 91% { opacity: .5; transform: scaleX(1); }
   95%, 100% { opacity: 0; transform: scaleX(1); }
 }
+
+/* ==== new previews: begin ==== */
+/* ==========================================================================
+   Highlight 05 — "Every agent, one window"
+   The deck window: a sidebar of projects whose sessions run different agents,
+   the selected session's Ghostty surface showing codex's own TUI (from the
+   verbatim captures in Tests/FlightDeckTests/Fixtures/Codex), and the New
+   Session split button's chevron menu held open over it.
+   Design size: 1000 x 500. The window is 372 tall; the pull-down menu drops
+   below its New Session bar, onto the desktop, as a menu does with room under it. Every selector is scoped under .fviz-05.
+   ========================================================================== */
+
+.fviz-05 {
+  --fv5-t-fg:   #e8e8e8;
+  --fv5-t-dim:  #8a8f98;
+  --fv5-t-cyan: #8abeb7;   /* Ghostty dark palette 6 */
+  --fv5-t-grn:  #b5bd68;   /* palette 2 */
+  --fv5-t-red:  #cc6666;   /* palette 1 */
+  --fv5-band:   rgba(255, 255, 255, 0.055);
+  margin: 0;
+  font-family: var(--font);
+}
+
+.fviz-05 .fv-stage {
+  position: relative;
+  width: 1000px;
+  height: 500px;
+}
+
+/* --- Window ------------------------------------------------------------- */
+.fviz-05 .fv-win {
+  position: absolute;
+  left: 0; top: 0; right: 0;
+  height: 372px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+.fviz-05 .fv-titlebar {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  position: relative;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-05 .fv-lights { display: flex; gap: 8px; position: relative; z-index: 1; }
+.fviz-05 .fv-lights i {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-05 .fv-lights .r { background: #ff5f57; }
+.fviz-05 .fv-lights .y { background: #febc2e; }
+.fviz-05 .fv-lights .g { background: #28c840; }
+.fviz-05 .fv-wintitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+}
+
+.fviz-05 .fv-split { flex: 1; min-height: 0; display: flex; }
+
+/* --- Sidebar ------------------------------------------------------------ */
+.fviz-05 .fv-side {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 38, 58, 0.82);
+  border-right: 1px solid #0a0f1a;
+}
+.fviz-05 .fv-list { flex: 1; min-height: 0; padding: 7px 0 4px; overflow: hidden; }
+
+/* Row geometry shared with the hero demo: 4px gap, 24px row, 9px inset */
+.fviz-05 .fv-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin: 1px 9px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-05 .fv-sess { padding-left: 24px; }
+.fviz-05 .fv-slot { width: 16px; flex: none; display: flex; align-items: center; }
+.fviz-05 .fv-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Unemphasized selection: the terminal holds first responder */
+.fviz-05 .fv-sel { background: rgba(255, 255, 255, 0.15); color: #fff; }
+
+.fviz-05 .fv-proj {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  letter-spacing: -0.005em;
+  margin-top: 5px;
+}
+.fviz-05 .fv-proj:first-child { margin-top: 0; }
+.fviz-05 .fv-chev {
+  width: 12px; height: 12px;
+  flex: none;
+  color: var(--fg-tertiary);
+  transform: rotate(90deg);
+}
+.fviz-05 .fv-collapsed .fv-chev { transform: none; }
+.fviz-05 .fv-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-05 .fv-count {
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  padding-right: 2px;
+}
+.fviz-05 .fv-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  line-height: 1;
+  padding-right: 2px;
+}
+
+.fviz-05 .fv-g { width: 11px; height: 11px; flex: none; display: block; }
+.fviz-05 .fv-g-idle   { color: #fff; opacity: 0.1; }
+.fviz-05 .fv-g-unread { color: var(--accent); }
+.fviz-05 .fv-g-wait   { color: var(--orange); }
+
+/* ProgressView .mini: 8 tapered spokes */
+.fviz-05 .fv-spin {
+  --sp: 12px;
+  width: var(--sp); height: var(--sp);
+  flex: none;
+  position: relative;
+  animation: fv05-spin 0.8s steps(8) infinite;
+}
+.fviz-05 .fv-spin i {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: calc(var(--sp) * 0.1417);
+  height: calc(var(--sp) * 0.3);
+  margin: calc(var(--sp) * -0.45) 0 0 calc(var(--sp) * -0.0708);
+  border-radius: 980px;
+  background: var(--fg-secondary);
+  transform-origin: 50% calc(var(--sp) * 0.45);
+}
+.fviz-05 .fv-spin i:nth-child(1) { transform: rotate(0deg);   opacity: 0.22; }
+.fviz-05 .fv-spin i:nth-child(2) { transform: rotate(45deg);  opacity: 0.32; }
+.fviz-05 .fv-spin i:nth-child(3) { transform: rotate(90deg);  opacity: 0.42; }
+.fviz-05 .fv-spin i:nth-child(4) { transform: rotate(135deg); opacity: 0.52; }
+.fviz-05 .fv-spin i:nth-child(5) { transform: rotate(180deg); opacity: 0.62; }
+.fviz-05 .fv-spin i:nth-child(6) { transform: rotate(225deg); opacity: 0.72; }
+.fviz-05 .fv-spin i:nth-child(7) { transform: rotate(270deg); opacity: 0.82; }
+.fviz-05 .fv-spin i:nth-child(8) { transform: rotate(315deg); opacity: 0.92; }
+@keyframes fv05-spin { to { transform: rotate(360deg); } }
+
+/* New Session bar: opaque windowBackgroundColor strip with a top divider,
+   a full-width bordered button whose chevron sits inside the same pill */
+.fviz-05 .fv-foot {
+  flex: none;
+  padding: 8px;
+  background: #1e1e20;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fviz-05 .fv-newbtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 0 0 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.10), 0 0.5px 1px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-05 .fv-plus { width: 12px; height: 12px; flex: none; color: var(--fg); }
+.fviz-05 .fv-newlabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-05 .fv-newkey { color: var(--fg-secondary); font-size: 12.5px; }
+.fviz-05 .fv-divider { width: 1px; height: 14px; background: rgba(255, 255, 255, 0.16); margin-left: 2px; }
+.fviz-05 .fv-drop {
+  width: 18px; height: 24px;
+  display: grid;
+  place-items: center;
+  margin-right: 3px;
+  color: var(--fg-secondary);
+}
+.fviz-05 .fv-drop svg { width: 10px; height: 10px; }
+.fviz-05 .fv-drop.open { color: var(--fg); }
+
+/* --- Terminal: codex's TUI on the Ghostty surface ------------------------ */
+.fviz-05 .fv-term {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 8px 14px 10px;
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.42;
+  color: var(--fv5-t-fg);
+  overflow: hidden;
+}
+.fviz-05 .fv-term .l { display: block; white-space: pre; min-height: 1.42em; }
+.fviz-05 .fv-term strong { font-weight: 700; color: #fff; }
+.fviz-05 .fv-term .b { color: #5a5f68; }
+.fviz-05 .fv-term .d { color: var(--fv5-t-dim); }
+.fviz-05 .fv-term .c { color: var(--fv5-t-cyan); }
+.fviz-05 .fv-term .g { color: var(--fv5-t-grn); }
+.fviz-05 .fv-term .r { color: var(--fv5-t-red); }
+/* the user's turn and the composer sit on a faintly shaded band, full width */
+.fviz-05 .fv-term .band {
+  background: var(--fv5-band);
+  margin: 0 -14px;
+  padding: 0 14px;
+}
+
+/* "◦ Working": the bullet pulses, the word shimmers */
+.fviz-05 .fv-bul { color: var(--fv5-t-dim); animation: fv05-pulse 1.2s steps(1) infinite; }
+@keyframes fv05-pulse { 50% { color: #fff; } }
+.fviz-05 .fv-term .fv-shim {
+  color: transparent;
+  background: linear-gradient(90deg, #8a8f98 0%, #8a8f98 35%, #ffffff 50%, #8a8f98 65%, #8a8f98 100%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+          background-clip: text;
+  animation: fv05-shim 2.2s linear infinite;
+}
+@keyframes fv05-shim { from { background-position: 100% 0; } to { background-position: 0% 0; } }
+
+/* --- The menu, over the window ----------------------------------------- */
+.fviz-05 .fv-menu {
+  position: absolute;
+  z-index: 3;
+  left: 212px;
+  top: 368px;
+  width: 232px;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(38, 40, 46, 0.86);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.18),
+    0 0 0 0.5px rgba(0, 0, 0, 0.7),
+    0 10px 30px rgba(0, 0, 0, 0.55);
+  font-size: 13px;
+  color: var(--fg);
+}
+.fviz-05 .fv-mi {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px 0 4px;
+  border-radius: 4px;
+  white-space: nowrap;
+  letter-spacing: -0.003em;
+}
+.fviz-05 .fv-mi.hot { background: var(--accent); color: #fff; }
+.fviz-05 .fv-ck { width: 18px; flex: none; display: grid; place-items: center; }
+.fviz-05 .fv-ck svg { width: 11px; height: 11px; }
+.fviz-05 .fv-mt { flex: 1; }
+.fviz-05 .fv-kq { color: rgba(235, 235, 245, 0.45); font-size: 12.5px; letter-spacing: 0.04em; }
+.fviz-05 .fv-sm { width: 10px; height: 10px; flex: none; }
+
+/* Opens off the highlighted row, to its right */
+.fviz-05 .fv-submenu {
+  left: 441px;
+  top: 363px;
+  width: 148px;
+}
+
+/* --- Phone width: the terminal, then the sidebar with its menu dropped below -- */
+@media (max-width: 640px) {
+  .fviz-05 .fv-stage { width: 100%; height: auto; padding-bottom: 4px; }
+  .fviz-05 .fv-win { position: relative; height: auto; }
+  .fviz-05 .fv-wintitle { font-size: 12px; padding-left: 64px; }
+  .fviz-05 .fv-split { flex-direction: column; }
+  .fviz-05 .fv-term {
+    order: -1;
+    height: calc(9 * 1.42em + 9px);
+    flex: none;
+    font-size: 9px;
+    padding: 0 10px 8px;
+    border-bottom: 1px solid #0a0f1a;
+  }
+  .fviz-05 .fv-term .band { margin: 0 -10px; padding: 0 10px; }
+  .fviz-05 .fv-side { width: 100%; border-right: none; }
+  .fviz-05 .fv-list { padding-bottom: 6px; }
+  .fviz-05 .fv-menu {
+    position: relative;
+    left: auto; top: auto;
+    width: 232px;
+    max-width: calc(100% - 8px);
+    margin: -6px 0 0 auto;
+  }
+  .fviz-05 .fv-submenu { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-05 .fv-spin,
+  .fviz-05 .fv-bul,
+  .fviz-05 .fv-term .fv-shim { animation: none; }
+  .fviz-05 .fv-term .fv-shim { color: #fff; background: none; }
+}
+
+/* ==========================================================================
+   Highlight 06 — "Know who needs you"
+   A close-up of the session sidebar with every row state (SessionStatusIcon),
+   a subagent count under the pointer showing its tooltip (SubagentCount's
+   .help(status.tooltip)), collapsed projects rolling up their most demanding
+   child (SessionStore.collapsedStatus), and the banner SessionNotifier posts
+   while another app is frontmost.
+   Design size: 1000 x 480. Every selector is scoped under .fviz-06.
+   ========================================================================== */
+
+.fviz-06 {
+  --fv6-z: 1.25;
+  margin: 0;
+  font-family: var(--font);
+}
+
+.fviz-06 .fv-stage {
+  position: relative;
+  width: 1000px;
+  height: 480px;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--hairline-soft);
+  background:
+    radial-gradient(70% 70% at 88% 8%, rgba(255, 159, 10, 0.08), transparent 60%),
+    radial-gradient(90% 80% at 10% 30%, rgba(26, 146, 255, 0.09), transparent 60%),
+    var(--bg-inset);
+}
+
+/* --- Menu bar: only the status side; Flight Deck is not the frontmost app -- */
+.fviz-06 .fv-menubar {
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 0 16px;
+  background: rgba(18, 24, 38, 0.72);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e6ebf3;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.003em;
+}
+.fviz-06 .fv-mbi { height: 12px; width: auto; display: block; color: #e6ebf3; }
+.fviz-06 .fv-clock { font-variant-numeric: tabular-nums; }
+
+/* --- The sidebar, magnified ---------------------------------------------- */
+.fviz-06 .fv-mac {
+  position: absolute;
+  left: 34px;
+  top: 52px;
+  display: flex;
+  align-items: flex-start;
+  zoom: var(--fv6-z);
+}
+
+.fviz-06 .fv-side {
+  width: 236px;
+  flex: none;
+  border-radius: 11px;
+  overflow: hidden;
+  background: rgba(28, 38, 58, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(0, 0, 0, 0.5);
+  padding-bottom: 8px;
+}
+/* An inactive window: the traffic lights go grey */
+.fviz-06 .fv-tbar {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+}
+.fviz-06 .fv-tbar i {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: #4a5163;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.3);
+}
+.fviz-06 .fv-list { padding: 4px 0 0; }
+
+.fviz-06 .fv-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin: 1px 9px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-06 .fv-sess { padding-left: 24px; }
+.fviz-06 .fv-slot { width: 16px; flex: none; display: flex; align-items: center; }
+.fviz-06 .fv-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-06 .fv-sel { background: rgba(255, 255, 255, 0.15); color: #fff; }
+
+.fviz-06 .fv-proj {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  letter-spacing: -0.005em;
+  margin-top: 5px;
+}
+.fviz-06 .fv-proj:first-child { margin-top: 1px; }
+.fviz-06 .fv-chev {
+  width: 12px; height: 12px;
+  flex: none;
+  color: var(--fg-tertiary);
+  transform: rotate(90deg);
+}
+.fviz-06 .fv-collapsed .fv-chev { transform: none; }
+.fviz-06 .fv-next { margin-top: 1px; }
+.fviz-06 .fv-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-06 .fv-count {
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  padding-right: 2px;
+}
+.fviz-06 .fv-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  line-height: 1;
+  padding-right: 2px;
+}
+
+/* The blocked row: an illustrative halo, not app chrome */
+.fviz-06 .fv-blocked {
+  background: rgba(255, 159, 10, 0.10);
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.30);
+  animation: fv06-halo 2.6s ease-in-out infinite;
+}
+@keyframes fv06-halo {
+  50% { box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.55), 0 0 14px rgba(255, 159, 10, 0.22); }
+}
+
+.fviz-06 .fv-g { width: 11px; height: 11px; flex: none; display: block; }
+.fviz-06 .fv-g-idle   { color: #fff; opacity: 0.1; }
+.fviz-06 .fv-g-unread { color: var(--accent); }
+.fviz-06 .fv-g-wait   { color: var(--orange); }
+
+.fviz-06 .fv-spin {
+  --sp: 12px;
+  width: var(--sp); height: var(--sp);
+  flex: none;
+  position: relative;
+  animation: fv06-spin 0.8s steps(8) infinite;
+}
+.fviz-06 .fv-spin i {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: calc(var(--sp) * 0.1417);
+  height: calc(var(--sp) * 0.3);
+  margin: calc(var(--sp) * -0.45) 0 0 calc(var(--sp) * -0.0708);
+  border-radius: 980px;
+  background: var(--fg-secondary);
+  transform-origin: 50% calc(var(--sp) * 0.45);
+}
+.fviz-06 .fv-spin i:nth-child(1) { transform: rotate(0deg);   opacity: 0.22; }
+.fviz-06 .fv-spin i:nth-child(2) { transform: rotate(45deg);  opacity: 0.32; }
+.fviz-06 .fv-spin i:nth-child(3) { transform: rotate(90deg);  opacity: 0.42; }
+.fviz-06 .fv-spin i:nth-child(4) { transform: rotate(135deg); opacity: 0.52; }
+.fviz-06 .fv-spin i:nth-child(5) { transform: rotate(180deg); opacity: 0.62; }
+.fviz-06 .fv-spin i:nth-child(6) { transform: rotate(225deg); opacity: 0.72; }
+.fviz-06 .fv-spin i:nth-child(7) { transform: rotate(270deg); opacity: 0.82; }
+.fviz-06 .fv-spin i:nth-child(8) { transform: rotate(315deg); opacity: 0.92; }
+@keyframes fv06-spin { to { transform: rotate(360deg); } }
+
+/* --- Pointer and tooltip, in the sidebar's own (unzoomed) units ----------- */
+.fviz-06 .fv-cursor {
+  position: absolute;
+  left: 215px;
+  top: 151px;
+  width: 11px;
+  height: 17px;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.6));
+}
+/* macOS dark tooltip: a small opaque grey card under the pointer */
+.fviz-06 .fv-tip {
+  position: absolute;
+  left: 218px;
+  top: 171px;
+  padding: 3px 7px 4px;
+  border-radius: 5px;
+  background: #2a2a2c;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.16),
+    0 0 0 0.5px rgba(0, 0, 0, 0.8),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  line-height: 1.3;
+  color: #ececee;
+  white-space: nowrap;
+  letter-spacing: 0.002em;
+  animation: fv06-tip 6s ease-in-out infinite;
+}
+@keyframes fv06-tip {
+  0%, 12% { opacity: 0; }
+  16%, 92% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* --- The other rows' tooltips, on the same 26px pitch ---------------------- */
+.fviz-06 .fv-legend {
+  list-style: none;
+  margin: 0 0 0 18px;
+  padding: 35px 0 0;
+  width: 230px;
+  flex: none;
+}
+.fviz-06 .fv-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  margin: 1px 0;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+  letter-spacing: -0.003em;
+}
+.fviz-06 .fv-legend .fv-l-proj { margin-top: 5px; }
+.fviz-06 .fv-legend .fv-l-proj:first-child { margin-top: 1px; }
+.fviz-06 .fv-legend .fv-l-next { margin-top: 1px; }
+.fviz-06 .fv-lead { width: 12px; flex: none; border-top: 1px dotted var(--hairline); }
+.fviz-06 .fv-legend .fv-hot { color: var(--orange); font-weight: 560; }
+.fviz-06 .fv-legend .fv-hot .fv-lead { border-top: 1px solid rgba(255, 159, 10, 0.55); }
+
+/* --- Notification banner --------------------------------------------------- */
+.fviz-06 .fv-banners {
+  position: absolute;
+  right: 14px;
+  top: 38px;
+  width: 352px;
+}
+.fviz-06 .fv-banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px 12px 11px;
+  border-radius: 18px;
+  background: rgba(46, 48, 56, 0.78);
+  backdrop-filter: blur(26px) saturate(1.6);
+  -webkit-backdrop-filter: blur(26px) saturate(1.6);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.20),
+    0 0 0 0.5px rgba(0, 0, 0, 0.6),
+    0 12px 32px rgba(0, 0, 0, 0.5);
+  color: #fff;
+  animation: fv06-in 6s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+}
+@keyframes fv06-in {
+  0%   { transform: translateX(380px); }
+  10%, 100% { transform: none; }
+}
+.fviz-06 .fv-icon { width: 38px; height: 38px; flex: none; align-self: flex-start; margin-top: 1px; }
+.fviz-06 .fv-btext { flex: 1; min-width: 0; }
+.fviz-06 .fv-bhead { display: flex; align-items: baseline; gap: 8px; }
+.fviz-06 .fv-btitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.006em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fviz-06 .fv-bwhen { font-size: 11.5px; color: rgba(235, 235, 245, 0.5); flex: none; }
+.fviz-06 .fv-bsub,
+.fviz-06 .fv-bbody {
+  font-size: 13px;
+  line-height: 1.3;
+  letter-spacing: -0.004em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fviz-06 .fv-bbody { white-space: normal; }
+.fviz-06 .fv-bsub { font-weight: 600; color: rgba(255, 255, 255, 0.92); }
+.fviz-06 .fv-bbody { color: rgba(235, 235, 245, 0.82); }
+
+/* --- Connector ------------------------------------------------------------ */
+.fviz-06 .fv-wire {
+  position: absolute;
+  left: 0; top: 0;
+  width: 1000px; height: 480px;
+  pointer-events: none;
+}
+.fviz-06 .fv-wire path { stroke-width: 1px; stroke-linecap: round; }
+.fviz-06 .fv-wire-base { stroke: rgba(255, 159, 10, 0.45); }
+.fviz-06 .fv-wire-flow {
+  stroke: #ffc46b;
+  stroke-dasharray: 3 14;
+  animation: fv06-flow 1.4s linear infinite;
+  filter: drop-shadow(0 0 2px rgba(255, 159, 10, 0.9));
+}
+@keyframes fv06-flow { to { stroke-dashoffset: 17; } }
+
+/* --- Phone width: banner first, then the sidebar at natural size ----------- */
+@media (max-width: 640px) {
+  .fviz-06 .fv-stage {
+    width: 100%;
+    height: auto;
+    padding: 0 0 18px;
+    display: flex;
+    flex-direction: column;
+  }
+  .fviz-06 .fv-menubar { order: -2; }
+  .fviz-06 .fv-banners { order: -1; }
+  .fviz-06 .fv-wire { display: none; }
+  .fviz-06 .fv-menubar { position: relative; font-size: 12px; gap: 10px; padding: 0 12px; }
+  .fviz-06 .fv-banners { position: relative; right: auto; top: auto; width: auto; margin: 10px 10px 0; }
+  .fviz-06 .fv-banner { padding: 10px 12px 11px 10px; border-radius: 16px; }
+  .fviz-06 .fv-bsub, .fviz-06 .fv-bbody { font-size: 12.5px; }
+  .fviz-06 .fv-bbody { white-space: normal; }
+  .fviz-06 .fv-mac {
+    position: relative;
+    left: auto; top: auto;
+    zoom: 1;
+    margin: 16px auto 0;
+    width: min(270px, calc(100% - 28px));
+    padding-bottom: 34px;
+  }
+  .fviz-06 .fv-side { width: 100%; }
+  .fviz-06 .fv-legend { display: none; }
+  .fviz-06 .fv-cursor { left: auto; right: 9px; }
+  .fviz-06 .fv-tip { left: auto; right: -6px; white-space: normal; width: 200px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-06 .fv-spin,
+  .fviz-06 .fv-blocked,
+  .fviz-06 .fv-tip,
+  .fviz-06 .fv-wire-flow,
+  .fviz-06 .fv-banner { animation: none; }
+}
+
+/* ==========================================================================
+   Preview 07 — "Agents that talk to each other"   (design: 1000 × 520)
+   Left: the Mac window on the SENDING tab, a Claude Code turn that ran
+   `flightdeck peer send … --notify-when-idle`, under the NSAlert sheet
+   PeerMessagingService raises for a message that crosses permission classes.
+   Right: the iPhone's SessionTimelineScreen for the RECEIVING tab: "From …"
+   arrives collapsed to three lines at 0.8 opacity behind a leading chevron,
+   and a short "To …" reply is drawn whole.
+   Reuses the site's .row / .glyph / .spinner sidebar classes.
+   ========================================================================== */
+
+.fviz-07 {
+  --t-fg:     #f2f2f2;
+  --t-sub:    #949494;
+  --t-claude: #d77757;
+  --t-ok:     #4eba65;
+  --t-user:   #373737;
+  --ios-bg:   #000;
+  --ios-bg2:  #1c1c1e;
+  --ios-fg:   #fff;
+  --ios-fg2:  rgba(235, 235, 245, 0.6);
+  --ios-fg3:  rgba(235, 235, 245, 0.3);
+  --ios-indigo: #5e5ce6;
+  --ios-indigo-fg: #7d7aff;
+  --ios-green: #30d158;
+}
+
+.fviz-07 .fv-stage {
+  position: relative;
+  width: 1000px;
+  max-width: 100%;
+  height: 520px;
+  overflow: hidden;
+}
+
+/* --- Mac window ---------------------------------------------------------- */
+.fviz-07 .fv-win {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 606px;
+  height: 520px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-07 .fv-titlebar {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  position: relative;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-07 .fv-lights { display: flex; gap: 8px; }
+.fviz-07 .fv-lights i {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-07 .fv-lights .r { background: #ff5f57; }
+.fviz-07 .fv-lights .y { background: #febc2e; }
+.fviz-07 .fv-lights .g { background: #28c840; }
+.fviz-07 .fv-wintitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  pointer-events: none;
+}
+
+.fviz-07 .fv-split { flex: 1; min-height: 0; display: flex; }
+.fviz-07 .fv-side {
+  width: 196px;
+  flex: none;
+  padding: 7px 0 4px;
+  overflow: hidden;
+  background: rgba(28, 38, 58, 0.82);
+  border-right: 1px solid #0a0f1a;
+}
+.fviz-07 .fv-side .row-project:first-child { margin-top: 0; }
+
+.fviz-07 .fv-term {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px 14px 14px;
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--t-fg);
+  overflow: hidden;
+}
+.fviz-07 .fv-term .l { display: block; white-space: pre; }
+.fviz-07 .fv-term .l.user {
+  align-self: flex-start;
+  background: var(--t-user);
+  color: #fff;
+  margin-bottom: 1.5em;
+  padding-right: 1ch;
+}
+.fviz-07 .fv-term .l.gap  { margin-top: 1.5em; }
+.fviz-07 .fv-term .l.spin { margin-top: 1.5em; }
+.fviz-07 .fv-term .fv-cmd { color: #d6d6d6; }
+.fviz-07 .t-dim    { color: var(--t-sub); }
+.fviz-07 .b-ok     { color: var(--t-ok); }
+.fviz-07 .t-claude { color: var(--t-claude); }
+
+/* --- NSAlert sheet --------------------------------------------------------
+   Hangs from under the title bar, centred on the window. Modern alert layout:
+   icon on top, bold message, small informative text, stacked full-width
+   buttons with the first (Deny) as the default. */
+.fviz-07 .fv-sheet {
+  position: absolute;
+  z-index: 3;
+  top: 34px;
+  left: 50%;
+  width: 262px;
+  margin-left: -131px;
+  padding: 15px 15px 14px;
+  border-radius: 14px;
+  background: rgba(38, 46, 62, 0.97);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 18px 44px rgba(0, 0, 0, 0.6);
+  text-align: center;
+  color: var(--fg);
+  animation: fv07-sheet 9s ease-out infinite;
+}
+.fviz-07 .fv-appicon { width: 44px; height: 44px; display: block; margin: 0 auto 7px; }
+.fviz-07 .fv-al-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+.fviz-07 .fv-al-text,
+.fviz-07 .fv-al-body {
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(233, 238, 247, 0.86);
+}
+.fviz-07 .fv-al-body {
+  margin: 7px 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.fviz-07 .fv-al-btn {
+  height: 23px;
+  line-height: 23px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+}
+.fviz-07 .fv-al-btn + .fv-al-btn { margin-top: 7px; }
+.fviz-07 .fv-al-btn.fv-default {
+  background: linear-gradient(180deg, #2a8dff, #0a74f0);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.28), 0 0.5px 1px rgba(0, 0, 0, 0.4);
+}
+
+/* --- Wire: the send leaves the terminal and lands on the phone ---------- */
+.fviz-07 .fv-wire {
+  position: absolute;
+  z-index: 1;
+  left: 606px;
+  top: 186px;
+  width: 64px;
+  height: 160px;
+  overflow: visible;
+}
+.fviz-07 .fv-wire-base { stroke: rgba(125, 122, 255, 0.35); stroke-width: 1.4; }
+.fviz-07 .fv-wire-flow {
+  stroke: #7d7aff;
+  stroke-width: 1.6;
+  stroke-dasharray: 3 9;
+  animation: fv07-flow 1.1s linear infinite;
+}
+
+/* --- iPhone ---------------------------------------------------------------- */
+.fviz-07 .fv-phone {
+  position: absolute;
+  z-index: 2;
+  right: 30px;
+  top: 14px;
+  width: 300px;
+  height: 506px;
+  padding: 9px 9px 0;
+  border-radius: 46px 46px 0 0;
+  background: linear-gradient(180deg, #2a2d33, #16181c 40%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2.5px #0b0c0e,
+    0 30px 70px -20px rgba(0, 0, 0, 0.9),
+    0 0 60px -10px rgba(94, 92, 230, 0.14);
+  -webkit-mask-image: linear-gradient(180deg, #000 90%, transparent);
+          mask-image: linear-gradient(180deg, #000 90%, transparent);
+}
+.fviz-07 .fv-screen {
+  height: 100%;
+  border-radius: 38px 38px 0 0;
+  background: var(--ios-bg);
+  color: var(--ios-fg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font);
+}
+.fviz-07 .fv-status {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 24px 0 30px;
+  position: relative;
+}
+.fviz-07 .fv-time { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+.fviz-07 .fv-island {
+  position: absolute;
+  left: 50%; top: 8px;
+  width: 78px; height: 23px;
+  margin-left: -39px;
+  border-radius: 980px;
+  background: #000;
+  box-shadow: inset 0 0 0 1px #0c0c0c;
+}
+.fviz-07 .fv-sicons { display: flex; gap: 5px; align-items: center; color: #fff; }
+.fviz-07 .fv-sicons svg { height: 9px; width: auto; fill: currentColor; }
+.fviz-07 .fv-nav {
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.fviz-07 .fv-back {
+  position: absolute;
+  left: 12px; top: 3px;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+}
+.fviz-07 .fv-back svg { width: 13px; height: 13px; }
+.fviz-07 .fv-navtitle { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
+
+/* TimelineRow: header (symbol · heading · time), then content; 6pt inside */
+.fviz-07 .fv-feed {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  overflow: hidden;
+}
+.fviz-07 .fv-item { display: flex; flex-direction: column; gap: 5px; }
+.fviz-07 .fv-ihead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 15px;
+  white-space: nowrap;
+}
+.fviz-07 .fv-sym {
+  width: 11px; height: 11px;
+  flex: none;
+  margin: 0 2.5px;
+  color: var(--ios-fg);
+}
+.fviz-07 .fv-chev {
+  width: 11px; height: 11px;
+  flex: none;
+  margin: 0 2.5px;
+  color: var(--ios-fg2);
+  transition: transform 0.25s ease;
+}
+.fviz-07 .fv-iname {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fviz-07 .fv-itime {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 10px;
+  color: var(--ios-fg3);
+  font-variant-numeric: tabular-nums;
+}
+.fviz-07 .fv-indigo { color: var(--ios-indigo-fg); }
+.fviz-07 .fv-green  { color: var(--ios-green); }
+
+.fviz-07 .fv-prose {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.38;
+  color: var(--ios-fg);
+  letter-spacing: -0.005em;
+}
+.fviz-07 .fv-prose code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+}
+
+/* Collapsed peer message: first three lines, the whole row at 0.8 */
+.fviz-07 .fv-peer { opacity: 0.8; animation: fv07-open 9s ease-in-out infinite; }
+.fviz-07 .fv-peer .fv-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.fviz-07 .fv-peer .fv-chev { animation: fv07-chev 9s ease-in-out infinite; }
+
+.fviz-07 .fv-tool {
+  border-radius: 10px;
+  background: var(--ios-bg2);
+  padding: 7px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ios-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Motion ---------------------------------------------------------------
+   The sheet drops in; while it sits, the collapsed message on the phone is
+   tapped open (chevron turns down, full opacity) and closes again. */
+@keyframes fv07-flow  { to { stroke-dashoffset: -12; } }
+@keyframes fv07-sheet {
+  0%   { transform: translateY(-14px); opacity: 0; }
+  6%   { transform: none; opacity: 1; }
+  100% { transform: none; opacity: 1; }
+}
+@keyframes fv07-chev {
+  0%, 38%  { transform: none; }
+  44%, 82% { transform: rotate(90deg); }
+  88%, 100% { transform: none; }
+}
+@keyframes fv07-open {
+  0%, 38%  { opacity: 0.8; }
+  44%, 82% { opacity: 1; }
+  88%, 100% { opacity: 0.8; }
+}
+/* Expanded state: the clamp lifts between the same keyframes */
+.fviz-07 .fv-peer .fv-clamp { animation: fv07-clamp 9s steps(1, end) infinite; }
+@keyframes fv07-clamp {
+  0%   { -webkit-line-clamp: 3; }
+  41%  { -webkit-line-clamp: 8; }
+  85%  { -webkit-line-clamp: 3; }
+}
+
+/* --- Phone-width modal: the receiving phone, then the sheet as a card -- */
+@media (max-width: 640px) {
+  .fviz-07 .fv-stage {
+    width: auto;
+    height: auto;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .fviz-07 .fv-wire,
+  .fviz-07 .fv-win .fv-titlebar,
+  .fviz-07 .fv-win .fv-split { display: none; }
+  .fviz-07 .fv-phone {
+    position: relative;
+    right: auto; top: auto;
+    width: min(300px, 100%);
+    height: 420px;
+  }
+  /* The window itself is hidden; only its sheet remains, below the phone */
+  .fviz-07 .fv-win {
+    position: relative;
+    order: 2;
+    width: min(290px, 100%);
+    height: auto;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    overflow: visible;
+  }
+  .fviz-07 .fv-sheet {
+    position: relative;
+    top: auto; left: auto;
+    margin: 0;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-07 .fv-sheet,
+  .fviz-07 .fv-wire-flow,
+  .fviz-07 .fv-peer,
+  .fviz-07 .fv-peer .fv-chev,
+  .fviz-07 .fv-peer .fv-clamp { animation: none; }
+  .fviz-07 .spinner { animation: none; }
+}
+
+/* ==========================================================================
+   Preview 08 — "Sessions that outlive the app"   (design: 1000 × 500)
+   Left top: the Mac window after a restart. The selected tab was resumed and
+   typed "Keep going"; idle tabs are asleep (they look idle: sleep has no glyph
+   of its own); one tab stopped on an API error, its tooltip showing the retry.
+   Left bottom: Settings › Shell & Environment, the Sleep and Recovery sections.
+   Right: the iPhone's SessionTimelineScreen for that tab, the retry strip in
+   its top inset counting down to the next "Keep going".
+   Reuses the site's .row / .glyph / .spinner sidebar classes.
+   ========================================================================== */
+
+@property --fv08-n {
+  syntax: '<integer>';
+  inherits: false;
+  initial-value: 54;
+}
+
+.fviz-08 {
+  --t-fg:     #f2f2f2;
+  --t-sub:    #949494;
+  --t-claude: #d77757;
+  --t-ok:     #4eba65;
+  --t-user:   #373737;
+  --ios-bg:   #000;
+  --ios-bg2:  #1c1c1e;
+  --ios-fg:   #fff;
+  --ios-fg2:  rgba(235, 235, 245, 0.6);
+  --ios-fg3:  rgba(235, 235, 245, 0.3);
+  --ios-green: #30d158;
+  --ios-red:   #ff453a;
+  --ios-orange: #ff9f0a;
+  --ios-accent: #0a84ff;
+}
+
+.fviz-08 .fv-stage {
+  position: relative;
+  width: 1000px;
+  max-width: 100%;
+  height: 500px;
+  overflow: hidden;
+}
+
+/* --- Mac window ---------------------------------------------------------- */
+.fviz-08 .fv-win {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 620px;
+  height: 288px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-08 .fv-titlebar {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  position: relative;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-08 .fv-lights { display: flex; gap: 8px; }
+.fviz-08 .fv-lights i {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.fviz-08 .fv-lights .r { background: #ff5f57; }
+.fviz-08 .fv-lights .y { background: #febc2e; }
+.fviz-08 .fv-lights .g { background: #28c840; }
+.fviz-08 .fv-wintitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  pointer-events: none;
+}
+
+.fviz-08 .fv-split { flex: 1; min-height: 0; display: flex; }
+.fviz-08 .fv-side {
+  width: 200px;
+  flex: none;
+  padding: 7px 0 4px;
+  overflow: hidden;
+  background: rgba(28, 38, 58, 0.82);
+  border-right: 1px solid #0a0f1a;
+}
+.fviz-08 .fv-side .row-project:first-child { margin-top: 0; }
+/* exclamationmark.triangle.fill, red */
+.fviz-08 .fv-g-err { color: var(--red); width: 12px; height: 12px; }
+.fviz-08 .fv-err { background: rgba(255, 255, 255, 0.06); }
+
+.fviz-08 .fv-term {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px 14px 14px;
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--t-fg);
+  overflow: hidden;
+}
+.fviz-08 .fv-term .l { display: block; white-space: pre; }
+.fviz-08 .fv-term .l.user {
+  align-self: flex-start;
+  background: var(--t-user);
+  color: #fff;
+  margin-bottom: 1.5em;
+  padding-right: 1ch;
+}
+.fviz-08 .fv-term .l.fv-kg { margin-top: 1.5em; animation: fv08-kg 6s ease-out infinite; }
+.fviz-08 .fv-term .l.spin { margin-top: 1.5em; }
+.fviz-08 .t-dim    { color: var(--t-sub); }
+.fviz-08 .b-ok     { color: var(--t-ok); }
+.fviz-08 .b-run    { color: var(--t-sub); }
+.fviz-08 .t-claude { color: var(--t-claude); }
+
+/* The system tooltip under the error row (NSToolTip, dark appearance) */
+.fviz-08 .fv-tip {
+  position: absolute;
+  z-index: 4;
+  left: 104px;
+  top: 285px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #e6e6e6;
+  background: rgba(46, 48, 54, 0.98);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 4px 12px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+  animation: fv08-tip 6s ease-out infinite;
+}
+
+/* --- Settings window crop ------------------------------------------------- */
+.fviz-08 .fv-prefs {
+  position: absolute;
+  left: 0;
+  top: 302px;
+  width: 620px;
+  height: 260px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #1c2436;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.5);
+  -webkit-mask-image: linear-gradient(180deg, #000 64%, transparent 76%);
+          mask-image: linear-gradient(180deg, #000 64%, transparent 76%);
+}
+.fviz-08 .fv-ptitle {
+  height: 30px;
+  line-height: 30px;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-08 .fv-form { padding: 9px 22px 0; }
+.fviz-08 .fv-sechead {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--fg);
+  margin: 0 0 5px 2px;
+}
+.fviz-08 .fv-group {
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  margin-bottom: 10px;
+}
+.fviz-08 .fv-frow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.fviz-08 .fv-frow + .fv-frow { border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.fviz-08 .fv-frow.fv-cap {
+  display: block;
+  padding: 6px 10px 7px;
+  font-size: 10.5px;
+  line-height: 1.38;
+  color: var(--fg-secondary);
+}
+.fviz-08 .fv-switch {
+  position: relative;
+  width: 26px; height: 15px;
+  border-radius: 980px;
+  background: rgba(255, 255, 255, 0.2);
+  flex: none;
+}
+.fviz-08 .fv-switch.on { background: var(--accent); }
+.fviz-08 .fv-switch::after {
+  content: "";
+  position: absolute;
+  top: 1.5px; left: 1.5px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.4);
+}
+.fviz-08 .fv-switch.on::after { left: 12.5px; }
+.fviz-08 .fv-stepper {
+  display: flex;
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+}
+.fviz-08 .fv-stepper i {
+  font-style: normal;
+  width: 18px;
+  height: 16px;
+  line-height: 15px;
+  text-align: center;
+  font-size: 12px;
+  color: #dfe5ef;
+}
+.fviz-08 .fv-stepper i + i { border-left: 1px solid rgba(0, 0, 0, 0.35); }
+
+/* --- Wire: the error row to the phone ------------------------------------ */
+.fviz-08 .fv-wire {
+  position: absolute;
+  z-index: 1;
+  left: 620px;
+  top: 118px;
+  width: 54px;
+  height: 154px;
+  overflow: visible;
+}
+.fviz-08 .fv-wire-base { stroke: rgba(255, 159, 10, 0.32); stroke-width: 1.4; }
+.fviz-08 .fv-wire-flow {
+  stroke: var(--orange);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 9;
+  animation: fv08-flow 1.1s linear infinite;
+}
+
+/* --- iPhone ---------------------------------------------------------------- */
+.fviz-08 .fv-phone {
+  position: absolute;
+  z-index: 2;
+  right: 28px;
+  top: 12px;
+  width: 300px;
+  height: 488px;
+  padding: 9px 9px 0;
+  border-radius: 46px 46px 0 0;
+  background: linear-gradient(180deg, #2a2d33, #16181c 40%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2.5px #0b0c0e,
+    0 30px 70px -20px rgba(0, 0, 0, 0.9),
+    0 0 60px -10px rgba(255, 159, 10, 0.10);
+  -webkit-mask-image: linear-gradient(180deg, #000 92%, transparent);
+          mask-image: linear-gradient(180deg, #000 92%, transparent);
+}
+.fviz-08 .fv-screen {
+  height: 100%;
+  border-radius: 38px 38px 0 0;
+  background: var(--ios-bg);
+  color: var(--ios-fg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font);
+}
+.fviz-08 .fv-status {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 24px 0 30px;
+  position: relative;
+}
+.fviz-08 .fv-time { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+.fviz-08 .fv-island {
+  position: absolute;
+  left: 50%; top: 8px;
+  width: 78px; height: 23px;
+  margin-left: -39px;
+  border-radius: 980px;
+  background: #000;
+  box-shadow: inset 0 0 0 1px #0c0c0c;
+}
+.fviz-08 .fv-sicons { display: flex; gap: 5px; align-items: center; color: #fff; }
+.fviz-08 .fv-sicons svg { height: 9px; width: auto; fill: currentColor; }
+.fviz-08 .fv-nav {
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.fviz-08 .fv-back {
+  position: absolute;
+  left: 12px; top: 3px;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+}
+.fviz-08 .fv-back svg { width: 13px; height: 13px; }
+.fviz-08 .fv-navtitle { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
+
+/* The retry strip: 16/10 padding, secondarySystemBackground, title3 arrow */
+.fviz-08 .fv-retry {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 14px;
+  margin-top: 4px;
+  background: var(--ios-bg2);
+}
+.fviz-08 .fv-rarrow { width: 17px; height: 17px; flex: none; color: var(--ios-orange); }
+.fviz-08 .fv-rtext {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* next in 54s … 45s: a pure-CSS countdown on an integer custom property */
+.fviz-08 .fv-count {
+  display: inline-block;
+  min-width: 1.25em;
+  text-align: right;
+  --fv08-n: 54;
+  counter-reset: fv08s var(--fv08-n);
+  animation: fv08-tick 10s linear infinite;
+}
+.fviz-08 .fv-count .fv-static { display: none; }
+.fviz-08 .fv-count::after { content: counter(fv08s); }
+
+.fviz-08 .fv-feed {
+  flex: 1;
+  min-height: 0;
+  padding: 0 14px 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 14px;
+  overflow: hidden;
+}
+.fviz-08 .fv-item { display: flex; flex-direction: column; gap: 5px; flex: none; }
+.fviz-08 .fv-ihead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 15px;
+  white-space: nowrap;
+}
+.fviz-08 .fv-sym {
+  width: 11px; height: 11px;
+  flex: none;
+  margin: 0 2.5px;
+  color: var(--ios-fg);
+}
+.fviz-08 .fv-iname {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.fviz-08 .fv-itime {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 10px;
+  color: var(--ios-fg3);
+  font-variant-numeric: tabular-nums;
+}
+.fviz-08 .fv-chip {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ios-red);
+  padding: 1px 6px;
+  border-radius: 980px;
+  background: rgba(255, 69, 58, 0.12);
+}
+.fviz-08 .fv-accent { color: var(--ios-accent); }
+.fviz-08 .fv-green  { color: var(--ios-green); }
+.fviz-08 .fv-red    { color: var(--ios-red); }
+
+.fviz-08 .fv-prose {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.38;
+  color: var(--ios-fg);
+  letter-spacing: -0.005em;
+  overflow-wrap: anywhere;
+}
+/* A user's own turn: the one tinted panel */
+.fviz-08 .fv-prose.fv-you {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(10, 132, 255, 0.16);
+}
+.fviz-08 .fv-tool {
+  border-radius: 10px;
+  background: var(--ios-bg2);
+  font-family: var(--mono);
+  overflow: hidden;
+}
+.fviz-08 .fv-tool span {
+  display: block;
+  padding: 7px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fviz-08 .fv-cmdl { font-size: 11px; color: var(--ios-fg); }
+.fviz-08 .fv-out {
+  font-size: 10px;
+  color: var(--ios-fg2);
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+/* --- Motion ---------------------------------------------------------------- */
+@keyframes fv08-flow { to { stroke-dashoffset: -12; } }
+@keyframes fv08-tick { from { --fv08-n: 54; } to { --fv08-n: 44; } }
+@keyframes fv08-tip {
+  0%, 4%    { opacity: 0; transform: translateY(-2px); }
+  10%, 92%  { opacity: 1; transform: none; }
+  100%      { opacity: 0; }
+}
+/* The nudge line lands with a brief cyan wash, then settles to the user-turn grey */
+@keyframes fv08-kg {
+  0%, 6%  { box-shadow: 0 0 0 0 rgba(79, 227, 255, 0); }
+  14%     { box-shadow: 0 0 0 3px rgba(79, 227, 255, 0.35); }
+  40%, 100% { box-shadow: 0 0 0 3px rgba(79, 227, 255, 0); }
+}
+
+/* --- Phone-width modal: phone, then the Mac rows, settings dropped -------- */
+@media (max-width: 640px) {
+  .fviz-08 .fv-stage {
+    width: auto;
+    height: auto;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .fviz-08 .fv-wire,
+  .fviz-08 .fv-prefs,
+  .fviz-08 .fv-term { display: none; }
+  .fviz-08 .fv-phone {
+    position: relative;
+    right: auto; top: auto;
+    width: min(300px, 100%);
+    height: 440px;
+  }
+  .fviz-08 .fv-win {
+    position: relative;
+    order: 2;
+    width: 100%;
+    height: auto;
+  }
+  .fviz-08 .fv-side { width: 100%; border-right: 0; }
+  .fviz-08 .fv-tip {
+    position: relative;
+    order: 3;
+    left: auto;
+    top: auto;
+    margin-top: -10px;
+    max-width: 92%;
+    white-space: normal;
+    text-align: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-08 .fv-wire-flow,
+  .fviz-08 .fv-tip,
+  .fviz-08 .fv-term .l.fv-kg,
+  .fviz-08 .fv-count { animation: none; }
+  .fviz-08 .fv-count::after { content: none; }
+  .fviz-08 .fv-count .fv-static { display: inline; }
+  .fviz-08 .spinner { animation: none; }
+}
+
+/* ==========================================================================
+   Feature 09 — "Cloud machines on demand"
+   Settings → Cloud (CloudSettingsTab: Accounts, Tailscale, Budget; its Machines
+   section beside it), and a shell tab printing the session's budget and the
+   cost line `flightdeck run --on` prints before a run lands on a cloud machine.
+   Design size 1000 × 520. Every selector is scoped under .fviz-09.
+   ========================================================================== */
+
+.fviz-09 {
+  --fv09-t-fg:  #f2f2f2;
+  --fv09-t-sub: #949494;
+  --fv09-t-ok:  #4eba65;
+  --fv09-win:   #151d2d;
+  --fv09-grp:   rgba(255, 255, 255, 0.045);
+  --fv09-line:  rgba(255, 255, 255, 0.065);
+  --fv09-sec:   #8c9ab2;
+}
+
+.fviz-09 .fv09-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 566px minmax(0, 1fr);
+  grid-template-rows: 520px;
+  gap: 14px;
+  height: 520px;
+  overflow: hidden;
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* --- Windows --------------------------------------------------------------- */
+.fviz-09 .fv09-win {
+  position: relative;
+  min-width: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--fv09-win);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    0 20px 40px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+/* The Settings window runs on below the stage: its Machines section is the card beside it */
+.fviz-09 .fv09-settings {
+  height: 560px;
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 70px), transparent calc(100% - 38px));
+          mask-image: linear-gradient(180deg, #000 calc(100% - 70px), transparent calc(100% - 38px));
+}
+
+.fviz-09 .fv09-chrome {
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-09 .fv09-titlerow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+}
+.fviz-09 .fv09-lights { display: flex; gap: 7px; }
+.fviz-09 .fv09-lights i {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+  background: #ff5f57;
+}
+.fviz-09 .fv09-lights i:nth-child(2) { background: #febc2e; }
+.fviz-09 .fv09-lights i:nth-child(3) { background: #28c840; }
+.fviz-09 .fv09-wintitle,
+.fviz-09 .fv09-ttitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  pointer-events: none;
+}
+
+/* Toolbar tabs: PreferencesView's ten panes, Cloud selected */
+.fviz-09 .fv09-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 1px;
+  padding: 1px 6px 6px;
+}
+.fviz-09 .fv09-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 5px 3px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  line-height: 1.1;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+.fviz-09 .fv09-tab svg { width: 18px; height: 16px; }
+.fviz-09 .fv09-tab-on {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--accent);
+}
+
+/* --- Grouped form ------------------------------------------------------------ */
+.fviz-09 .fv09-form { padding: 3px 20px 20px; }
+.fviz-09 .fv09-sh {
+  margin: 9px 2px 4px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: #c4cfe0;
+  letter-spacing: -0.003em;
+}
+.fviz-09 .fv09-group {
+  border-radius: 8px;
+  background: var(--fv09-grp);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+.fviz-09 .fv09-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 23px;
+  margin: 0 10px;
+  font-size: 12px;
+  color: var(--fg);
+  border-top: 1px solid var(--fv09-line);
+}
+.fviz-09 .fv09-row:first-child { border-top: none; }
+.fviz-09 .fv09-lab { flex: none; white-space: nowrap; }
+.fviz-09 .fv09-val,
+.fviz-09 .fv09-pop {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--fv09-sec);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.fviz-09 .fv09-pop { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); }
+.fviz-09 .fv09-pop svg { width: 8px; height: 11px; color: var(--fv09-sec); flex: none; }
+.fviz-09 .fv09-mono { font-size: 11.5px; }
+
+/* A macOS stepper: two halves of one small rounded control */
+.fviz-09 .fv09-step {
+  position: relative;
+  margin-left: auto;
+  width: 13px;
+  height: 20px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12), 0 0.5px 1px rgba(0, 0, 0, 0.4);
+}
+.fviz-09 .fv09-step::before,
+.fviz-09 .fv09-step::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  border: 3px solid transparent;
+}
+.fviz-09 .fv09-step::before { top: 2px; border-bottom: 3.5px solid #c9d3e3; border-top-width: 0; }
+.fviz-09 .fv09-step::after { bottom: 2px; border-top: 3.5px solid #c9d3e3; border-bottom-width: 0; }
+.fviz-09 .fv09-step i {
+  position: absolute;
+  left: 2px; right: 2px; top: 50%;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.fviz-09 .fv09-caprow { padding: 5px 0 6px; align-items: center; }
+.fviz-09 .fv09-cap {
+  flex: 1;
+  font-size: 10.5px;
+  line-height: 1.38;
+  color: var(--fv09-sec);
+}
+.fviz-09 .fv09-btn {
+  flex: none;
+  padding: 2px 9px 3px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), 0 0.5px 1.5px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+}
+.fviz-09 .fv09-small { font-size: 11px; padding: 1px 8px 2px; }
+
+/* --- Right column ------------------------------------------------------------ */
+.fviz-09 .fv09-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Machines card: the same material as feature 03's cards */
+.fviz-09 .fv09-card {
+  flex: none;
+  background: rgba(28, 38, 58, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  min-width: 0;
+}
+.fviz-09 .fv09-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, rgba(32, 43, 64, 0.9), rgba(26, 36, 55, 0.9));
+}
+.fviz-09 .fv09-ico { width: 15px; height: 15px; color: var(--fg-secondary); flex: none; }
+.fviz-09 .fv09-head-title { font-size: 12.5px; font-weight: 600; color: #b9c6dc; white-space: nowrap; }
+.fviz-09 .fv09-head-cap {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+.fviz-09 .fv09-machines { list-style: none; margin: 0; padding: 0; }
+.fviz-09 .fv09-m {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.fviz-09 .fv09-m:first-child { border-top: none; }
+.fviz-09 .fv09-mtext { flex: 1; min-width: 0; }
+.fviz-09 .fv09-mline { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--fg); }
+.fviz-09 .fv09-mstate { font-size: 10.5px; color: var(--fv09-sec); }
+.fviz-09 .fv09-mcost {
+  display: flex;
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fv09-sec);
+  white-space: nowrap;
+}
+/* .truncationMode(.middle): the head ellipsizes, the tail stays */
+.fviz-09 .fv09-mcost b { font-weight: inherit; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-09 .fv09-mcost i { font-style: normal; flex: none; }
+
+/* --- Terminal ---------------------------------------------------------------- */
+.fviz-09 .fv09-term {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-inset);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    0 20px 40px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-09 .fv09-tbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  flex: none;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-09 .fv09-tbody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 10px 12px 12px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--fv09-t-fg);
+  overflow: hidden;
+}
+/* A terminal hard-wraps at its last column, mid-word */
+.fviz-09 .fv09-l { display: block; white-space: pre-wrap; word-break: break-all; min-height: 1.5em; }
+.fviz-09 .fv09-ps { color: var(--glow-cyan); }
+.fviz-09 .fv09-dim { color: var(--fv09-t-sub); }
+.fviz-09 .fv09-early { opacity: 0.55; }
+.fviz-09 .fv09-cost { color: #c8d4e6; }
+.fviz-09 .fv09-ok { color: var(--fv09-t-ok); }
+.fviz-09 .fv09-caret {
+  display: inline-block;
+  width: 1ch;
+  height: 1.15em;
+  margin-left: 0.2ch;
+  vertical-align: -0.2em;
+  background: var(--fv09-t-fg);
+  animation: fv09-blink 1.1s steps(2) infinite;
+}
+
+/* The run's lines arrive in order, the cost line first */
+.fviz-09 .fv09-s { animation: fv09-arrive 0.28s ease-out both; }
+.fviz-09 .s1 { animation-delay: 0.4s; }
+.fviz-09 .s2 { animation-delay: 0.8s; }
+.fviz-09 .s3 { animation-delay: 1.5s; }
+.fviz-09 .s4 { animation-delay: 1.9s; }
+.fviz-09 .s5 { animation-delay: 2.7s; }
+.fviz-09 .s6 { animation-delay: 3.6s; }
+.fviz-09 .s7 { animation-delay: 4.3s; }
+
+@keyframes fv09-arrive { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes fv09-blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-09 .fv09-s,
+  .fviz-09 .fv09-caret { animation: none; }
+}
+
+/* --- Narrow: the phone modal stacks Budget, Machines and the terminal ------- */
+@media (max-width: 640px) {
+  .fviz-09 .fv09-stage { display: flex; grid-template-rows: none; flex-direction: column; gap: 12px; height: auto; overflow: visible; }
+  .fviz-09 .fv09-settings { height: auto; -webkit-mask-image: none; mask-image: none; }
+  .fviz-09 .fv09-tabs,
+  .fviz-09 .fv09-x,
+  .fviz-09 .fv09-xm { display: none; }
+  .fviz-09 .fv09-form { padding: 2px 12px 12px; }
+  .fviz-09 .fv09-row { margin: 0 9px; font-size: 11.5px; }
+  .fviz-09 .fv09-head-cap { display: none; }
+  .fviz-09 .fv09-early,
+  .fviz-09 .fv09-gap,
+  .fviz-09 .fv09-pyh,
+  .fviz-09 .fv09-w { display: none; }
+  .fviz-09 .fv09-term { flex: none; }
+  .fviz-09 .fv09-tbody { padding: 10px 11px; font-size: 10px; }
+}
+
+/* ==========================================================================
+   Feature 10 — "Accounts, pools and usage"
+   Settings → Accounts (AccountsSettingsTab): logins grouped by agent, a pool
+   with its accounts one level in, and each account's usage windows with their
+   resets (AccountUsageCluster). Beside it, Settings → Projects resolving a
+   project's account through its folder, and /switch-account in a claude tab.
+   Design size 1000 × 500. Every selector is scoped under .fviz-10.
+   ========================================================================== */
+
+.fviz-10 {
+  --fv10-t-fg:   #f2f2f2;
+  --fv10-t-sub:  #949494;
+  --fv10-t-ok:   #4eba65;
+  --fv10-t-user: #373737;
+  --fv10-t-sel:  #b1b9f9;
+  --fv10-win:    #151d2d;
+  --fv10-grp:    rgba(255, 255, 255, 0.045);
+  --fv10-line:   rgba(255, 255, 255, 0.065);
+  --fv10-sec:    #8c9ab2;
+}
+
+.fviz-10 .fv10-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 588px minmax(0, 1fr);
+  grid-template-rows: 500px;
+  gap: 14px;
+  height: 500px;
+  overflow: hidden;
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* --- Windows --------------------------------------------------------------- */
+.fviz-10 .fv10-win {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--fv10-win);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    0 20px 40px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-10 .fv10-chrome {
+  flex: none;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-10 .fv10-titlerow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+}
+.fviz-10 .fv10-lights { display: flex; gap: 7px; }
+.fviz-10 .fv10-lights i {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+  background: #ff5f57;
+}
+.fviz-10 .fv10-lights i:nth-child(2) { background: #febc2e; }
+.fviz-10 .fv10-lights i:nth-child(3) { background: #28c840; }
+.fviz-10 .fv10-wintitle,
+.fviz-10 .fv10-ttitle {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 590;
+  color: #b9c6dc;
+  letter-spacing: -0.005em;
+  pointer-events: none;
+}
+.fviz-10 .fv10-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 1px;
+  padding: 1px 6px 6px;
+}
+.fviz-10 .fv10-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 5px 3px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  line-height: 1.1;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+.fviz-10 .fv10-tab svg { width: 18px; height: 16px; }
+.fviz-10 .fv10-tab-on { background: rgba(255, 255, 255, 0.09); color: var(--accent); }
+
+/* --- Grouped form ------------------------------------------------------------ */
+.fviz-10 .fv10-form {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px 18px 0;
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
+          mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
+}
+.fviz-10 .fv10-sh {
+  display: flex;
+  align-items: baseline;
+  margin: 9px 2px 5px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: #c4cfe0;
+}
+.fviz-10 .fv10-link {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--accent);
+}
+.fviz-10 .fv10-group {
+  border-radius: 8px;
+  background: var(--fv10-grp);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+.fviz-10 .fv10-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 39px;
+  margin: 0 10px;
+  border-top: 1px solid var(--fv10-line);
+}
+.fviz-10 .fv10-row:first-child { border-top: none; }
+/* Members sit one icon column further in */
+.fviz-10 .fv10-member { padding-left: 30px; }
+.fviz-10 .fv10-empty { min-height: 28px; font-size: 12px; color: var(--fv10-sec); }
+
+.fviz-10 .fv10-av { width: 22px; height: 22px; flex: none; color: #7f8ba1; }
+.fviz-10 .fv10-stack { color: var(--accent); }
+.fviz-10 .fv10-unsigned { color: var(--orange); }
+
+.fviz-10 .fv10-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fviz-10 .fv10-name { font-size: 12.5px; color: var(--fg); white-space: nowrap; }
+.fviz-10 .fv10-cap {
+  font-size: 10.5px;
+  color: var(--fv10-sec);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fviz-10 .fv10-default {
+  flex: none;
+  padding: 1px 6px 2px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  color: var(--fv10-sec);
+  background: rgba(255, 255, 255, 0.075);
+}
+/* The Default slot is reserved on every account row so the clusters line up */
+.fviz-10 .fv10-slot { flex: none; width: 48px; display: flex; justify-content: flex-end; }
+.fviz-10 .fv10-ctl { width: 14px; height: 14px; flex: none; color: var(--fv10-sec); }
+.fviz-10 .fv10-disc { transform: rotate(90deg); }
+
+/* AccountUsageCluster: label · track (ticks at soft and hard) · percent · reset */
+.fviz-10 .fv10-usage {
+  flex: none;
+  width: 172px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+}
+.fviz-10 .fv10-u { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fviz-10 .fv10-u b { width: 42px; text-align: right; font-weight: 400; color: var(--fv10-sec); }
+.fviz-10 .fv10-u em { width: 30px; text-align: right; font-style: normal; color: var(--fg); font-variant-numeric: tabular-nums; }
+.fviz-10 .fv10-u s { width: 52px; text-decoration: none; color: var(--fv10-sec); }
+.fviz-10 .fv10-track {
+  position: relative;
+  width: 34px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(140, 154, 178, 0.22);
+}
+.fviz-10 .fv10-track::before,
+.fviz-10 .fv10-track::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: rgba(233, 238, 247, 0.55);
+}
+.fviz-10 .fv10-track::before { left: calc(80% - 0.5px); }
+.fviz-10 .fv10-track::after { left: calc(95% - 0.5px); }
+.fviz-10 .fv10-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: calc(var(--f) * 100%);
+  min-width: 2px;
+  border-radius: 2px;
+}
+.fviz-10 .fv10-g { background: var(--green); }
+.fviz-10 .fv10-o { background: var(--orange); }
+.fviz-10 .fv10-msg { align-items: flex-end; justify-content: center; color: var(--fv10-sec); }
+
+/* A live reading creeps up between polls */
+.fviz-10 .fv10-a1 { animation: fv10-creep1 9s ease-in-out infinite alternate; }
+.fviz-10 .fv10-a2 { animation: fv10-creep2 9s ease-in-out infinite alternate; }
+@keyframes fv10-creep1 { from { width: 36%; } to { width: 38%; } }
+@keyframes fv10-creep2 { from { width: 81%; } to { width: 83%; } }
+
+.fviz-10 .fv10-foot {
+  margin: 5px 2px 0;
+  font-size: 10.5px;
+  color: var(--fv10-sec);
+}
+
+.fviz-10 .fv10-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 16px;
+  border-top: 1px solid rgba(0, 0, 0, 0.45);
+  font-size: 10.5px;
+  color: var(--fv10-sec);
+  white-space: nowrap;
+}
+.fviz-10 .fv10-bar svg { width: 13px; height: 13px; color: #c4cfe0; flex: none; }
+
+/* --- Right column ------------------------------------------------------------ */
+.fviz-10 .fv10-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+
+.fviz-10 .fv10-card {
+  flex: none;
+  background: rgba(28, 38, 58, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  min-width: 0;
+}
+.fviz-10 .fv10-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, rgba(32, 43, 64, 0.9), rgba(26, 36, 55, 0.9));
+}
+.fviz-10 .fv10-ico { width: 15px; height: 15px; color: var(--fg-secondary); flex: none; }
+.fviz-10 .fv10-head-title { font-size: 12.5px; font-weight: 600; color: #b9c6dc; white-space: nowrap; }
+.fviz-10 .fv10-head-cap { margin-left: auto; font-size: 10.5px; color: var(--fg-tertiary); white-space: nowrap; }
+
+/* Projects: the path list beside the selected project's detail */
+.fviz-10 .fv10-split { display: grid; grid-template-columns: 124px minmax(0, 1fr); }
+.fviz-10 .fv10-plist {
+  list-style: none;
+  margin: 0;
+  padding: 5px 5px;
+  border-right: 1px solid rgba(0, 0, 0, 0.4);
+  background: rgba(10, 15, 26, 0.25);
+}
+.fviz-10 .fv10-plist li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px 5px;
+  border-radius: 5px;
+  min-width: 0;
+}
+.fviz-10 .fv10-plist .fv10-psel { background: var(--accent); }
+.fviz-10 .fv10-pn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.fviz-10 .fv10-pn svg { width: 11px; height: 11px; color: var(--fv10-sec); flex: none; }
+.fviz-10 .fv10-pn em {
+  margin-left: auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-style: normal;
+  font-size: 9px;
+  color: var(--fv10-sec);
+  background: rgba(255, 255, 255, 0.08);
+}
+.fviz-10 .fv10-pp { font-size: 9.5px; color: var(--fv10-sec); white-space: nowrap; overflow: hidden; }
+.fviz-10 .fv10-psel .fv10-pp { color: rgba(255, 255, 255, 0.78); }
+
+.fviz-10 .fv10-pdetail { padding: 4px 10px 10px; min-width: 0; }
+.fviz-10 .fv10-pgroup h6 {
+  margin: 6px 2px 4px;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: #c4cfe0;
+}
+.fviz-10 .fv10-prow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--fv10-grp);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  color: var(--fg);
+}
+.fviz-10 .fv10-prow + .fv10-prow { margin-top: -1px; border-radius: 0 0 6px 6px; }
+.fviz-10 .fv10-pgroup .fv10-prow:first-of-type:not(:last-child) { border-radius: 6px 6px 0 0; }
+.fviz-10 .fv10-plab { flex: none; }
+.fviz-10 .fv10-pick {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.fviz-10 .fv10-pick svg { width: 7px; height: 10px; color: var(--fv10-sec); flex: none; }
+.fviz-10 .fv10-pgroup:first-child .fv10-pick { margin-left: 0; }
+.fviz-10 .fv10-pfoot { margin: 5px 2px 0; font-size: 9.5px; line-height: 1.35; color: var(--fv10-sec); }
+
+/* --- Terminal: a claude tab ------------------------------------------------- */
+.fviz-10 .fv10-term {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-inset);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    0 20px 40px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-10 .fv10-tbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  flex: none;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-10 .fv10-tbody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 10px 12px 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--fv10-t-fg);
+  overflow: hidden;
+}
+.fviz-10 .fv10-l { display: block; white-space: pre-wrap; word-break: break-all; min-height: 1.5em; }
+.fviz-10 .fv10-dim { color: var(--fv10-t-sub); }
+.fviz-10 .fv10-okb { color: var(--fv10-t-ok); }
+.fviz-10 .fv10-early { opacity: 0.55; }
+.fviz-10 .fv10-user { background: var(--fv10-t-user); color: #fff; padding-right: 1ch; }
+
+/* The plugin's pane: a titled box under the transcript */
+.fviz-10 .fv10-pane {
+  padding: 2px 0 0;
+  border-top: 1px solid #3a3f4b;
+}
+.fviz-10 .fv10-ptitle { color: var(--fv10-t-sub); }
+.fviz-10 .fv10-b { font-weight: 700; }
+.fviz-10 .fv10-opt { padding-left: 2ch; }
+.fviz-10 .fv10-focus { position: relative; color: var(--fv10-t-sel); }
+.fviz-10 .fv10-focus::before { content: "❯"; position: absolute; left: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fviz-10 .fv10-a1,
+  .fviz-10 .fv10-a2 { animation: none; }
+}
+
+/* --- Narrow: the phone modal shows the Claude group, then the picker -------- */
+@media (max-width: 640px) {
+  .fviz-10 .fv10-stage { display: flex; flex-direction: column; gap: 12px; height: auto; overflow: visible; }
+  .fviz-10 .fv10-tabs,
+  .fviz-10 .fv10-bar,
+  .fviz-10 .fv10-link,
+  .fviz-10 .fv10-x,
+  .fviz-10 .fv10-proj,
+  .fviz-10 .fv10-early,
+  .fviz-10 .fv10-gap,
+  .fviz-10 .fv10-slot,
+  .fviz-10 .fv10-ctl,
+  .fviz-10 .fv10-cap { display: none; }
+  .fviz-10 .fv10-form { padding: 0 10px 12px; -webkit-mask-image: none; mask-image: none; }
+  .fviz-10 .fv10-row { margin: 0 8px; gap: 7px; min-height: 36px; }
+  .fviz-10 .fv10-member { padding-left: 16px; }
+  .fviz-10 .fv10-pool .fv10-cap { display: none; }
+  .fviz-10 .fv10-av { width: 19px; height: 19px; }
+  .fviz-10 .fv10-usage { width: 156px; font-size: 9.5px; }
+  .fviz-10 .fv10-u b { width: 40px; }
+  .fviz-10 .fv10-u s { width: 46px; }
+  .fviz-10 .fv10-term { flex: none; }
+  .fviz-10 .fv10-tbody { padding: 9px 10px 11px; font-size: 9.5px; }
+}
+
+/* ==========================================================================
+   Feature panel 11 — Swarms and task routing
+   Left: Settings → Flight Control, its Routing section (rules over their
+   compiled pills, the lightbulb's index hint open) and its Capability Index
+   heatmap. Right: the main window's sidebar running a swarm, with the header
+   menu's Swarm Details… popover, and the phone's SwarmCard.
+   Design size: 1000 × 520.
+   ========================================================================== */
+
+.fviz-11 {
+  --f11-sec:   rgba(235, 240, 250, 0.58);
+  --f11-ter:   rgba(235, 240, 250, 0.34);
+  --f11-line:  rgba(255, 255, 255, 0.07);
+  --f11-acc:   #0a84ff;
+  --f11-acct:  #3f9cff;
+  --f11-pop:   #262b35;
+  position: relative;
+  height: 520px;
+  font-family: var(--font);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.fviz-11 .fv11-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.fviz-11 svg { display: block; fill: currentColor; }
+
+/* --- Windows ------------------------------------------------------------- */
+.fviz-11 .fv11-win {
+  position: absolute;
+  border-radius: 11px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.fviz-11 .fv11-set  { left: 0; top: 0; width: 452px; padding-bottom: 10px; overflow: visible; z-index: 3; }
+/* Cascaded behind the Routing window: only its body shows below it */
+.fviz-11 .fv11-idx  { left: 0; top: 250px; width: 452px; height: 276px; z-index: 1; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.fviz-11 .fv11-main { left: 466px; top: 0; width: 534px; height: 520px; overflow: visible; z-index: 2; }
+
+.fviz-11 .fv11-tb {
+  position: relative;
+  display: flex; align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 11px 11px 0 0;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+}
+.fviz-11 .fv11-lights { display: flex; gap: 7px; }
+.fviz-11 .fv11-lights i { width: 11px; height: 11px; border-radius: 50%; box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28); }
+.fviz-11 .fv11-lights i:nth-child(1) { background: #ff5f57; }
+.fviz-11 .fv11-lights i:nth-child(2) { background: #febc2e; }
+.fviz-11 .fv11-lights i:nth-child(3) { background: #28c840; }
+.fviz-11 .fv11-wt {
+  position: absolute; left: 0; right: 0;
+  text-align: center;
+  font-size: 12px; font-weight: 590; color: #b9c6dc;
+  white-space: nowrap;
+}
+
+/* Section bar: the segmented control and the project picker */
+.fviz-11 .fv11-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px 4px;
+}
+.fviz-11 .fv11-rule-b { padding-bottom: 8px; border-bottom: 1px solid rgba(0, 0, 0, 0.45); }
+.fviz-11 .fv11-seg {
+  display: inline-flex;
+  padding: 1px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.fviz-11 .fv11-seg > * { padding: 2px 6.5px; border-radius: 5px; color: var(--f11-sec); font-weight: 500; }
+.fviz-11 .fv11-seg > * + * { border-left: 1px solid rgba(255, 255, 255, 0.08); }
+.fviz-11 .fv11-seg > b + *, .fviz-11 .fv11-seg > b { border-left-color: transparent; }
+.fviz-11 .fv11-seg b {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.35);
+  font-weight: 600;
+}
+.fviz-11 .fv11-pick {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 19px;
+  padding: 0 5px 0 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.4), inset 0 0.5px 0 rgba(255, 255, 255, 0.08);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.fviz-11 .fv11-fold { width: 12px; height: 10px; color: var(--f11-acct); }
+.fviz-11 .fv11-ud { width: 6px; height: 9px; color: var(--f11-sec); margin-left: 6px; }
+
+/* --- Routing: a grouped form ------------------------------------------- */
+.fviz-11 .fv11-form { padding: 2px 14px 0; }
+.fviz-11 .fv11-sh {
+  padding: 6px 4px 4px;
+  font-size: 10.5px; font-weight: 600;
+  color: var(--f11-sec);
+}
+.fviz-11 .fv11-group {
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  padding: 0 9px;
+}
+.fviz-11 .fv11-rule {
+  position: relative;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0;
+}
+.fviz-11 .fv11-group > * + * { border-top: 1px solid var(--f11-line); }
+.fviz-11 .fv11-selrow::before {
+  content: "";
+  position: absolute; inset: 2px -6px;
+  border-radius: 6px;
+  background: rgba(10, 132, 255, 0.16);
+}
+.fviz-11 .fv11-rm { position: relative; flex: 1; min-width: 0; }
+.fviz-11 .fv11-sent {
+  font-size: 11.5px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fviz-11 .fv11-pills {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px 4px;
+  margin-top: 4px;
+}
+.fviz-11 .fv11-pill {
+  display: inline-flex; align-items: center;
+  height: 17px;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 10.5px; font-weight: 500;
+  color: rgba(233, 238, 247, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+  white-space: nowrap;
+}
+.fviz-11 .fv11-add {
+  padding: 0 5px;
+  background: none;
+  box-shadow: none;
+  border: 0.75px dashed rgba(255, 255, 255, 0.28);
+  color: var(--f11-sec);
+}
+.fviz-11 .fv11-add svg { width: 8px; height: 8px; }
+.fviz-11 .fv11-j { font-size: 10px; color: var(--f11-ter); }
+.fviz-11 .fv11-to { display: inline-flex; align-items: center; gap: 5px; }
+.fviz-11 .fv11-arr { width: 10px; height: 9px; color: var(--f11-ter); }
+.fviz-11 .fv11-tgt {
+  color: var(--f11-acct);
+  background: rgba(10, 132, 255, 0.16);
+  box-shadow: inset 0 0 0 0.5px rgba(10, 132, 255, 0.5);
+}
+.fviz-11 .fv11-st {
+  position: relative;
+  flex: none;
+  min-width: 38px;
+  display: flex; justify-content: flex-end; align-items: center; gap: 9px;
+}
+.fviz-11 .fv11-ok { width: 14px; height: 14px; color: var(--green); }
+.fviz-11 .fv11-bulb { width: 13px; height: 13px; color: #ffd60a; }
+.fviz-11 .fv11-use {
+  font-size: 10.5px; font-weight: 600; color: #fff;
+  padding: 1px 8px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, #2b93ff, var(--f11-acc));
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.4), inset 0 0.5px 0 rgba(255, 255, 255, 0.2);
+}
+.fviz-11 .fv11-new {
+  display: flex; align-items: center; gap: 8px;
+  height: 25px;
+  font-size: 11.5px; color: var(--f11-ter);
+}
+.fviz-11 .fv11-new svg { width: 9px; height: 9px; }
+.fviz-11 .fv11-foot {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 4px 0;
+  font-size: 9.5px; color: var(--f11-sec);
+}
+.fviz-11 .fv11-foot span { flex: 1; min-width: 0; }
+.fviz-11 .fv11-foot b { font-weight: 500; color: var(--f11-acct); white-space: nowrap; }
+
+/* The lightbulb's popover, hanging below the bulb */
+.fviz-11 .fv11-hint {
+  position: absolute;
+  right: -5px; top: calc(100% + 4px);
+  width: 292px;
+  z-index: 5;
+  border-radius: 10px;
+  background: var(--f11-pop);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 14px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.fviz-11 .fv11-hint::before {
+  content: "";
+  position: absolute; top: -6px; right: 28px;
+  width: 12px; height: 12px;
+  background: var(--f11-pop);
+  transform: rotate(45deg);
+  border-radius: 2px 0 0 0;
+  box-shadow: -0.5px -0.5px 0 rgba(255, 255, 255, 0.16);
+}
+.fviz-11 .fv11-hbody { position: relative; display: flex; gap: 9px; padding: 13px 14px 12px; }
+.fviz-11 .fv11-hbody .fv11-bulb { flex: none; margin-top: 1px; }
+.fviz-11 .fv11-hbody b { font-size: 12px; font-weight: 700; color: var(--fg); }
+.fviz-11 .fv11-hbody p { margin: 3px 0 0; font-size: 11px; color: var(--f11-sec); line-height: 1.4; }
+.fviz-11 .fv11-hfoot {
+  display: flex; justify-content: flex-end; gap: 7px;
+  padding: 9px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fviz-11 .fv11-btn {
+  display: inline-flex; align-items: center;
+  height: 19px;
+  padding: 0 9px;
+  border-radius: 5px;
+  font-size: 10.5px; font-weight: 500;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.13);
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.45), inset 0 0.5px 0 rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+}
+.fviz-11 .fv11-def { color: #fff; background: linear-gradient(180deg, #2b93ff, var(--f11-acc)); }
+
+/* --- Capability index ---------------------------------------------------- */
+.fviz-11 .fv11-ix { padding: 14px 14px 0; }
+.fviz-11 .fv11-ixh { display: flex; align-items: center; gap: 6px; }
+.fviz-11 .fv11-ixh > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fviz-11 .fv11-ixh b { font-size: 13px; font-weight: 700; }
+.fviz-11 .fv11-ixh span:not(.fv11-btn) { font-size: 10.5px; color: var(--f11-sec); white-space: nowrap; }
+.fviz-11 .fv11-scl { margin: 9px 0 4px; font-size: 11.5px; font-weight: 700; }
+.fviz-11 .fv11-hm {
+  display: grid;
+  grid-template-columns: 104px repeat(8, 42px);
+  gap: 2px;
+  align-items: center;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 34px), transparent);
+          mask-image: linear-gradient(90deg, #000 calc(100% - 34px), transparent);
+}
+.fviz-11 .fv11-hm > span { font-size: 9px; color: var(--f11-sec); text-align: center; white-space: nowrap; }
+.fviz-11 .fv11-hm > .fv11-mh { text-align: left; font-weight: 700; color: var(--fg); font-size: 10px; }
+.fviz-11 .fv11-hm > .fv11-m { text-align: left; font-size: 10.5px; color: var(--fg); }
+.fviz-11 .fv11-hm i {
+  font-style: normal;
+  height: 19px;
+  display: grid; place-items: center;
+  border-radius: 3px;
+  background: var(--c);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.fviz-11 .fv11-hm i.fv11-na { background: rgba(148, 163, 187, 0.08); color: var(--f11-sec); }
+.fviz-11 .fv11-cap { margin: 6px 0 0; font-size: 9.5px; color: var(--f11-sec); }
+
+/* --- Main window: sidebar + a glimpse of the selected tab ---------------- */
+.fviz-11 .fv11-wt-r { font-size: 12px; }
+.fviz-11 .fv11-mbody { display: flex; height: calc(100% - 28px); border-radius: 0 0 11px 11px; overflow: hidden; }
+.fviz-11 .fv11-side {
+  flex: none;
+  width: 266px;
+  padding: 6px 0;
+  background: rgba(28, 38, 58, 0.72);
+  border-right: 1px solid #0a0f1a;
+}
+.fviz-11 .fv11-row {
+  display: flex; align-items: center; gap: 5px;
+  height: 24px;
+  margin: 1px 8px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.fviz-11 .fv11-proj { font-weight: 600; color: var(--fg-secondary); margin-top: 3px; gap: 4px; }
+.fviz-11 .fv11-chv { width: 11px; height: 11px; flex: none; color: var(--fg-tertiary); transform: rotate(90deg); }
+.fviz-11 .fv11-coll .fv11-chv { transform: none; }
+.fviz-11 .fv11-pn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fviz-11 .fv11-hchip {
+  font-size: 9.5px; font-weight: 500;
+  color: var(--fg);
+  padding: 1px 5px;
+  border-radius: 980px;
+  background: rgba(255, 255, 255, 0.11);
+}
+.fviz-11 .fv11-cnt { font-size: 10.5px; font-weight: 400; color: var(--fg-secondary); font-variant-numeric: tabular-nums; }
+.fviz-11 .fv11-sess { padding-left: 22px; }
+.fviz-11 .fv11-sel { background: rgba(255, 255, 255, 0.15); }
+.fviz-11 .fv11-slot { width: 15px; flex: none; display: flex; align-items: center; }
+.fviz-11 .fv11-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; margin-right: 1px; }
+.fviz-11 .fv11-g { width: 11px; height: 11px; flex: none; }
+.fviz-11 .fv11-idle { color: rgba(255, 255, 255, 0.2); }
+.fviz-11 .fv11-unread { color: var(--accent); }
+.fviz-11 .fv11-chip {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--fg);
+  padding: 1px 5px;
+  border-radius: 980px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.fviz-11 .fv11-mk { flex: none; font-size: 10px; color: var(--fg-secondary); }
+/* RowMiniMeter: 28 × 4, soft and hard ticks */
+.fviz-11 .fv11-mini {
+  position: relative; flex: none;
+  width: 28px; height: 4px;
+  border-radius: 2px;
+  background: rgba(148, 163, 187, 0.2);
+}
+.fviz-11 .fv11-mini b { position: absolute; left: 0; top: 0; bottom: 0; width: 88%; border-radius: 2px; background: var(--orange); }
+.fviz-11 .fv11-mini u,
+.fviz-11 .fv11-trk u { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px; background: rgba(233, 238, 247, 0.55); }
+
+.fviz-11 .fv11-spin { --sp: 11px; position: relative; width: var(--sp); height: var(--sp); flex: none; animation: fv11-spin 0.8s steps(8) infinite; }
+.fviz-11 .fv11-spin i {
+  position: absolute; left: 50%; top: 50%;
+  width: 1.6px; height: 3.3px;
+  margin: -5px 0 0 -0.8px;
+  border-radius: 980px;
+  background: var(--fg-secondary);
+  transform-origin: 50% 5px;
+}
+.fviz-11 .fv11-spin i:nth-child(1) { transform: rotate(0deg);   opacity: .22; }
+.fviz-11 .fv11-spin i:nth-child(2) { transform: rotate(45deg);  opacity: .32; }
+.fviz-11 .fv11-spin i:nth-child(3) { transform: rotate(90deg);  opacity: .42; }
+.fviz-11 .fv11-spin i:nth-child(4) { transform: rotate(135deg); opacity: .52; }
+.fviz-11 .fv11-spin i:nth-child(5) { transform: rotate(180deg); opacity: .62; }
+.fviz-11 .fv11-spin i:nth-child(6) { transform: rotate(225deg); opacity: .72; }
+.fviz-11 .fv11-spin i:nth-child(7) { transform: rotate(270deg); opacity: .82; }
+.fviz-11 .fv11-spin i:nth-child(8) { transform: rotate(315deg); opacity: .92; }
+@keyframes fv11-spin { to { transform: rotate(360deg); } }
+
+.fviz-11 .fv11-term {
+  flex: 1; min-width: 0;
+  background: var(--bg-inset);
+}
+
+/* Swarm Details… : arrow on its leading edge, at the header row */
+.fviz-11 .fv11-pop {
+  position: absolute;
+  left: 272px; top: 27px;
+  width: 262px;
+  z-index: 4;
+  padding: 11px 12px 11px;
+  border-radius: 10px;
+  background: var(--f11-pop);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 14px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.fviz-11 .fv11-pop::before {
+  content: "";
+  position: absolute; left: -6px; top: 13px;
+  width: 12px; height: 12px;
+  background: var(--f11-pop);
+  transform: rotate(45deg);
+  border-radius: 0 0 0 2px;
+  box-shadow: -0.5px 0.5px 0 rgba(255, 255, 255, 0.16);
+}
+.fviz-11 .fv11-ph { position: relative; font-size: 12.5px; font-weight: 700; }
+.fviz-11 .fv11-pool { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+.fviz-11 .fv11-pt { font-size: 11.5px; font-weight: 700; }
+.fviz-11 .fv11-al { display: flex; justify-content: space-between; font-size: 11px; }
+.fviz-11 .fv11-al span + span { color: var(--f11-sec); font-variant-numeric: tabular-nums; }
+.fviz-11 .fv11-trk {
+  position: relative;
+  height: 5px; margin: 3px 0 3px;
+  border-radius: 3px;
+  background: rgba(148, 163, 187, 0.2);
+}
+.fviz-11 .fv11-trk b { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--green); }
+.fviz-11 .fv11-trk b.fv11-soft { background: var(--orange); }
+.fviz-11 .fv11-ac { font-size: 9.5px; color: var(--f11-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fviz-11 .fv11-wh { margin-top: 10px; font-size: 11px; font-weight: 500; }
+.fviz-11 .fv11-wl { margin-top: 3px; font-size: 9.5px; line-height: 1.4; }
+.fviz-11 .fv11-links { margin-top: 8px; font-size: 11px; color: var(--f11-acct); }
+
+/* --- iPhone: FleetListScreen with the SwarmCard at the top of a project -- */
+.fviz-11 .fv11-phone {
+  position: absolute;
+  right: 6px; top: 336px;
+  width: 226px; height: 184px;
+  z-index: 6;
+  padding: 7px 7px 0;
+  border-radius: 36px 36px 0 0;
+  background: linear-gradient(180deg, #2a2d33, #16181c 40%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2.5px #0b0c0e,
+    0 30px 70px -20px rgba(0, 0, 0, 0.9);
+  -webkit-mask-image: linear-gradient(180deg, #000 90%, transparent);
+          mask-image: linear-gradient(180deg, #000 90%, transparent);
+}
+.fviz-11 .fv11-scr {
+  height: 100%;
+  border-radius: 30px 30px 0 0;
+  background: #000;
+  color: #fff;
+  overflow: hidden;
+  padding: 0 0 0;
+}
+.fviz-11 .fv11-stat {
+  position: relative;
+  height: 27px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 18px 0 24px;
+}
+.fviz-11 .fv11-time { font-size: 11px; font-weight: 600; }
+.fviz-11 .fv11-isl { position: absolute; left: 50%; top: 7px; width: 62px; height: 18px; margin-left: -31px; border-radius: 980px; background: #000; box-shadow: inset 0 0 0 1px #0c0c0c; }
+.fviz-11 .fv11-sic { display: flex; gap: 4px; align-items: center; }
+.fviz-11 .fv11-sic svg { height: 8px; width: auto; }
+.fviz-11 .fv11-big { padding: 0 14px 2px; font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.fviz-11 .fv11-phh {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 14px 4px 16px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: rgba(235, 235, 245, 0.6);
+}
+.fviz-11 .fv11-pchv { width: 8px; height: 8px; transform: rotate(90deg); }
+.fviz-11 .fv11-phh em { margin-left: auto; font-style: normal; font-size: 9.5px; }
+.fviz-11 .fv11-pplus { width: 10px; height: 10px; color: var(--f11-acc); margin-left: 6px; }
+.fviz-11 .fv11-cell {
+  margin: 0 10px;
+  padding: 8px 10px 9px;
+  background: #1c1c1e;
+  border-radius: 10px 10px 0 0;
+}
+.fviz-11 .fv11-cell + .fv11-cell { border-radius: 0; border-top: 0.5px solid rgba(84, 84, 88, 0.6); }
+.fviz-11 .fv11-ct { font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+.fviz-11 .fv11-cm { font-family: var(--mono); font-size: 8.5px; line-height: 1.5; color: rgba(235, 235, 245, 0.6); font-variant-numeric: tabular-nums; }
+.fviz-11 .fv11-cm.fv11-warn { color: var(--orange); }
+.fviz-11 .fv11-pb {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 11px;
+  border-radius: 980px;
+  font-size: 10.5px; font-weight: 500;
+  color: var(--f11-acct);
+  background: rgba(10, 132, 255, 0.18);
+}
+.fviz-11 .fv11-srow { display: flex; align-items: center; gap: 8px; }
+.fviz-11 .fv11-st2 { font-family: var(--mono); font-size: 11px; }
+.fviz-11 .fv11-sc { font-family: var(--mono); font-size: 8.5px; color: rgba(235, 235, 245, 0.85); margin-top: 1px; }
+
+/* --- Motion ---------------------------------------------------------------- */
+@keyframes fv11-pulse { 50% { opacity: 0.45; } }
+.fviz-11 .fv11-hint .fv11-bulb,
+.fviz-11 .fv11-selrow .fv11-bulb { animation: fv11-pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .fviz-11 .fv11-spin,
+  .fviz-11 .fv11-bulb { animation: none !important; }
+}
+
+/* --- Phone-width modal ------------------------------------------------------ */
+@media (max-width: 640px) {
+  .fviz-11 { height: auto; display: flex; flex-direction: column; gap: 12px; }
+  .fviz-11 .fv11-win,
+  .fviz-11 .fv11-phone { position: relative; left: auto; right: auto; top: auto; width: auto; height: auto; }
+  .fviz-11 .fv11-idx,
+  .fviz-11 .fv11-phone,
+  .fviz-11 .fv11-term,
+  .fviz-11 .fv11-hint { display: none; }
+  .fviz-11 .fv11-set { order: 2; }
+  .fviz-11 .fv11-main { order: 1; }
+  .fviz-11 .fv11-bar { flex-wrap: wrap; }
+  .fviz-11 .fv11-seg { font-size: 9px; }
+  .fviz-11 .fv11-seg > * { padding: 2px 4.5px; }
+  .fviz-11 .fv11-pick { margin-left: 0; }
+  .fviz-11 .fv11-form { padding-bottom: 4px; }
+  .fviz-11 .fv11-foot { display: none; }
+  .fviz-11 .fv11-mbody { flex-direction: column; height: auto; }
+  .fviz-11 .fv11-side { width: auto; border-right: 0; }
+  .fviz-11 .fv11-side .fv11-row:nth-child(n+7) { display: none; }
+  .fviz-11 .fv11-pop { position: relative; left: auto; top: auto; width: auto; margin: 4px 10px 10px; }
+  .fviz-11 .fv11-pop::before { left: 40px; top: -6px; border-radius: 2px 0 0 0; box-shadow: -0.5px -0.5px 0 rgba(255, 255, 255, 0.16); }
+  .fviz-11 .fv11-wt-r { font-size: 11.5px; }
+}
+/* ==== new previews: end ==== */
