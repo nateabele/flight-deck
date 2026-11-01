@@ -3,7 +3,7 @@
 //! symbols of the view instead of through the resolver.
 
 use super::{RefRes, SymId, GraphData};
-use crate::facts::{Import, Reference, SymbolKind};
+use crate::facts::{Import, RefSite, SymbolKind};
 use crate::resolve::Resolved;
 use std::collections::HashMap;
 
@@ -49,21 +49,23 @@ impl GraphData {
     /// `None` leaves local calls to the generic path. A qualifier that names no module in the view
     /// is a package, and must not fall back to "the only function called `info`": that would bind
     /// `Logger.info` to an unrelated repository function.
-    pub(super) fn elixir_ref(&self, r: &Reference, qualifiers: &HashMap<String, Resolved>) -> Option<RefRes> {
+    pub(super) fn elixir_ref(&self, r: &RefSite, qualifiers: &HashMap<String, Resolved>) -> Option<RefRes> {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: super::Confidence::Exact, external: None };
         let none = RefRes { target: None, confidence: super::Confidence::Exact, external: None };
-        if r.name.starts_with(|c: char| c.is_uppercase()) {
-            let full = match &r.qualifier {
-                Some(q) => format!("{q}.{}", r.name),
-                None => r.name.clone(),
+        let name = self.name(r.name);
+        let qualifier = self.qualifier(r);
+        if name.starts_with(|c: char| c.is_uppercase()) {
+            let full = match &qualifier {
+                Some(q) => format!("{q}.{}", name),
+                None => name.to_string(),
             };
             return Some(self.elixir_module(&full).map(exact).unwrap_or(none));
         }
-        let q = r.qualifier.as_deref()?;
+        let q = qualifier?;
         let file = qualifiers
             .get(q)
             .and_then(|res| self.file_of(res))
             .or_else(|| self.elixir_module(q).map(|id| id.file));
-        Some(file.and_then(|t| self.member_of(t, q, &r.name)).map(exact).unwrap_or(none))
+        Some(file.and_then(|t| self.member_of(t, q, name)).map(exact).unwrap_or(none))
     }
 }

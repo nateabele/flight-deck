@@ -38,6 +38,7 @@ use compact::{Incoming, NameIndex};
 
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
+use crate::names::{NameId, NamePool};
 use crate::resolve::{Resolved, Resolver};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -92,7 +93,7 @@ pub struct FileNode {
     pub path: String,
     pub blob_id: String,
     pub language: &'static str,
-    pub facts: Arc<BlobFacts>,
+    pub facts: Arc<InternedFacts>,
     pub alive: bool,
     names: Arc<NameMap>,
 }
@@ -100,7 +101,7 @@ pub struct FileNode {
 /// A file's symbols by name (local ids in source order).
 pub(crate) type NameMap = HashMap<String, Vec<u32>>;
 
-fn name_map(facts: &BlobFacts) -> NameMap {
+fn name_map(facts: &InternedFacts) -> NameMap {
     let mut names: NameMap = HashMap::new();
     for s in &facts.symbols {
         names.entry(s.name.clone()).or_default().push(s.local_id);
@@ -115,7 +116,7 @@ fn name_map_bytes(n: &NameMap) -> usize {
 }
 
 impl FileNode {
-    fn new(f: &FileRef, facts: Arc<BlobFacts>, share: Option<&Share>) -> FileNode {
+    fn new(f: &FileRef, facts: Arc<InternedFacts>, share: Option<&Share>) -> FileNode {
         let names = match share {
             Some(s) => s.names(&facts),
             None => Arc::new(name_map(&facts)),
@@ -124,14 +125,14 @@ impl FileNode {
     }
 
     /// A slot of the repository's file numbering that this graph has no file in.
-    fn gap(empty: &Arc<BlobFacts>, names: &Arc<NameMap>) -> FileNode {
+    fn gap(empty: &Arc<InternedFacts>, names: &Arc<NameMap>) -> FileNode {
         FileNode { path: String::new(), blob_id: String::new(), language: "", facts: empty.clone(), alive: false, names: names.clone() }
     }
 
     fn tombstone(&self) -> FileNode {
         FileNode {
             alive: false,
-            facts: Arc::new(BlobFacts::default()),
+            facts: Arc::new(InternedFacts::default()),
             names: Arc::new(HashMap::new()),
             ..self.clone()
         }
@@ -143,7 +144,7 @@ impl FileNode {
 }
 
 pub enum FileChange {
-    Upsert(FileRef, Arc<BlobFacts>),
+    Upsert(FileRef, Arc<InternedFacts>),
     Remove(String),
 }
 
@@ -180,6 +181,9 @@ pub struct GraphData {
     /// The repository's shared numbering and block table, if the graph was built with one; the
     /// blocks and name tables are then charged there, once, not to each graph.
     share: Option<Arc<Share>>,
+    /// Resolves every `RefSite` of `files`. The repository's pool as of this build; a later one
+    /// would do as well (ids only append), which is what `with_changes` relies on.
+    names: Arc<NamePool>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -199,32 +203,33 @@ impl std::ops::Deref for ViewGraph {
 }
 
 impl ViewGraph {
-    /// Resolve every file from scratch.
-    pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>) -> ViewGraph {
-        Self::build_in(label, inputs, None, None)
+    /// Resolve every file from scratch. `names` must resolve every input's references
+    /// (`InternedFacts::name_bound`).
+    pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<InternedFacts>)>, names: Arc<NamePool>) -> ViewGraph {
+        Self::build_in(label, inputs, names, None, None)
     }
 
     /// `build`, with PageRank started from `near`'s ranks (a graph of the same repository at a
     /// nearby commit). Resolution is unaffected; ranks agree with a cold build within tolerance.
-    pub fn build_near(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, near: Option<&ViewGraph>) -> ViewGraph {
-        Self::build_in(label, inputs, None, near)
+    pub fn build_near(label: ViewLabel, inputs: Vec<(FileRef, Arc<InternedFacts>)>, names: Arc<NamePool>, near: Option<&ViewGraph>) -> ViewGraph {
+        Self::build_in(label, inputs, names, None, near)
     }
 
     /// Resolve every file from scratch, numbering files the way `share`'s repository does and
     /// taking every block and name table some other graph of the repository already holds from
     /// there instead of keeping a copy (see `blocks`). PageRank starts from `near`'s ranks when
     /// given (files match by path, so the two numberings need not agree).
-    pub fn build_shared(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, share: Arc<Share>, near: Option<&ViewGraph>) -> ViewGraph {
-        Self::build_in(label, inputs, Some(share), near)
+    pub fn build_shared(label: ViewLabel, inputs: Vec<(FileRef, Arc<InternedFacts>)>, names: Arc<NamePool>, share: Arc<Share>, near: Option<&ViewGraph>) -> ViewGraph {
+        Self::build_in(label, inputs, names, Some(share), near)
     }
 
-    fn build_in(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, share: Option<Arc<Share>>, near: Option<&ViewGraph>) -> ViewGraph {
+    fn build_in(label: ViewLabel, inputs: Vec<(FileRef, Arc<InternedFacts>)>, names: Arc<NamePool>, share: Option<Arc<Share>>, near: Option<&ViewGraph>) -> ViewGraph {
         let root = label.worktree.clone();
         let files: Vec<FileNode> = match &share {
             None => inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone(), None)).collect(),
             Some(s) => {
                 let (ids, slots) = s.layout(inputs.iter().map(|(f, _)| f.path.as_str()));
-                let (empty, no_names) = (Arc::new(BlobFacts::default()), Arc::new(NameMap::new()));
+                let (empty, no_names) = (Arc::new(InternedFacts::default()), Arc::new(NameMap::new()));
                 let mut files = vec![FileNode::gap(&empty, &no_names); slots];
                 for ((f, facts), i) in inputs.iter().zip(ids) {
                     files[i as usize] = FileNode::new(f, facts.clone(), Some(s));
@@ -250,6 +255,7 @@ impl ViewGraph {
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
             share,
+            names,
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -262,9 +268,14 @@ impl ViewGraph {
     }
 
     /// A graph for `self` with `changes` applied, reusing every per-file resolution the changes
-    /// cannot affect (see the module docs for the exact dirty set).
-    pub fn with_changes(&self, label: ViewLabel, changes: Vec<FileChange>) -> ViewGraph {
+    /// cannot affect (see the module docs for the exact dirty set). `names` is the pool for the
+    /// changed files' facts: the same store's, at least as new as the one `self` was built with.
+    pub fn with_changes(&self, label: ViewLabel, changes: Vec<FileChange>, names: Arc<NamePool>) -> ViewGraph {
+        debug_assert_eq!(names.store_id(), self.data.names.store_id(), "a pool of another store");
         let mut g: GraphData = (*self.data).clone();
+        if names.len() > g.names.len() {
+            g.names = names;
+        }
         g.root = label.worktree.clone();
         let old_files_len = g.files.len();
 
@@ -332,10 +343,11 @@ impl ViewGraph {
                 && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
                     // `Shop.Order.total()` names the module in its qualifier, and a `%Shop.Item{}` splits
                     // the module name across qualifier and name; either may be what just appeared.
+                    let name = g.names.resolve(fr.name);
                     (rr.target.is_none() || rr.confidence == Confidence::Fallback || g.files[i as usize].language == "swift")
-                        && (changed_names.contains(&fr.name)
-                            || fr.qualifier.as_ref().is_some_and(|q| {
-                                changed_names.contains(q) || changed_names.contains(&format!("{q}.{}", fr.name))
+                        && (changed_names.contains(name)
+                            || fr.qualifier().map(|q| g.names.resolve(q)).is_some_and(|q| {
+                                changed_names.contains(q) || changed_names.contains(&format!("{q}.{name}"))
                             }))
                 });
             // A removed file's importers resolved into it; they are in `dirty` via `importers`.
@@ -463,7 +475,7 @@ impl ViewGraph {
     /// empty overlay): only the root, label and root-dependent resolver change.
     pub fn for_worktree(&self, label: ViewLabel) -> ViewGraph {
         if self.data.location_sensitive && self.data.root != label.worktree {
-            return self.with_changes(label, Vec::new());
+            return self.with_changes(label, Vec::new(), self.data.names.clone());
         }
         ViewGraph { root: label.worktree.clone(), label, data: self.data.clone() }
     }
@@ -483,7 +495,7 @@ impl ViewGraph {
                     "{} ref {}:{} -> {:?} {:?} {:?}",
                     f.path,
                     fr.line,
-                    fr.name,
+                    self.names.resolve(fr.name),
                     rr.target.map(sym),
                     rr.confidence,
                     rr.external
@@ -515,6 +527,21 @@ impl GraphData {
 
     pub fn resolution(&self, file: u32) -> &FileRes {
         &self.res[file as usize]
+    }
+
+    /// The repository's name pool this graph resolves references through.
+    pub fn names(&self) -> &Arc<NamePool> {
+        &self.names
+    }
+
+    /// The text of an interned name (a reference's name or qualifier).
+    pub fn name(&self, id: NameId) -> &str {
+        self.names.resolve(id)
+    }
+
+    /// A reference's qualifier as text.
+    pub fn qualifier(&self, r: &RefSite) -> Option<&str> {
+        r.qualifier().map(|q| self.names.resolve(q))
     }
 
     /// The resolver this graph was built with, so a mutator rewriting an import resolves a path
@@ -755,7 +782,7 @@ impl GraphData {
     fn resolve_ref(
         &self,
         f: u32,
-        r: &Reference,
+        r: &RefSite,
         lang: &str,
         qualifiers: &HashMap<String, Resolved>,
         locals: &HashMap<String, (Resolved, String)>,
@@ -765,6 +792,7 @@ impl GraphData {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
         let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
         let external = |targets: Vec<ExtTarget>| RefRes { target: None, confidence: Confidence::Exact, external: Some(Box::new(targets)) };
+        let name = self.names.resolve(r.name);
 
         // Where an imported name lands.
         let through = |res: &Resolved, orig: &str| -> RefRes {
@@ -773,7 +801,7 @@ impl GraphData {
                     Some(t) => {
                         let found = self.lookup_in_file(t, orig, 3).or_else(|| {
                             // Default imports bind whatever the file exports.
-                            (orig == "default").then(|| self.default_export(t, &r.name)).flatten()
+                            (orig == "default").then(|| self.default_export(t, name)).flatten()
                         });
                         found.map(exact).unwrap_or(none.clone())
                     }
@@ -789,28 +817,28 @@ impl GraphData {
         {
             return rr;
         }
-        match r.qualifier.as_deref() {
+        match self.qualifier(r) {
             None => {
-                if let Some(id) = self.unqualified_visible(f, &r.name) {
+                if let Some(id) = self.unqualified_visible(f, name) {
                     return exact(id);
                 }
-                if let Some((res, orig)) = locals.get(&r.name) {
+                if let Some((res, orig)) = locals.get(name) {
                     return through(res, orig);
                 }
                 // Elm `exposing (Type(..))`: the constructors come with the type.
                 for (res, ty) in subs_types {
                     if let Some(t) = self.file_of(res)
-                        && let Some(id) = self.member_of(t, ty, &r.name) {
+                        && let Some(id) = self.member_of(t, ty, name) {
                             return exact(id);
                         }
                 }
                 for g in globs {
                     if let Some(t) = self.file_of(g)
-                        && let Some(id) = self.lookup_in_file(t, &r.name, 3) {
+                        && let Some(id) = self.lookup_in_file(t, name, 3) {
                             return exact(id);
                         }
                 }
-                match self.fallback(f, &r.name, r.kind, false) {
+                match self.fallback(f, name, r.kind, false) {
                     Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
                     // Nothing in this view: it may be a constructor or a name a linked module
                     // exposes through `Type(..)` or `(..)`. Which one is for the linked view to say.
@@ -820,7 +848,7 @@ impl GraphData {
                             .map(|(res, _)| res)
                             .chain(globs)
                             .filter_map(|res| match res {
-                                Resolved::External(p) => Some(ExtTarget { path: p.clone(), name: r.name.clone() }),
+                                Resolved::External(p) => Some(ExtTarget { path: p.clone(), name: name.to_string() }),
                                 _ => None,
                             })
                             .collect();
@@ -830,10 +858,10 @@ impl GraphData {
             }
             Some(q) => {
                 if matches!(q, "self" | "Self" | "this" | "cls") {
-                    if let Some(id) = self.member_of_enclosing(f, r.enclosing, &r.name) {
+                    if let Some(id) = self.member_of_enclosing(f, r.enclosing(), name) {
                         return exact(id);
                     }
-                    return match self.fallback(f, &r.name, r.kind, true) {
+                    return match self.fallback(f, name, r.kind, true) {
                         Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
                         None => none,
                     };
@@ -845,20 +873,20 @@ impl GraphData {
                     if lang == "rust" && !rest.is_empty() {
                         let mut segs = vec!["self".to_string()];
                         segs.extend(rest);
-                        segs.push(r.name.clone());
+                        segs.push(name.to_string());
                         if let Resolved::File { path, .. } = res
                             && let Resolved::File { path: p2, rest } = self.resolver.rust_path(path, &segs) {
-                                return self.rust_item(&p2, &rest, &r.name).map(exact).unwrap_or(none);
+                                return self.rust_item(&p2, &rest, name).map(exact).unwrap_or(none);
                             }
                         return none;
                     }
-                    return through(res, &r.name);
+                    return through(res, name);
                 }
                 if lang == "rust" && (q.contains("::") || matches!(q, "crate" | "super")) {
                     let mut segs: Vec<String> = q.split("::").map(String::from).collect();
-                    segs.push(r.name.clone());
+                    segs.push(name.to_string());
                     if let Resolved::File { path, rest } = self.resolver.rust_path(&self.files[f as usize].path, &segs) {
-                        return self.rust_item(&path, &rest, &r.name).map(exact).unwrap_or(none);
+                        return self.rust_item(&path, &rest, name).map(exact).unwrap_or(none);
                     }
                     return none;
                 }
@@ -868,19 +896,19 @@ impl GraphData {
                 }
                 // `Type::method`, `obj.method`, `Class.method`.
                 if self.unqualified_visible(f, q).is_some()
-                    && let Some(id) = self.member_of(f, q, &r.name) {
+                    && let Some(id) = self.member_of(f, q, name) {
                         return exact(id);
                     }
                 if let Some((res, orig)) = locals.get(q) {
                     if let Some(t) = self.file_of(res)
-                        && let Some(id) = self.member_of(t, orig, &r.name) {
+                        && let Some(id) = self.member_of(t, orig, name) {
                             return exact(id);
                         }
                     if !matches!(res, Resolved::File { .. }) {
                         return none; // a member of something from a package
                     }
                 }
-                match self.fallback(f, &r.name, r.kind, true) {
+                match self.fallback(f, name, r.kind, true) {
                     Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
                     None => none,
                 }
@@ -921,14 +949,15 @@ impl GraphData {
 /// Estimated heap bytes of one blob's facts (struct sizes plus string payloads, with a flat
 /// allocator overhead per string). An estimate on purpose: it only has to rank graphs for the
 /// memory budget, and the daemon reports measured RSS next to it.
-pub fn facts_bytes(f: &BlobFacts) -> usize {
+pub fn facts_bytes(f: &InternedFacts) -> usize {
     use std::mem::size_of;
     const ALLOC: usize = 16;
     let st = |s: &str| if s.is_empty() { 0 } else { s.len() + ALLOC };
     let ost = |s: &Option<String>| s.as_deref().map(st).unwrap_or(0);
-    let mut n = size_of::<BlobFacts>() + ost(&f.module_name);
+    let mut n = size_of::<InternedFacts>() + ost(&f.module_name);
     n += f.symbols.len() * size_of::<Symbol>() + f.symbols.iter().map(|s| st(&s.name) + ost(&s.signature)).sum::<usize>();
-    n += f.refs.len() * size_of::<Reference>() + f.refs.iter().map(|r| st(&r.name) + ost(&r.qualifier)).sum::<usize>();
+    // Names live once per repository in its `NamePool`, charged by the engine (`names_bytes`).
+    n += f.refs.capacity() * size_of::<RefSite>();
     n += f.imports.len() * size_of::<Import>()
         + f.imports
             .iter()

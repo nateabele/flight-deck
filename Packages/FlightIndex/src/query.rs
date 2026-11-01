@@ -284,7 +284,7 @@ impl ViewGraph {
                 RefHit {
                     path: self.abs(fi),
                     line: r.line,
-                    enclosing: r.enclosing.map(|e| f.symbol(e).name.clone()),
+                    enclosing: r.enclosing().map(|e| f.symbol(e).name.clone()),
                     kind: r.kind,
                     confidence: self.res[fi as usize].refs[ri as usize].confidence,
                 }
@@ -313,7 +313,7 @@ impl ViewGraph {
                         if r.kind == RefKind::Type {
                             continue;
                         }
-                        if let Some(e) = r.enclosing {
+                        if let Some(e) = r.enclosing() {
                             step.push((SymId { file: fi, local: e }, r.line, self.res[fi as usize].refs[ri as usize].confidence));
                         }
                     }
@@ -325,7 +325,7 @@ impl ViewGraph {
                         if r.kind == RefKind::Type || !callable(self.symbol(t).kind) {
                             continue;
                         }
-                        if r.enclosing.is_some_and(|e| self.within(cur.file, e, cur.local)) {
+                        if r.enclosing().is_some_and(|e| self.within(cur.file, e, cur.local)) {
                             step.push((t, r.line, rr.confidence));
                         }
                     }

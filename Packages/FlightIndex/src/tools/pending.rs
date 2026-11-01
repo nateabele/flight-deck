@@ -24,7 +24,7 @@
 //! substitutions).
 
 use super::{is_test_path, Ctx, ToolError, ToolResult};
-use crate::facts::{BlobFacts, RefKind, Symbol, SymbolKind};
+use crate::facts::{InternedFacts, RefKind, Symbol, SymbolKind};
 use crate::graph::{Confidence, SymId, ViewGraph};
 use crate::links::Views;
 use std::collections::{BTreeSet, HashMap};
@@ -211,7 +211,7 @@ fn family(k: SymbolKind) -> u8 {
     }
 }
 
-fn parent_chain(f: &BlobFacts, s: &Symbol) -> String {
+fn parent_chain(f: &InternedFacts, s: &Symbol) -> String {
     let mut parts = Vec::new();
     let mut p = s.parent;
     while let Some(id) = p {
@@ -230,9 +230,9 @@ fn shape(lang: &str, s: &Symbol) -> String {
 /// The base symbols of one file whose call shape changed or that disappeared. Symbols sharing a
 /// key (overloads, Elixir clauses of several arities) are paired by equal shape first, then in
 /// order, so adding an arity next to an old one changes nothing.
-pub fn changes(lang: &str, base: &BlobFacts, cur: &BlobFacts) -> Vec<Change> {
+pub fn changes(lang: &str, base: &InternedFacts, cur: &InternedFacts) -> Vec<Change> {
     type Key = (String, String, u8);
-    let key = |f: &BlobFacts, s: &Symbol| -> Key { (parent_chain(f, s), s.name.clone(), family(s.kind)) };
+    let key = |f: &InternedFacts, s: &Symbol| -> Key { (parent_chain(f, s), s.name.clone(), family(s.kind)) };
     let mut cur_by: HashMap<Key, Vec<u32>> = HashMap::new();
     for s in cur.symbols.iter().filter(|s| !container(s.kind)) {
         cur_by.entry(key(cur, s)).or_default().push(s.local_id);

@@ -7,6 +7,7 @@
 //! that needs the surrounding tree (which file does this import land on? who calls this?) is
 //! derived later, in memory, by `graph`.
 
+use crate::names::{NameId, NamePool};
 use serde::{Deserialize, Serialize};
 
 /// Symbol kinds. The string forms are what the store holds and what tools will print, so they are
@@ -189,6 +190,24 @@ impl RefKind {
             _ => RefKind::Use,
         }
     }
+
+    /// The store's integer form (the `refs.kind` column). Part of the on-disk contract like
+    /// `as_str`: add codes, never renumber.
+    pub fn code(self) -> u8 {
+        match self {
+            RefKind::Call => 0,
+            RefKind::Type => 1,
+            RefKind::Use => 2,
+        }
+    }
+
+    pub fn from_code(c: i64) -> RefKind {
+        match c {
+            0 => RefKind::Call,
+            1 => RefKind::Type,
+            _ => RefKind::Use,
+        }
+    }
 }
 
 /// An outgoing reference by name. Resolution to a definition happens in `graph`.
@@ -248,5 +267,83 @@ impl BlobFacts {
         s.local_id = id;
         self.symbols.push(s);
         id
+    }
+}
+
+/// "No qualifier" / "no enclosing symbol" inside a `RefSite`. An `Option<u32>` is 8 bytes; the
+/// sentinel keeps a site at 20.
+const NONE: u32 = u32::MAX;
+
+/// A `Reference` as the graph holds it: name and qualifier interned in the repository's
+/// `NamePool` (see `names`), every field a `u32` but the kind. 20 bytes against 64 plus two heap
+/// strings, which on tessera is 16 MB of sites instead of 72 MB.
+///
+/// The ids are the store's, so unlike `BlobFacts` this is not a pure function of the blob: the
+/// same blob in two repositories has different ids. That is why the engine shares sites per
+/// store, never across stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefSite {
+    pub name: NameId,
+    qualifier: u32,
+    pub line: u32,
+    enclosing: u32,
+    pub kind: RefKind,
+}
+
+impl RefSite {
+    pub fn new(name: NameId, qualifier: Option<NameId>, line: u32, enclosing: Option<u32>, kind: RefKind) -> RefSite {
+        RefSite { name, qualifier: qualifier.map_or(NONE, |q| q.0), line, enclosing: enclosing.unwrap_or(NONE), kind }
+    }
+
+    /// `List` in `List.map`, `crate::store` in `crate::store::open`, `self` in `self.open()`.
+    pub fn qualifier(&self) -> Option<NameId> {
+        (self.qualifier != NONE).then_some(NameId(self.qualifier))
+    }
+
+    /// The local id of the symbol the reference sits in.
+    pub fn enclosing(&self) -> Option<u32> {
+        (self.enclosing != NONE).then_some(self.enclosing)
+    }
+
+    /// The parse-time form, with names resolved through `pool`.
+    pub fn to_reference(&self, pool: &NamePool) -> Reference {
+        Reference {
+            name: pool.resolve(self.name).to_string(),
+            qualifier: self.qualifier().map(|q| pool.resolve(q).to_string()),
+            line: self.line,
+            enclosing: self.enclosing(),
+            kind: self.kind,
+        }
+    }
+}
+
+/// `BlobFacts` with its references interned: what the engine loads from the store, shares
+/// between graphs and resolves. Symbols, imports and relations keep their strings (they are a
+/// small share: on tessera 0.85 MB of symbol names and 6.5 MB of imports against 72 MB of
+/// references).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InternedFacts {
+    pub module_name: Option<String>,
+    pub line_count: u32,
+    pub symbols: Vec<Symbol>,
+    pub imports: Vec<Import>,
+    pub refs: Vec<RefSite>,
+    pub hierarchy: Vec<TypeRelation>,
+    /// One past the highest name id in `refs` (0 if none): a pool must be at least this long to
+    /// resolve these facts, which is how the engine knows when to read new names from the store.
+    pub name_bound: u32,
+}
+
+impl InternedFacts {
+    /// Intern `f`'s references into `pool`, which assigns its own ids. The store does this with
+    /// ids from its `names` table instead (`store::Reader::get_interned`).
+    pub fn intern(f: BlobFacts, pool: &mut NamePool) -> InternedFacts {
+        let refs: Vec<RefSite> = f
+            .refs
+            .iter()
+            .map(|r| RefSite::new(pool.intern(&r.name), r.qualifier.as_deref().map(|q| pool.intern(q)), r.line, r.enclosing, r.kind))
+            .collect();
+        let name_bound = refs.iter().map(|r| r.name.0.max(r.qualifier().map_or(0, |q| q.0)) + 1).max().unwrap_or(0);
+        InternedFacts { module_name: f.module_name, line_count: f.line_count, symbols: f.symbols, imports: f.imports, refs, hierarchy: f.hierarchy, name_bound }
     }
 }

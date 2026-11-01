@@ -456,7 +456,7 @@ impl<'a> Views<'a> {
                 RefHit {
                     path: g.abs(fi),
                     line: r.line,
-                    enclosing: r.enclosing.map(|e| f.symbol(e).name.clone()),
+                    enclosing: r.enclosing().map(|e| f.symbol(e).name.clone()),
                     kind: r.kind,
                     confidence: g.res[fi as usize].refs[ri as usize].confidence,
                 },
@@ -481,7 +481,7 @@ impl<'a> Views<'a> {
             if r.kind == RefKind::Type {
                 continue;
             }
-            if let Some(e) = r.enclosing {
+            if let Some(e) = r.enclosing() {
                 let mut caller = g.hit(SymId { file: fi, local: e });
                 caller.view = v;
                 if !out.iter().any(|(c, _, _)| c.view == v && c.id == caller.id) {
@@ -506,7 +506,7 @@ impl<'a> Views<'a> {
         let f = g.file(h.id.file);
         for (r, rr) in f.facts.refs.iter().zip(&g.res[h.id.file as usize].refs) {
             let Some(ext) = &rr.external else { continue };
-            if r.kind == RefKind::Type || !r.enclosing.is_some_and(|e| g.within(h.id.file, e, h.id.local)) {
+            if r.kind == RefKind::Type || !r.enclosing().is_some_and(|e| g.within(h.id.file, e, h.id.local)) {
                 continue;
             }
             for (tv, id) in self.resolve_external(h.view, ext) {

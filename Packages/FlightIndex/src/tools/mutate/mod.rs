@@ -402,7 +402,7 @@ fn safe_delete(c: &MutCtx) -> Result<Plan, ToolError> {
     for &local in &targets {
         for &(fi, ri) in g.incoming.get(&SymId { file: tf, local }).unwrap_or(&[]) {
             let r = &g.file(fi).facts.refs[ri as usize];
-            let own = fi == tf && r.enclosing.is_some_and(&inside);
+            let own = fi == tf && r.enclosing().is_some_and(&inside);
             if !own {
                 live.push(format!("{}:L{} ({})", g.abs(fi).display(), r.line, r.kind.as_str()));
             }

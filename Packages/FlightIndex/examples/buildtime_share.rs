@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-fn inputs(g: &ViewGraph) -> Vec<(FileRef, Arc<flightindex::facts::BlobFacts>)> {
+fn inputs(g: &ViewGraph) -> Vec<(FileRef, Arc<flightindex::facts::InternedFacts>)> {
     let mut v: Vec<_> = (0..g.files_len() as u32)
         .map(|i| g.file(i))
         .filter(|f| f.alive)
@@ -37,16 +37,23 @@ fn main() {
     let target = graph(&a[3]);
     let label = target.label.clone();
     let inp = inputs(&target);
+    let names = target.names().clone();
     let share = Arc::new(Share::new());
-    let warm: Vec<ViewGraph> = a[4..].iter().map(|w| ViewGraph::build_shared(graph(w).label.clone(), inputs(&graph(w)), share.clone(), None)).collect();
+    let warm: Vec<ViewGraph> = a[4..]
+        .iter()
+        .map(|w| {
+            let g = graph(w);
+            ViewGraph::build_shared(g.label.clone(), inputs(&g), g.names().clone(), share.clone(), None)
+        })
+        .collect();
     let mut plain = Vec::new();
     let mut shared = Vec::new();
     for _ in 0..runs {
         let t = Instant::now();
-        drop(ViewGraph::build(label.clone(), inp.clone()));
+        drop(ViewGraph::build(label.clone(), inp.clone(), names.clone()));
         plain.push(t.elapsed().as_secs_f64() * 1000.0);
         let t = Instant::now();
-        let g = ViewGraph::build_shared(label.clone(), inp.clone(), share.clone(), None);
+        let g = ViewGraph::build_shared(label.clone(), inp.clone(), names.clone(), share.clone(), None);
         shared.push(t.elapsed().as_secs_f64() * 1000.0);
         drop(g);
     }

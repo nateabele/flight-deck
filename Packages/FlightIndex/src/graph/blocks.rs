@@ -21,7 +21,7 @@
 //! as `with_changes` already leaves) for every numbered path it does not contain.
 
 use super::{FileRes, NameMap};
-use crate::facts::BlobFacts;
+use crate::facts::InternedFacts;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -68,7 +68,7 @@ pub struct Share {
 }
 
 /// A name table and the facts it indexes, both weak.
-type NameEntry = (Weak<BlobFacts>, Weak<NameMap>);
+type NameEntry = (Weak<InternedFacts>, Weak<NameMap>);
 
 /// Distinct live blocks and name tables and their estimated heap bytes.
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,7 +122,7 @@ impl Share {
     }
 
     /// The name table of `facts` (name -> local ids), built once for every graph holding them.
-    pub fn names(&self, facts: &Arc<BlobFacts>) -> Arc<NameMap> {
+    pub fn names(&self, facts: &Arc<InternedFacts>) -> Arc<NameMap> {
         let key = Arc::as_ptr(facts) as usize;
         let mut m = self.names.lock().unwrap();
         if let Some((f, n)) = m.get(&key)

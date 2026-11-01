@@ -270,7 +270,7 @@ impl GraphData {
         let mut sedges: Vec<Vec<u32>> = vec![Vec::new(); total];
         for (fi, r) in self.res.iter().enumerate() {
             for (rr, fr) in r.refs.iter().zip(&self.files[fi].facts.refs) {
-                if let (Some(t), Some(e)) = (rr.target, fr.enclosing) {
+                if let (Some(t), Some(e)) = (rr.target, fr.enclosing()) {
                     sedges[offset[fi] + e as usize].push((offset[t.file as usize] + t.local as usize) as u32);
                 }
             }
