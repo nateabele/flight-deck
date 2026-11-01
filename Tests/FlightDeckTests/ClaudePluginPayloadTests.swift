@@ -272,7 +272,7 @@ final class ClaudePluginPayloadTests: XCTestCase {
 
     /// The authoring skill ships as a folder (claude reads it through the plugin, codex through
     /// `CodexBundledSkill`), and its template manifest must be one `provider check` accepts.
-    func testTheVisualProviderSkillShipsWithATemplateThatParses() throws {
+    func testTheVisualProviderSkillShipsWithATemplateThatParses() async throws {
         let folder = try pluginRoot().appendingPathComponent("skills/visual-provider")
         let skill = try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8)
         XCTAssertTrue(skill.hasPrefix("---\nname: visual-provider\ndescription: "))
@@ -282,6 +282,10 @@ final class ClaudePluginPayloadTests: XCTestCase {
         let parsed = try ProviderManifestParser.load(folder: templates)
         XCTAssertEqual(parsed.manifest.kinds.count, 1)
         XCTAssertTrue(parsed.issues.isEmpty, "the template must not teach a key the parser warns about")
+        // The real check, as an agent following the skill runs it on a copy of the template.
+        let report = await ProviderCheck.run(folder: templates)
+        XCTAssertEqual(report.exitCode, 0, report.text)
+        XCTAssertFalse(report.text.contains("error"), report.text)
     }
 
     override func tearDownWithError() throws {

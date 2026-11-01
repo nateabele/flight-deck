@@ -156,6 +156,9 @@ final class ProviderCheckTests: XCTestCase {
         XCTAssertEqual(report.exitCode, 1, report.text)
         XCTAssertTrue(report.text.contains("boom"), report.text)
         XCTAssertTrue(report.text.contains("3"), report.text)
+        // A sample failure is not a line of provider.toml, so it carries no file prefix.
+        XCTAssertTrue(report.text.contains("\nerror: sample chart: the generator exited 3"), report.text)
+        XCTAssertFalse(report.text.contains("provider.toml: error: sample"), report.text)
     }
 
     func testGeneratorThatWritesNothingIsAProblem() async throws {
@@ -203,20 +206,80 @@ final class ProviderCheckTests: XCTestCase {
 
     // MARK: - Fix round 1
 
-    func testMissingEntryFileIsReportedAtItsLine() async throws {
-        let manifest = Self.header + Self.kind
-        let report = await check(try folder(manifest, files: [("chart.md", "d"), ("style.css", "x")]))
+    /// Spec §9 step 5: `entry` is the file the agent writes in the draft folder, so a provider
+    /// does not ship one. Only its path is checked.
+    func testEntryNeedNotExistBecauseTheAgentWritesItInTheDraft() async throws {
+        let report = await check(try folder(Self.header + Self.kind, files: [("chart.md", "d"), ("style.css", "x")]))
+        XCTAssertEqual(report.exitCode, 0, report.text)
+        XCTAssertFalse(report.text.contains("chart.svg"), report.text)
+    }
+
+    func testEntryThatEscapesTheFolderIsStillRefusedAtItsLine() async throws {
+        let manifest = Self.header + Self.kind.replacingOccurrences(of: "entry = \"chart.svg\"", with: "entry = \"../chart.svg\"")
+        let report = await check(try folder(manifest))
         XCTAssertEqual(report.exitCode, 1, report.text)
         let line = manifest.split(separator: "\n", omittingEmptySubsequences: false)
             .firstIndex { $0.hasPrefix("entry") }! + 1
         XCTAssertTrue(report.text.contains("provider.toml:\(line): error: "), report.text)
-        XCTAssertTrue(report.text.contains("chart.svg"), report.text)
     }
 
-    func testEntryThatIsAFolderIsReported() async throws {
-        let report = await check(try folder(Self.header + Self.kind, files: [
-            ("chart.md", "d"), ("style.css", "x"), ("chart.svg/inner", "x")]))
+    func testEntryThroughALinkOutOfTheFolderIsStillRefused() async throws {
+        let url = try folder(Self.header + Self.kind, files: [("chart.md", "d"), ("style.css", "x")])
+        try FileManager.default.createSymbolicLink(atPath: url.appendingPathComponent("chart.svg").path,
+                                                   withDestinationPath: "/etc/hosts")
+        let report = await check(url)
         XCTAssertEqual(report.exitCode, 1, report.text)
+        XCTAssertTrue(report.text.contains("symlink"), report.text)
+    }
+
+    /// Spec §9's own example manifest, with the one file it names that a provider ships.
+    func testSpecExampleManifestPasses() async throws {
+        let manifest = """
+        id = "fd.diagram.mermaid"
+        name = "Mermaid diagrams"
+        version = "1.0.0"
+        contract = 1
+
+        [[kind]]
+        id = "diagram.sequence"
+        summary = "Message order between named participants"
+        output = "mermaid"          # html | svg | png | mermaid | canvas
+        entry = "diagram.mmd"
+        pins = "nodes"              # nodes | canvas | dom | xy
+        states = []
+        sizes = ["default"]
+        cost = { seconds = 20, tokens = 6000 }
+        instructions = "kinds/diagram.sequence.md"
+        assets = []
+
+        [generator]                 # optional; omit for a data-only provider
+        command = ["./bin/render", "{source}", "{out}"]
+        timeout = "60s"
+        network = false
+        """
+        let report = await check(try folder(manifest, files: [("kinds/diagram.sequence.md", "draw"), ("bin/render", "#!/bin/sh\n")]),
+                                 runSamples: false)
+        XCTAssertEqual(report.exitCode, 0, report.text)
+        XCTAssertFalse(report.text.contains("error"), report.text)
+    }
+
+    func testALinkedProviderFolderSaysToPassTheRealOne() async throws {
+        let real = try folder(Self.header + Self.kind)
+        let link = tmp.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let report = await check(link)
+        XCTAssertEqual(report.exitCode, 1, report.text)
+        XCTAssertTrue(report.text.contains("the provider folder is a link; pass the real folder"), report.text)
+    }
+
+    func testAManifestThatIsNotARegularFileSaysSoPlainly() async throws {
+        let url = try folder(Self.header + Self.kind)
+        let manifest = url.appendingPathComponent("provider.toml")
+        try FileManager.default.removeItem(at: manifest)
+        XCTAssertEqual(mkfifo(manifest.path, 0o644), 0)
+        let report = await check(url)
+        XCTAssertEqual(report.exitCode, 1, report.text)
+        XCTAssertTrue(report.text.contains("provider.toml must be a regular file"), report.text)
     }
 
     func testLineComesFromTheKindThatNamesTheMissingFile() async throws {

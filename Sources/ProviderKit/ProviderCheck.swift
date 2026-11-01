@@ -27,10 +27,23 @@ public enum ProviderCheck {
         func fail(_ line: Int?, _ message: String) {
             report(ProviderManifestIssue(.error, line: line, message))
         }
+        /// A problem that is not a line of provider.toml (a sample run, the folder itself), so
+        /// it carries no `provider.toml:` prefix.
+        func problem(_ message: String) {
+            lines.append(clean("error: \(message)"))
+            errors += 1
+        }
         func finish() -> ProviderCheckReport {
             ProviderCheckReport(text: lines.joined(separator: "\n"), exitCode: errors == 0 ? 0 : 1)
         }
 
+        // The registry ignores a linked provider folder, so the check refuses one too, and says
+        // what to pass instead. Only the folder itself: a link higher up (/tmp) is fine.
+        if (try? FileManager.default.attributesOfItem(atPath: folder.path))?[.type] as? FileAttributeType == .typeSymbolicLink {
+            problem("the provider folder is a link; pass the real folder")
+            lines.append("invalid: nothing to check")
+            return finish()
+        }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             lines.append(clean("\(folder.path): error: not a folder"))
@@ -57,10 +70,10 @@ public enum ProviderCheck {
         result.issues.forEach(report)
 
         // The parser proves each path stays inside the folder; this proves the file is there.
-        // The line of each is the one the parser read it from.
+        // The line of each is the one the parser read it from. Not `entry`: spec §9 step 5 has
+        // the agent write it in the draft folder, so a provider ships no such file.
         for kind in manifest.kinds {
             let scope = "kind \"\(kind.id)\""
-            requireFile(kind.entry, "\(scope) entry", in: folder, line: kind.lines.entry, fail: fail)
             requireFile(kind.instructions, "\(scope) instructions", in: folder, line: kind.lines.instructions, fail: fail)
             for asset in kind.assets {
                 requireFile(asset, "\(scope) asset", in: folder, line: kind.lines.assets, fail: fail)
@@ -74,7 +87,7 @@ public enum ProviderCheck {
                 lines.append("generator not run: fix the problems above first")
             } else {
                 sampled = await sampleRun(manifest, generator: generator, folder: folder, sandbox: sandbox,
-                                           say: { lines.append($0) }, fail: fail)
+                                           say: { lines.append($0) }, fail: problem)
             }
         }
 
@@ -111,7 +124,7 @@ public enum ProviderCheck {
     /// Runs the generator once per kind that has a samples folder; returns how many ran ok.
     private static func sampleRun(_ manifest: ProviderManifest, generator: ProviderGenerator, folder: URL,
                                    sandbox: ProviderSandbox, say: (String) -> Void,
-                                   fail: (Int?, String) -> Void) async -> Int {
+                                   fail: (String) -> Void) async -> Int {
         let root = folder.resolvingSymlinksInPath().standardizedFileURL
         var succeeded = 0
         for kind in manifest.kinds {
@@ -124,11 +137,11 @@ public enum ProviderCheck {
             }
             let resolved = samples.resolvingSymlinksInPath().standardizedFileURL
             guard resolved.path.hasPrefix(root.path + "/") else {
-                fail(nil, "sample \(kind.id): \(relative) resolves outside the provider folder")
+                fail("sample \(kind.id): \(relative) resolves outside the provider folder")
                 continue
             }
             if let bad = unsafeEntry(in: samples, prefix: relative) {
-                fail(nil, "sample \(kind.id): \(bad)")
+                fail("sample \(kind.id): \(bad)")
                 continue
             }
             // The exact argv, before anything runs. {source} and {out} are filled in by the
@@ -150,20 +163,20 @@ public enum ProviderCheck {
                 switch outcome {
                 case .exited(let code, _, let stderr, let outputs):
                     if code != 0 {
-                        fail(nil, "sample \(kind.id): the generator exited \(code)" + detail(stderr))
+                        fail("sample \(kind.id): the generator exited \(code)" + detail(stderr))
                     } else if outputs.isEmpty {
-                        fail(nil, "sample \(kind.id): the generator exited 0 but wrote no files" + detail(stderr))
+                        fail("sample \(kind.id): the generator exited 0 but wrote no files" + detail(stderr))
                     } else {
                         succeeded += 1
                         say(clean("sample \(kind.id): ok, wrote \(outputs.sorted().joined(separator: ", "))"))
                     }
                 case .timedOut:
-                    fail(nil, "sample \(kind.id): the generator did not finish within \(generator.timeout.seconds) seconds")
+                    fail("sample \(kind.id): the generator did not finish within \(generator.timeout.seconds) seconds")
                 case .outputTooLarge(let what):
-                    fail(nil, "sample \(kind.id): the generator's \(what) is over the size limit")
+                    fail("sample \(kind.id): the generator's \(what) is over the size limit")
                 }
             } catch {
-                fail(nil, "sample \(kind.id): \(error)")
+                fail("sample \(kind.id): \(error)")
             }
         }
         return succeeded
