@@ -157,6 +157,7 @@ name = "flightindex"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "libc",
  "rayon",
  "regex",
  "rusqlite",

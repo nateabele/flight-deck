@@ -25,6 +25,9 @@ use std::process::Command;
 /// produce symbols nobody searches for.
 pub const MAX_FILE_BYTES: u64 = 1_000_000;
 
+/// Most files a directory outside git may hold before it is refused as an index root.
+const MAX_PLAIN_FILES: usize = 100_000;
+
 /// Project manifests that mark the root of a directory that is not in git.
 const ROOT_MARKERS: &[&str] =
     &["elm.json", "Cargo.toml", "package.json", "mix.exs", "Package.swift", "pyproject.toml"];
@@ -298,9 +301,16 @@ fn plain_view(root: &Path) -> Result<View> {
         .filter_entry(|e| e.file_name() != "node_modules")
         .build();
     let mut overlay = Vec::new();
+    let mut walked = 0usize;
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
+        }
+        // A manifest in a home directory or a data dump would otherwise make a request read
+        // hundreds of thousands of files; a real project outside git is nowhere near this.
+        walked += 1;
+        if walked > MAX_PLAIN_FILES {
+            return Err(Error::Msg(format!("{} has more than {MAX_PLAIN_FILES} files and is not a git repository: not indexing it", root.display())));
         }
         let Ok(rel) = entry.path().strip_prefix(root) else { continue };
         let rel = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");

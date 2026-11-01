@@ -1,98 +1,215 @@
-//! `fdindex`: the CLI/daemon binary. Step 1 ships only developer verbs that drive the engine
-//! directly; the daemon, MCP shim and query CLI arrive in steps 2-4.
+//! `fdindex`: the machine-wide code index. One binary, three roles.
 //!
 //! ```text
-//! fdindex build <path> [--store DIR] [--priority FILE]...   index the view containing <path>
-//! fdindex find  <path> <name> [--store DIR]                 find a definition by exact name
-//! fdindex refs  <path> <name> [--store DIR]                 references to a definition
-//! fdindex gc    <path> [--store DIR]                        garbage-collect and vacuum its repo
+//! fdindex daemon [--foreground] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon
+//! fdindex status [--json] | stop                                            ask it, or stop it
+//! fdindex <tool> [first-arg] [--flag value]...                              query it
+//!
+//! tools: map find grep read outline deps stats impact refs calls
+//!        build <path> | gc <path> | add_root <path>          (admin: index a view now, collect, hint)
+//! global flags: --store DIR  --socket PATH  --cwd DIR  --json
 //! ```
+//!
+//! A query verb connects to the daemon, starting it detached if it is not running, and sends the
+//! tool with the caller's cwd. Flags become tool arguments as they are written (`--file-path x` is
+//! `file_path`), so there is no per-tool flag table to keep in step with the tools themselves;
+//! the first positional argument fills the tool's required parameter.
 
-use flightindex::engine::{Engine, Phase};
-use flightindex::query::NameMatch;
+use flightindex::client::{connect_or_start, Client};
+use flightindex::daemon;
+use flightindex::error::{Error, Result};
+use flightindex::proto::state;
+use flightindex::runtime::Paths;
+use flightindex::service::Config;
 use flightindex::store::default_store_root;
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::Duration;
+
+/// Flags that never take a value, so `find --regex foo` reads `foo` as the name, not as regex's value.
+const BOOLEAN_FLAGS: &[&str] = &[
+    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force",
+];
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("fdindex: {e}");
-        std::process::exit(1);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("fdindex: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn run() -> flightindex::error::Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mut store = default_store_root();
-    let mut priority: Vec<PathBuf> = Vec::new();
-    let mut positional = Vec::new();
-    while !args.is_empty() {
-        let a = args.remove(0);
-        match a.as_str() {
-            "--store" if !args.is_empty() => store = PathBuf::from(args.remove(0)),
-            "--priority" if !args.is_empty() => priority.push(PathBuf::from(args.remove(0))),
-            _ => positional.push(a),
+struct Cli {
+    store: PathBuf,
+    socket: Option<PathBuf>,
+    cwd: Option<String>,
+    json: bool,
+    foreground: bool,
+    graph_budget_mb: Option<usize>,
+    build_wait_ms: Option<u64>,
+    verb: String,
+    positional: Vec<String>,
+    args: Map<String, Value>,
+}
+
+fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
+    let mut cli = Cli {
+        store: default_store_root(),
+        socket: None,
+        cwd: None,
+        json: false,
+        foreground: false,
+        graph_budget_mb: None,
+        build_wait_ms: None,
+        verb: String::new(),
+        positional: Vec::new(),
+        args: Map::new(),
+    };
+    let mut it = argv.into_iter().peekable();
+    while let Some(a) = it.next() {
+        let Some(flag) = a.strip_prefix("--") else {
+            if cli.verb.is_empty() {
+                cli.verb = a;
+            } else {
+                cli.positional.push(a);
+            }
+            continue;
+        };
+        let (key, inline) = match flag.split_once('=') {
+            Some((k, v)) => (k.replace('-', "_"), Some(v.to_string())),
+            None => (flag.replace('-', "_"), None),
+        };
+        let boolean = BOOLEAN_FLAGS.contains(&key.as_str());
+        let value = match inline {
+            Some(v) => Some(v),
+            None if boolean => it.next_if(|n| matches!(n.as_str(), "true" | "false")),
+            None => it.next_if(|n| !n.starts_with("--")),
+        };
+        match (key.as_str(), value) {
+            ("store", Some(v)) => cli.store = PathBuf::from(v),
+            ("socket", Some(v)) => cli.socket = Some(PathBuf::from(v)),
+            ("cwd", Some(v)) => cli.cwd = Some(v),
+            ("json", _) => cli.json = true,
+            ("foreground", _) => cli.foreground = true,
+            ("graph_budget_mb", Some(v)) => cli.graph_budget_mb = Some(v.parse().map_err(|_| "--graph-budget-mb takes a number")?),
+            ("build_wait_ms", Some(v)) if cli.verb == "daemon" => cli.build_wait_ms = Some(v.parse().map_err(|_| "--build-wait-ms takes a number")?),
+            (k, None) => {
+                cli.args.insert(k.to_string(), Value::Bool(true));
+            }
+            (k, Some(v)) => {
+                // A repeated flag becomes a list (`--boost-files a --boost-files b`).
+                match cli.args.get_mut(k) {
+                    Some(Value::Array(list)) => list.push(Value::String(v)),
+                    Some(old) => *old = json!([old.clone(), v]),
+                    None => {
+                        cli.args.insert(k.to_string(), Value::String(v));
+                    }
+                }
+            }
         }
     }
-    let (verb, path) = match positional.as_slice() {
-        [v, p, ..] => (v.as_str(), PathBuf::from(p)),
-        _ => {
-            eprintln!("usage: fdindex <build|find|refs|gc> <path> [name] [--store DIR] [--priority FILE]");
-            std::process::exit(2);
+    Ok(cli)
+}
+
+/// The parameter the first positional argument fills.
+fn positional_param(tool: &str, first: &str) -> Option<&'static str> {
+    Some(match tool {
+        "find" | "calls" => "name",
+        "refs" => "symbol",
+        "grep" => "query",
+        "outline" | "deps" | "impact" | "stats" | "build" | "gc" | "add_root" | "workspace" => "file_path",
+        // `read src/x.rs` reads a file; `read parse_config` reads a symbol.
+        "read" if first.contains('/') || std::path::Path::new(first).is_file() => "file_path",
+        "read" => "symbol_name",
+        _ => return None,
+    })
+}
+
+fn run() -> Result<i32> {
+    let cli = parse(std::env::args().skip(1).collect()).map_err(Error::Msg)?;
+    if cli.verb.is_empty() {
+        eprintln!("usage: fdindex <daemon|status|stop|map|find|grep|read|outline|deps|stats|impact|refs|calls|build|gc|add_root> [args] [--flags]");
+        return Ok(2);
+    }
+    let paths = Paths::new(&cli.store, cli.socket.clone());
+
+    if cli.verb == "daemon" {
+        let mut config = Config::new(&cli.store);
+        if let Some(mb) = cli.graph_budget_mb {
+            config.graph_budget = mb << 20;
+        }
+        if let Some(ms) = cli.build_wait_ms {
+            config.build_wait = Duration::from_millis(ms);
+        }
+        let _ = cli.foreground; // the daemon always logs to its file; there is no terminal mode to enter
+        daemon::run(daemon::Options { paths, config })?;
+        return Ok(0);
+    }
+
+    let mut args = cli.args.clone();
+    if let Some(first) = cli.positional.first() {
+        match positional_param(&cli.verb, first) {
+            Some(param) => {
+                args.entry(param.to_string()).or_insert_with(|| Value::String(first.clone()));
+            }
+            None => return Err(Error::Msg(format!("{} takes no positional argument (got '{first}')", cli.verb))),
+        }
+    }
+    let cwd = match &cli.cwd {
+        Some(c) => c.clone(),
+        None => std::env::current_dir().map_err(|e| Error::Msg(format!("cannot read the current directory: {e}")))?.to_string_lossy().to_string(),
+    };
+
+    if cli.verb == "stop" {
+        return match Client::connect(&paths.socket) {
+            Ok(mut c) => {
+                let _ = c.call(&cwd, 0, "shutdown", Map::new());
+                println!("stopped");
+                Ok(0)
+            }
+            Err(_) => {
+                println!("not running");
+                Ok(0)
+            }
+        };
+    }
+
+    let mut client = match connect_or_start(&paths, &daemon_args(&cli)) {
+        Ok(c) => c,
+        Err(e) => {
+            // The state a shim reports when it cannot reach the daemon: agents fall back to rg.
+            eprintln!("state: {}\n{e}", state::UNAVAILABLE);
+            return Ok(3);
         }
     };
-    let path = path.canonicalize().unwrap_or(path);
-    let engine = Engine::open(store)?;
-    let view = engine.view_for_path(&path)?;
-    match verb {
-        "build" => {
-            let t = Instant::now();
-            let report = engine.build(&view, &priority, |p| {
-                if matches!(p.phase, Phase::PriorityDone) {
-                    eprintln!("priority slice ready: {} of {} files", p.done, p.total);
-                }
-            })?;
-            let built = t.elapsed();
-            let g = engine.graph(&view)?;
-            let graph_time = t.elapsed() - built;
-            println!("view: {:?}", g.label);
-            println!("build: {report:?}");
-            println!("graph: {} ms", graph_time.as_millis());
-            let stats = g.stats().data;
-            for (lang, s) in &stats.by_language {
-                println!("{lang}: {} files, {} lines, {} symbols", s.files, s.lines, s.symbols);
-            }
-            let (exact, fallback, none) = g.resolution_counts();
-            println!("refs: {exact} exact, {fallback} fallback, {none} unresolved");
-            let st = engine.reader(&view.label.repo)?.stats()?;
-            println!("store: {} facts rows, {} symbols, {} bytes", st.facts, st.symbols, (st.page_count - st.free_pages) * st.page_size);
+    let resp = client.call(&cwd, 0, &cli.verb, args)?;
+    if cli.json || (cli.verb == "status" && resp.text.is_none()) {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+        return Ok(if resp.ok { 0 } else { 1 });
+    }
+    if cli.verb == "status" && !resp.ok {
+        eprintln!("{}", resp.error.unwrap_or_default());
+        return Ok(1);
+    }
+    match (resp.ok, resp.text, resp.error) {
+        (true, Some(t), _) => {
+            println!("{t}");
+            Ok(0)
         }
-        "find" => {
-            let name = positional.get(2).cloned().unwrap_or_default();
-            let g = engine.graph(&view)?;
-            for h in g.find_symbols(&NameMatch::Exact(name), None, 20).data {
-                println!("{} {} {}:{}-{}  {}", h.kind.as_str(), h.name, h.path.display(), h.start_line, h.end_line, h.signature.unwrap_or_default());
-            }
-        }
-        "refs" => {
-            let name = positional.get(2).cloned().unwrap_or_default();
-            let g = engine.graph(&view)?;
-            for def in g.find_symbols(&NameMatch::Exact(name), None, 5).data {
-                println!("{} {}:{}", def.name, def.path.display(), def.start_line);
-                for r in g.references(def.id).data {
-                    println!("  {}:{} {:?} in {} ({:?})", r.path.display(), r.line, r.kind, r.enclosing.unwrap_or_default(), r.confidence);
-                }
-            }
-        }
-        "gc" => {
-            let stats = engine.gc(&view.label.repo)?;
-            let freed = engine.incremental_vacuum(&view.label.repo, 0)?;
-            println!("gc: {stats:?}; vacuumed {freed} pages");
-        }
-        other => {
-            eprintln!("unknown verb {other}");
-            std::process::exit(2);
+        (_, _, e) => {
+            eprintln!("state: {}\n{}", resp.state.unwrap_or_default(), e.unwrap_or_default());
+            Ok(1)
         }
     }
-    Ok(())
+}
+
+/// Daemon tuning a client forwards when it is the one starting the daemon.
+fn daemon_args(cli: &Cli) -> Vec<String> {
+    let mut a = Vec::new();
+    if let Some(mb) = cli.graph_budget_mb {
+        a.extend(["--graph-budget-mb".to_string(), mb.to_string()]);
+    }
+    a
 }

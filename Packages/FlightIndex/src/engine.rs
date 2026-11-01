@@ -85,8 +85,11 @@ pub struct Engine {
     /// Blob facts shared between every graph that holds them. Weak, so a blob nobody's graph holds
     /// any more is freed: ten graphs of ten commits of one repository hold one copy of each blob
     /// they share, not ten.
-    facts: Mutex<HashMap<(String, &'static str), (Weak<BlobFacts>, usize)>>,
+    facts: Mutex<HashMap<(String, &'static str), SharedFacts>>,
 }
+
+/// A blob's facts as held weakly by the shared cache, with their estimated size.
+type SharedFacts = (Weak<BlobFacts>, usize);
 
 /// Default budget for resolved graphs: with hundreds of worktrees on many commits the daemon
 /// cannot hold them all (one tessera graph is ~100 MB), so the least recently used are dropped.
@@ -247,9 +250,11 @@ impl Engine {
         let stored = total - pending.values().map(Vec::len).sum::<usize>();
         let mut report = BuildReport { total_files: total, already_stored: stored, ..Default::default() };
         let mut done = stored;
+        if pending.is_empty() {
+            self.mark_complete(view); // before the Done event: a waiter woken by it must find the view ready
+        }
         progress(Progress { phase: if pending.is_empty() { Phase::Done } else { Phase::Priority }, done, total });
         if pending.is_empty() {
-            self.mark_complete(view);
             report.elapsed = started.elapsed();
             return Ok(report);
         }
