@@ -204,6 +204,22 @@ final class VisualWebView: NSObject, WKNavigationDelegate {
         decisionHandler(.cancel)
     }
 
+    /// A page that could not load (a scheme handler error, a refused request) is a failure the
+    /// block shows, not a white body.
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        loadFailed(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        loadFailed(error)
+    }
+
+    private func loadFailed(_ error: Error) {
+        guard !stopped, (error as NSError).code != NSURLErrorCancelled else { return }
+        status = .failed(message: "The diagram's page did not load: \(error.localizedDescription)", height: 0)
+        onStatus?(status)
+    }
+
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         status = .failed(message: "The diagram's web content stopped.", height: 0)
         onStatus?(status)

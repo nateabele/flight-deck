@@ -39,19 +39,28 @@ final class VisualSizeUITests: XCTestCase {
         return app
     }
 
-    /// Scrolls the detail pane until `target`'s top is inside the window, down or back up: the
-    /// board sits above the plan.
+    /// Scrolls the detail pane until all of `target` is inside the window, down or back up: the
+    /// board sits above the plan, and a block's diagram is in the lower part of its frame.
     private func scrollTo(_ target: XCUIElement, in app: XCUIApplication) {
         let detail = app.scrollViews["intake-detail"].firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 5), "no detail pane")
         let window = app.windows.firstMatch.frame
         for _ in 0..<20 {
-            let y = target.frame.minY
-            if y > window.minY + 120, y < window.maxY - 120 { break }
-            detail.scroll(byDeltaX: 0, deltaY: y > window.midY ? -200 : 200)
+            let frame = target.frame
+            if frame.minY > window.minY + 100, frame.maxY < window.maxY - 40 { break }
+            detail.scroll(byDeltaX: 0, deltaY: frame.midY > window.midY ? -200 : 200)
             pause(0.3)
         }
         pause(1)
+    }
+
+    private func eventually(_ timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            pause(0.5)
+        }
+        return condition()
     }
 
     private func isOn(_ button: XCUIElement) -> Bool { (button.value as? Int) == 1 || button.isSelected }
@@ -62,17 +71,24 @@ final class VisualSizeUITests: XCTestCase {
         XCTAssertTrue(block.waitForExistence(timeout: 20), "the plan's diagram block never appeared")
         // An NSSegmentedControl in select-one mode reads as a radio group.
         let sizes = app.radioGroups["visual-sizes"].firstMatch
-        scrollTo(sizes, in: app)
+        scrollTo(block, in: app)
         XCTAssertTrue(sizes.waitForExistence(timeout: 10), "the block has no size control")
-        // Mermaid draws in a web view: give it its first draw before looking.
-        pause(3)
+        // Mermaid draws in a web view: the block says when it has drawn ("live, drawn").
+        let drawn = eventually(20) { (block.value as? String) == "live, drawn" }
         shot(app, "wide")
+        let state = (block.value as? String) ?? "nil"
+        let note = XCTAttachment(string: "block value: \(state)")
+        note.name = "visual-size-draw-state"
+        note.lifetime = .keepAlways
+        add(note)
+        XCTAssertTrue(drawn, "the diagram was never drawn; the block says: \(state)")
         let wide = sizes.radioButtons["wide"], narrow = sizes.radioButtons["narrow"]
         XCTAssertTrue(wide.exists && narrow.exists, "the size control does not offer both sizes")
         XCTAssertTrue(isOn(wide), "the first size is not the one shown")
 
         narrow.click()
-        pause(3)
+        XCTAssertTrue(eventually(20) { (block.value as? String) == "live, drawn" },
+                      "the diagram was not drawn at the new size; the block says: \((block.value as? String) ?? "nil")")
         shot(app, "narrow")
         XCTAssertTrue(isOn(narrow), "choosing narrow did not switch the block's size")
         XCTAssertFalse(isOn(wide))

@@ -38,6 +38,9 @@ final class VisualBlockView: NSView {
     private(set) var size: String?
     private(set) var comparing = false
     private(set) var isLive = false
+    /// What the block's body shows, in words: VoiceOver reads it as the block's value, and a UI
+    /// test reads it to know the diagram was drawn ("live, drawn"), not just laid out.
+    private(set) var drawState = "picture" { didSet { setAccessibilityValue(drawState) } }
     /// What the live page last said: drawn, or Mermaid's error.
     private(set) var liveStatus: VisualRenderStatus?
 
@@ -322,6 +325,7 @@ final class VisualBlockView: NSView {
         self.web = web
         isLive = true
         liveStatus = .loading
+        drawState = "live, loading"
     }
 
     /// Back to the picture. What the live view drew is kept as the picture when there is none
@@ -334,6 +338,7 @@ final class VisualBlockView: NSView {
     func goSnapshot() {
         guard isLive, let web else { return }
         isLive = false
+        drawState = "picture"
         self.web = nil
         VisualLivePool.shared.release(self)
         var key: VisualSnapshotCache.Key?
@@ -395,6 +400,11 @@ final class VisualBlockView: NSView {
 
     private func liveStatusChanged(_ status: VisualRenderStatus) {
         liveStatus = status
+        switch status {
+        case .loading: drawState = "live, loading"
+        case .rendered: drawState = "live, drawn"
+        case .failed(let message, _): drawState = "live, failed: \(message)"
+        }
         if case .failed(let message, _) = status {
             body.setAccessibilityLabel("Mermaid could not draw this diagram: \(message)")
         }
@@ -455,6 +465,8 @@ final class VisualBlockView: NSView {
 
     private func refreshAfterVariantChange() {
         if isLive, let rep = shown {
+            liveStatus = .loading
+            drawState = "live, loading"
             web?.show(rep.revision.id, r: rep.revision.r, state: snapshotKey(rep).state, size: snapshotKey(rep).size)
         } else {
             rebuildBody()
