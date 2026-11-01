@@ -416,6 +416,31 @@ impl<'a> Views<'a> {
         out
     }
 
+    /// Symbols ranked by their words (`crate::words`), the answering view's first, then each
+    /// linked view's. Each view is scored by its own index: document frequencies differ between
+    /// views, so scores are not compared across them. At most `per_view` hits from each view;
+    /// the second value counts every match.
+    pub fn ranked_by_words(&self, words: &[String], kind: Option<SymbolKind>, per_view: usize) -> (Vec<SymbolHit>, usize) {
+        let mut out = Vec::new();
+        let mut total = 0;
+        for (v, g) in self.graphs.iter().enumerate() {
+            let mut taken = 0;
+            for (_, id) in g.words().search(words) {
+                if kind.is_some_and(|k| g.symbol(id).kind != k) || (v != 0 && !self.searches(v, &g.abs(id.file))) {
+                    continue;
+                }
+                total += 1;
+                if taken < per_view {
+                    let mut h = g.hit(id);
+                    h.view = v;
+                    out.push(h);
+                    taken += 1;
+                }
+            }
+        }
+        (out, total)
+    }
+
     /// `(referring view, file, index into that file's refs)` of the references from other views
     /// that bind to `d`: each external target of each other view is looked up in the file it
     /// names, which is how it is known which symbol it is.

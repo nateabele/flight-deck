@@ -123,6 +123,25 @@ fn find_and_grep_answer_prose_from_history() {
     assert!(t.contains("No history matches for 'zebra' in the last 4 commits"), "{t}");
 }
 
+/// p4's ranked-by-words `grep` and q19's history tier are separate tiers of one answer: the ranked
+/// rows first, then the commit-message matches, neither replacing the other.
+#[test]
+fn a_ranked_grep_keeps_its_rows_and_adds_the_history_tier_after_them() {
+    let (r, _) = repo();
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service::open(Config::new(dir.path().join("store"))).unwrap();
+    let t = settled(&svc, &r.root, "grep", json!({"query": "beta retry"}));
+    let (ranked, history) = t.split_once("History matches").unwrap_or_else(|| panic!("no history tier: {t}"));
+    assert!(ranked.contains("Ranked by words: beta retry") && ranked.contains("beta"), "{t}");
+    assert!(history.lines().nth(1).unwrap().starts_with("beta"), "{t}");
+    // `history=false` leaves the ranked rows alone.
+    let t = call(&svc, &r.root, "grep", json!({"query": "beta retry", "history": false}));
+    assert!(t.contains("Ranked by words: beta retry") && !t.contains("History matches"), "{t}");
+    // A zero-hit find keeps both its closest-by-words rows and the history tier.
+    let t = settled(&svc, &r.root, "find", json!({"name": "betaRetry"}));
+    assert!(t.contains("Closest by words (beta retry)") && t.contains("History matches for 'betaRetry'"), "{t}");
+}
+
 #[test]
 fn a_file_changed_outside_its_symbols_gets_a_row_where_it_ranks() {
     let (r, _) = repo();

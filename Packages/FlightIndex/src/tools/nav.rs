@@ -27,7 +27,13 @@ pub fn find(c: &Ctx) -> ToolResult {
         .collect();
     let history = super::history::section(c, &name, hits.is_empty() && pkgs.is_empty());
     if hits.is_empty() && pkgs.is_empty() {
-        return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match.{history}"));
+        let mut out = format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match.");
+        if !regex && let Some(rows) = super::ranked::find_fallback(c, &name, kind) {
+            out.push('\n');
+            out.push_str(&rows);
+        }
+        out.push_str(&history);
+        return Ok(out);
     }
     let near = Near::of(c);
     if let Some(n) = &near {
@@ -70,10 +76,14 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let query = c.args.str(&["query", "pattern"]).ok_or_else(|| ToolError::bad("grep requires `query` (alias: pattern)"))?;
     let kind = c.kind()?;
     let regex = c.args.flag(&["regex"], false);
-    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT);
     if c.args.flag(&["search_bodies"], false) {
-        return grep_bodies(c, &query, regex, limit);
+        return grep_bodies(c, &query, regex, c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT));
     }
+    // A sentence is a ranked search by words: no symbol name has a space in it.
+    if c.args.flag(&["rank"], false) || (!regex && query.trim().contains(char::is_whitespace)) {
+        return super::ranked::grep(c, &query, kind, c.args.num(&["limit"]));
+    }
+    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT);
     // A symbol-name search: `Foo` and `Foo*` both mean "names starting with Foo", so a file path
     // that merely contains the text never matches.
     let re = if regex { compile_regex(&query)? } else { compile_regex(&format!("^{}", regex::escape(query.trim_end_matches('*'))))? };
@@ -82,7 +92,12 @@ pub fn grep(c: &Ctx) -> ToolResult {
     hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.path.cmp(&b.path)).then(a.start_line.cmp(&b.start_line)));
     let history = super::history::section(c, &query, hits.is_empty());
     if hits.is_empty() {
-        return Ok(c.fit(format!("No symbols match `{query}`{history}")));
+        let mut out = match (!regex).then(|| super::ranked::prefix_fallback(c, &query, kind)).flatten() {
+            Some(rows) => rows,
+            None => format!("No symbols match `{query}`"),
+        };
+        out.push_str(&history);
+        return Ok(c.fit(out));
     }
     // With a seed set, nearest first; equally near rows stay alphabetical (the sort is stable).
     let near = Near::of(c);
@@ -152,7 +167,7 @@ fn grep_bodies(c: &Ctx, query: &str, regex: bool, limit: usize) -> ToolResult {
     Ok(c.fit(out))
 }
 
-fn is_body(k: SymbolKind) -> bool {
+pub(super) fn is_body(k: SymbolKind) -> bool {
     matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Macro | SymbolKind::Const)
 }
 

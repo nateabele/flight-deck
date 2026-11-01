@@ -109,7 +109,7 @@
  },
  {
   "name": "qartez_find",
-  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private. Takes qualified names (Type.method, Module.fn, stem::fn). For part of a name use qartez_grep; for its uses, qartez_refs.",
+  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private. Takes qualified names (Type.method, Module.fn, stem::fn). No exact match lists the closest by words. For part of a name use qartez_grep; for its uses, qartez_refs.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -198,7 +198,7 @@
  },
  {
   "name": "qartez_grep",
-  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
+  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. A query with spaces, or rank=true, is ranked by words (BM25). Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -233,7 +233,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows (default 200).",
+     "description": "Max rows (default 200; 20 ranked).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -252,12 +252,20 @@
      ]
     },
     "query": {
-     "description": "Name prefix (Foo = Foo*), a regex with regex=true, or text with search_bodies=true. Alias: pattern.",
+     "description": "Name prefix (Foo = Foo*); words to rank by (a space); regex with regex=true; body text with search_bodies=true. Alias: pattern.",
      "type": "string"
     },
     "history": {
      "default": null,
      "description": "Also list symbols whose recent commit messages match these words (BM25). Default: on for a multi-word query or no name hit; false = off.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "rank": {
+     "default": null,
+     "description": "Rank by the words of the query (BM25 over split names, parents, paths) even for one word. A query with spaces is ranked anyway.",
      "type": [
       "boolean",
       "null"

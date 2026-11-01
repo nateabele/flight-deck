@@ -226,6 +226,8 @@ pub struct GraphData {
     resolved: usize,
     /// Property, return and supertype tables of the view's Swift files (the receiver ladder).
     swift_types: Arc<swift_types::SwiftTypes>,
+    /// BM25 over symbol words (`crate::words`), built on the first ranked query, not here.
+    pub(crate) words: std::sync::OnceLock<Arc<crate::words::WordIndex>>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -302,6 +304,7 @@ impl ViewGraph {
             resolved: 0,
             soft_index: Arc::default(),
             swift_types: Arc::default(),
+            words: std::sync::OnceLock::new(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -325,6 +328,7 @@ impl ViewGraph {
         }
         g.root = label.worktree.clone();
         g.soft_index = Arc::default();
+        g.words = std::sync::OnceLock::new(); // the base's word index describes the base's symbols
         let old_files_len = g.files.len();
 
         let mut changed: HashSet<u32> = HashSet::new();
@@ -1230,6 +1234,7 @@ impl GraphData {
         if let Some(idx) = self.soft_index.get() {
             n += idx.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<u32>>() + ALLOC + v.len() * 4 + 8).sum::<usize>();
         }
+        n += self.words_if_built().map_or(0, |w| w.bytes());
         // The resolver keeps every path of the view in a set.
         n += self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
         n

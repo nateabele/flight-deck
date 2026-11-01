@@ -138,6 +138,19 @@ fn a_pathless_search_looks_in_the_callers_view_first_then_the_linked_ones() {
 }
 
 #[test]
+fn a_ranked_grep_lists_the_callers_view_first_then_the_linked_ones() {
+    let (_d, svc) = service();
+    let w = world();
+    let t = ok(&svc, &w.app, "grep", json!({"query": "view node string"}));
+    let rows: Vec<&str> = t.lines().filter(|l| l.contains(" [L")).collect();
+    assert!(rows[0].starts_with("view ") && !rows[0].contains("[view: "), "the caller's view first, unlabelled: {t}");
+    let lib_rows: Vec<&&str> = rows.iter().filter(|l| l.contains(&w.lib.display().to_string())).collect();
+    assert!(!lib_rows.is_empty() && lib_rows.iter().all(|l| l.ends_with(&format!("[view: {}]", tag(&w.lib)))), "linked rows labelled: {t}");
+    let first_lib = rows.iter().position(|l| l.contains(&w.lib.display().to_string())).unwrap();
+    assert!(rows[first_lib..].iter().all(|l| l.contains(&w.lib.display().to_string())), "views are listed in turn, not interleaved by score: {t}");
+}
+
+#[test]
 fn refs_from_the_linking_repo_include_its_own_files_and_label_the_rest() {
     let (_d, svc) = service();
     let w = world();

@@ -205,7 +205,7 @@ fn grep_matches_symbol_names_by_prefix_and_can_search_bodies() {
     let t = ok(&svc, &r.root, "grep", json!({"query": "hel*"}));
     assert!(t.contains("Found 1 result(s)") && t.contains("helper"), "{t}");
     let t = ok(&svc, &r.root, "grep", json!({"query": "web"}));
-    assert!(t.contains("No symbols match"), "a file path never matches: {t}");
+    assert!(t.contains("No symbol names start with `web`"), "a file path never matches a prefix: {t}");
     let t = ok(&svc, &r.root, "grep", json!({"query": "needle_marker", "search_bodies": true}));
     assert!(t.contains("b.ts:L2 in helper (function)") && t.contains("return needle_marker;"), "{t}");
 }

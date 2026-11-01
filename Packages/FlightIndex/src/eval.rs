@@ -59,33 +59,11 @@ impl Task {
     /// Words of the request that could name code: identifier-shaped, three or more characters,
     /// not a stopword; deduplicated case-insensitively, original case kept, at most 12.
     pub fn terms(&self) -> Vec<String> {
-        let re = regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").unwrap();
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for m in re.find_iter(&self.query) {
-            let w = m.as_str();
-            let lower = w.to_lowercase();
-            if w.len() < 3 || STOPWORDS.contains(&lower.as_str()) || !seen.insert(lower) {
-                continue;
-            }
-            out.push(w.to_string());
-            if out.len() == 12 {
-                break;
-            }
-        }
-        out
+        crate::words::query_tokens(&self.query)
     }
 }
 
-const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "that", "this", "from", "into", "not", "are", "was", "were", "but", "its", "it's", "has", "have",
-    "had", "now", "when", "then", "than", "one", "two", "all", "any", "each", "every", "only", "also", "own", "out", "off", "via",
-    "who", "what", "which", "where", "why", "how", "can", "cannot", "does", "doesn", "don", "did", "will", "would", "should",
-    "could", "may", "must", "never", "always", "still", "just", "same", "new", "old", "more", "less", "most", "some", "other",
-    "they", "them", "their", "there", "these", "those", "our", "you", "your", "his", "her", "being", "been", "too", "very",
-    "fix", "fixes", "feat", "docs", "chore", "test", "tests", "round", "add", "adds", "added", "use", "uses", "used", "make",
-    "makes", "instead", "without", "while", "after", "before", "about", "over", "under", "between", "per", "again", "once",
-];
+pub use crate::words::{split_words, STOPWORDS};
 
 /// A ranking, best first. `exclude` names files to drop from both the ranking and the gold set
 /// (the "open file" a seeded strategy was handed is not something it found).
@@ -236,100 +214,33 @@ pub fn builtin_strategies() -> Vec<(String, Strategy)> {
         }),
     ));
     v.push(("bm25".into(), Arc::new(bm25)));
+    v.push((
+        "grep_words".into(),
+        // The whole request as one `grep` query: a sentence is ranked by words. 200 rows, so the
+        // files of the best 200 symbols are what File@10 reads, as for `bm25`.
+        Arc::new(|p, t| (!t.terms().is_empty()).then(|| p.ranking_from(&p.tool("grep", json!({ "query": t.query, "rank": true, "limit": DEPTH * 10 }))))),
+    ));
     v
 }
 
-// ---- BM25 over split qualified symbol ids (the report's tier 3, as a reference) ----------------
+// ---- BM25 over split qualified symbol ids (the report's tier 3) ------------------------------
 
-/// `InfraPreflight.checkTofu` / `check_tofu` / `Sources/Infra/x.swift` -> lowercase words.
-pub fn split_words(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for chunk in s.split(|c: char| !c.is_alphanumeric()) {
-        let chars: Vec<char> = chunk.chars().collect();
-        let mut cur = String::new();
-        for i in 0..chars.len() {
-            let c = chars[i];
-            let boundary = i > 0
-                && ((c.is_uppercase() && (chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit()))
-                    || (c.is_uppercase() && i + 1 < chars.len() && chars[i + 1].is_lowercase() && chars[i - 1].is_uppercase()));
-            if boundary && !cur.is_empty() {
-                out.push(std::mem::take(&mut cur).to_lowercase());
-            }
-            cur.push(c);
-        }
-        if !cur.is_empty() {
-            out.push(cur.to_lowercase());
-        }
-    }
-    out.retain(|w| w.len() >= 2);
-    out
-}
-
+/// The graph's own word index (`crate::words`), queried directly: the same ranking `grep`
+/// gives a sentence, without the tool's text round trip. Files in first-mention order of the
+/// best 200 symbols.
 fn bm25(p: &Probe, t: &Task) -> Option<Ranking> {
-    let mut q: Vec<String> = t.terms().iter().flat_map(|w| split_words(w)).filter(|w| !STOPWORDS.contains(&w.as_str())).collect();
-    q.sort();
-    q.dedup();
-    if q.is_empty() {
+    let words = crate::words::query_words(&t.query);
+    if words.is_empty() {
         return None;
     }
-    let g = p.graph;
-    // One document per symbol: its name, its parent's name, its file's path segments and module.
-    // (symbol location, term frequencies, document length)
-    type Doc = ((String, u32), HashMap<String, u32>, usize);
-    let mut docs: Vec<Doc> = Vec::new();
-    let mut df: HashMap<String, u32> = HashMap::new();
-    for fi in (0..g.files.len() as u32).filter(|i| g.file(*i).alive) {
-        let node = g.file(fi);
-        let mut path_words = split_words(&node.path);
-        if let Some(m) = &node.facts.module_name {
-            path_words.extend(split_words(m));
-        }
-        for s in &node.facts.symbols {
-            if matches!(s.kind, SymbolKind::Impl | SymbolKind::Field) {
-                continue;
-            }
-            let mut words = split_words(&s.name);
-            if let Some(pi) = s.parent {
-                words.extend(split_words(&node.symbol(pi).name));
-            }
-            words.extend(path_words.iter().cloned());
-            let mut tf: HashMap<String, u32> = HashMap::new();
-            for w in &words {
-                *tf.entry(w.clone()).or_default() += 1;
-            }
-            for w in tf.keys() {
-                *df.entry(w.clone()).or_default() += 1;
-            }
-            docs.push(((node.path.clone(), s.start_line), tf, words.len()));
-        }
-    }
-    let n = docs.len() as f64;
-    let avg = docs.iter().map(|d| d.2).sum::<usize>() as f64 / n.max(1.0);
-    let (k1, b) = (1.2, 0.75);
-    let mut scored: Vec<(f64, usize)> = docs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, tf, len))| {
-            let mut s = 0.0;
-            for w in &q {
-                let Some(&f) = tf.get(w) else { continue };
-                let d = df[w] as f64;
-                let idf = ((n - d + 0.5) / (d + 0.5) + 1.0).ln();
-                let f = f as f64;
-                s += idf * f * (k1 + 1.0) / (f + k1 * (1.0 - b + b * *len as f64 / avg));
-            }
-            (s > 0.0).then_some((s, i))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
     let mut r = Ranking::default();
-    for (_, i) in scored.iter().take(DEPTH * 10) {
-        let (path, line) = &docs[*i].0;
+    for (_, id) in p.graph.words().search(&words).into_iter().take(DEPTH * 10) {
+        let path = &p.graph.file(id.file).path;
         if !r.files.contains(path) {
             r.files.push(path.clone());
         }
         if r.symbols.len() < DEPTH {
-            r.symbols.push((path.clone(), *line));
+            r.symbols.push((path.clone(), p.graph.symbol(id).start_line));
         }
     }
     Some(r)
@@ -701,13 +612,6 @@ pub fn main_with(extra: Vec<(String, Strategy)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splits_identifiers_into_words() {
-        assert_eq!(split_words("InfraPreflight.checkTofu"), ["infra", "preflight", "check", "tofu"]);
-        assert_eq!(split_words("HTTPServer_load2Files"), ["http", "server", "load2", "files"]);
-        assert_eq!(split_words("Sources/FlightDeck/x.swift"), ["sources", "flight", "deck", "swift"]);
-    }
 
     #[test]
     fn recall_is_normalised_by_the_smaller_of_k_and_gold() {
