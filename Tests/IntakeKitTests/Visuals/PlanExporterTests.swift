@@ -155,6 +155,19 @@ final class PlanExporterTests: XCTestCase {
         XCTAssertThrowsError(try export(s)) { XCTAssertEqual($0 as? PlanExporter.Failure, .unsafePath("../../evil")) }
     }
 
+    /// A `.git`-anything component (any case) would be ignored or obeyed by git rather than
+    /// committed: `.gitignore` hides the snapshots, `.git/config` plants a repo. Refused.
+    func testAManifestPathWithAGitComponentIsRefused() {
+        for bad in [".gitignore", ".GitAttributes", "sub/.git/config", ".gitmodules"] {
+            var s = store()
+            var m = s.revisions[RevisionRef(visualID: vid, r: 2)]!
+            m.files.append(entry(bad))
+            s.revisions[RevisionRef(visualID: vid, r: 2)] = m
+            s.bytes["pairing/2/\(bad)"] = Data("bytes:\(bad)".utf8)
+            XCTAssertThrowsError(try export(s), bad) { XCTAssertEqual($0 as? PlanExporter.Failure, .unsafePath(bad)) }
+        }
+    }
+
     func testAMissingVisualLeavesANoteAndAWarning() throws {
         let out = try export(FakeStore(), plan: "```fd-visual id=ghost\nGhost\n```\n")
         let md = String(decoding: try XCTUnwrap(out.file("plan.md")).data, as: UTF8.self)

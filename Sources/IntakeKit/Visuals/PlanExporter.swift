@@ -225,11 +225,18 @@ public enum PlanExporter {
         }
     }
 
+    /// A component git reads instead of committing: `.git`, `.gitignore`, `.gitattributes`,
+    /// `.gitmodules`, any case (APFS folds it). A `.gitignore` in the export would hide its own
+    /// snapshots from `git add`; a `.git/` would plant a repo in the user's tree.
+    public static func isGitName<S: StringProtocol>(_ component: S) -> Bool {
+        component.lowercased().hasPrefix(".git")
+    }
+
     /// The names the export owns (`README.md`, the alternates folder) cannot come from a manifest.
     private static func isSafe(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"), !path.contains("\\") else { return false }
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return false }
+        guard !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || isGitName($0) }) else { return false }
         return parts[0] != Substring(alternatesDir)
     }
 

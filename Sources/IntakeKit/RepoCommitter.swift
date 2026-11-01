@@ -275,6 +275,7 @@ public struct RepoCommitter: Sendable {
 
     private static func isSafe(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0") else { return false }
-        return !path.split(separator: "/", omittingEmptySubsequences: false).contains { $0.isEmpty || $0 == "." || $0 == ".." }
+        return !path.split(separator: "/", omittingEmptySubsequences: false)
+            .contains { $0.isEmpty || $0 == "." || $0 == ".." || PlanExporter.isGitName($0) }
     }
 }

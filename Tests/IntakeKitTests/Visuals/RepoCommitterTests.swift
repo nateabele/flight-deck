@@ -414,6 +414,17 @@ final class RepoCommitterTests: XCTestCase {
         XCTAssertFalse(exists("docs/plans/demo/plan.md"), "refused before anything was written")
     }
 
+    /// The review's live probe: a `.gitignore` of `*` in the export left only `plan.md` staged
+    /// while release reported success. Any `.git*` component is refused before anything is written.
+    func testAGitComponentInTheExportIsRefusedBeforeWriting() async throws {
+        for bad in [".gitignore", "visuals/a/.GITATTRIBUTES", "visuals/a/.git/config"] {
+            var export = sample()
+            export.files.append(ExportedFile(path: bad, data: Data("*\n".utf8)))
+            await assertFails(.unsafePath(bad)) { _ = try await committer().commit(export, repo: repo) }
+            XCTAssertFalse(exists("docs/plans/demo/plan.md"), bad)
+        }
+    }
+
     func testSlugOwnerReadsTheMarker() async throws {
         XCTAssertEqual(RepoCommitter.owner(of: "demo", repo: repo), .free)
         try write("docs/plans/demo/x", "x")
