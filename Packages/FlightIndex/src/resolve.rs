@@ -11,6 +11,9 @@
 //! follows it yet.
 
 mod python;
+mod swift;
+
+pub use swift::swift_module_key;
 
 use crate::facts::Import;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +38,8 @@ pub struct Resolver {
     rust_crates: HashMap<String, String>,
     /// elm.json directory (relative to root, "" = root) -> absolute-normalised source dirs.
     elm_projects: Mutex<HashMap<String, Option<Vec<PathBuf>>>>,
+    /// Swift module name -> the module keys (directories) bearing it.
+    swift_modules: HashMap<String, Vec<String>>,
 }
 
 const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -50,7 +55,8 @@ impl Resolver {
                 rust_crates.insert(name.replace('-', "_"), p.clone());
             }
         }
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()) }
+        let swift_modules = swift::swift_module_names(paths.iter());
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), swift_modules }
     }
 
     pub fn has_path(&self, p: &str) -> bool {

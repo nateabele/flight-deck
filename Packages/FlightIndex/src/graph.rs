@@ -22,6 +22,7 @@
 
 mod elixir;
 mod python;
+mod swift;
 
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
@@ -217,7 +218,7 @@ impl ViewGraph {
                 && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
                     // `Shop.Order.total()` names the module in its qualifier, and a `%Shop.Item{}` splits
                     // the module name across qualifier and name; either may be what just appeared.
-                    (rr.target.is_none() || rr.confidence == Confidence::Fallback)
+                    (rr.target.is_none() || rr.confidence == Confidence::Fallback || g.files[i as usize].language == "swift")
                         && (changed_names.contains(&fr.name)
                             || fr.qualifier.as_ref().is_some_and(|q| {
                                 changed_names.contains(q) || changed_names.contains(&format!("{q}.{}", fr.name))
@@ -581,8 +582,12 @@ impl ViewGraph {
         }
 
         let mut refs = Vec::with_capacity(facts.refs.len());
+        let swift_keys = (lang == "swift").then(|| self.swift_keys(f));
         for r in &facts.refs {
-            refs.push(self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs));
+            refs.push(match &swift_keys {
+                Some(keys) => self.swift_ref(f, r, keys),
+                None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
+            });
         }
         // No import is needed to call `Shop.Order.total()` or to use a type from the same Swift
         // module, so for these languages a resolved reference is itself the dependency.
