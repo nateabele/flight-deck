@@ -68,8 +68,8 @@ pub fn map(c: &Ctx) -> ToolResult {
 
     // The files the caller is working on seed a personalized PageRank (`graph/ppr.rs`): the ones
     // it names, or else the worktree's modified files, which the service passes as `diff_files`.
-    // On the eval's seeded tasks this took the top ten from 0.3% to about 25% of gold files
-    // (tessera) and from 2.7% to about 48% (flight-deck). Not for `by=symbols`: ranked that way
+    // On the eval's seeded tasks this took the top ten from 0.3% to 32% of gold files (tessera)
+    // and from 2.7% to 57% (flight-deck). Not for `by=symbols`: ranked that way
     // the walk found 1-3% of gold functions, worse than the symbol PageRank it would replace.
     let seed_paths: Vec<PathBuf> = if !personalize || by_symbols {
         Vec::new()

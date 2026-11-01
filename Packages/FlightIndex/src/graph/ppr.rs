@@ -4,8 +4,8 @@
 //! Plain `file_rank` answers "what is central to the whole repository", which is the right map
 //! for a newcomer and close to useless mid-task: on the eval's seeded tasks (an open or modified
 //! file standing in for the task) the global map put a gold file in the top ten 0.3% (tessera) and
-//! 2.7% (flight-deck) of the time. Restarting the walk at the seed files instead lifts it to about
-//! 25% and 48%.
+//! 2.7% (flight-deck) of the time. Restarting the walk at the seed files instead lifts it to 32%
+//! and 57% (eval `map_open`, 159 and 176 tasks; 35% and 53% on the next 200 commits of each).
 //!
 //! The edge weights start from Aider's `repomap.py` (`get_ranked_tags`), reworked by measurement:
 //!
@@ -17,9 +17,10 @@
 //! * Each edge also runs backwards, definer -> referencer, at `reverse` times its weight. This is
 //!   the lever that matters. A forward-only walk from a seed only reaches what the seed uses, and
 //!   the rest of a change is as often what *uses* the seed (its callers, its tests). Measured
-//!   File@10 for reverse = 0, 1, 5, 20: 5.4, 18.4, 21.9, 25.3 (tessera); 9.8, 33.3, 40.0, 48.5
-//!   (flight-deck). Twenty is the default; it was picked on the scored tasks, with no held-out
-//!   split, so treat it as a tuned constant rather than a principle.
+//!   File@10 for reverse = 0, 1, 5, 20: 6.4, 29.7, 31.8, 32.2 (tessera); 12.1, 55.8, 56.8, 57.2
+//!   (flight-deck). On held-out tasks (`--skip 200`) 1, 5, 20 gave 28.3, 31.2, 34.8 and 50.2,
+//!   52.2, 52.9, so twenty is the default; past five the gain is small, and the constant is tuned,
+//!   not a principle.
 //! * Aider's x10 for a name the chat mentions and x50 for edges out of a chat file are left out:
 //!   both measured neutral or harmful (mentioned names dilute the seed by 2-3 pp).
 //! * A definition nobody references gets Aider's 0.1 self edge, so a file of unused definitions
@@ -30,7 +31,9 @@
 //!
 //! The weighted adjacency does not depend on the seeds, so it is built once per graph, on the
 //! first seeded call, and kept (`GraphData::ppr_graph`); each call then runs only the iteration.
-//! The prototype rebuilt it per call and spent 40-130 ms; most of that was this build.
+//! Measured on tessera (2963 files): the build 41 ms and +344 KB, each later call 1.2 ms
+//! (flight-deck: 16 ms, +169 KB, 0.6 ms), at load 37. The prototype rebuilt it per call and spent
+//! 40-130 ms.
 
 use super::GraphData;
 use std::collections::{HashMap, HashSet};
