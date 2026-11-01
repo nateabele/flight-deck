@@ -13,6 +13,14 @@ path = "src/lib.rs"
 name = "fdindex"
 path = "src/main.rs"
 
+[features]
+# The relevance evaluation harness (`src/eval.rs`, `examples/eval.rs`); off in the shipped binary.
+eval = []
+
+[[example]]
+name = "eval"
+required-features = ["eval"]
+
 [dependencies]
 tree-sitter = "0.25"
 tree-sitter-language = "0.1"
