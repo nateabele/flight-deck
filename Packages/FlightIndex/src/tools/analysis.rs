@@ -284,6 +284,9 @@ pub fn stats(c: &Ctx) -> ToolResult {
 }
 
 pub fn impact(c: &Ctx) -> ToolResult {
+    if c.args.flag(&["pending"], false) {
+        return super::pending::pending(c);
+    }
     let (path, fi) = c.file()?;
     let g = c.graph;
     let include_tests = c.args.flag(&["include_tests"], false);

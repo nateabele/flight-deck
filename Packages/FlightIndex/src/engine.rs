@@ -817,6 +817,20 @@ impl Engine {
         self.graph_with(view, false)
     }
 
+    /// The graph of `view`'s base commit, re-pointed at its worktree: what `impact pending=true`
+    /// diffs the worktree against. `None` when the view has no base commit or nothing differs
+    /// from it. It is the cached base graph the overlay graph was derived from, so this is
+    /// normally a cache lookup; only a base graph the budget has evicted is rebuilt.
+    pub fn base_graph(&self, view: &View, complete: bool) -> Result<Option<Arc<ViewGraph>>> {
+        if view.label.base_commit.is_none() || view.overlay.is_empty() {
+            return Ok(None);
+        }
+        let mut clean = view.clone();
+        clean.overlay.clear();
+        clean.label.dirty = false;
+        self.graph_with(&clean, complete).map(Some)
+    }
+
     fn graph_with(&self, view: &View, complete: bool) -> Result<Arc<ViewGraph>> {
         // Opened only when a graph actually has to be built: a cached one needs no connection.
         let load = |files: &[FileRef]| -> Result<Vec<(FileRef, Arc<BlobFacts>)>> {

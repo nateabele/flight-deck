@@ -521,7 +521,7 @@
  },
  {
   "name": "qartez_impact",
-  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), the linked tests, then transitive dependents and hot symbols. Call before editing a widely imported file (the edit guard asks for it). One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
+  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), linked tests, transitive dependents. Call before editing a widely imported file (the edit guard asks for it). pending=true: call sites the diff still owes an edit. One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -567,6 +567,14 @@
       "null"
      ]
     },
+    "pending": {
+     "default": null,
+     "description": "Follow up the worktree diff: changed call shapes and the call sites it has not edited yet. file_path optional; tests included.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
     "token_budget": {
      "default": null,
      "description": "Output cap in tokens (default 4000).",
@@ -578,9 +586,6 @@
      ]
     }
    },
-   "required": [
-    "file_path"
-   ],
    "type": "object"
   },
   "annotations": {

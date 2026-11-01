@@ -172,6 +172,11 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
+/// The text of blob `id` (lossy UTF-8), or `None` if git cannot read it.
+pub fn blob_text(root: &Path, id: &str) -> Option<String> {
+    git(root, &["cat-file", "blob", id]).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
 /// Finds the file listing of `(repository, commit)` if the caller already holds one.
 pub type KnownBase<'a> = dyn Fn(&Path, &str, &Path) -> Option<Arc<Vec<FileRef>>> + 'a;
 

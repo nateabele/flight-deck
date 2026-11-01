@@ -66,7 +66,8 @@ fn impact_text(p: &Probe, t: &Task, seed: &str, diff: &[String]) -> String {
     let args = Args::new(map, p.root.to_path_buf());
     let co = cochange(p.root, &t.parent);
     let get = move || -> flightindex::error::Result<Arc<CoChange>> { Ok(co.clone()) };
-    let ctx = Ctx { graph: p.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &get, diff };
+    let no_base = || -> flightindex::error::Result<Option<tools::Baseline>> { Ok(None) };
+    let ctx = Ctx { graph: p.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &get, diff, base: &no_base };
     tools::run("impact", &ctx).unwrap_or_default()
 }
 
