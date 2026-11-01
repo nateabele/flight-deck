@@ -236,6 +236,31 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertNoThrow(try ThreadStore(intakeDirectory: directory).saveCursor(0))
     }
 
+    /// B-I3: ⌘⇧↩ (send and resolve) appends the message and then `resolve`. The reply is still
+    /// answered — the resolve lands once that turn ends — and then the thread is resolved.
+    func testSendAndResolveAnswersTheMessageFirst() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try send(id, "Last word, then close it")
+        try commands.append(.resolve(id))
+        await runner(agent).run()
+
+        XCTAssertEqual(agent.requests.count, 1, "the message got its turn")
+        XCTAssertEqual(store.turns(id).last?.reply, "Hello from the fake agent.")
+        XCTAssertEqual(store.thread(id)?.status, .resolved)
+    }
+
+    /// A resolve with no turn waiting resolves at once, as before; a reopen in between undoes a
+    /// resolve still waiting on its turn.
+    func testAResolveWithNoTurnWaitingIsImmediate() async throws {
+        let agent = ScriptedAgent()
+        let id = try open()
+        try commands.append(.resolve(id))
+        await runner(agent).run()
+        XCTAssertEqual(store.thread(id)?.status, .resolved)
+        XCTAssertTrue(agent.requests.isEmpty)
+    }
+
     // MARK: - One turn
 
     func testAMessageRunsOneTurnAndStoresTheReply() async throws {

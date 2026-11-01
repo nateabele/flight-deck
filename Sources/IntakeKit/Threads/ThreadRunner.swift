@@ -204,9 +204,15 @@ actor ThreadKeeper {
                 record.effort = effort
             }
         case .resolve:
-            try mutate(id) { $0.status = .resolved }
+            // A message still to be answered is answered first (B-I3): resolving now would make
+            // the scheduler skip its turn, and the reply would wait for a Reopen.
+            let waiting = store.turns(id).contains { $0.endedAt == nil && !$0.isDivider }
+            try mutate(id) { record in
+                if waiting { record.resolveAfterTurn = true } else { record.status = .resolved }
+            }
         case .reopen:
             try mutate(id) { [store] record in
+                record.resolveAfterTurn = nil
                 guard record.status == .resolved else { return }
                 record.status = Self.restingStatus(store.turns(id), store.diffs(id))
             }
@@ -263,6 +269,13 @@ actor ThreadKeeper {
 
     func turnEnded(_ id: ThreadID) {
         running.remove(id)
+        // A resolve that waited on this thread's turns lands once the last of them has ended.
+        if store.thread(id)?.resolveAfterTurn == true, !store.turns(id).contains(where: { $0.endedAt == nil && !$0.isDivider }) {
+            update(id) { record in
+                record.resolveAfterTurn = nil
+                record.status = .resolved
+            }
+        }
         wake()
     }
 

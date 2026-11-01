@@ -67,6 +67,9 @@ public struct ThreadRecord: Codable, Equatable, Sendable {
     public var sessionID: String?
     public var followsCheckpoint: Int
     public var createdAt: Date
+    /// A `resolve` folded while a turn was still to run (⌘⇧↩, send and resolve; B-I3): the
+    /// thread resolves once its queued turns have ended. Nil on threads written before it.
+    public var resolveAfterTurn: Bool?
 
     public init(id: ThreadID, title: String, anchor: ThreadAnchor, status: ThreadStatus = .open, agent: AgentID,
                 model: String, effort: String, autoAccept: Bool = false, sessionID: String? = nil,
