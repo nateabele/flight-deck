@@ -1,0 +1,762 @@
+//! The resolved graph of one view, computed in memory from blob facts.
+//!
+//! Not persisted, on purpose: resolving a few thousand files from facts takes milliseconds, and a
+//! persisted graph would need its own invalidation against every file edit in every worktree. What
+//! is cached is the graph of a *base tree* (see `Engine::graph`); a worktree with local edits gets
+//! `ViewGraph::with_changes`, which keeps the base's per-file resolutions and recomputes only the
+//! changed files and what depends on them:
+//!
+//! * the changed files themselves;
+//! * their importers (a symbol they used may have moved, been renamed, or gone);
+//! * if any file was added or removed (or an Elm module renamed), every file with an unresolved
+//!   import, since it may resolve now (or a resolved one may now be dangling);
+//! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
+//!   changed, because "the unique symbol with this name" may have changed.
+//!
+//! File indices are stable across `with_changes` (removed files become tombstones, added files are
+//! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
+//! prove the incremental result equals a full rebuild.
+//!
+//! PageRank is recomputed from scratch on every graph (microseconds-to-milliseconds at this size)
+//! rather than reusing the base's ranks, so ranks are exact for the view.
+
+use crate::facts::*;
+use crate::git::{FileRef, ViewLabel};
+use crate::resolve::{Resolved, Resolver};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SymId {
+    pub file: u32,
+    pub local: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    /// Resolved through the import table, a qualifier, or the same file.
+    Exact,
+    /// The only symbol with this name in the view; no import justified it.
+    Fallback,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefRes {
+    pub target: Option<SymId>,
+    pub confidence: Confidence,
+    /// The reference resolved into a file outside this worktree (cross-repo link, step 7).
+    pub external: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileRes {
+    pub imports: Vec<Resolved>,
+    pub refs: Vec<RefRes>,
+    /// Files this file depends on (deduplicated, no self edge).
+    pub edges: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileNode {
+    pub path: String,
+    pub blob_id: String,
+    pub language: &'static str,
+    pub facts: Arc<BlobFacts>,
+    pub alive: bool,
+    names: Arc<HashMap<String, Vec<u32>>>,
+}
+
+impl FileNode {
+    fn new(f: &FileRef, facts: Arc<BlobFacts>) -> FileNode {
+        let mut names: HashMap<String, Vec<u32>> = HashMap::new();
+        for s in &facts.symbols {
+            names.entry(s.name.clone()).or_default().push(s.local_id);
+        }
+        FileNode {
+            path: f.path.clone(),
+            blob_id: f.blob_id.clone(),
+            language: f.language,
+            facts,
+            alive: true,
+            names: Arc::new(names),
+        }
+    }
+
+    fn tombstone(&self) -> FileNode {
+        FileNode {
+            alive: false,
+            facts: Arc::new(BlobFacts::default()),
+            names: Arc::new(HashMap::new()),
+            ..self.clone()
+        }
+    }
+
+    pub fn symbol(&self, local: u32) -> &Symbol {
+        &self.facts.symbols[local as usize]
+    }
+}
+
+pub enum FileChange {
+    Upsert(FileRef, Arc<BlobFacts>),
+    Remove(String),
+}
+
+#[derive(Clone)]
+pub struct ViewGraph {
+    pub label: ViewLabel,
+    pub(crate) root: PathBuf,
+    pub(crate) files: Vec<FileNode>,
+    pub(crate) index: HashMap<String, u32>,
+    pub(crate) res: Vec<FileRes>,
+    pub(crate) importers: Vec<Vec<u32>>,
+    pub(crate) name_index: HashMap<String, Vec<SymId>>,
+    /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
+    pub(crate) incoming: HashMap<SymId, Vec<(u32, u32)>>,
+    pub(crate) file_rank: Vec<f64>,
+    /// per file, per local symbol id
+    pub(crate) symbol_rank: Vec<Vec<f64>>,
+    resolver: Arc<Resolver>,
+    elm_modules: HashMap<String, Vec<u32>>,
+}
+
+impl ViewGraph {
+    /// Resolve every file from scratch.
+    pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>) -> ViewGraph {
+        let root = label.worktree.clone();
+        let files: Vec<FileNode> = inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone())).collect();
+        let mut g = ViewGraph {
+            label,
+            root,
+            res: vec![FileRes::default(); files.len()],
+            files,
+            index: HashMap::new(),
+            importers: Vec::new(),
+            name_index: HashMap::new(),
+            incoming: HashMap::new(),
+            file_rank: Vec::new(),
+            symbol_rank: Vec::new(),
+            resolver: Arc::new(Resolver::new(Path::new(""), &[])),
+            elm_modules: HashMap::new(),
+        };
+        g.reindex();
+        for f in 0..g.files.len() as u32 {
+            g.res[f as usize] = g.resolve_file(f);
+        }
+        g.finalize();
+        g
+    }
+
+    /// A graph for `self` with `changes` applied, reusing every per-file resolution the changes
+    /// cannot affect (see the module docs for the exact dirty set).
+    pub fn with_changes(&self, label: ViewLabel, changes: Vec<FileChange>) -> ViewGraph {
+        let mut g = self.clone();
+        g.label = label;
+        let old_files_len = g.files.len();
+
+        let mut changed: HashSet<u32> = HashSet::new();
+        let mut structural = false; // a path appeared/disappeared or an Elm module name moved
+        let mut old_names: HashSet<String> = HashSet::new();
+        let mut new_names: HashSet<String> = HashSet::new();
+        let names_of = |n: &FileNode| -> Vec<String> { n.facts.symbols.iter().map(|s| s.name.clone()).collect() };
+
+        for ch in changes {
+            match ch {
+                FileChange::Upsert(f, facts) => {
+                    let node = FileNode::new(&f, facts);
+                    match g.index.get(&f.path).copied() {
+                        Some(i) => {
+                            let old = &g.files[i as usize];
+                            old_names.extend(names_of(old));
+                            structural |= old.facts.module_name != node.facts.module_name;
+                            new_names.extend(names_of(&node));
+                            g.files[i as usize] = node;
+                            changed.insert(i);
+                        }
+                        None => {
+                            structural = true;
+                            new_names.extend(names_of(&node));
+                            g.files.push(node);
+                            let i = g.files.len() as u32 - 1;
+                            g.index.insert(f.path.clone(), i);
+                            changed.insert(i);
+                        }
+                    }
+                }
+                FileChange::Remove(path) => {
+                    if let Some(i) = g.index.remove(&path) {
+                        structural = true;
+                        old_names.extend(names_of(&g.files[i as usize]));
+                        g.files[i as usize] = g.files[i as usize].tombstone();
+                        g.res[i as usize] = FileRes::default();
+                        changed.insert(i);
+                    }
+                }
+            }
+        }
+        g.res.resize(g.files.len(), FileRes::default());
+        let changed_names: HashSet<String> = old_names.symmetric_difference(&new_names).cloned().collect();
+        g.reindex();
+
+        let mut dirty: HashSet<u32> = changed.iter().copied().filter(|i| g.files[*i as usize].alive).collect();
+        for &c in &changed {
+            if (c as usize) < old_files_len {
+                dirty.extend(self.importers[c as usize].iter().copied());
+            }
+        }
+        for (i, r) in g.res.iter().enumerate() {
+            let i = i as u32;
+            if dirty.contains(&i) || !g.files[i as usize].alive {
+                continue;
+            }
+            let unresolved_import = structural && r.imports.iter().any(|x| matches!(x, Resolved::Unresolved));
+            let soft_hit = !changed_names.is_empty()
+                && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
+                    (rr.target.is_none() || rr.confidence == Confidence::Fallback) && changed_names.contains(&fr.name)
+                });
+            // A removed file's importers resolved into it; they are in `dirty` via `importers`.
+            if unresolved_import || soft_hit {
+                dirty.insert(i);
+            }
+        }
+        for f in dirty {
+            if g.files[f as usize].alive {
+                g.res[f as usize] = g.resolve_file(f);
+            }
+        }
+        g.finalize();
+        g
+    }
+
+    /// Rebuild the path index, resolver and name/module indexes from `files`.
+    fn reindex(&mut self) {
+        self.index = self.files.iter().enumerate().filter(|(_, f)| f.alive).map(|(i, f)| (f.path.clone(), i as u32)).collect();
+        let refs: Vec<FileRef> = self
+            .files
+            .iter()
+            .filter(|f| f.alive)
+            .map(|f| FileRef { path: f.path.clone(), blob_id: f.blob_id.clone(), language: f.language })
+            .collect();
+        self.resolver = Arc::new(Resolver::new(&self.root, &refs));
+        self.name_index.clear();
+        self.elm_modules.clear();
+        for (fi, f) in self.files.iter().enumerate().filter(|(_, f)| f.alive) {
+            for s in &f.facts.symbols {
+                if s.kind != SymbolKind::Impl {
+                    self.name_index.entry(s.name.clone()).or_default().push(SymId { file: fi as u32, local: s.local_id });
+                }
+            }
+            if let Some(m) = &f.facts.module_name {
+                self.elm_modules.entry(m.clone()).or_default().push(fi as u32);
+            }
+        }
+    }
+
+    /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks.
+    fn finalize(&mut self) {
+        let n = self.files.len();
+        self.importers = vec![Vec::new(); n];
+        for (i, r) in self.res.iter().enumerate() {
+            for &t in &r.edges {
+                self.importers[t as usize].push(i as u32);
+            }
+        }
+        self.incoming.clear();
+        for (fi, r) in self.res.iter().enumerate() {
+            for (ri, rr) in r.refs.iter().enumerate() {
+                if let Some(t) = rr.target {
+                    self.incoming.entry(t).or_default().push((fi as u32, ri as u32));
+                }
+            }
+        }
+        // File rank: importers vote for what they import.
+        let edges: Vec<Vec<u32>> = self.res.iter().map(|r| r.edges.clone()).collect();
+        let alive: Vec<bool> = self.files.iter().map(|f| f.alive).collect();
+        self.file_rank = pagerank(&edges, &alive);
+
+        // Symbol rank: a symbol votes, via the references inside it, for what it uses.
+        let mut offset = Vec::with_capacity(n);
+        let mut total = 0usize;
+        for f in &self.files {
+            offset.push(total);
+            total += f.facts.symbols.len();
+        }
+        let mut sedges: Vec<Vec<u32>> = vec![Vec::new(); total];
+        for (fi, r) in self.res.iter().enumerate() {
+            for (rr, fr) in r.refs.iter().zip(&self.files[fi].facts.refs) {
+                if let (Some(t), Some(e)) = (rr.target, fr.enclosing) {
+                    sedges[offset[fi] + e as usize].push((offset[t.file as usize] + t.local as usize) as u32);
+                }
+            }
+        }
+        let salive = vec![true; total];
+        let flat = pagerank(&sedges, &salive);
+        self.symbol_rank = self.files.iter().enumerate().map(|(i, f)| flat[offset[i]..offset[i] + f.facts.symbols.len()].to_vec()).collect();
+    }
+
+    // ---- accessors ---------------------------------------------------------------------
+
+    pub fn file_count(&self) -> usize {
+        self.files.iter().filter(|f| f.alive).count()
+    }
+
+    pub fn file_idx(&self, abs_or_rel: &Path) -> Option<u32> {
+        let rel = abs_or_rel.strip_prefix(&self.root).unwrap_or(abs_or_rel);
+        self.index.get(&rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")).copied()
+    }
+
+    /// Absolute path of a file in this view. Paths are derived from the root rather than stored,
+    /// so a base-tree graph can be re-pointed at another worktree of the same commit.
+    pub fn abs(&self, i: u32) -> PathBuf {
+        self.root.join(&self.files[i as usize].path)
+    }
+
+    /// The same graph for another worktree whose resolved content is identical (same base tree,
+    /// empty overlay): only the root, label and root-dependent resolver change.
+    pub fn for_worktree(&self, label: ViewLabel) -> ViewGraph {
+        let mut g = self.clone();
+        g.root = label.worktree.clone();
+        g.label = label;
+        g.reindex();
+        g
+    }
+
+    pub fn file(&self, i: u32) -> &FileNode {
+        &self.files[i as usize]
+    }
+
+    pub fn symbol(&self, id: SymId) -> &Symbol {
+        self.files[id.file as usize].symbol(id.local)
+    }
+
+    pub fn resolution(&self, file: u32) -> &FileRes {
+        &self.res[file as usize]
+    }
+
+    /// A stable text summary of every resolution, keyed by path. Two graphs of the same file set
+    /// have equal fingerprints; used to prove incremental == full.
+    pub fn fingerprint(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let sym = |id: SymId| format!("{}#{}", self.files[id.file as usize].path, id.local);
+        for (i, f) in self.files.iter().enumerate().filter(|(_, f)| f.alive) {
+            let r = &self.res[i];
+            let mut edges: Vec<&str> = r.edges.iter().map(|e| self.files[*e as usize].path.as_str()).collect();
+            edges.sort();
+            out.push(format!("{} edges={:?}", f.path, edges));
+            for (rr, fr) in r.refs.iter().zip(&f.facts.refs) {
+                out.push(format!(
+                    "{} ref {}:{} -> {:?} {:?} {:?}",
+                    f.path,
+                    fr.line,
+                    fr.name,
+                    rr.target.map(sym),
+                    rr.confidence,
+                    rr.external
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    // ---- resolution --------------------------------------------------------------------
+
+    fn file_of(&self, r: &Resolved) -> Option<u32> {
+        match r {
+            Resolved::File { path, .. } => self.index.get(path).copied(),
+            _ => None,
+        }
+    }
+
+    /// `names` of `file` visible to an unqualified reference: top-level, constructors and module
+    /// members. Methods and fields need a qualifier (`self.`, `Type::`), so a bare `open()` never
+    /// binds to some type's `open` method.
+    fn unqualified_visible(&self, file: u32, name: &str) -> Option<SymId> {
+        let f = &self.files[file as usize];
+        let cands = f.names.get(name)?;
+        let visible = |l: &&u32| {
+            let s = f.symbol(**l);
+            match s.parent {
+                None => true,
+                Some(p) => s.kind == SymbolKind::Constructor || f.symbol(p).kind == SymbolKind::Module,
+            }
+        };
+        let pick = cands.iter().filter(visible).max_by_key(|l| {
+            let s = f.symbol(**l);
+            (s.parent.is_none(), s.exported)
+        })?;
+        Some(SymId { file, local: *pick })
+    }
+
+    /// A definition named `name` in `file`, following re-exports up to a few hops.
+    fn lookup_in_file(&self, file: u32, name: &str, depth: u8) -> Option<SymId> {
+        let f = &self.files[file as usize];
+        if let Some(cands) = f.names.get(name) {
+            let best = cands.iter().max_by_key(|l| {
+                let s = f.symbol(**l);
+                (s.parent.is_none(), s.exported, s.kind != SymbolKind::Field)
+            });
+            if let Some(l) = best {
+                return Some(SymId { file, local: *l });
+            }
+        }
+        if depth == 0 {
+            return None;
+        }
+        // Re-exports: an import in the target that brings in `name` (TS `export { x } from`,
+        // Rust `pub use`, Elm has none).
+        for (imp, res) in f.facts.imports.iter().zip(&self.res[file as usize].imports) {
+            let matches = imp.names.iter().find(|n| n.local() == name || n.name == "*");
+            if let (Some(n), Some(t)) = (matches, self.file_of(res)) {
+                let orig = if n.name == "*" { name } else { n.name.as_str() };
+                if t != file {
+                    if let Some(found) = self.lookup_in_file(t, orig, depth - 1) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The `member` child of any definition named `container` in `file`.
+    fn member_of(&self, file: u32, container: &str, member: &str) -> Option<SymId> {
+        let f = &self.files[file as usize];
+        let cands = f.names.get(member)?;
+        cands
+            .iter()
+            .find(|l| f.symbol(**l).parent.is_some_and(|p| f.symbol(p).name == container))
+            .map(|l| SymId { file, local: *l })
+    }
+
+    /// For `self.x` / `Self::x` / `this.x`: the member `x` of the container around `enclosing`.
+    fn member_of_enclosing(&self, file: u32, enclosing: Option<u32>, member: &str) -> Option<SymId> {
+        let f = &self.files[file as usize];
+        let mut cur = enclosing;
+        let is_container = |k: SymbolKind| matches!(k, SymbolKind::Impl | SymbolKind::Class | SymbolKind::Struct | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Enum);
+        while let Some(c) = cur {
+            let s = f.symbol(c);
+            if is_container(s.kind) {
+                // Rust splits a type across `struct Foo` and `impl Foo`: match by container name.
+                return self.member_of(file, &s.name.clone(), member);
+            }
+            cur = s.parent;
+        }
+        None
+    }
+
+    fn fallback(&self, from_file: u32, name: &str, kind: RefKind, qualified: bool) -> Option<SymId> {
+        let cands: Vec<SymId> = self.name_index.get(name)?.iter().copied().filter(|c| c.file != from_file).collect();
+        let type_like = |id: &SymId| {
+            matches!(
+                self.symbol(*id).kind,
+                SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Class | SymbolKind::TypeAlias
+            )
+        };
+        let pool: Vec<SymId> = match kind {
+            RefKind::Type => {
+                let t: Vec<_> = cands.iter().copied().filter(type_like).collect();
+                if t.is_empty() { cands } else { t }
+            }
+            _ if qualified => cands.into_iter().filter(|c| self.symbol(*c).parent.is_some() || !type_like(c)).collect(),
+            _ => cands,
+        };
+        (pool.len() == 1).then(|| pool[0])
+    }
+
+    fn resolve_file(&self, f: u32) -> FileRes {
+        let node = &self.files[f as usize];
+        let facts = &node.facts;
+        let lang = node.language;
+
+        // Imports -> targets, and the lookup tables references go through.
+        let mut imports: Vec<Resolved> = Vec::with_capacity(facts.imports.len());
+        let mut edges: Vec<u32> = Vec::new();
+        let mut qualifiers: HashMap<String, Resolved> = HashMap::new();
+        let mut locals: HashMap<String, (Resolved, String)> = HashMap::new();
+        let mut subs_types: Vec<(Resolved, String)> = Vec::new();
+        let mut globs: Vec<Resolved> = Vec::new();
+        let add_edge = |edges: &mut Vec<u32>, t: u32| {
+            if t != f && !edges.contains(&t) {
+                edges.push(t);
+            }
+        };
+
+        for imp in &facts.imports {
+            let mut r = self.resolver.resolve_import(&node.path, lang, imp);
+            if lang == "elm" && matches!(r, Resolved::Unresolved) {
+                // No usable elm.json: fall back to the module name each file declares.
+                if let Some([only]) = self.elm_modules.get(&imp.specifier).map(|v| v.as_slice()) {
+                    r = Resolved::File { path: self.files[*only as usize].path.clone(), rest: vec![] };
+                }
+            }
+            if let Some(t) = self.file_of(&r) {
+                add_edge(&mut edges, t);
+            }
+            match lang {
+                "elm" => {
+                    qualifiers.insert(imp.alias.clone().unwrap_or_else(|| imp.specifier.clone()), r.clone());
+                    for n in &imp.names {
+                        if n.name == "*" {
+                            globs.push(r.clone());
+                        } else {
+                            locals.insert(n.local().to_string(), (r.clone(), n.name.clone()));
+                            if n.subs {
+                                subs_types.push((r.clone(), n.name.clone()));
+                            }
+                        }
+                    }
+                }
+                "rust" => {
+                    if imp.kind == ImportKind::ModDecl {
+                        qualifiers.insert(imp.specifier.clone(), r.clone());
+                    }
+                    for n in &imp.names {
+                        if n.name == "*" {
+                            globs.push(r.clone());
+                            continue;
+                        }
+                        if n.name == "self" {
+                            let last = imp.specifier.rsplit("::").next().unwrap_or("").to_string();
+                            qualifiers.insert(n.alias.clone().unwrap_or(last), r.clone());
+                            continue;
+                        }
+                        // `use a::b::{c}`: is `c` a module (its own file) or an item in `b`?
+                        let mut segs: Vec<String> = imp.specifier.split("::").filter(|s| !s.is_empty()).map(String::from).collect();
+                        segs.push(n.name.clone());
+                        let deeper = self.resolver.rust_path(&node.path, &segs);
+                        match (&deeper, &r) {
+                            (Resolved::File { path: dp, rest }, Resolved::File { path: rp, .. }) if rest.is_empty() && dp != rp => {
+                                if let Some(t) = self.file_of(&deeper) {
+                                    add_edge(&mut edges, t);
+                                }
+                                qualifiers.insert(n.local().to_string(), deeper.clone());
+                            }
+                            _ => {
+                                locals.insert(n.local().to_string(), (r.clone(), n.name.clone()));
+                            }
+                        }
+                    }
+                    if imp.names.is_empty() && imp.kind == ImportKind::Import {
+                        // `use foo;` / `use std;` — binds the module itself under its last segment.
+                        let last = imp.specifier.rsplit("::").next().unwrap_or("").to_string();
+                        qualifiers.insert(last, r.clone());
+                    }
+                }
+                _ => {
+                    if let Some(a) = &imp.alias {
+                        qualifiers.insert(a.clone(), r.clone());
+                    }
+                    for n in &imp.names {
+                        if n.name == "*" {
+                            if imp.kind == ImportKind::Reexport {
+                                globs.push(r.clone());
+                            }
+                        } else if imp.kind == ImportKind::Import {
+                            locals.insert(n.local().to_string(), (r.clone(), n.name.clone()));
+                        }
+                    }
+                }
+            }
+            imports.push(r);
+        }
+
+        let mut refs = Vec::with_capacity(facts.refs.len());
+        for r in &facts.refs {
+            refs.push(self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs));
+        }
+        FileRes { imports, refs, edges }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_ref(
+        &self,
+        f: u32,
+        r: &Reference,
+        lang: &str,
+        qualifiers: &HashMap<String, Resolved>,
+        locals: &HashMap<String, (Resolved, String)>,
+        subs_types: &[(Resolved, String)],
+        globs: &[Resolved],
+    ) -> RefRes {
+        let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
+        let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
+        let external = |p: &PathBuf| RefRes { target: None, confidence: Confidence::Exact, external: Some(p.clone()) };
+
+        // Where an imported name lands.
+        let through = |res: &Resolved, orig: &str| -> RefRes {
+            match res {
+                Resolved::File { .. } => match self.file_of(res) {
+                    Some(t) => {
+                        let found = self.lookup_in_file(t, orig, 3).or_else(|| {
+                            // Default imports bind whatever the file exports.
+                            (orig == "default").then(|| self.default_export(t, &r.name)).flatten()
+                        });
+                        found.map(exact).unwrap_or(none.clone())
+                    }
+                    None => none.clone(),
+                },
+                Resolved::External(p) => external(p),
+                Resolved::Unresolved => none.clone(),
+            }
+        };
+
+        match r.qualifier.as_deref() {
+            None => {
+                if let Some(id) = self.unqualified_visible(f, &r.name) {
+                    return exact(id);
+                }
+                if let Some((res, orig)) = locals.get(&r.name) {
+                    return through(res, orig);
+                }
+                // Elm `exposing (Type(..))`: the constructors come with the type.
+                for (res, ty) in subs_types {
+                    if let Some(t) = self.file_of(res) {
+                        if let Some(id) = self.member_of(t, ty, &r.name) {
+                            return exact(id);
+                        }
+                    }
+                }
+                for g in globs {
+                    if let Some(t) = self.file_of(g) {
+                        if let Some(id) = self.lookup_in_file(t, &r.name, 3) {
+                            return exact(id);
+                        }
+                    }
+                }
+                match self.fallback(f, &r.name, r.kind, false) {
+                    Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
+                    None => none,
+                }
+            }
+            Some(q) => {
+                if matches!(q, "self" | "Self" | "this") {
+                    if let Some(id) = self.member_of_enclosing(f, r.enclosing, &r.name) {
+                        return exact(id);
+                    }
+                    return match self.fallback(f, &r.name, r.kind, true) {
+                        Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
+                        None => none,
+                    };
+                }
+                let first = q.split("::").next().unwrap_or(q);
+                // Module-qualified: `List.map`, `ns.go`, `store::open`.
+                if let Some(res) = qualifiers.get(first) {
+                    let rest: Vec<String> = q.split("::").skip(1).map(String::from).collect();
+                    if lang == "rust" && !rest.is_empty() {
+                        let mut segs = vec!["self".to_string()];
+                        segs.extend(rest);
+                        segs.push(r.name.clone());
+                        if let Resolved::File { path, .. } = res {
+                            if let Resolved::File { path: p2, rest } = self.resolver.rust_path(path, &segs) {
+                                return self.rust_item(&p2, &rest, &r.name).map(exact).unwrap_or(none);
+                            }
+                        }
+                        return none;
+                    }
+                    return through(res, &r.name);
+                }
+                if lang == "rust" && (q.contains("::") || matches!(q, "crate" | "super")) {
+                    let mut segs: Vec<String> = q.split("::").map(String::from).collect();
+                    segs.push(r.name.clone());
+                    if let Resolved::File { path, rest } = self.resolver.rust_path(&self.files[f as usize].path, &segs) {
+                        return self.rust_item(&path, &rest, &r.name).map(exact).unwrap_or(none);
+                    }
+                    return none;
+                }
+                if lang == "elm" {
+                    // A qualifier that is not an import is a core/package module (`List`, `Html`).
+                    return none;
+                }
+                // `Type::method`, `obj.method`, `Class.method`.
+                if self.unqualified_visible(f, q).is_some() {
+                    if let Some(id) = self.member_of(f, q, &r.name) {
+                        return exact(id);
+                    }
+                }
+                if let Some((res, orig)) = locals.get(q) {
+                    if let Some(t) = self.file_of(res) {
+                        if let Some(id) = self.member_of(t, orig, &r.name) {
+                            return exact(id);
+                        }
+                    }
+                    if !matches!(res, Resolved::File { .. }) {
+                        return none; // a member of something from a package
+                    }
+                }
+                match self.fallback(f, &r.name, r.kind, true) {
+                    Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
+                    None => none,
+                }
+            }
+        }
+    }
+
+    /// `rest` is what was left of a Rust path inside `file`: `[]` (a module), `[item]`, or
+    /// `[Type, member]`.
+    fn rust_item(&self, path: &str, rest: &[String], name: &str) -> Option<SymId> {
+        let file = *self.index.get(path)?;
+        match rest {
+            [] => None,
+            [_] => self.lookup_in_file(file, name, 3),
+            [.., container, _] => self.member_of(file, container, name).or_else(|| self.lookup_in_file(file, name, 3)),
+        }
+    }
+
+    /// What `import X from './file'` binds: an exported top-level symbol named like the local
+    /// binding or like the file, else the file's only exported class/function.
+    fn default_export(&self, file: u32, local: &str) -> Option<SymId> {
+        let f = &self.files[file as usize];
+        let top: Vec<&Symbol> = f.facts.symbols.iter().filter(|s| s.parent.is_none() && s.exported).collect();
+        let stem = Path::new(&f.path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let pick = top
+            .iter()
+            .find(|s| s.name == "default")
+            .or_else(|| top.iter().find(|s| s.name == local))
+            .or_else(|| top.iter().find(|s| s.name == stem))
+            .or_else(|| {
+                let callable: Vec<_> = top.iter().filter(|s| matches!(s.kind, SymbolKind::Class | SymbolKind::Function)).collect();
+                (callable.len() == 1).then(|| callable[0])
+            })?;
+        Some(SymId { file, local: pick.local_id })
+    }
+}
+
+/// Plain PageRank (damping 0.85, 30 iterations). Dangling nodes spread evenly; dead nodes (removed
+/// files) neither give nor receive.
+pub fn pagerank(edges: &[Vec<u32>], alive: &[bool]) -> Vec<f64> {
+    let n = edges.len();
+    let live = alive.iter().filter(|a| **a).count();
+    if live == 0 {
+        return vec![0.0; n];
+    }
+    let d = 0.85;
+    let base = (1.0 - d) / live as f64;
+    let mut rank: Vec<f64> = alive.iter().map(|a| if *a { 1.0 / live as f64 } else { 0.0 }).collect();
+    for _ in 0..30 {
+        let mut next: Vec<f64> = alive.iter().map(|a| if *a { base } else { 0.0 }).collect();
+        let mut dangling = 0.0;
+        for (i, out) in edges.iter().enumerate() {
+            if !alive[i] {
+                continue;
+            }
+            let outs: Vec<&u32> = out.iter().filter(|t| alive[**t as usize]).collect();
+            if outs.is_empty() {
+                dangling += rank[i];
+            } else {
+                let share = d * rank[i] / outs.len() as f64;
+                for t in outs {
+                    next[*t as usize] += share;
+                }
+            }
+        }
+        let spread = d * dangling / live as f64;
+        for (i, v) in next.iter_mut().enumerate() {
+            if alive[i] {
+                *v += spread;
+            }
+        }
+        rank = next;
+    }
+    rank
+}
