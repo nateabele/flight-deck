@@ -394,11 +394,20 @@ public struct SystemCommandRunner: CommandRunner {
         var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
-    private struct RawPipe { let readFD: Int32; let writeFD: Int32 }
+    struct RawPipe { let readFD: Int32; let writeFD: Int32 }
 
-    private static func makePipe() throws -> RawPipe {
+    static func makePipe() throws -> RawPipe {
         var fds: [Int32] = [0, 0]
         guard pipe(&fds) == 0 else { throw SpawnFailed(step: "pipe", errno: errno) }
+        // Close-on-exec at once, on all four ends. CLOEXEC_DEFAULT covers only this runner's
+        // own spawn; anything else the app forks meanwhile (libghostty's shell for a new tab)
+        // would inherit a write end, and the holder sweep after the round would then kill it.
+        // The child still gets 1 and 2: `adddup2` clears the flag on the copies it makes.
+        for fd in fds where fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 {
+            let error = errno
+            close(fds[0]); close(fds[1])
+            throw SpawnFailed(step: "fcntl", errno: error)
+        }
         return RawPipe(readFD: fds[0], writeFD: fds[1])
     }
 

@@ -213,6 +213,19 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file).count, 0, "the child wrote through an inherited descriptor")
     }
 
+    /// The round's pipes must not leak into anything else the app forks while the round is
+    /// being set up (a terminal tab's shell, from libghostty): the pipe-holder kill that ends a
+    /// round would then SIGKILL the user's tab. `adddup2` clears the flag on the child's 1 and 2.
+    func testRoundPipesAreCloseOnExec() throws {
+        let pipes = [try SystemCommandRunner.makePipe(), try SystemCommandRunner.makePipe()]
+        defer { for p in pipes { close(p.readFD); close(p.writeFD) } }
+        for fd in pipes.flatMap({ [$0.readFD, $0.writeFD] }) {
+            let flags = fcntl(fd, F_GETFD)
+            XCTAssertGreaterThanOrEqual(flags, 0)
+            XCTAssertEqual(flags & FD_CLOEXEC, FD_CLOEXEC, "fd \(fd) is inherited across exec")
+        }
+    }
+
     /// A double-forked `setsid` child leaves the process group, so no group signal reaches it,
     /// and it keeps the stdout pipe. The run must still end soon after the leader does, and the
     /// holder must be dead. A rescue kills the holder after 15s so a regression fails instead
