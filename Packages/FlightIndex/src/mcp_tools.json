@@ -347,6 +347,20 @@
       "array",
       "null"
      ]
+    },
+    "with": {
+     "default": null,
+     "description": "Attach context to each symbol read. `[\"callers\"]` adds up to 5 callers, each with its signature and the source line of its call, so you need no separate qartez_calls + read round trips. Off by default.",
+     "items": {
+      "enum": [
+       "callers"
+      ],
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
     }
    },
    "type": "object"
@@ -669,7 +683,7 @@
    "properties": {
     "depth": {
      "default": null,
-     "description": "Max depth for call chain traversal. Default 1, max 10. Values above 10 are clamped. `depth=0` is the seed-only mode: prints the resolved target symbol header without expanding callers or callees.",
+     "description": "Max depth for call chain traversal. Default 1, max 10. Values above 10 are clamped. `depth=0` is the seed-only mode: prints the resolved target symbol header without expanding callers or callees. `depth>=2` returns a tree of signatures only (no bodies): each function once, nested under the one that calls it, cycles marked; deeper levels are dropped whole when the tree exceeds token_budget.",
      "format": "uint32",
      "minimum": 0,
      "type": [

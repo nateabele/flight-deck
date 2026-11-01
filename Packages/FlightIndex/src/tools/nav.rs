@@ -133,7 +133,19 @@ pub fn read(c: &Ctx) -> ToolResult {
         names.insert(0, n);
     }
     let max_bytes = c.args.num(&["max_bytes"]).unwrap_or(DEFAULT_MAX_BYTES);
-    let body = if names.is_empty() { read_range(c)? } else { read_symbols(c, &names)? };
+    // `with`: what to attach to each definition. Opt-in, because retrieved context is not always
+    // worth its tokens.
+    let mut with_callers = false;
+    for w in c.args.list(&["with"]) {
+        match w.as_str() {
+            "callers" => with_callers = true,
+            other => return Err(ToolError::bad(format!("unknown `with` value '{other}': use callers"))),
+        }
+    }
+    if with_callers && names.is_empty() {
+        return Err(ToolError::bad("with=callers needs symbol_name (or symbols): a line range has no callers"));
+    }
+    let body = if names.is_empty() { read_range(c)? } else { read_symbols(c, &names, with_callers)? };
     Ok(cap_bytes(body, max_bytes))
 }
 
@@ -155,7 +167,7 @@ fn numbered(out: &mut String, lines: &[&str], first: usize, width: usize) {
     }
 }
 
-fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
+fn read_symbols(c: &Ctx, names: &[String], with_callers: bool) -> ToolResult {
     let kind = c.kind()?;
     let file = c.args.path(FILE);
     let context = c.args.num(&["context_lines"]).unwrap_or(0);
@@ -178,6 +190,10 @@ fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
             let end = (d.end_line as usize + context).min(lines.len());
             let tag = views.tag(d.view).map(|t| format!(" (view: {t})")).unwrap_or_default();
             let _ = writeln!(out, "// {} {} @ {}:L{}-{}{tag}", d.name, d.kind.as_str(), d.path.display(), d.start_line, d.end_line);
+            // Before the body, so a body cut at max_bytes still leaves its callers on screen.
+            if with_callers {
+                super::calltree::read_callers(&views, d, &mut out);
+            }
             numbered(&mut out, &lines[start..end], start + 1, end.to_string().len());
         }
     }

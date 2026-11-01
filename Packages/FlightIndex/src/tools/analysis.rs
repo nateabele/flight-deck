@@ -41,7 +41,7 @@ fn shown<T>(rows: &[T], view_of: impl Fn(&T) -> usize, cap: usize) -> Vec<&T> {
 }
 
 /// Whether `h` can be called: what `calls` treats as a function-like definition.
-fn function_like(k: SymbolKind) -> bool {
+pub(super) fn function_like(k: SymbolKind) -> bool {
     matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Const | SymbolKind::Constructor | SymbolKind::Macro | SymbolKind::Port)
 }
 
@@ -393,7 +393,7 @@ pub fn refs(c: &Ctx) -> ToolResult {
 }
 
 /// `  [view: tessera @ /path]` for a row from a view other than the one the header names.
-fn tag_suffix(views: &Views, view: usize) -> String {
+pub(super) fn tag_suffix(views: &Views, view: usize) -> String {
     views.tag(view).map(|t| format!("  [view: {t}]")).unwrap_or_default()
 }
 
@@ -436,6 +436,9 @@ pub fn calls(c: &Ctx) -> ToolResult {
     };
 
     let keep = |h: &SymbolHit| include_tests || !is_test_path(&h.path.strip_prefix(&views.graph(h.view).root).unwrap_or(&h.path).to_string_lossy());
+    if depth >= 2 && c.format != Format::Mermaid {
+        return Ok(super::calltree::render(c, &views, &target, want_callers, want_callees, depth as u32, limit, &keep));
+    }
     // Level by level, so each edge knows its parent: the flat `calls()` answer is enough for a
     // list but not for a tree or a diagram.
     let walk = |dir: Direction| -> Vec<(SymbolHit, CallEntry)> {
