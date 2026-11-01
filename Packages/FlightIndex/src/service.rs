@@ -23,7 +23,9 @@ use crate::engine::{Engine, Phase, Progress, DEFAULT_GRAPH_BUDGET};
 use crate::error::{Error, Result};
 use crate::git::{self, View};
 use crate::proto::{state, Request, Response, PROTOCOL_VERSION};
+use crate::refresh::{self, BaseIndex, Refreshed};
 use crate::tools::{self, args::Args, Ctx, ToolError};
+use crate::watch::{Pending, WatchConfig, Watcher};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,11 +44,12 @@ pub struct Config {
     pub store: PathBuf,
     pub build_wait: Duration,
     pub graph_budget: usize,
+    pub watch: WatchConfig,
 }
 
 impl Config {
     pub fn new(store: impl Into<PathBuf>) -> Config {
-        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, graph_budget: DEFAULT_GRAPH_BUDGET }
+        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, graph_budget: DEFAULT_GRAPH_BUDGET, watch: WatchConfig::default() }
     }
 }
 
@@ -110,19 +113,64 @@ impl Service {
     pub fn open(cfg: Config) -> Result<Arc<Service>> {
         let engine = Engine::open(&cfg.store)?;
         engine.set_graph_budget(cfg.graph_budget);
-        Ok(Arc::new(Service {
-            engine,
-            cfg,
-            freshness: Freshness::default(),
-            builds: Mutex::new(HashMap::new()),
-            views: Mutex::new(HashMap::new()),
-            cochange: Mutex::new(HashMap::new()),
-            gates: Mutex::new(HashMap::new()),
-            seqs: Mutex::new(HashMap::new()),
-            started: Instant::now(),
-            requests: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-        }))
+        let svc = Arc::new_cyclic(|me: &std::sync::Weak<Service>| {
+            // The refs callback runs on the watcher's own thread, after the service exists.
+            let me = me.clone();
+            let watcher = Watcher::start(&cfg.watch, move |common| {
+                if let Some(s) = me.upgrade() {
+                    s.on_refs(common);
+                }
+            });
+            Service {
+                engine,
+                cfg,
+                freshness: Freshness::new(watcher),
+                builds: Mutex::new(HashMap::new()),
+                views: Mutex::new(HashMap::new()),
+                cochange: Mutex::new(HashMap::new()),
+                gates: Mutex::new(HashMap::new()),
+                seqs: Mutex::new(HashMap::new()),
+                started: Instant::now(),
+                requests: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+            }
+        });
+        svc.watch_known_repos();
+        Ok(svc)
+    }
+
+    /// A repository's refs changed (or it was just added to the ref watch): re-read its branch
+    /// heads, which garbage collection treats as roots.
+    fn on_refs(&self, common: &Path) {
+        if !common.join("HEAD").exists() {
+            // Gone, or not a git repository at all; the retention pass drops its store.
+            if let Some(w) = self.freshness.watcher() {
+                w.unwatch_repo(common);
+            }
+            return;
+        }
+        if let Err(e) = self.engine.refresh_known_refs(common) {
+            log::info(&format!("could not read the branch heads of {}: {e}", common.display()));
+        }
+    }
+
+    /// Every repository the store already knows, so their refs are watched from the first moment
+    /// and a commit made while no request was in flight still moves the known refs.
+    fn watch_known_repos(&self) {
+        let Some(w) = self.freshness.watcher() else { return };
+        for (_, repo) in crate::store::list_dbs(&self.cfg.store) {
+            if let Some(repo) = repo.filter(|r| r.join("HEAD").exists()) {
+                w.watch_repo(&repo);
+            }
+        }
+    }
+
+    /// The view of the worktree containing `path` as of now, recorded in the store (see
+    /// `Engine::record_view`).
+    fn view(&self, path: &Path) -> Result<View> {
+        let view = self.freshness.view(&self.engine, path)?;
+        self.engine.record_view(&view)?;
+        Ok(view)
     }
 
     /// Answer one request. Never panics out: a bug in a tool costs that request, not the daemon.
@@ -186,7 +234,7 @@ impl Service {
         check_indexable(&located, &anchor.path)?;
         let gate = self.gate(&located.root);
         let _reading = gate.read().unwrap_or_else(|e| e.into_inner());
-        let view = self.freshness.view(&self.engine, &anchor.path)?;
+        let view = self.view(&anchor.path)?;
         self.touch(&view);
 
         let readiness = self.ensure_built(&view, &anchor.priority, anchor.slice_ok, anchor.needs_index.then_some(wait))?;
@@ -226,7 +274,7 @@ impl Service {
         let mut attempt = 0;
         let (view, plan) = loop {
             attempt += 1;
-            let view = self.freshness.view(&self.engine, &anchor)?;
+            let view = self.view(&anchor)?;
             self.touch(&view);
             // A rename that misses a file because its importers were not parsed yet would leave
             // the code broken, so a mutator never works from a partial graph.
@@ -284,7 +332,7 @@ impl Service {
 
         // Re-index before answering: the next query from this cwd must see the change, so look at
         // the worktree again now (the writes are on disk) and make its graph.
-        let view = self.freshness.view(&self.engine, &anchor)?;
+        let view = self.view(&anchor)?;
         let written: Vec<PathBuf> = plan.changes.iter().filter(|c| c.after.is_some()).map(|c| c.path.clone()).collect();
         self.ensure_built(&view, &written, false, Some(MAX_BUILD_WAIT))?;
         let graph = self.engine.graph(&view)?;
@@ -463,7 +511,7 @@ impl Service {
             return Ok("workspace remove: nothing to do. The daemon indexes any path on demand, so there is no scope to shrink.".into());
         }
         let path = args.path(&["path", "root", "dir", "file_path"]).or_else(|| (!req.cwd.is_empty()).then(|| PathBuf::from(&req.cwd))).ok_or_else(|| ToolError::bad(format!("{tool} requires a path")))?;
-        let view = self.freshness.view(&self.engine, &path)?;
+        let view = self.view(&path)?;
         self.touch(&view);
         if tool == "gc" {
             let stats = self.engine.gc(&view.label.repo)?;
@@ -557,8 +605,18 @@ impl Service {
     }
 }
 
-/// Where a request's view comes from. Today: git, recomputed per request. The watcher step
-/// replaces this with a view kept current by file events and a ref watcher; callers do not change.
+/// Where a request's view comes from.
+///
+/// With a watcher, a worktree's view is *kept*: a request waits for the watcher's barrier (every
+/// change made before the request has been reported by then), applies only the changed paths to
+/// the cached view (`refresh`), and checks HEAD with two small file reads. No process is spawned.
+/// Without one (the platform has none, the worktree is not in git, the watch could not be set up
+/// or the barrier timed out) the view is recomputed from `git status`, which is slower and always
+/// right. Both ends meet at "a full read": a worktree is read in full when it is first seen, when
+/// its watch was dropped for idleness, when the watcher lost events, when HEAD moved, when a
+/// `.gitignore` changed, and when a bulk change makes per-path work the more expensive route.
+/// Ordering matters on that path: the watch goes live *before* the full read, so nothing that
+/// happens between the read and the watch can be missed.
 ///
 /// Concurrent requests for one worktree share a recomputation, but never an older one: a request
 /// that arrives while a `git status` is running waits for the *next* one to start and finish, so
@@ -568,6 +626,23 @@ impl Service {
 #[derive(Default)]
 pub struct Freshness {
     slots: Mutex<HashMap<PathBuf, Arc<Slot>>>,
+    watcher: Option<Arc<Watcher>>,
+    entries: Mutex<HashMap<PathBuf, Arc<Mutex<Entry>>>>,
+}
+
+/// One watched worktree's kept view. The mutex serialises its requests: a second request must not
+/// read the view while the first is still applying the changes that the barrier handed to it.
+#[derive(Default)]
+struct Entry {
+    cached: Option<Cached>,
+    last_used: Option<Instant>,
+}
+
+struct Cached {
+    view: View,
+    index: BaseIndex,
+    gitdir: PathBuf,
+    common: PathBuf,
 }
 
 #[derive(Default)]
@@ -618,7 +693,98 @@ impl Drop for Leader<'_> {
 }
 
 impl Freshness {
+    pub fn new(watcher: Option<Arc<Watcher>>) -> Freshness {
+        Freshness { watcher, ..Default::default() }
+    }
+
+    pub fn watcher(&self) -> Option<&Arc<Watcher>> {
+        self.watcher.as_ref()
+    }
+
     pub fn view(&self, engine: &Engine, path: &Path) -> Result<View> {
+        let located = git::locate(path)?;
+        match (&self.watcher, located.is_git) {
+            (Some(w), true) => self.watched(w, engine, &located.root, path),
+            _ => self.from_status(engine, path),
+        }
+    }
+
+    fn watched(&self, w: &Arc<Watcher>, engine: &Engine, root: &Path, path: &Path) -> Result<View> {
+        let entry = self.entries.lock().unwrap().entry(root.to_path_buf()).or_default().clone();
+        let mut e = entry.lock().unwrap_or_else(|x| x.into_inner());
+        e.last_used = Some(Instant::now());
+        if let Some(c) = e.cached.as_mut()
+            && w.is_watching(root)
+        {
+            match w.sync(root) {
+                Ok(pending) => {
+                    if let Some(v) = Self::apply(c, pending) {
+                        return Ok(v);
+                    }
+                }
+                // A stream that does not deliver cannot vouch for anything; read in full, and the
+                // next request tries the watch again.
+                Err(_) => w.unwatch_worktree(root),
+            }
+        }
+        e.cached = None;
+        let Ok((gitdir, common)) = git::git_dirs(root) else { return self.from_status(engine, path) };
+        if !w.watch_worktree(root, &gitdir, &common) {
+            return self.from_status(engine, path);
+        }
+        w.drain(root);
+        let view = self.from_status(engine, path)?;
+        e.cached = Some(Cached { index: BaseIndex::new(&view), view: view.clone(), gitdir, common });
+        Ok(view)
+    }
+
+    /// The cached view brought up to date, or `None` when it needs a full read.
+    fn apply(c: &mut Cached, pending: Pending) -> Option<View> {
+        if pending.rescan || pending.gitignore {
+            return None;
+        }
+        if git::read_head(&c.gitdir, &c.common) != c.view.label.base_commit {
+            return None;
+        }
+        if pending.is_empty() {
+            return Some(c.view.clone());
+        }
+        match refresh::refresh(&c.view, &c.index, &pending) {
+            Ok(Refreshed::View(v)) => {
+                c.view = v.clone();
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// Stop watching worktrees nobody has asked about for `idle`, and forget their kept views:
+    /// their next query is a full read (spec §5.4). Returns the worktrees released.
+    pub fn release_idle(&self, idle: Duration) -> Vec<PathBuf> {
+        let Some(w) = &self.watcher else { return Vec::new() };
+        let mut released = Vec::new();
+        for (root, entry) in self.entries.lock().unwrap().iter() {
+            // A worktree being answered right now is not idle, whatever its stamp says.
+            let Ok(mut e) = entry.try_lock() else { continue };
+            if e.cached.is_some() && e.last_used.is_some_and(|t| t.elapsed() >= idle) {
+                e.cached = None;
+                w.unwatch_worktree(root);
+                released.push(root.clone());
+            }
+        }
+        released
+    }
+
+    /// A worktree that no longer exists.
+    pub fn forget(&self, root: &Path) {
+        self.entries.lock().unwrap().remove(root);
+        if let Some(w) = &self.watcher {
+            w.unwatch_worktree(root);
+        }
+    }
+
+    /// The view recomputed from git, shared between concurrent callers.
+    fn from_status(&self, engine: &Engine, path: &Path) -> Result<View> {
         let root = git::locate(path)?.root;
         let slot = self.slots.lock().unwrap().entry(root).or_default().clone();
         let mut st = slot.state.lock().unwrap();

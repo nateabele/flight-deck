@@ -234,8 +234,13 @@ impl Watcher {
         v
     }
 
-    fn apply(&self, st: &State) -> io::Result<()> {
-        self.backend.set_specs(&Self::specs(st))
+    /// Push the watched set to the backend. Never called with the state lock held: replacing an
+    /// FSEvents stream waits for callbacks already running, and a callback needs that lock to
+    /// record its events, so holding it here would deadlock the two.
+    fn apply(&self, st: std::sync::MutexGuard<'_, State>) -> io::Result<()> {
+        let specs = Self::specs(&st);
+        drop(st);
+        self.backend.set_specs(&specs)
     }
 
     /// Watch a repository's refs. Idempotent.
@@ -246,13 +251,17 @@ impl Watcher {
             return true;
         }
         st.repos.insert(common.to_path_buf(), Repo { refs_dirty: true, ..Default::default() });
-        if self.apply(&st).is_err() {
-            st.repos.remove(common);
+        if self.apply(st).is_err() {
+            self.shared.state.lock().unwrap().repos.remove(common);
             return false;
         }
-        drop(st);
         self.shared.cv.notify_all();
         true
+    }
+
+    pub fn info(&self, root: &Path) -> Option<WatchInfo> {
+        let st = self.shared.state.lock().unwrap();
+        st.roots.get(root).map(|w| WatchInfo { worktree: root.to_path_buf(), events: w.events, last_event: w.last_event, watched_since: w.watched_since })
     }
 
     pub fn is_watching(&self, root: &Path) -> bool {
@@ -274,8 +283,8 @@ impl Watcher {
                 Wt { gitdir: gitdir.to_path_buf(), common: common.to_path_buf(), pending: Pending::default(), last_event: None, events: 0, watched_since: SystemTime::now() },
             );
             st.repos.entry(common.to_path_buf()).or_insert_with(|| Repo { refs_dirty: true, ..Default::default() });
-            if self.apply(&st).is_err() {
-                st.roots.remove(root);
+            if self.apply(st).is_err() {
+                self.shared.state.lock().unwrap().roots.remove(root);
                 return false;
             }
         }
@@ -293,7 +302,7 @@ impl Watcher {
         let _set = self.set_lock.lock().unwrap();
         let mut st = self.shared.state.lock().unwrap();
         if st.roots.remove(root).is_some() {
-            let _ = self.apply(&st);
+            let _ = self.apply(st);
         }
     }
 
@@ -302,7 +311,7 @@ impl Watcher {
         let _set = self.set_lock.lock().unwrap();
         let mut st = self.shared.state.lock().unwrap();
         if st.repos.remove(common).is_some() {
-            let _ = self.apply(&st);
+            let _ = self.apply(st);
         }
     }
 
@@ -341,6 +350,12 @@ impl Watcher {
         let mut st = self.shared.state.lock().unwrap();
         let wt = st.roots.get_mut(root).ok_or(SyncError::Unwatched)?;
         Ok(std::mem::take(&mut wt.pending))
+    }
+
+    /// Take what has been remembered for `root` without a barrier: right after the watch went live,
+    /// to discard whatever it saw while the caller was not yet reading the worktree.
+    pub fn drain(&self, root: &Path) -> Pending {
+        self.shared.state.lock().unwrap().roots.get_mut(root).map(|w| std::mem::take(&mut w.pending)).unwrap_or_default()
     }
 
     /// Something went wrong that the watcher cannot see (a request found a `git status` that
