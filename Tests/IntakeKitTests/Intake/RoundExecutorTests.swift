@@ -833,6 +833,25 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(correction.prompt.contains("ghost"), correction.prompt)
     }
 
+    /// Polish reads the same catalogue encode does, and is told a null `visualRefs` in a
+    /// `replace` keeps the task's refs, so a polisher never strips them by leaving the field out.
+    func testPolishGetsTheVisualsCatalogue() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.patchReply(ChangeSetPatch(add: [self.citing("pairing")])))
+        }
+        let tape = try polishTape()
+        let head = try XCTUnwrap(tape.head?.id)
+        try writeUserEdits(visualPlan, checkpoint: head)
+        try VisualDiskFixture.install(store, id: "pairing")
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                    inputs(config(), tape: tape)))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertTrue(runner.calls("correction").isEmpty, "a cited visual of the plan validates")
+        let prompt = try XCTUnwrap(runner.calls("polisher").first).prompt
+        XCTAssertTrue(prompt.contains("`pairing` — sequence: Pairing handshake"), prompt)
+        XCTAssertTrue(prompt.contains("null keeps"), prompt)
+    }
+
     func testEncodeSecondFailurePauses() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             ok(call, "enc", self.changeSetReply(pre: Precondition(status: "closed", assignee: nil)))

@@ -85,14 +85,17 @@ extension PlanVisualFence {
     }
 
     /// The visual ids a change set may cite (`ChangeSetValidator`'s `knownVisuals`): each
-    /// non-pending block in `plan` whose primary revision loads (the ones `VisualCatalogue` lists). A pending placeholder has
+    /// non-pending block in `plan` with a block state (checkpoint `checkpoint`'s record first, then
+    /// `block.json`) whose primary revision loads: exactly what release exports and `VisualCatalogue`
+    /// lists, so a task never cites a folder that is not written. A pending placeholder has
     /// nothing to export, so a task cannot be built to match it yet. Empty, never nil, for a
     /// plan with no visuals or no plan at all.
-    public static func knownVisuals(plan: String?, store: any VisualStoreReading) -> Set<String> {
+    public static func knownVisuals(plan: String?, store: any VisualStoreReading, checkpoint: Int? = nil) -> Set<String> {
         guard let plan else { return [] }
         return Set(blocks(in: plan).filter { b in
-            guard !b.pending, let r = store.blockState(b.id)?.primary.r ?? store.revisions(b.id).last else { return false }
-            return store.revision(b.id, r: r) != nil
+            guard !b.pending, let state = checkpoint.flatMap({ store.blockState(b.id, checkpoint: $0) }) ?? store.blockState(b.id)
+            else { return false }
+            return store.revision(b.id, r: state.primary.r) != nil
         }.map(\.id.rawValue))
     }
 }

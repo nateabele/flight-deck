@@ -570,8 +570,9 @@ public enum RoundPrompts {
     /// The visuals catalogue encode reads (spec §12): each visual a task may cite, with the files
     /// to open, and the rule for `visualRefs`. Empty for a plan with no visuals, so such a plan's
     /// prompt is what it always was.
-    public static func visualsCatalogue(_ visuals: [VisualCatalogueEntry]) -> String {
+    public static func visualsCatalogue(_ visuals: [VisualCatalogueEntry], patch: Bool = false) -> String {
         guard !visuals.isEmpty else { return "" }
+        let keep = " In a `replace`, null keeps the task's current `visualRefs`; send `[]` only to drop them."
         let list = visuals.map { v in
             var line = "- `\(v.id)` — \(v.kind)"
             let name = v.caption ?? (v.title.isEmpty ? nil : v.title)
@@ -592,7 +593,7 @@ public enum RoundPrompts {
         visuals it implements, each as `{"visualID": "<id>", "states": [...]}` with the states \
         that task must match (an empty list means every state). Cite only ids listed above. \
         FD adds the "Fidelity references" section to the task's description itself, so do not \
-        write one. Every other op, and a task that implements no visual, sets `visualRefs` to null.
+        write one. Every other op, and a task that implements no visual, sets `visualRefs` to null.\(patch ? keep : "")
         """
     }
 
@@ -609,7 +610,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)
@@ -629,7 +630,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)
@@ -645,7 +646,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)

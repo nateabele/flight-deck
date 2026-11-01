@@ -61,10 +61,39 @@ final class VisualRoundsTests: XCTestCase {
         XCTAssertEqual(PlanVisualFence.knownVisuals(plan: nil, store: store), Set<String>())
     }
 
-    /// A revision written before its `block.json` still counts, by its newest revision.
-    func testARevisionWithNoBlockStateIsKnown() throws {
+    /// A visual with revisions but no block state anywhere is not citable: release would export
+    /// nothing for it, and a task must never cite a folder that is not written.
+    func testARevisionWithNoBlockStateIsNotKnown() throws {
         try VisualDiskFixture.install(tape, id: "pairing", blockState: false)
-        XCTAssertEqual(PlanVisualFence.knownVisuals(plan: plan, store: store), ["pairing"])
+        XCTAssertEqual(PlanVisualFence.knownVisuals(plan: plan, store: store), Set<String>())
+        XCTAssertTrue(VisualCatalogue.entries(plan: plan, store: store, tape: tape).isEmpty)
+    }
+
+    /// The released checkpoint's recorded block state comes first; block.json is the fallback.
+    func testTheCheckpointsBlockStateWinsForKnownAndTheCatalogue() throws {
+        let id = try VisualDiskFixture.install(tape, id: "pairing", r: 1, blockState: false)
+        try VisualDiskFixture.install(tape, id: "pairing", r: 2, kind: "component")
+        let r1 = RevisionRef(visualID: id, r: 1)
+        try FileManager.default.createDirectory(at: tape.checkpointDirectory(3), withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(CheckpointBlockStates(states: [id: BlockState(representations: [r1], primary: r1)]))
+            .write(to: tape.checkpointVisualsURL(3))
+        XCTAssertEqual(VisualCatalogue.entries(plan: plan, store: store, tape: tape, checkpoint: 3).first?.primaryRevision, 1)
+        XCTAssertEqual(VisualCatalogue.entries(plan: plan, store: store, tape: tape).first?.primaryRevision, 2)
+        XCTAssertEqual(PlanVisualFence.knownVisuals(plan: plan, store: store, checkpoint: 3), ["pairing"])
+    }
+
+    /// A polish `replace` that leaves `visualRefs` null keeps the task's refs; `[]` drops them.
+    func testAReplaceWithNullVisualRefsKeepsTheOldOnes() throws {
+        let refs = [VisualRef(visualID: "pairing", states: ["default"])]
+        let base = ChangeSet(graphObservedAt: Date(), ops: [.createBead(NewBead(tempId: "t1", title: "A", description: "d", visualRefs: refs))])
+        func refsAfter(_ replacement: [VisualRef]?) throws -> [VisualRef]? {
+            let patch = ChangeSetPatch(replace: [.init(index: 0, op: .createBead(NewBead(tempId: "t1", title: "B", description: "d", visualRefs: replacement)))])
+            guard case .createBead(let b) = try patch.apply(to: base).get().ops[0] else { XCTFail(); return nil }
+            XCTAssertEqual(b.title, "B")
+            return b.visualRefs
+        }
+        XCTAssertEqual(try refsAfter(nil), refs, "null is not a drop")
+        XCTAssertEqual(try refsAfter([]), [], "an explicit [] drops them")
     }
 
     func testTheCatalogueNamesKindSectionStatesAndFiles() throws {
@@ -100,7 +129,7 @@ final class VisualRoundsTests: XCTestCase {
         let item = try XCTUnwrap(refs["items"] as? [String: Any])
         XCTAssertEqual(item["required"] as? [String], ["visualID", "states"])
         XCTAssertEqual(item["additionalProperties"] as? Bool, false)
-        XCTAssertTrue(Triage.changeSetRulesText(observedAt: Date()).contains("`visualRefs` is null on every op"))
+        XCTAssertTrue(Triage.changeSetRulesText(observedAt: Date()).contains("`visualRefs`: null unless a visuals list below"))
     }
 
     /// The flat op an agent returns decodes its refs onto the new task.

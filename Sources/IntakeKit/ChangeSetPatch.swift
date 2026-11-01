@@ -80,7 +80,16 @@ public struct ChangeSetPatch: Codable, Equatable, Sendable {
         guard problems.isEmpty else { return .failure(Problems(problems: problems)) }
 
         let removed = Set(remove)
-        let replacements = Dictionary(replace.map { ($0.index, $0.op) }, uniquingKeysWith: { first, _ in first })
+        // A replaced create that leaves `visualRefs` null keeps the refs its tempId had: null is
+        // "not mentioned", so a polisher never strips fidelity references by leaving the field
+        // out. An explicit `[]` drops them.
+        var oldRefs: [String: [VisualRef]] = [:]
+        for case .createBead(let b) in base.ops { if let refs = b.visualRefs { oldRefs[b.tempId] = refs } }
+        let replacements = Dictionary(replace.map { r -> (Int, ChangeOp) in
+            guard case .createBead(var b) = r.op, b.visualRefs == nil, let refs = oldRefs[b.tempId] else { return (r.index, r.op) }
+            b.visualRefs = refs
+            return (r.index, .createBead(b))
+        }, uniquingKeysWith: { first, _ in first })
         var ops: [ChangeOp] = base.ops.indices.compactMap { i in
             removed.contains(i) ? nil : replacements[i] ?? base.ops[i]
         }

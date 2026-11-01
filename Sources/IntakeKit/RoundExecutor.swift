@@ -365,8 +365,7 @@ public struct RoundExecutor: Sendable {
         let (graph, graphFile, observedAt) = try await readGraph(inputs)
         var ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
         // The visuals catalogue (spec §12): the plan's visuals a task may cite, with their files.
-        let planText = (try? Data(contentsOf: plan)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        ctx.visuals = VisualCatalogue.entries(plan: planText, store: DiskVisualStore(tape: inputs.store), tape: inputs.store)
+        ctx.visuals = visualCatalogue(inputs, plan: plan)
         var readable = [plan.deletingLastPathComponent(), inputs.store.workDirectory()]
         if !ctx.visuals.isEmpty { readable.append(inputs.store.visualsRoot) }
         let (cs, run) = try await changeSetSeat(planned, "encoder", inputs.config.encoder,
@@ -415,7 +414,9 @@ public struct RoundExecutor: Sendable {
         // Numbered: the patch names ops by the `index` this file shows on each one.
         try ChangeSetPatch.numbered(old).write(to: changeSetFile, options: .atomic)
         try graphData.write(to: graphFile, options: .atomic)
-        let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        var ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        // The same catalogue encode reads, so a polisher keeps (or adds) fidelity references.
+        ctx.visuals = visualCatalogue(inputs, plan: plan)
 
         // A shadow copy of `old` — the change set THIS round starts from, never whatever the
         // polisher goes on to propose — so FD can run `bv`'s robot reports against the graph as
@@ -434,7 +435,8 @@ public struct RoundExecutor: Sendable {
                                          analytics: analytics)
         }
         let (cs, run) = try await patchSeat(planned, "polisher", polisher, prompt: prompt,
-                                            readable: [plan.deletingLastPathComponent(), work], base: old,
+                                            readable: [plan.deletingLastPathComponent(), work]
+                                                + (ctx.visuals.isEmpty ? [] : [inputs.store.visualsRoot]), base: old,
                                             changeSetFile: changeSetFile, graph: graph, observedAt: observedAt,
                                             inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
@@ -933,7 +935,16 @@ public struct RoundExecutor: Sendable {
     /// never nil, for a plan with none, so a `visualRefs` entry there is always `unknownVisual`.
     private func knownVisuals(_ inputs: RoundInputs) -> Set<String> {
         let text = (try? currentPlan(inputs)).flatMap { try? Data(contentsOf: $0) }.map { String(decoding: $0, as: UTF8.self) }
-        return PlanVisualFence.knownVisuals(plan: text, store: DiskVisualStore(tape: inputs.store))
+        return PlanVisualFence.knownVisuals(plan: text, store: DiskVisualStore(tape: inputs.store),
+                                            checkpoint: inputs.store.headPlanCheckpoint(in: inputs.tape))
+    }
+
+    /// The visuals catalogue (spec §12) for the plan at `plan`, as the head plan checkpoint
+    /// recorded its block states: the same rule as `knownVisuals` and release.
+    private func visualCatalogue(_ inputs: RoundInputs, plan: URL) -> [VisualCatalogueEntry] {
+        let text = (try? Data(contentsOf: plan)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return VisualCatalogue.entries(plan: text, store: DiskVisualStore(tape: inputs.store), tape: inputs.store,
+                                       checkpoint: inputs.store.headPlanCheckpoint(in: inputs.tape))
     }
 
     private func currentPlan(_ inputs: RoundInputs) throws -> URL {

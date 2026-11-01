@@ -247,7 +247,7 @@ public enum Triage {
           `pre`; also `delivery` when the task you are editing is `in_progress`.
         - `reopen`: `id`, `reason`, and `pre`.
         - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
-        - `visualRefs` is null on every op, unless a visuals list below says when to set it.
+        - `visualRefs`: null unless a visuals list below says when to set it.
         """ + kindsRulesText(kinds)
     }
 

@@ -27,16 +27,15 @@ public struct VisualCatalogueEntry: Equatable, Sendable {
 public enum VisualCatalogue {
     /// The plan's visuals that a task may cite, in plan order, each once: exactly the ids
     /// `PlanVisualFence.knownVisuals` accepts. The primary is the one the block state names
-    /// (checkpoint `checkpoint`'s record first, as the plan shown, then the current one), else the
-    /// newest revision.
+    /// (checkpoint `checkpoint`'s record first, then `block.json`); a visual with neither is left out,
+    /// since release would export nothing for it.
     public static func entries(plan: String, store: any VisualStoreReading, tape: TapeStore,
                                checkpoint: Int? = nil) -> [VisualCatalogueEntry] {
         var seen = Set<VisualID>()
         var out: [VisualCatalogueEntry] = []
         for block in PlanVisualFence.blocks(in: plan) where !block.pending && seen.insert(block.id).inserted {
             let state = checkpoint.flatMap { store.blockState(block.id, checkpoint: $0) } ?? store.blockState(block.id)
-            guard let r = state?.primary.r ?? store.revisions(block.id).last,
-                  let rev = store.revision(block.id, r: r) else { continue }
+            guard let r = state?.primary.r, let rev = store.revision(block.id, r: r) else { continue }
             let m = rev.manifest
             let dir = tape.revisionDirectory(block.id, r: r)
             out.append(VisualCatalogueEntry(
