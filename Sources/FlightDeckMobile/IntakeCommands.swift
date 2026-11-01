@@ -19,8 +19,11 @@ protocol IntakeCommanding: AnyObject {
 enum IntakeAction: Hashable {
     case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
     case answer(String)
-    /// Ask threads: a draft's send (by its id), a thread's resolve and answers (by thread id), a diff's decision.
-    case threadSend(UUID), threadResolve(UUID), threadAnswer(UUID), diffDecide(UUID)
+    /// Ask threads: a draft's send (by its id), a thread's resolve (by thread id). Answers are keyed
+    /// on the turn they answer and a diff's decision on which decision it is (C-I1): a token kept
+    /// from a lost ✓ reused for a ✗ was acked as a duplicate while the plan took the edit, and one
+    /// kept from turn N's answers reused for turn N+1's dropped them without a word.
+    case threadSend(UUID), threadResolve(UUID), threadAnswer(UUID, turn: Int), diffDecide(UUID, accept: Bool)
 }
 
 enum CommandCopy {

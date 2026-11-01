@@ -51,9 +51,11 @@ enum PhoneDiffGutter {
         return parts.count == 2 ? parts[0] + new + parts[1] : nil
     }
 
-    /// Accept only on a pending diff of an intake that still takes steering.
-    static func canDecide(_ diff: WirePendingDiff, detail: WireIntakeDetail?) -> Bool {
-        diff.state == "pending" && ThreadGate.canAsk(detail: detail)
+    /// Accept only on a pending diff of an intake that still takes steering — or on a stale one
+    /// this phone already sent a ✓ for that wasn't acked (C-5): the edit landed and made it stale,
+    /// the decision didn't, and the Mac completes the accept on the retry (`alreadyQueued`).
+    static func canDecide(_ diff: WirePendingDiff, detail: WireIntakeDetail?, acceptSent: Bool = false) -> Bool {
+        (diff.state == "pending" || (diff.state == "stale" && acceptSent)) && ThreadGate.canAsk(detail: detail)
     }
 }
 
@@ -129,7 +131,11 @@ struct PhoneDiffSheet: View {
                         .accessibilityLabel("New text: \(DiffText.spoken(diff.new))")
                 }
                 .fixedSize(horizontal: false, vertical: true)
-                if diff.state == "stale" {
+                if diff.state == "stale" && canDecide {
+                    // C-5: this phone's Accept reached the plan but maybe not the thread.
+                    Text("Your Accept may not have finished on your Mac. Tap Accept again to finish it.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if diff.state == "stale" {
                     Text("A newer round changed this passage, so the change no longer fits. Open the thread to ask for it again.")
                         .font(.footnote).foregroundStyle(.orange)
                 } else if !canDecide {
@@ -141,11 +147,13 @@ struct PhoneDiffSheet: View {
                             Text(deciding ? "Working…" : "Accept").font(.body.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 44)
                         }
                         .buttonStyle(.borderedProminent).tint(.green).disabled(deciding)
-                        Button(role: .destructive) { onDecide(false) } label: {
-                            Label("Reject", systemImage: "xmark").labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                        if diff.state == "pending" {
+                            Button(role: .destructive) { onDecide(false) } label: {
+                                Label("Reject", systemImage: "xmark").labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                            }
+                            .buttonStyle(.bordered).disabled(deciding)
+                            .accessibilityLabel("Reject")
                         }
-                        .buttonStyle(.bordered).disabled(deciding)
-                        .accessibilityLabel("Reject")
                     }
                     Spacer(minLength: 0)
                     Button(action: onOpenThread) { Text("Open thread").font(.subheadline).frame(minHeight: 44) }

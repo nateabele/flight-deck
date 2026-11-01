@@ -67,6 +67,10 @@ final class PhoneDiffGutterTests: XCTestCase {
         XCTAssertFalse(PhoneDiffGutter.canDecide(diff(state: "stale"), detail: detail(threads: true, state: "shaping")))
         XCTAssertFalse(PhoneDiffGutter.canDecide(diff(), detail: detail(threads: nil, state: "shaping")))
         XCTAssertFalse(PhoneDiffGutter.canDecide(diff(), detail: detail(threads: true, state: "review")))
+        // C-5: a ✓ whose edit landed but whose decision didn't made the diff stale; this phone
+        // sent that ✓, so it still offers Accept, and the Mac completes it.
+        XCTAssertTrue(PhoneDiffGutter.canDecide(diff(state: "stale"), detail: detail(threads: true, state: "shaping"),
+                                                acceptSent: true))
     }
 
     /// VoiceOver reads the label, so it gets the words and not the markup.

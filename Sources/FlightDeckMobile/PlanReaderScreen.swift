@@ -190,8 +190,10 @@ struct PlanReaderScreen: View {
             AskSheet(quote: t.quote) { text in ask(t, text: text) }
         }
         .sheet(item: $openDiff) { diff in
-            PhoneDiffSheet(diff: diff, canDecide: PhoneDiffGutter.canDecide(diff, detail: detailModel.detail),
-                           deciding: commands.inFlight.contains(.diffDecide(diff.id)),
+            PhoneDiffSheet(diff: diff, canDecide: PhoneDiffGutter.canDecide(diff, detail: detailModel.detail,
+                                                                            acceptSent: flightControl.threadOutbox(for: intake).outbox.hasSentAccept(diff.id)),
+                           deciding: commands.inFlight.contains(.diffDecide(diff.id, accept: true))
+                               || commands.inFlight.contains(.diffDecide(diff.id, accept: false)),
                            onDecide: { accept in
                 flightControl.decideDiff(diff, accept: accept, intake: intake) { openDiff = nil; reloadHead() }
             }, onOpenThread: {

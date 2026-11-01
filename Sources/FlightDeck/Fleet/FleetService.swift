@@ -1468,8 +1468,9 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text) {
                 return .err(cid: cid, code: code)
             }
-        case .intakeThreadAnswer(let id, let token, let threadID, let answers):
-            if let code = store.intakeService.phoneThreadAnswer(id, token: token, threadID: threadID, answers: answers) {
+        case .intakeThreadAnswer(let id, let token, let threadID, let answers, let turn):
+            if let code = store.intakeService.phoneThreadAnswer(id, token: token, threadID: threadID, answers: answers,
+                                                                turn: turn) {
                 return .err(cid: cid, code: code)
             }
         case .intakeThreadResolve(let id, let token, let threadID):

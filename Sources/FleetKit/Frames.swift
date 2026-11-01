@@ -339,7 +339,9 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     case intakeThreadSend(id: UUID, token: UUID, threadID: UUID?, anchor: WireThreadAnchor?, text: String)
     /// The phone answering the questions a thread's turn asked (`intake.thread.answer`), as
     /// `intakeAnswer` answers a triage round; it queues the thread's next turn.
-    case intakeThreadAnswer(id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer])
+    /// `turn` is the seq of the turn whose questions these answer (C-I1); a Mac refuses
+    /// `stale_questions` when it is not the newest. Optional and additive: an older phone omits it.
+    case intakeThreadAnswer(id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer], turn: Int? = nil)
     /// The phone resolving a thread (`intake.thread.resolve`); it takes no more turns until it
     /// is reopened.
     case intakeThreadResolve(id: UUID, token: UUID, threadID: UUID)
@@ -362,7 +364,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case block, approve, feedback
         case command, stage, mode, noteID, kind, checkpoint, quote, preset, config, base
         case round, digest, answers
-        case threadID, anchor, diffID, accept
+        case threadID, anchor, diffID, accept, turn
     }
 
     private enum Op: String, Codable {
@@ -531,12 +533,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encodeIfPresent(threadID, forKey: .threadID)
             try c.encodeIfPresent(anchor, forKey: .anchor)
             try c.encode(text, forKey: .text)
-        case .intakeThreadAnswer(let id, let token, let threadID, let answers):
+        case .intakeThreadAnswer(let id, let token, let threadID, let answers, let turn):
             try c.encode(Op.intakeThreadAnswer, forKey: .op)
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(threadID, forKey: .threadID)
             try c.encode(answers, forKey: .answers)
+            try c.encodeIfPresent(turn, forKey: .turn)
         case .intakeThreadResolve(let id, let token, let threadID):
             try c.encode(Op.intakeThreadResolve, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -725,7 +728,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 threadID: try c.decode(UUID.self, forKey: .threadID),
-                answers: try c.decode([WireStructuredAnswer].self, forKey: .answers)
+                answers: try c.decode([WireStructuredAnswer].self, forKey: .answers),
+                turn: try c.decodeIfPresent(Int.self, forKey: .turn)
             )
         case .intakeThreadResolve:
             self = .intakeThreadResolve(

@@ -77,6 +77,28 @@ public struct WireThreadTurn: Codable, Equatable, Sendable {
         self.reply = reply; self.decision = decision; self.questions = questions; self.diffs = diffs
         self.errors = errors; self.checkpoint = checkpoint; self.startedAt = startedAt; self.endedAt = endedAt
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case seq, messageID, you, answers, reply, decision, questions, diffs, errors, checkpoint, startedAt, endedAt
+    }
+
+    /// `errors` and `checkpoint` decode as optional, like every other field here (C-7): a later
+    /// Mac that leaves one out must not break the phone's decode of the whole page.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        seq = try c.decode(Int.self, forKey: .seq)
+        messageID = try c.decode(String.self, forKey: .messageID)
+        you = try c.decodeIfPresent(String.self, forKey: .you)
+        answers = try c.decodeIfPresent([WireStructuredAnswer].self, forKey: .answers)
+        reply = try c.decodeIfPresent(String.self, forKey: .reply)
+        decision = try c.decodeIfPresent(String.self, forKey: .decision)
+        questions = try c.decodeIfPresent([WireStructuredQuestion].self, forKey: .questions)
+        diffs = try c.decodeIfPresent([UUID].self, forKey: .diffs)
+        errors = try c.decodeIfPresent([String].self, forKey: .errors) ?? []
+        checkpoint = try c.decodeIfPresent(Int.self, forKey: .checkpoint) ?? 0
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+    }
 }
 
 /// A diff awaiting the human, in full, so the phone draws its gutter bar without a fetch.

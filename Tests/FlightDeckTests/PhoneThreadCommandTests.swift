@@ -199,6 +199,25 @@ final class PhoneThreadCommandTests: XCTestCase {
         XCTAssertEqual(svc.applyPhoneThreadAnswer(i.id, token: UUID(), threadID: t.raw, answers: [], reader: quiet), "stale_questions")
     }
 
+    /// C-I1: answers name the turn they answer. Answers to an older turn than the newest one
+    /// asking are `stale_questions`, and queue nothing; the right turn, or none (an older phone), lands.
+    func testAnAnswerToAnOlderTurnIsStale() async throws {
+        let i = try seed(); let svc = await makeService(); let t = ThreadID()
+        func asking(_ seq: Int) -> ThreadTurn {
+            ThreadTurn(seq: seq, messageID: "m\(seq)", reply: "?", actions: [.askQuestion(
+                StructuredQuestion(id: "q1", text: "Day?", kind: .single, options: [.init(id: "fri", label: "Fri")]))],
+                checkpoint: 1, startedAt: date)
+        }
+        let reader = FakeThreadReader(records: [record(t, status: .needsYou)], turnsByThread: [t: [asking(1), asking(2)]])
+        let answers = [WireStructuredAnswer(questionID: "q1", selected: ["fri"])]
+        XCTAssertEqual(svc.applyPhoneThreadAnswer(i.id, token: UUID(), threadID: t.raw, answers: answers, turn: 1, reader: reader),
+                       "stale_questions")
+        XCTAssertTrue(threadCommands(i.id).isEmpty)
+        XCTAssertNil(svc.applyPhoneThreadAnswer(i.id, token: UUID(), threadID: t.raw, answers: answers, turn: 2, reader: reader))
+        XCTAssertNil(svc.applyPhoneThreadAnswer(i.id, token: UUID(), threadID: t.raw, answers: answers, reader: reader))
+        XCTAssertEqual(threadCommands(i.id).count, 2)
+    }
+
     // MARK: - diffs
 
     func testAcceptWritesTheTapeEditFirstThenTheDecision() async throws {

@@ -164,4 +164,22 @@ final class ThreadWireCodingTests: XCTestCase {
         let old = #"{"id":"\#(UUID().uuidString)","title":"T","state":"shaping","needsAttention":false,"createdAt":1}"#
         XCTAssertNil(try JSONDecoder().decode(WireIntakeSummary.self, from: Data(old.utf8)).threadsNeedingYou)
     }
+
+    /// C-7: a turn from a Mac that leaves `errors` or `checkpoint` out still decodes, with no
+    /// errors and checkpoint 0, like every other optional field in this file.
+    func testATurnWithoutErrorsOrCheckpointStillDecodes() throws {
+        let json = #"{"seq":3,"messageID":"m","startedAt":1}"#
+        let turn = try JSONDecoder().decode(WireThreadTurn.self, from: Data(json.utf8))
+        XCTAssertEqual(turn.errors, [])
+        XCTAssertEqual(turn.checkpoint, 0)
+        XCTAssertEqual(turn.seq, 3)
+    }
+
+    /// C-I1: the answer op carries its turn when given, and omits it otherwise (an older phone).
+    func testThreadAnswerCarriesItsTurnOnlyWhenGiven() throws {
+        let with = FleetCommand.intakeThreadAnswer(id: UUID(), token: UUID(), threadID: UUID(), answers: [], turn: 4)
+        XCTAssertEqual(try object(with)["turn"] as? Int, 4)
+        XCTAssertEqual(try JSONDecoder().decode(FleetCommand.self, from: JSONEncoder().encode(with)), with)
+        XCTAssertNil(try object(FleetCommand.intakeThreadAnswer(id: UUID(), token: UUID(), threadID: UUID(), answers: []))["turn"])
+    }
 }

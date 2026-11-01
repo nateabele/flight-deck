@@ -79,9 +79,9 @@ struct ThreadScreen: View {
             if let open = model.openQuestions, answeredTurn != open.turn, canAsk {
                 StructuredQuestionForm(
                     title: "\(open.questions.count) question\(open.questions.count == 1 ? "" : "s") from the agent",
-                    questions: open.questions, sending: commands.inFlight.contains(.threadAnswer(threadID))
+                    questions: open.questions, sending: commands.inFlight.contains(.threadAnswer(threadID, turn: open.turn))
                 ) { answers in
-                    flightControl.answerThread(threadID, answers: answers, intake: intake) {
+                    flightControl.answerThread(threadID, answers: answers, turn: open.turn, intake: intake) {
                         answeredTurn = open.turn
                         load()
                     }
@@ -113,8 +113,10 @@ struct ThreadScreen: View {
         }
         .safeAreaInset(edge: .bottom) { if canAsk, !resolved { composer } }
         .sheet(item: $openDiff) { diff in
-            PhoneDiffSheet(diff: diff, canDecide: PhoneDiffGutter.canDecide(diff, detail: detail),
-                           deciding: commands.inFlight.contains(.diffDecide(diff.id)),
+            PhoneDiffSheet(diff: diff, canDecide: PhoneDiffGutter.canDecide(diff, detail: detail,
+                                                                            acceptSent: outbox.hasSentAccept(diff.id)),
+                           deciding: commands.inFlight.contains(.diffDecide(diff.id, accept: true))
+                               || commands.inFlight.contains(.diffDecide(diff.id, accept: false)),
                            onDecide: { accept in
                 flightControl.decideDiff(diff, accept: accept, intake: intake) { openDiff = nil; load() }
             }, onOpenThread: { openDiff = nil })

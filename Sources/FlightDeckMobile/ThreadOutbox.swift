@@ -53,6 +53,7 @@ struct ThreadOutbox: Equatable {
     }
     private var entries: [Entry] = []
     private var decisions: [UUID: Bool] = [:]
+    private var acceptsSent: Set<UUID> = []
 
     /// Not acked: drawn with "Not yet sent", or the failure and a Retry.
     var unsent: [ThreadDraft] { entries.filter { !$0.acked }.map(\.draft) }
@@ -77,6 +78,14 @@ struct ThreadOutbox: Equatable {
     }
 
     mutating func remove(_ id: UUID) { entries.removeAll { $0.draft.id == id } }
+
+    /// The token a draft's last send carried, nil before its first.
+    func token(of id: UUID) -> UUID? { entries.first { $0.draft.id == id }?.token }
+
+    /// A ✓ sent for `diff` that the Mac hasn't acked (C-5): its edit may have landed and made the
+    /// diff stale with the decision still missing, so Accept stays offered to complete it.
+    mutating func acceptSent(_ diff: UUID) { acceptsSent.insert(diff) }
+    func hasSentAccept(_ diff: UUID) -> Bool { acceptsSent.contains(diff) }
 
     /// The thread an acked opening draft became.
     func openedThread(of draftID: UUID) -> UUID? {
@@ -126,7 +135,10 @@ struct ThreadOutbox: Equatable {
     /// A ✓ or ✗ the Mac acked. A runner applies it after the ack, so until the plan stops
     /// listing the diff as pending the reader keeps drawing the decision (accepted: the new
     /// text, rejected: the old), instead of flashing back to a pending diff.
-    mutating func decided(_ diff: UUID, accept: Bool) { decisions[diff] = accept }
+    mutating func decided(_ diff: UUID, accept: Bool) {
+        decisions[diff] = accept
+        acceptsSent.remove(diff)
+    }
 
     func decision(for diff: UUID) -> Bool? { decisions[diff] }
 
@@ -157,7 +169,12 @@ extension FlightControlModel {
     func sendThread(_ draft: ThreadDraft, intake: UUID, onAck: @escaping () -> Void = {}) {
         let model = threadOutbox(for: intake)
         model.outbox.submit(draft)
-        commands(for: intake).send(.threadSend(draft.id), command: { token in
+        // A draft already sent keeps its token for every Retry (C-6), past the command model's
+        // window too: the Mac dedupes on it, so a send that did land never opens a second thread
+        // or runs a second paid turn.
+        let stored = model.outbox.token(of: draft.id)
+        commands(for: intake).send(.threadSend(draft.id), command: { fresh in
+            let token = stored ?? fresh
             model.outbox.sending(draft.id, token: token)
             return .intakeThreadSend(id: intake, token: token, threadID: draft.threadID, anchor: draft.anchor, text: draft.text)
         }, onAck: {
@@ -168,7 +185,8 @@ extension FlightControlModel {
 
     func decideDiff(_ diff: WirePendingDiff, accept: Bool, intake: UUID, onAck: @escaping () -> Void = {}) {
         let model = threadOutbox(for: intake)
-        commands(for: intake).send(.diffDecide(diff.id), command: {
+        if accept { model.outbox.acceptSent(diff.id) }
+        commands(for: intake).send(.diffDecide(diff.id, accept: accept), command: {
             .intakeDiffDecide(id: intake, token: $0, threadID: diff.thread, diffID: diff.id, accept: accept)
         }, onAck: {
             model.outbox.decided(diff.id, accept: accept)
@@ -182,9 +200,9 @@ extension FlightControlModel {
         }, onAck: onAck)
     }
 
-    func answerThread(_ thread: UUID, answers: [WireStructuredAnswer], intake: UUID, onAck: @escaping () -> Void = {}) {
-        commands(for: intake).send(.threadAnswer(thread), command: {
-            .intakeThreadAnswer(id: intake, token: $0, threadID: thread, answers: answers)
+    func answerThread(_ thread: UUID, answers: [WireStructuredAnswer], turn: Int, intake: UUID, onAck: @escaping () -> Void = {}) {
+        commands(for: intake).send(.threadAnswer(thread, turn: turn), command: {
+            .intakeThreadAnswer(id: intake, token: $0, threadID: thread, answers: answers, turn: turn)
         }, onAck: onAck)
     }
 }

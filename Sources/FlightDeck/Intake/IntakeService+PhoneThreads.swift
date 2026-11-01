@@ -27,8 +27,8 @@ extension IntakeService {
     }
 
     /// Answers to a turn's `askQuestion` actions; queues the thread's next turn.
-    func phoneThreadAnswer(_ id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer]) -> String? {
-        return applyPhoneThreadAnswer(id, token: token, threadID: threadID, answers: answers, reader: liveReader(id))
+    func phoneThreadAnswer(_ id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer], turn: Int? = nil) -> String? {
+        return applyPhoneThreadAnswer(id, token: token, threadID: threadID, answers: answers, turn: turn, reader: liveReader(id))
     }
 
     func phoneThreadResolve(_ id: UUID, token: UUID, threadID: UUID) -> String? {
@@ -149,7 +149,7 @@ extension IntakeService {
         return nil
     }
 
-    func applyPhoneThreadAnswer(_ id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer],
+    func applyPhoneThreadAnswer(_ id: UUID, token: UUID, threadID: UUID, answers: [WireStructuredAnswer], turn: Int? = nil,
                                 reader: any ThreadStoreReading) -> String? {
         if alreadyAccepted(token, for: id) { return nil }
         if let refusal = notShaping(id) { return refusal }
@@ -157,7 +157,11 @@ extension IntakeService {
         guard reader.threads().contains(where: { $0.id == thread }) else { return refuse("unknown_thread", id) }
         // Only the newest turn's questions are open; an answer to anything older is to a
         // question the thread has already moved past.
-        guard !IntakeThreadProjection.openQuestions(reader.turns(thread)).isEmpty else { return refuse("stale_questions", id) }
+        let turns = reader.turns(thread)
+        guard !IntakeThreadProjection.openQuestions(turns).isEmpty else { return refuse("stale_questions", id) }
+        // Answers name the turn whose questions they answer (C-I1); an older phone sends none.
+        // To a turn the thread has moved past, they would land on newer questions.
+        if let turn, turn != turns.map(\.seq).max() { return refuse("stale_questions", id) }
         let mapped = answers.map { StructuredAnswer(questionID: $0.questionID, selected: $0.selected, other: $0.other) }
         do {
             try ThreadCommandStore(intakeDirectory: tapeStore(id).intakeDirectory)
