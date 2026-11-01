@@ -52,15 +52,15 @@ fn all_descriptions(t: &Value) -> Vec<(String, String)> {
 fn tool_and_parameter_names_stay_the_qartez_set() {
     let want: BTreeMap<&str, Vec<&str>> = BTreeMap::from([
         ("qartez_map", vec!["all_files", "boost_files", "boost_terms", "by", "format", "token_budget", "top_n", "with_health"]),
-        ("qartez_find", vec!["format", "kind", "limit", "name", "regex"]),
-        ("qartez_grep", vec!["format", "kind", "limit", "query", "regex", "search_bodies", "token_budget"]),
+        ("qartez_find", vec!["format", "kind", "limit", "name", "near", "regex"]),
+        ("qartez_grep", vec!["format", "kind", "limit", "near", "query", "regex", "search_bodies", "token_budget"]),
         ("qartez_read", vec!["context_lines", "end_line", "file_path", "limit", "max_bytes", "start_line", "symbol_name", "symbols", "with"]),
         ("qartez_outline", vec!["file_path", "format", "offset", "token_budget"]),
         ("qartez_deps", vec!["file_path", "format", "token_budget"]),
         ("qartez_stats", vec!["file_path"]),
-        ("qartez_impact", vec!["file_path", "format", "include_tests", "pending", "seed_diff", "token_budget"]),
-        ("qartez_refs", vec!["format", "include_tests", "symbol", "token_budget", "transitive"]),
-        ("qartez_calls", vec!["depth", "direction", "file_path", "format", "include_tests", "kind", "limit", "name", "token_budget"]),
+        ("qartez_impact", vec!["file_path", "format", "include_tests", "near", "pending", "seed_diff", "token_budget"]),
+        ("qartez_refs", vec!["format", "include_tests", "near", "symbol", "token_budget", "transitive"]),
+        ("qartez_calls", vec!["depth", "direction", "file_path", "format", "include_tests", "kind", "limit", "name", "near", "token_budget"]),
         ("qartez_replace_symbol", vec!["apply", "file_path", "kind", "new_code", "symbol"]),
         ("qartez_insert_before_symbol", vec!["apply", "file_path", "kind", "new_code", "symbol"]),
         ("qartez_insert_after_symbol", vec!["apply", "file_path", "kind", "new_code", "symbol"]),
@@ -94,8 +94,9 @@ fn every_tool_and_parameter_is_described_tersely() {
             total += d.len();
         }
     }
-    // The qartez wording was 19,698 characters; the audit holds the set under half that.
-    assert!(total <= 9_000, "descriptions total {total} chars");
+    // The qartez wording was 19,698 characters; the audit holds the set under half that, with
+    // room for the parameters added since (near, pending, seed_diff, with).
+    assert!(total <= 9_800, "descriptions total {total} chars");
 }
 
 #[test]

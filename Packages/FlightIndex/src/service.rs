@@ -30,7 +30,7 @@ use crate::tools::{self, args::Args, Ctx, ToolError};
 use crate::sweep::Snapshot;
 use crate::watch::{WatchConfig, Watcher};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
@@ -125,6 +125,10 @@ pub struct Service {
     /// Last `seq` seen per cwd. Nothing reads it: freshness does not need it, because every
     /// request looks at the file system itself.
     seqs: Mutex<HashMap<String, u64>>,
+    /// Per worktree, the files `read` and `outline` looked at last, newest first: half of the
+    /// default `near` seed set (`near.rs`). In memory only; a restart forgets them, which costs
+    /// one request's ordering, not correctness.
+    recent_reads: Mutex<HashMap<PathBuf, VecDeque<PathBuf>>>,
     maintenance: Arc<Maintenance>,
     started: Instant,
     requests: AtomicU64,
@@ -161,6 +165,7 @@ impl Service {
                 links: LinkIndex::default(),
                 gates: Mutex::new(HashMap::new()),
                 seqs: Mutex::new(HashMap::new()),
+                recent_reads: Mutex::new(HashMap::new()),
                 maintenance: Arc::new(Maintenance::default()),
                 started: Instant::now(),
                 requests: AtomicU64::new(0),
@@ -397,8 +402,12 @@ impl Service {
             let root = view.label.worktree.clone();
             Ok(Some(tools::Baseline { graph, text: Box::new(move |id| git::blob_text(&root, id)) }))
         };
-        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange, base: &base, diff: &diff };
+        let recent = self.recent_for(&view);
+        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, recent: &recent, cochange: &cochange, base: &base, diff: &diff };
         let body = tools::run(tool, &ctx)?;
+        if matches!(tool, "read" | "outline") {
+            self.remember_reads(&view, crate::near::read_files(&ctx));
+        }
         if tool == "impact" {
             self.acknowledge(&graph, &args);
         }
@@ -745,6 +754,31 @@ impl Service {
         }
         m.push_str(&format!("A {tool} writes into one view only and never into a linked one. Make the change in each view, starting with the dependent one(s), or drop it."));
         Err(ToolError::failed(m))
+    }
+
+    /// The default `near` seeds of a view: its changed files, then what was read last.
+    fn recent_for(&self, view: &View) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = view.overlay.iter().filter_map(|o| match o {
+            git::Overlay::Present(f) => Some(view.label.worktree.join(&f.path)),
+            git::Overlay::Deleted(_) => None,
+        }).collect();
+        if let Some(reads) = self.recent_reads.lock().unwrap().get(&view.label.worktree) {
+            out.extend(reads.iter().filter(|p| !out.contains(p)).cloned().collect::<Vec<_>>());
+        }
+        out
+    }
+
+    fn remember_reads(&self, view: &View, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return;
+        }
+        let mut all = self.recent_reads.lock().unwrap();
+        let list = all.entry(view.label.worktree.clone()).or_default();
+        for f in files {
+            list.retain(|p| *p != f);
+            list.push_front(f);
+        }
+        list.truncate(crate::near::RECENT_READS);
     }
 
     fn wait_bound(&self, args: &Args) -> Duration {

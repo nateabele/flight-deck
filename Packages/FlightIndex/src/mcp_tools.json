@@ -156,6 +156,16 @@
      "description": "Exact or qualified name, or a regex with regex=true. Aliases: symbol, symbol_name.",
      "type": "string"
     },
+    "near": {
+     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
     "regex": {
      "default": null,
      "description": "Treat name as an unanchored, case-insensitive regex.",
@@ -220,6 +230,16 @@
      "minimum": 0,
      "type": [
       "integer",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
       "null"
      ]
     },
@@ -575,6 +595,16 @@
       "null"
      ]
     },
+    "near": {
+     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
     "token_budget": {
      "default": null,
      "description": "Output cap in tokens (default 4000).",
@@ -629,6 +659,16 @@
      "description": "Include references from test files (default true).",
      "type": [
       "boolean",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
       "null"
      ]
     },
@@ -761,6 +801,16 @@
     "name": {
      "description": "Function or method name. Aliases: symbol, symbol_name.",
      "type": "string"
+    },
+    "near": {
+     "description": "Files/symbols you're working on: their graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
     },
     "token_budget": {
      "default": null,

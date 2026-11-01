@@ -3,6 +3,7 @@
 use super::args::{FILE, SYMBOL};
 use super::{compile_regex, range, status, Ctx, ToolError, ToolResult};
 use crate::facts::SymbolKind;
+use crate::near::Near;
 use crate::query::{NameMatch, SymbolHit};
 use std::fmt::Write;
 use std::path::Path;
@@ -19,11 +20,18 @@ pub fn find(c: &Ctx) -> ToolResult {
     let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_FIND_LIMIT);
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
     let views = c.views();
-    let hits = views.find_symbols(&matcher, kind);
+    let mut hits = views.find_symbols(&matcher, kind);
     if hits.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
+    let near = Near::of(c);
+    if let Some(n) = &near {
+        n.sort_hits(c.graph, &mut hits);
+    }
     let mut out = format!("Found {} match(es) for '{name}':\n", hits.len());
+    if let Some(n) = &near {
+        let _ = writeln!(out, "{}", n.note());
+    }
     for h in hits.iter().take(limit) {
         let _ = writeln!(out, "{} ({})", h.name, h.kind.as_str());
         let _ = writeln!(out, "File: {} {}", h.path.display(), range(h));
@@ -64,7 +72,15 @@ pub fn grep(c: &Ctx) -> ToolResult {
     if hits.is_empty() {
         return Ok(format!("No symbols match `{query}`"));
     }
+    // With a seed set, nearest first; equally near rows stay alphabetical (the sort is stable).
+    let near = Near::of(c);
+    if let Some(n) = &near {
+        n.sort_hits(c.graph, &mut hits);
+    }
     let mut out = format!("Found {} result(s) for `{query}`:\n", hits.len());
+    if let Some(n) = &near {
+        let _ = writeln!(out, "{}", n.note());
+    }
     for h in hits.iter().take(limit) {
         let tag = views.tag(h.view).map(|t| format!("  [view: {t}]")).unwrap_or_default();
         let _ = writeln!(out, "{:<30} {:<12} {} {}  {}{tag}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));

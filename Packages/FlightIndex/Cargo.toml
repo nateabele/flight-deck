@@ -25,6 +25,10 @@ required-features = ["eval"]
 name = "eval_impact"
 required-features = ["eval"]
 
+[[example]]
+name = "eval_near"
+required-features = ["eval"]
+
 [dependencies]
 tree-sitter = "0.25"
 tree-sitter-language = "0.1"
