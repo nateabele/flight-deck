@@ -9,6 +9,8 @@
 //! fdindex <tool> [first-arg] [--flag value]...                              query it
 //!
 //! tools: map find grep read outline deps stats impact refs calls
+//! mutators (preview unless --apply): replace_symbol insert_before_symbol insert_after_symbol
+//!        rename move safe_delete rename_file
 //!        build <path> | gc <path> | add_root <path>          (admin: index a view now, collect, hint)
 //! global flags: --store DIR  --socket PATH  --cwd DIR  --json
 //! ```
@@ -134,6 +136,19 @@ fn positional_param(tool: &str, first: &str) -> Option<&'static str> {
     })
 }
 
+/// Mutators take two names (`rename old new`, `move symbol to-file`), so they map every positional
+/// argument, in order; the first one still fills the tool's required parameter.
+fn mutator_positionals(tool: &str) -> Option<&'static [&'static str]> {
+    Some(match tool.strip_prefix("qartez_").unwrap_or(tool) {
+        "replace_symbol" | "insert_before_symbol" | "insert_after_symbol" => &["symbol", "new_code"],
+        "safe_delete" => &["symbol"],
+        "rename" => &["old_name", "new_name"],
+        "move" => &["symbol", "to_file"],
+        "rename_file" => &["from", "to"],
+        _ => return None,
+    })
+}
+
 fn run() -> Result<i32> {
     let argv0 = std::env::args().next().unwrap_or_default();
     let cli = parse(alias::normalize(&argv0, std::env::args().skip(1).collect())).map_err(Error::Msg)?;
@@ -176,7 +191,14 @@ fn run() -> Result<i32> {
     }
 
     let mut args = cli.args.clone();
-    if let Some(first) = cli.positional.first() {
+    if let Some(params) = mutator_positionals(&cli.verb) {
+        if cli.positional.len() > params.len() {
+            return Err(Error::Msg(format!("{} takes {} (got {} positional arguments)", cli.verb, params.join(" then "), cli.positional.len())));
+        }
+        for (param, value) in params.iter().zip(&cli.positional) {
+            args.entry(param.to_string()).or_insert_with(|| Value::String(value.clone()));
+        }
+    } else if let Some(first) = cli.positional.first() {
         match positional_param(&cli.verb, first) {
             Some(param) => {
                 args.entry(param.to_string()).or_insert_with(|| Value::String(first.clone()));

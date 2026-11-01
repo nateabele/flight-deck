@@ -385,6 +385,12 @@ impl GraphData {
         &self.res[file as usize]
     }
 
+    /// The resolver this graph was built with, so a mutator rewriting an import resolves a path
+    /// exactly the way the graph did (a second resolver could disagree about which file it names).
+    pub(crate) fn resolver(&self) -> &Resolver {
+        &self.resolver
+    }
+
     fn file_of(&self, r: &Resolved) -> Option<u32> {
         match r {
             Resolved::File { path, .. } => self.index.get(path).copied(),
