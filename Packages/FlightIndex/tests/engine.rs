@@ -250,3 +250,67 @@ fn concurrent_builds_of_one_repository_parse_each_blob_once() {
     // 150 blobs shared by both commits, plus the one file that differs: 151 distinct.
     assert_eq!(e.parse_count(), 151, "builds ran one after the other, so the second found the first's blobs");
 }
+
+#[test]
+fn a_graph_a_request_holds_is_not_evicted_to_make_room() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    let (v1, v2) = two_commits(&e, &r);
+    let in_use = e.graph(&v1).unwrap();
+    e.set_graph_budget(1);
+    e.graph(&v2).unwrap();
+    // Dropping the held graph from the cache frees nothing and costs the holder's next request a rebuild.
+    let st = e.graph_cache_stats();
+    assert_eq!((st.graphs, st.evictions), (2, 0), "{st:?}");
+    drop(in_use);
+}
+
+#[test]
+fn the_heap_limit_evicts_idle_graphs_and_spares_the_ones_in_use() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    let (v1, v2) = two_commits(&e, &r);
+    e.set_heap_limit(1); // any live heap is over
+    let held = e.graph(&v1).unwrap();
+    e.graph(&v2).unwrap();
+    let st = e.graph_cache_stats();
+    assert_eq!((st.graphs, st.evictions, st.heap_limit), (2, 0, 1), "v1 is held, v2 was just touched: {st:?}");
+    assert!(e.over_heap_limit() && !e.shed_graphs(), "only what is in use or just touched may remain");
+    drop(held);
+    assert!(!e.shed_graphs(), "still over: nothing idle is left");
+    assert_eq!(e.graph_cache_stats().graphs, 0, "shedding evicts every idle graph, the touched one included");
+    e.set_heap_limit(0);
+    assert!(!e.over_heap_limit(), "0 is no limit");
+}
+
+#[test]
+fn the_memory_target_maps_to_a_heap_limit_and_back() {
+    use flightindex::engine::{heap_limit_for, target_for_heap, DEFAULT_GRAPH_BUDGET, DEFAULT_MEMORY_TARGET};
+    assert_eq!(DEFAULT_MEMORY_TARGET, 1536 << 20);
+    assert_eq!(heap_limit_for(DEFAULT_MEMORY_TARGET), (1536 - 192) * (1 << 20) / 6 * 5, "(1536 - 192) / 1.2");
+    assert_eq!(DEFAULT_GRAPH_BUDGET, heap_limit_for(DEFAULT_MEMORY_TARGET));
+    assert_eq!(heap_limit_for(1 << 20), 0, "a target below the fixed overhead leaves no heap, not an underflow");
+    let t = target_for_heap(600 << 20);
+    assert!(heap_limit_for(t).abs_diff(600 << 20) < 8, "{t}");
+    let c = flightindex::service::Config::new("/x").with_graph_budget(2000 << 20);
+    assert_eq!(c.graph_budget, Some(2000 << 20));
+    assert!(c.memory_target >= target_for_heap(2000 << 20), "an explicit budget raises the target to fit it");
+    let small = flightindex::service::Config::new("/x").with_graph_budget(10 << 20);
+    assert_eq!(small.memory_target, DEFAULT_MEMORY_TARGET, "a smaller budget leaves the target alone");
+}
+
+#[test]
+fn many_requests_for_cold_graphs_all_get_one_under_a_tiny_heap_limit() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    let (v1, v2) = two_commits(&e, &r);
+    e.set_heap_limit(1);
+    let e = &e;
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = (0..8).map(|i| s.spawn({ let v = if i % 2 == 0 { v1.clone() } else { v2.clone() }; move || e.graph(&v).unwrap().stats().data.files })).collect();
+        for j in jobs {
+            assert!(j.join().unwrap() >= 5);
+        }
+    });
+    assert!(e.graph_cache_stats().graphs <= 2);
+}

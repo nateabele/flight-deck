@@ -19,7 +19,7 @@
 
 use crate::cochange::CoChange;
 use crate::edit;
-use crate::engine::{Engine, Phase, Progress, DEFAULT_GRAPH_BUDGET};
+use crate::engine::{heap_limit_for, target_for_heap, Engine, Phase, Progress, DEFAULT_MEMORY_TARGET};
 use crate::error::{Error, Result};
 use crate::git::{self, View};
 use crate::links::{LinkIndex, Member, Role};
@@ -46,13 +46,25 @@ pub const DEFAULT_BUILD_WAIT: Duration = Duration::from_secs(10);
 pub struct Config {
     pub store: PathBuf,
     pub build_wait: Duration,
-    pub graph_budget: usize,
+    /// RSS the daemon aims to stay under. It becomes a limit on live heap (`engine::heap_limit_for`)
+    /// that evicts idle graphs and then idle kept views, and the default graph budget.
+    pub memory_target: usize,
+    /// Cap on the estimated size of cached graphs; `None` is everything the memory target allows.
+    pub graph_budget: Option<usize>,
     pub watch: WatchConfig,
 }
 
 impl Config {
+    /// An explicit graph budget (`--graph-budget-mb`) with no memory target of its own raises the
+    /// target to fit it, so the older flag keeps meaning what it did.
+    pub fn with_graph_budget(mut self, bytes: usize) -> Config {
+        self.graph_budget = Some(bytes);
+        self.memory_target = self.memory_target.max(target_for_heap(bytes));
+        self
+    }
+
     pub fn new(store: impl Into<PathBuf>) -> Config {
-        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, graph_budget: DEFAULT_GRAPH_BUDGET, watch: WatchConfig::default() }
+        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, memory_target: DEFAULT_MEMORY_TARGET, graph_budget: None, watch: WatchConfig::default() }
     }
 }
 
@@ -128,7 +140,8 @@ impl Drop for Service {
 impl Service {
     pub fn open(cfg: Config) -> Result<Arc<Service>> {
         let engine = Engine::open(&cfg.store)?;
-        engine.set_graph_budget(cfg.graph_budget);
+        engine.set_heap_limit(heap_limit_for(cfg.memory_target));
+        engine.set_graph_budget(cfg.graph_budget.unwrap_or(heap_limit_for(cfg.memory_target)));
         let svc = Arc::new_cyclic(|me: &std::sync::Weak<Service>| {
             // The refs callback runs on the watcher's own thread, after the service exists.
             let me = me.clone();
@@ -162,6 +175,23 @@ impl Service {
 
     // ---- maintenance ----------------------------------------------------------------------
 
+    /// Over the heap limit: evict idle graphs, then the kept views of worktrees nobody is using,
+    /// until under or only what requests hold is left. Costs one atomic load when under.
+    fn shed_memory(&self) {
+        if !self.engine.over_heap_limit() || self.engine.shed_graphs() {
+            return;
+        }
+        for idle in [Duration::from_secs(60), Duration::ZERO] {
+            let dropped = self.freshness.release_idle(idle);
+            if !dropped.is_empty() {
+                log::info(&format!("over the memory limit: dropped {} kept view(s) idle for {}s or more", dropped.len(), idle.as_secs()));
+            }
+            if !self.engine.over_heap_limit() || self.engine.shed_graphs() {
+                return;
+            }
+        }
+    }
+
     /// One look at the world: drop worktrees whose directory is gone, release watches nobody has
     /// used lately, and collect when a collection is due.
     pub fn maintain(&self) {
@@ -173,6 +203,7 @@ impl Service {
         for root in self.freshness.release_idle(self.cfg.watch.active_for) {
             log::info(&format!("dropped the kept view of idle worktree {}", root.display()));
         }
+        self.shed_memory();
         if self.maintenance.gc_due(self.started.elapsed()) {
             self.run_gc();
         }
@@ -291,6 +322,7 @@ impl Service {
         }
         let svc = self.clone();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || svc.dispatch(&req)));
+        self.shed_memory();
         match outcome {
             Ok(Ok(resp)) => resp.with_id(id),
             Ok(Err(e)) => self.fail(Response::error(id, e.state, e.message)),
@@ -945,24 +977,29 @@ impl Service {
             "free_pages": free_pages, "last": self.maintenance.last().map(|r| r.to_json()),
         });
         let rss = crate::runtime::rss_bytes();
+        let vm = crate::runtime::vm_info();
         let data = json!({
             "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL_VERSION, "pid": std::process::id(),
             "uptime_seconds": self.started.elapsed().as_secs(),
-            "rss_bytes": rss,
+            "rss_bytes": rss, "memory_target": self.cfg.memory_target,
             "requests": self.requests.load(Ordering::Relaxed), "errors": self.errors.load(Ordering::Relaxed),
             "parses": self.engine.parse_count(),
             "views": views, "builds": builds,
-            "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "budget": g.budget, "evictions": g.evictions},
+            "vm": {"resident": vm.resident, "internal": vm.internal, "reusable": vm.reusable, "compressed": vm.compressed, "footprint": vm.footprint},
+            "heap_bytes": crate::alloc::live_bytes(), "heap_peak_bytes": crate::alloc::peak_bytes(),
+            "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "budget": g.budget, "evictions": g.evictions, "heap_limit": g.heap_limit},
             "stores": stores,
             "watch": watch, "gc": gc,
         });
         let mb = |b: u64| format!("{:.1} MB", b as f64 / 1_048_576.0);
         let text = format!(
-            "fdindex {} (protocol {PROTOCOL_VERSION}), pid {}, up {}s\nrss {}; {} request(s), {} error(s), {} blob(s) parsed\nviews known: {}; builds running: {}\ngraphs cached: {} ({} of {} budget, {} evicted)\nstore: {} db file(s), {}, {} free page(s)\nwatch: {}\ngc: {}",
+            "fdindex {} (protocol {PROTOCOL_VERSION}), pid {}, up {}s\nrss {} (target {}, heap {}); {} request(s), {} error(s), {} blob(s) parsed\nviews known: {}; builds running: {}\ngraphs cached: {} ({} of {} budget, {} evicted)\nstore: {} db file(s), {}, {} free page(s)\nwatch: {}\ngc: {}",
             env!("CARGO_PKG_VERSION"),
             std::process::id(),
             self.started.elapsed().as_secs(),
             mb(rss),
+            mb(self.cfg.memory_target as u64),
+            mb(crate::alloc::live_bytes() as u64),
             self.requests.load(Ordering::Relaxed),
             self.errors.load(Ordering::Relaxed),
             self.engine.parse_count(),

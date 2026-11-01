@@ -100,17 +100,89 @@ pub fn wait_until_stopped(pidfile: &Path, timeout: std::time::Duration) -> bool 
     }
 }
 
-/// Resident set size of this process in bytes, 0 when the platform will not say.
+/// Resident set size of this process in bytes, 0 when the platform will not say. Cheap enough to
+/// sample after every build (no process is spawned).
 pub fn rss_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
         let pages: u64 = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse().ok()).unwrap_or(0);
         pages * 4096
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        // No portable API without a mach binding; `ps` is the same number Activity Monitor shows.
-        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output();
-        out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok()).map(|kb| kb * 1024).unwrap_or(0)
+        // SAFETY: `task_info` fills the struct we pass for the flavor we name; `count` is its size in words.
+        unsafe {
+            let mut info: libc::mach_task_basic_info = std::mem::zeroed();
+            let mut count = (std::mem::size_of::<libc::mach_task_basic_info>() / std::mem::size_of::<libc::integer_t>()) as libc::mach_msg_type_number_t;
+            #[allow(deprecated)]
+            let task = libc::mach_task_self();
+            let rc = libc::task_info(task, libc::MACH_TASK_BASIC_INFO, (&mut info as *mut libc::mach_task_basic_info).cast(), &mut count);
+            if rc == 0 { info.resident_size } else { 0 }
+        }
     }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+/// What the kernel says about this process's pages (macOS only; zero elsewhere).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VmInfo {
+    /// Resident, including pages the allocator freed with `MADV_FREE_REUSABLE` that the kernel has not yet taken back.
+    pub resident: u64,
+    /// Dirty anonymous memory the process owns.
+    pub internal: u64,
+    /// Freed by the allocator and marked reusable, but still counted in `resident`.
+    pub reusable: u64,
+    pub compressed: u64,
+    /// What Activity Monitor calls Memory: dirty + compressed, without reusable pages.
+    pub footprint: u64,
+}
+
+#[cfg(target_os = "macos")]
+pub fn vm_info() -> VmInfo {
+    // The head of `task_vm_info` (mach/task_info.h) up to `phys_footprint`; the kernel fills as many words as the count allows.
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+    let mut info = TaskVmInfo::default();
+    let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::integer_t>()) as libc::mach_msg_type_number_t;
+    // SAFETY: `task_info` fills at most `count` words of the struct we pass.
+    let rc = unsafe {
+        #[allow(deprecated)]
+        let task = libc::mach_task_self();
+        libc::task_info(task, TASK_VM_INFO, (&mut info as *mut TaskVmInfo).cast(), &mut count)
+    };
+    if rc != 0 {
+        return VmInfo::default();
+    }
+    VmInfo { resident: info.resident_size, internal: info.internal, reusable: info.reusable, compressed: info.compressed, footprint: info.phys_footprint }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn vm_info() -> VmInfo {
+    VmInfo { resident: rss_bytes(), ..VmInfo::default() }
 }

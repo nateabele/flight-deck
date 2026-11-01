@@ -389,6 +389,12 @@ impl ViewGraph {
         self.root.join(&self.files[i as usize].path)
     }
 
+    /// Whether anything besides this handle holds the resolved data: a request working from a
+    /// `for_worktree` copy of a cached graph does, and evicting the cached one frees nothing.
+    pub(crate) fn data_shared(&self) -> bool {
+        Arc::strong_count(&self.data) > 1
+    }
+
     /// The same graph for another worktree whose resolved content is identical (same base tree,
     /// empty overlay): only the root, label and root-dependent resolver change.
     pub fn for_worktree(&self, label: ViewLabel) -> ViewGraph {

@@ -1,4 +1,5 @@
 pub mod ack;
+pub mod alloc;
 pub mod alias;
 pub mod client;
 pub mod cochange;
@@ -28,3 +29,6 @@ pub mod tools;
 pub mod watch;
 pub mod refresh;
 pub mod retention;
+
+#[global_allocator]
+static ALLOCATOR: alloc::Counting = alloc::Counting;

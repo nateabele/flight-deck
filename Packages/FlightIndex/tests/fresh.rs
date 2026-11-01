@@ -274,6 +274,10 @@ fn a_status_row_names_the_repo_as_the_header_does() {
     let v = &status["views"][0];
     assert_eq!(v["repo"], name.as_str(), "{v}");
     assert!(v["repo_path"].as_str().unwrap().ends_with(".git"), "the path stays available: {v}");
+    // The memory the daemon reports next to its target: heap in use, and the limit it derived.
+    assert_eq!(status["memory_target"], 1536u64 << 20);
+    assert!(status["heap_bytes"].as_u64().unwrap() > 0 && status["heap_peak_bytes"].as_u64().unwrap() >= status["heap_bytes"].as_u64().unwrap());
+    assert_eq!(status["graphs"]["heap_limit"], flightindex::engine::heap_limit_for(1536 << 20) as u64);
 }
 
 #[test]

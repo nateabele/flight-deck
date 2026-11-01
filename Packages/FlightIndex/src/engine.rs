@@ -7,6 +7,7 @@
 //! the store has never seen. That "parse each blob once, whatever worktree holds it" property is
 //! the point of keying facts by git blob.
 
+use crate::alloc;
 use crate::error::{Error, Result};
 use crate::facts::BlobFacts;
 use crate::git::{self, FileRef, Overlay, View, MAX_FILE_BYTES};
@@ -19,7 +20,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// Blobs per parse-then-write step: big enough to amortise a transaction and keep every core fed,
@@ -97,7 +98,30 @@ pub struct Engine {
     /// What the store's `worktrees` row says for each worktree, so a request whose view has not
     /// changed writes nothing (see `record_view`).
     recorded: Mutex<HashMap<PathBuf, Recorded>>,
+    /// Live heap bytes above which idle graphs are evicted (0: no limit).
+    heap_limit: AtomicUsize,
+    /// Graph builds running now. A build is the largest transient the daemon has (its facts plus
+    /// the graph being resolved, 60 to 150 MB on tessera) and thirty clients on thirty cold
+    /// worktrees would otherwise run thirty at once: measured, the heap peaked 730 MB above what
+    /// was live afterwards, and RSS stays at the peak.
+    builds: (Mutex<usize>, Condvar),
+    /// What the last graph built cost, so the next build can make room before it starts.
+    last_build_bytes: AtomicUsize,
 }
+
+struct BuildSlot<'a>(&'a (Mutex<usize>, Condvar));
+
+impl Drop for BuildSlot<'_> {
+    fn drop(&mut self) {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.1.notify_one();
+    }
+}
+
+/// Graph builds that may run at once. Fewer holds the peak closer to the limit (measured at a
+/// 1.5 GB target with 30 clients on cold worktrees: 2 slots peaked 3% over it, 8 slots 12% over)
+/// and more finishes a burst of cold requests sooner; 4 is between.
+const BUILD_SLOTS: usize = 4;
 
 /// A worktree's view as last written to the store.
 #[derive(Clone)]
@@ -124,9 +148,33 @@ fn charged(estimate: usize) -> usize {
 /// A blob's facts as held weakly by the shared cache, with their estimated size.
 type SharedFacts = (Weak<BlobFacts>, usize);
 
-/// Default budget for resolved graphs: with hundreds of worktrees on many commits the daemon
-/// cannot hold them all (one tessera graph is ~100 MB), so the least recently used are dropped.
-pub const DEFAULT_GRAPH_BUDGET: usize = 1536 << 20;
+/// The process's memory target, as RSS, when nothing says otherwise. Measured on tessera (one graph
+/// is 40 to 100 MB): RSS is about 1.2 times the heap the daemon holds plus 130 to 190 MB that is
+/// not graphs (the parse pool's buffers, SQLite caches, kept views, allocator slack). 1.5 GB holds
+/// about 30 tessera graphs, one hot worktree for each of thirty agents; 1 GiB (`--memory-mb 1024`)
+/// holds 19 and was measured to cycle its cache under that load (nearly every request rebuilds).
+/// It is the figure the graph budget used to be, now kept: RSS ran 1.8 GB under it before.
+pub const DEFAULT_MEMORY_TARGET: usize = 1536 << 20;
+
+/// RSS the daemon uses that is not graphs and does not shrink when graphs are evicted.
+const FIXED_OVERHEAD: usize = 192 << 20;
+
+/// The live heap that corresponds to an RSS target: RSS runs about 1.2 times the heap (allocator
+/// rounding, fragmentation, pages freed but not yet returned), after the fixed overhead.
+pub const fn heap_limit_for(target: usize) -> usize {
+    target.saturating_sub(FIXED_OVERHEAD) / 6 * 5
+}
+
+/// The RSS target that leaves room for `heap` bytes of heap; the inverse of `heap_limit_for`.
+pub const fn target_for_heap(heap: usize) -> usize {
+    heap / 5 * 6 + FIXED_OVERHEAD
+}
+
+/// Default budget for resolved graphs: the whole heap allowance of the default target. The
+/// estimate charged against it (5/4 of the counted structures) runs above the real heap, so the
+/// budget is reached before the heap limit in a steady state and the limit catches what is not
+/// charged (kept views, builds in flight, plans of mutators).
+pub const DEFAULT_GRAPH_BUDGET: usize = heap_limit_for(DEFAULT_MEMORY_TARGET);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum GraphKey {
@@ -163,6 +211,7 @@ pub struct GraphCacheStats {
     pub facts_bytes: usize,
     pub budget: usize,
     pub evictions: u64,
+    pub heap_limit: usize,
 }
 
 impl Engine {
@@ -182,6 +231,9 @@ impl Engine {
             build_locks: Mutex::new(HashMap::new()),
             facts: Mutex::new(HashMap::new()),
             recorded: Mutex::new(HashMap::new()),
+            heap_limit: AtomicUsize::new(0),
+            builds: (Mutex::new(0), Condvar::new()),
+            last_build_bytes: AtomicUsize::new(64 << 20),
         })
     }
 
@@ -604,32 +656,83 @@ impl Engine {
             (c.map.len(), c.map.values().map(|g| g.own_bytes).sum::<usize>(), c.budget, c.evictions)
         };
         let facts_bytes = self.live_facts_bytes();
-        GraphCacheStats { graphs, bytes: charged(own + facts_bytes), facts_bytes, budget, evictions }
+        GraphCacheStats { graphs, bytes: charged(own + facts_bytes), facts_bytes, budget, evictions, heap_limit: self.heap_limit.load(Ordering::Relaxed) }
     }
 
     fn live_facts_bytes(&self) -> usize {
         self.facts.lock().unwrap().values().filter(|(w, _)| w.strong_count() > 0).map(|(_, b)| *b).sum()
     }
 
-    /// Evict least recently used graphs until the cache fits its budget; the entry just touched
-    /// (`keep`) always stays, because a request is about to use it.
+    /// Bring the cache within its graph budget and the process within its heap limit; the entry
+    /// just touched (`keep`) always stays, because a request is about to use it. Only graphs no
+    /// request holds are evicted: dropping one that is in use frees nothing, so evicting it (and
+    /// then every other graph, which is what a budget check that cannot see the in-use bytes
+    /// goes on to do) only costs the next request a rebuild.
     fn enforce_budget(&self, keep: &GraphKey) {
-        loop {
-            let facts = self.live_facts_bytes();
-            let mut c = self.graphs.lock().unwrap();
-            let own: usize = c.map.values().map(|g| g.own_bytes).sum();
-            if charged(own + facts) <= c.budget || c.map.len() <= 1 {
-                return;
+        while (self.over_budget() || self.over_heap_limit()) && self.evict_lru(keep) {}
+    }
+
+    fn over_budget(&self) -> bool {
+        let facts = self.live_facts_bytes();
+        let c = self.graphs.lock().unwrap();
+        charged(c.map.values().map(|g| g.own_bytes).sum::<usize>() + facts) > c.budget
+    }
+
+    /// Is the live heap over the limit? The heap is what the daemon can free, and it is exact and
+    /// immediate where RSS is neither (see `Config::memory_target`).
+    pub fn over_heap_limit(&self) -> bool {
+        let limit = self.heap_limit.load(Ordering::Relaxed);
+        limit > 0 && alloc::live_bytes() > limit
+    }
+
+    /// Evict idle graphs, least recently used first, until the heap is under its limit or only
+    /// graphs in use remain. Returns whether it is under.
+    pub fn shed_graphs(&self) -> bool {
+        while self.over_heap_limit() {
+            if !self.evict_lru(&GraphKey::Overlay(PathBuf::new())) {
+                return false;
             }
-            let Some(victim) = c.map.iter().filter(|(k, _)| *k != keep).min_by_key(|(_, g)| g.used).map(|(k, _)| k.clone()) else {
-                return;
-            };
-            c.map.remove(&victim);
-            c.evictions += 1;
-            drop(c);
-            // Facts nothing holds any more are dead weight in the index of weak pointers.
-            self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
         }
+        true
+    }
+
+    /// Evict the least recently used graph that nothing is using, other than `keep`. False when
+    /// there is none.
+    fn evict_lru(&self, keep: &GraphKey) -> bool {
+        let mut c = self.graphs.lock().unwrap();
+        let Some(victim) = c.map.iter().filter(|(k, g)| *k != keep && Arc::strong_count(&g.graph) == 1 && !g.graph.data_shared()).min_by_key(|(_, g)| g.used).map(|(k, _)| k.clone()) else {
+            return false;
+        };
+        c.map.remove(&victim);
+        c.evictions += 1;
+        drop(c);
+        // Facts nothing holds any more are dead weight in the index of weak pointers.
+        self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        true
+    }
+
+    /// Run a graph build in one of `BUILD_SLOTS`, after evicting idle graphs to leave room for it
+    /// under the heap limit (what the last build cost, since the next is probably as big).
+    fn building<T>(&self, build: impl FnOnce() -> T) -> T {
+        let (running, cv) = &self.builds;
+        let mut n = running.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= BUILD_SLOTS {
+            n = cv.wait(n).unwrap();
+        }
+        *n += 1;
+        drop(n);
+        let _slot = BuildSlot(&self.builds); // released on a panic too
+        let limit = self.heap_limit.load(Ordering::Relaxed);
+        if limit > 0 {
+            let reserve = self.last_build_bytes.load(Ordering::Relaxed);
+            while alloc::live_bytes() + reserve > limit && self.evict_lru(&GraphKey::Overlay(PathBuf::new())) {}
+        }
+        build()
+    }
+
+    /// Keep the live heap under `bytes` by evicting graphs; 0 means no limit.
+    pub fn set_heap_limit(&self, bytes: usize) {
+        self.heap_limit.store(bytes, Ordering::Relaxed);
     }
 
     fn key_lock(&self, key: &GraphKey) -> Arc<Mutex<()>> {
@@ -654,7 +757,9 @@ impl Engine {
             let mut c = self.graphs.lock().unwrap();
             c.tick += 1;
             let used = c.tick;
-            c.map.insert(key.clone(), CachedGraph { own_bytes: graph.own_bytes(), graph, stamp, used });
+            let own_bytes = graph.own_bytes();
+            self.last_build_bytes.store(charged(own_bytes), Ordering::Relaxed);
+            c.map.insert(key.clone(), CachedGraph { own_bytes, graph, stamp, used });
         }
         self.enforce_budget(&key);
     }
@@ -695,7 +800,7 @@ impl Engine {
         };
 
         let Some(commit) = &view.label.base_commit else {
-            return Ok(Arc::new(ViewGraph::build(view.label.clone(), load(&view.files())?)));
+            return self.building(|| Ok(Arc::new(ViewGraph::build(view.label.clone(), load(&view.files())?))));
         };
         let base_key = GraphKey::Base(view.label.repo.clone(), commit.clone());
         let base = match self.cached(&base_key, "").filter(|_| complete) {
@@ -709,7 +814,7 @@ impl Engine {
                     None => {
                         let mut base_label = view.label.clone();
                         base_label.dirty = false;
-                        let b = Arc::new(ViewGraph::build(base_label, load(&view.base)?));
+                        let b = self.building(|| -> Result<_> { Ok(Arc::new(ViewGraph::build(base_label, load(&view.base)?))) })?;
                         if complete {
                             self.remember(base_key.clone(), String::new(), b.clone());
                         }

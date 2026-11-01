@@ -877,6 +877,20 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   2000 at a time with the writer released between chunks, then free pages 256 at a time and a WAL
   truncate. A repository whose common dir is gone has its database deleted. `fdindex status`
   reports the last collection, bytes reclaimed and free pages.
+- **Memory.** `fdindex daemon --memory-mb N` (default 1536) is a target for the process's RSS. What
+  the daemon can free is heap, and RSS follows it only loosely on macOS (about 1.2 times the heap
+  plus 130 to 190 MB that is not graphs; freed pages stay resident until the kernel wants them,
+  and neither `malloc_zone_pressure_relief` nor mimalloc's `mi_collect` gave any back in
+  measurement), so the target becomes a limit on live heap, counted by the global allocator
+  (`src/alloc.rs`; `status` shows `heap_bytes` and the peak). Over the limit, idle graphs are
+  evicted least recently used first, then the kept views of idle worktrees; graphs a request holds
+  are never evicted (that frees nothing). The graph budget (`--graph-budget-mb`, estimated size of
+  cached graphs) defaults to the same allowance, and passing it alone raises the target to fit.
+  At most four graph builds run at once, after evicting to leave room for the last one's size:
+  thirty clients on cold worktrees used to build thirty graphs together and peak 700 MB above
+  what stayed live. On tessera with about 90 worktrees queried in turn: 1.8 GB RSS under the old
+  1.5 GB budget, 1.43 GB under the new default; with 30 busy clients 2.6 GB became 1.66 GB (the
+  contract spec has the table, and the latency price of a smaller cache).
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

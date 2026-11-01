@@ -334,12 +334,16 @@ pub fn format_status(svc: &Service, data: Option<&Value>) -> String {
     };
     let n = |v: &Value| v.as_u64().unwrap_or(0);
     out += &format!(
-        "daemon:   running, pid {}, fdindex {} (protocol {}), up {}\nmemory:   {} resident; graphs {} cached, {} of {} budget, {} evicted\n",
+        "daemon:   running, pid {}, fdindex {} (protocol {}), up {}\nmemory:   {} resident{}; graphs {} cached, {} of {} budget, {} evicted\n",
         n(&d["pid"]),
         d["version"].as_str().unwrap_or("?"),
         n(&d["protocol"]),
         human_duration(n(&d["uptime_seconds"])),
         human_bytes(n(&d["rss_bytes"])),
+        match n(&d["memory_target"]) {
+            0 => String::new(),
+            t => format!(" (target {}, heap {})", human_bytes(t), human_bytes(n(&d["heap_bytes"]))),
+        },
         n(&d["graphs"]["count"]),
         human_bytes(n(&d["graphs"]["bytes"])),
         human_bytes(n(&d["graphs"]["budget"])),
@@ -479,7 +483,7 @@ mod tests {
         let s = svc(Manager::Launchd);
         assert!(format_status(&s, None).contains("daemon:   not running"));
         let d = serde_json::json!({
-            "version": "0.1.0", "protocol": 1, "pid": 42, "uptime_seconds": 125, "rss_bytes": 104857600u64, "requests": 7, "errors": 1, "parses": 90,
+            "version": "0.1.0", "protocol": 1, "pid": 42, "uptime_seconds": 125, "rss_bytes": 104857600u64, "memory_target": 1073741824u64, "heap_bytes": 52428800u64, "requests": 7, "errors": 1, "parses": 90,
             "views": [{"worktree": "/w/app", "repo": "app", "base": "1a2b3c4d5e", "dirty_files": 3, "requests": 5, "idle_seconds": 9, "kept": true, "snapshot_files": 1500, "snapshot_dirs": 300, "last_sweep_ms": 1.4}],
             "builds": [{"worktree": "/w/app", "phase": "Parsing", "done": 4, "total": 10}],
             "graphs": {"count": 1, "bytes": 2097152, "budget": 536870912u64, "evictions": 0},
@@ -488,7 +492,7 @@ mod tests {
             "gc": {"runs": 2, "reclaimed_bytes_total": 2097152, "free_pages": 0, "last": {"repos": 2, "repos_dropped": 1, "facts_dropped": 40, "trees_dropped": 3, "bytes_reclaimed": 1048576, "took_seconds": 0.5}},
         });
         let t = format_status(&s, Some(&d));
-        for want in ["pid 42", "fdindex 0.1.0", "up 2m05s", "100.0 MB resident", "1.0 MB in 1 repository", "/w/app (repo app, base 1a2b3c4, dirty 3)", "Parsing 4 of 10", "views kept and swept by stat (dropped after 6 h idle); refs of 2 repository(ies) watched, 12 event(s)", "swept by stat (1500 files, 300 dirs, last 1.4 ms)", "2 run(s), 2.0 MB reclaimed in total", "1 dropped; 40 fact(s), 3 tree(s) collected; 1.0 MB reclaimed"] {
+        for want in ["pid 42", "fdindex 0.1.0", "up 2m05s", "100.0 MB resident (target 1024.0 MB, heap 50.0 MB)", "1.0 MB in 1 repository", "/w/app (repo app, base 1a2b3c4, dirty 3)", "Parsing 4 of 10", "views kept and swept by stat (dropped after 6 h idle); refs of 2 repository(ies) watched, 12 event(s)", "swept by stat (1500 files, 300 dirs, last 1.4 ms)", "2 run(s), 2.0 MB reclaimed in total", "1 dropped; 40 fact(s), 3 tree(s) collected; 1.0 MB reclaimed"] {
             assert!(t.contains(want), "{want} missing in\n{t}");
         }
     }

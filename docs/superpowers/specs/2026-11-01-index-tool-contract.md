@@ -93,7 +93,7 @@ Newline-delimited JSON over a Unix socket (mode 0600). Default path: `<store>/fd
 
 ## CLI
 
-`fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <tool> [first-arg] [--flag value]…`. Flags become arguments as written (`--file-path x` is `file_path`, `--build-wait-ms` is `build_wait_ms`). A flag without a value is `true`; the boolean flags (`--regex`, `--transitive`, `--include-tests`, `--all-files`, `--search-bodies`, …) never consume the next word. A repeated flag becomes a list. The first positional argument fills `name` (find, calls), `symbol` (refs), `query` (grep), `file_path` (outline, deps, impact, stats, build, gc, add_root); `read` takes a file if the argument contains `/` or is a file, else a symbol. If no daemon answers, the CLI starts `fdindex daemon` detached and retries. `fdindex status`, `fdindex stop` (returns when the daemon has exited) and `fdindex daemon [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]` manage it (`--watch-hours`, default 6: how long an idle worktree keeps its in-memory view; `--no-watch`: every request reads `git status` and no ref watcher runs).
+`fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <tool> [first-arg] [--flag value]…`. Flags become arguments as written (`--file-path x` is `file_path`, `--build-wait-ms` is `build_wait_ms`). A flag without a value is `true`; the boolean flags (`--regex`, `--transitive`, `--include-tests`, `--all-files`, `--search-bodies`, …) never consume the next word. A repeated flag becomes a list. The first positional argument fills `name` (find, calls), `symbol` (refs), `query` (grep), `file_path` (outline, deps, impact, stats, build, gc, add_root); `read` takes a file if the argument contains `/` or is a file, else a symbol. If no daemon answers, the CLI starts `fdindex daemon` detached and retries. `fdindex status`, `fdindex stop` (returns when the daemon has exited) and `fdindex daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]` manage it (`--watch-hours`, default 6: how long an idle worktree keeps its in-memory view; `--no-watch`: every request reads `git status` and no ref watcher runs).
 
 Management verbs (top level, and `fdindex service <verb>`): `status` (the daemon's report, exit 3 when it is not running; **never starts it**, unlike every query verb; `--json` prints the raw reply), `stop`, `start`, `restart`, `install`, `uninstall`. `fdindex mcp [--no-start]` is the MCP shim.
 
@@ -198,3 +198,19 @@ The daemon is machine-wide, so a per-project status file would be written into e
 ### `fdindex switchover`
 
 `--dry-run` (the default) prints every file and change, `--apply` does it, `--rollback` undoes the last apply, `--list-old-dbs [root…]` lists `.qartez/index.db` files with sizes (default root `~/Projects`) and deletes nothing. `--home`, `--store` and `--no-service` exist for rehearsal. See the module comment of `src/switchover.rs` for exactly what changes, and `scripts/switchover-rehearsal.sh` for the round trip on copies of the real files.
+
+## Memory
+
+`--memory-mb N` (default 1536) is the RSS the daemon aims to stay under. It maps to a limit on live heap, `(N - 192 MB) / 1.2`, and to the default graph budget of the same size; `--graph-budget-mb` alone raises the target to fit it. `status` reports `rss_bytes`, `memory_target`, `heap_bytes`, `heap_peak_bytes`, `vm` (macOS: resident, internal, reusable, footprint) and `graphs.heap_limit`. The default is the figure the graph budget used to be: 1.5 GB holds about 30 tessera-size graphs, one hot worktree per agent for thirty agents; 1 GiB holds 19 and cycles its cache under that load.
+
+Measured on tessera (86 to 93 worktrees, the count grew while measuring): every worktree queried one after another, twice; then 30 clients (reads, builds, applies in throwaway worktrees) for 90 s. The host's load average was 80 to 165 throughout, so latencies compare roughly:
+
+| | RSS after sweep | RSS peak, 30 clients | live heap peak | graphs cached | evictions (sweep x2 / mixed) | find p50 sweep 1 / 2 / mixed |
+|---|---|---|---|---|---|---|
+| before: 1.5 GB graph budget | 1803 / 1816 MB | 2636 MB | 2071 MB (earlier run) | 41 | 155 / 1982 | 568 / 297 / 682 ms |
+| `--memory-mb 1536` (default) | 1424 / 1441 MB | 1660 MB | 1206 MB | 30 | 178 / 742 | 814 / 319 / 3601 ms |
+| `--memory-mb 1024` | 1023 / 1038 MB | 1165 MB | 810 MB | 19 | 197 / 452 | 834 / 340 / 8781 ms |
+
+Reading the latency: a hot find is 7 ms either way, and the second sweep is within noise. What costs is the mixed run, where 30 clients pick among about 95 worktrees at random: with fewer graphs cached more requests rebuild one (0.2 to 0.4 s on a quiet machine, seconds on this loaded one), and builds now queue for four slots instead of all running at once. Machines that want the old latency under that load can pass `--memory-mb 3072`.
+
+Where the memory went (before): 1327 MB live heap at 1512 MB charged (graphs and their facts, 12.4 million allocations); kept views of 85 worktrees 93 MB; 130 to 190 MB resident that is not live heap at all (a daemon holding one graph is at 440 MB RSS with 200 MB live); and, under concurrency, 700 MB of transient peak from builds running together plus graphs evicted from the cache while requests still held them, which freed nothing and were not counted. Allocator retention is real but not recoverable from inside the process on macOS: `malloc_zone_pressure_relief` ran 83 times without changing RSS, swapping in mimalloc (with `mi_collect`) was 200 MB worse at one graph, and the kernel's own accounting (`vm`) marks 85% of the resident pages reusable, which is why an RSS-triggered eviction loop would evict everything and free nothing.

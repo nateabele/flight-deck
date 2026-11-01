@@ -1,7 +1,7 @@
 //! `fdindex`: the machine-wide code index. One binary, three roles.
 //!
 //! ```text
-//! fdindex daemon [--foreground] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon
+//! fdindex daemon [--foreground] [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon (RSS target, default 1536)
 //!                [--watch-hours N] [--no-watch]                              (keep the views of worktrees active in the last N hours; default 6)
 //! fdindex status [--json] | stop                                            ask it, or stop it
 //! fdindex mcp [--no-start]                                                  stdio MCP server (a client of the daemon)
@@ -63,6 +63,7 @@ struct Cli {
     json: bool,
     foreground: bool,
     graph_budget_mb: Option<usize>,
+    memory_mb: Option<usize>,
     build_wait_ms: Option<u64>,
     watch_hours: Option<f64>,
     no_watch: bool,
@@ -79,6 +80,7 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
         json: false,
         foreground: false,
         graph_budget_mb: None,
+        memory_mb: None,
         build_wait_ms: None,
         watch_hours: None,
         no_watch: false,
@@ -114,6 +116,7 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
             ("json", _) => cli.json = true,
             ("foreground", _) => cli.foreground = true,
             ("graph_budget_mb", Some(v)) => cli.graph_budget_mb = Some(v.parse().map_err(|_| "--graph-budget-mb takes a number")?),
+            ("memory_mb", Some(v)) => cli.memory_mb = Some(v.parse().map_err(|_| "--memory-mb takes a number")?),
             ("watch_hours", Some(v)) => cli.watch_hours = Some(v.parse().map_err(|_| "--watch-hours takes a number")?),
             ("no_watch", _) => cli.no_watch = true,
             ("build_wait_ms", Some(v)) if cli.verb == "daemon" => cli.build_wait_ms = Some(v.parse().map_err(|_| "--build-wait-ms takes a number")?),
@@ -177,8 +180,11 @@ fn run() -> Result<i32> {
 
     if cli.verb == "daemon" {
         let mut config = Config::new(&cli.store);
+        if let Some(mb) = cli.memory_mb {
+            config.memory_target = mb << 20;
+        }
         if let Some(mb) = cli.graph_budget_mb {
-            config.graph_budget = mb << 20;
+            config = config.with_graph_budget(mb << 20);
         }
         if let Some(ms) = cli.build_wait_ms {
             config.build_wait = Duration::from_millis(ms);
@@ -314,6 +320,9 @@ fn read_stdin() -> String {
 /// Daemon tuning a client forwards when it is the one starting the daemon.
 fn daemon_args(cli: &Cli) -> Vec<String> {
     let mut a = Vec::new();
+    if let Some(mb) = cli.memory_mb {
+        a.extend(["--memory-mb".to_string(), mb.to_string()]);
+    }
     if let Some(mb) = cli.graph_budget_mb {
         a.extend(["--graph-budget-mb".to_string(), mb.to_string()]);
     }
