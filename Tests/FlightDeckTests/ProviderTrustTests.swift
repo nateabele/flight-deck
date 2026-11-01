@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import HostKit
 import XCTest
@@ -156,5 +157,65 @@ final class ProviderTrustTests: XCTestCase {
             XCTAssertEqual($0 as? ProviderTrustStore.StoreError, .trustFileUnreadable)
         }
         XCTAssertEqual(try Data(contentsOf: file), Data("not json".utf8))
+    }
+    // MARK: - Final review: size caps
+
+    private func sparse(_ dir: URL, _ name: String, bytes: UInt64) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: bytes)
+        try handle.close()
+    }
+
+    /// A repo can commit a file of any size; the digest is taken on the Settings path, so a
+    /// file over 10 MB is refused by name without being read.
+    func testAFileOverTenMegabytesIsRefusedByName() throws {
+        let dir = try folder("p", files: [("provider.toml", "x")])
+        try sparse(dir.appendingPathComponent("bin"), "big.bin", bytes: 10 * 1024 * 1024 + 1)
+        let start = Date()
+        XCTAssertThrowsError(try ProviderTrust.digest(folder: dir)) { error in
+            let text = "\(error)"
+            XCTAssertTrue(text.contains("bin/big.bin"), text)
+            XCTAssertTrue(text.contains("10 MB"), text)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+    }
+
+    func testAFileOfExactlyTenMegabytesIsDigested() throws {
+        let dir = try folder("p", files: [("provider.toml", "x")])
+        try sparse(dir, "edge.bin", bytes: 10 * 1024 * 1024)
+        XCTAssertEqual(try ProviderTrust.digest(folder: dir).count, 64)
+    }
+
+    func testAFolderOverFiftyMegabytesIsRefusedNamingTheFileThatCrossedIt() throws {
+        let dir = try folder("p", files: [("provider.toml", "x")])
+        for i in 0..<6 { try sparse(dir, "part\(i).bin", bytes: 9 * 1024 * 1024) }
+        let start = Date()
+        XCTAssertThrowsError(try ProviderTrust.digest(folder: dir)) { error in
+            let text = "\(error)"
+            XCTAssertTrue(text.contains("50 MB"), text)
+            XCTAssertTrue(text.contains("part5.bin"), text)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5, "the folder was read before its size was known")
+    }
+
+    /// Streaming the bytes must not change a digest an approval already stored: the stream is
+    /// path, NUL, 8-byte big-endian length, owner-exec byte, bytes, file by file in path order.
+    func testDigestFormatIsUnchanged() throws {
+        let body = Data((0..<200_000).map { UInt8($0 % 251) })
+        let dir = try folder("p", files: [("provider.toml", "x"), ("sub/gen.sh", "echo")])
+        try body.write(to: dir.appendingPathComponent("blob"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.appendingPathComponent("sub/gen.sh").path)
+        var hasher = SHA256()
+        for (path, data, exec) in [("blob", body, false), ("provider.toml", Data("x".utf8), false), ("sub/gen.sh", Data("echo".utf8), true)] {
+            hasher.update(data: Data(path.utf8) + Data([0]))
+            var length = UInt64(data.count).bigEndian
+            withUnsafeBytes(of: &length) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: Data([exec ? 1 : 0]) + data)
+        }
+        let expected = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(try ProviderTrust.digest(folder: dir), expected)
     }
 }
