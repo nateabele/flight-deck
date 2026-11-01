@@ -5,7 +5,8 @@ import SwiftUI
 
 @main
 struct FlightDeckMobileApp: App {
-    @State private var model = FleetModel(cache: PhoneCache(), drafts: DraftStore(), answerDrafts: AnswerDraftStore())
+    @State private var model = FleetModel(cache: PhoneCache(), drafts: DraftStore(), answerDrafts: AnswerDraftStore(),
+                                            intakeDrafts: DraftStore(directory: DraftStore.defaultIntakeDirectory()))
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Remembers whether the app was actually suspended. See `RedialOnReturn` — reading it off

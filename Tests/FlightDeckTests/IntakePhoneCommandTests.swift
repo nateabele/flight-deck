@@ -139,6 +139,39 @@ final class IntakePhoneCommandTests: XCTestCase {
 
     // MARK: transport
 
+    // MARK: intake.create
+
+    func testCreateCapturesUnderThePhonesIdAndTriages() async throws {
+        let svc = await makeService()
+        let id = UUID()
+        XCTAssertNil(svc.phoneCreate(id, token: UUID(), project: "/p", intent: "Add dark mode"))
+        let made = try XCTUnwrap(svc.intakes.first { $0.id == id })
+        XCTAssertEqual(made.intent, "Add dark mode")
+        XCTAssertEqual(made.state, .triaging)
+        XCTAssertEqual(made.projectPath, IntakeService.projectKey("/p"))
+    }
+
+    /// A retry after a lost ack — same token, or a new one from a phone that restarted — meets
+    /// the intake its first delivery made, and is acked without making a second.
+    func testCreateIsIdempotentPerIdAndNeverOverwrites() async throws {
+        let svc = await makeService()
+        let id = UUID(), token = UUID()
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "first"))
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "first"))
+        XCTAssertNil(svc.phoneCreate(id, token: UUID(), project: "/p", intent: "second"))
+        XCTAssertEqual(svc.intakes.filter { $0.id == id }.count, 1)
+        XCTAssertEqual(svc.intakes.first { $0.id == id }?.intent, "first")
+    }
+
+    func testCreateRefusesBlankIntentAndLeavesTheTokenUsable() async throws {
+        let svc = await makeService()
+        let id = UUID(), token = UUID()
+        XCTAssertEqual(svc.phoneCreate(id, token: token, project: "/p", intent: " \n "), "empty_intent")
+        XCTAssertTrue(svc.intakes.isEmpty)
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "now with words"))
+        XCTAssertEqual(svc.intakes.count, 1)
+    }
+
     func testAPauseWhileRunningIsQueued() async throws {
         let i = try seedTape(.running)
         let svc = await makeService()

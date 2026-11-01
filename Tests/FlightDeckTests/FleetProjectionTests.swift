@@ -91,6 +91,13 @@ final class FleetProjectionTests: XCTestCase {
         XCTAssertTrue(snapshot.projects.flatMap(\.sessions).allSatisfy(\.allowsBlockedAbort))
     }
 
+    /// This build handles `intake.create`, so every project says so: the phone's licence to send it.
+    func testTheProjectionLicensesCreatingAnIntakeOnEveryProject() {
+        let store = store()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        XCTAssertTrue(FleetProjection.snapshot(of: store).projects.allSatisfy { $0.canCreateIntake == true })
+    }
+
     /// This build drives the "Type something" row, so every session says so.
     func testTheProjectionSaysThisMacTakesTypedAnswers() {
         let store = store()

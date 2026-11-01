@@ -76,7 +76,8 @@ enum FleetProjection {
                 )
             },
             intakes: intakes,
-            swarm: swarm
+            swarm: swarm,
+            canCreateIntake: true
         )
     }
 

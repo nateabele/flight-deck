@@ -351,6 +351,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// The phone's ✓ or ✗ on a thread's diff (`intake.diff.decide`). Refused with `diff_stale`
     /// when a newer round left the diff unrebasable: accepting it would apply a guess.
     case intakeDiffDecide(id: UUID, token: UUID, threadID: UUID, diffID: UUID, accept: Bool)
+    /// The phone starting a new intake (`intake.create`): `id` is the phone's own, minted before
+    /// the send so it can open that intake's screen without waiting for the Mac's answer, and
+    /// `intent` is the outcome as typed. The Mac runs the same capture its Triage button does.
+    /// **Sent only to a project whose snapshot has `canCreateIntake == true`** — an older Mac
+    /// drops the socket on this unknown op, and there is no intake yet to carry a flag on.
+    case intakeCreate(id: UUID, token: UUID, project: UUID, intent: String)
 
     /// Pause or resume project `project`'s swarm (L3-S §8). Idempotent by state, so no token.
     /// Sent only for a project whose snapshot carries `swarm`, which an older Mac never sends —
@@ -368,6 +374,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case command, stage, mode, noteID, kind, checkpoint, quote, preset, config, base
         case round, digest, answers
         case threadID, anchor, diffID, accept, turn
+        case intent
     }
 
     private enum Op: String, Codable {
@@ -398,6 +405,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeThreadAnswer = "intake.thread.answer"
         case intakeThreadResolve = "intake.thread.resolve"
         case intakeDiffDecide = "intake.diff.decide"
+        case intakeCreate = "intake.create"
         case swarmPause = "swarm.pause"
         case swarmResume = "swarm.resume"
         case handoffConfirm = "handoff.confirm"
@@ -560,6 +568,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(threadID, forKey: .threadID)
             try c.encode(diffID, forKey: .diffID)
             try c.encode(accept, forKey: .accept)
+        case .intakeCreate(let id, let token, let project, let intent):
+            try c.encode(Op.intakeCreate, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(project, forKey: .project)
+            try c.encode(intent, forKey: .intent)
         case .swarmPause(let project):
             try c.encode(Op.swarmPause, forKey: .op); try c.encode(project, forKey: .project)
         case .swarmResume(let project):
@@ -757,6 +771,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 threadID: try c.decode(UUID.self, forKey: .threadID),
                 diffID: try c.decode(UUID.self, forKey: .diffID),
                 accept: try c.decode(Bool.self, forKey: .accept)
+            )
+        case .intakeCreate:
+            self = .intakeCreate(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                project: try c.decode(UUID.self, forKey: .project),
+                intent: try c.decode(String.self, forKey: .intent)
             )
         case .swarmPause: self = .swarmPause(project: try c.decode(UUID.self, forKey: .project))
         case .swarmResume: self = .swarmResume(project: try c.decode(UUID.self, forKey: .project))

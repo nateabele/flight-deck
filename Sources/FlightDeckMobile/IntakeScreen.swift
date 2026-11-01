@@ -26,6 +26,13 @@ struct IntakeScreen: View {
                     Text("Couldn't load this intake.").font(.subheadline).foregroundStyle(.secondary)
                     Button { model.refresh() } label: { Text("Retry").font(.subheadline) }
                 }
+            } else if model.awaitingCreation {
+                // Opened before the Mac has the intake: Triage pushed this screen as it sent the
+                // create. A refusal pops it again, so this only ever waits.
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Sending to your Mac…").font(.subheadline).foregroundStyle(.secondary)
+                }
             } else {
                 ProgressView()
             }

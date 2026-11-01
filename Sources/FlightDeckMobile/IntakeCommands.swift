@@ -17,7 +17,7 @@ protocol IntakeCommanding: AnyObject {
 /// answer reuse a token kept from a timed-out send of the last, which the Mac acks as a
 /// duplicate and drops without a word.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds, create
     case answer(String)
     /// Planning's Retry (`intake.retry`): re-run what halted.
     case retry
@@ -60,6 +60,9 @@ enum CommandCopy {
             case "write_failed": return "Your Mac couldn't save that. Try again."
             case "no_agents": return "No agent is available on your Mac to run planning rounds."
             case "unknown_intake": return "This intake is no longer on your Mac."
+            case "unknown_project": return "That project is no longer on your Mac."
+            case "no_flight_control": return "Flight Control isn't turned on for that project on your Mac."
+            case "empty_intent": return "Describe the outcome first."
             case "unknown_checkpoint", "unknown_block", "rounds_changed":
                 return "The plan changed — reopen it and try again."
             case "invalid_config": return "Your Mac couldn't use those settings."

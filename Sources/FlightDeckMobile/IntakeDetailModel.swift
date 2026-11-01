@@ -17,6 +17,10 @@ final class IntakeDetailModel {
     private(set) var detail: WireIntakeDetail?
     private(set) var failure: String?
     private(set) var gone = false
+    /// True from the phone minting this intake's id until the Mac answers the create: the screen
+    /// is open before the Mac has heard of the intake, and its `unknown_intake` is "not yet",
+    /// not "no longer on your Mac".
+    var awaitingCreation = false
     /// Rounds edits not yet sent, by `RoundEditing.draftKey`: one per fidelity while it is being
     /// chosen, one for the running config while shaping. Held here, with the detail, so an edit
     /// survives leaving the inspector for the fidelity list and back.
@@ -57,7 +61,7 @@ final class IntakeDetailModel {
             case .success(nil):
                 self.gone = false
             case .failure(.server(code: "unknown_intake")):
-                self.gone = true
+                if !self.awaitingCreation { self.gone = true }
             case .failure(.disconnected):
                 break
             case .failure(let error):

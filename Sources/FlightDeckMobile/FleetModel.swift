@@ -47,6 +47,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     @ObservationIgnored let cache: PhoneCache?
     /// What is typed in each conversation's composer, kept as it is typed. See `DraftStore`.
     @ObservationIgnored let drafts: DraftStore?
+    /// What is typed in the New Intake sheet, per project. See `NewIntakeModel`.
+    @ObservationIgnored let intakeDrafts: DraftStore?
     /// Where the next connector resumes from: the sequence `fleet` was folded to and the epoch
     /// it was counted in, updated with every `onFleet`. `nil` means resume from nothing.
     ///
@@ -109,16 +111,31 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// fetcher, and `lazy` does not compose with `@Observable`); `@ObservationIgnored` because
     /// it is its own observable and never reassigned.
     @ObservationIgnored private(set) var flightControl: FlightControlModel!
+    /// The New Intake sheet's state; built beside `flightControl`, which sends its command.
+    @ObservationIgnored private(set) var newIntake: NewIntakeModel!
 
     init(
         store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil,
-        drafts: DraftStore? = nil, answerDrafts: AnswerDraftStore? = nil
+        drafts: DraftStore? = nil, answerDrafts: AnswerDraftStore? = nil, intakeDrafts: DraftStore? = nil
     ) {
         self.store = store
         self.cache = cache
         self.drafts = drafts
+        self.intakeDrafts = intakeDrafts
         self.mac = store.load()
         self.flightControl = FlightControlModel(fetcher: self, commander: self, answerDrafts: answerDrafts)
+        self.newIntake = NewIntakeModel(
+            flightControl: flightControl, drafts: intakeDrafts,
+            open: { [weak self] id in
+                guard let self else { return 0 }
+                let depth = self.path.count
+                self.path.append(IntakeRoute.intake(id))
+                return depth
+            },
+            close: { [weak self] depth in
+                guard let self, self.path.count > depth else { return }
+                self.path.removeLast(self.path.count - depth)
+            })
         // A cold launch resumes from the fleet cached on disk, or asks for EVERYTHING.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
@@ -336,6 +353,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         path = NavigationPath()
         // Same reasoning: queued banners and cached intake bodies name the revoked pairing's work.
         flightControl.reset()
+        newIntake.reset()
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -1116,6 +1134,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // What was typed for the old pairing's sessions is that pairing's too.
         drafts?.purgeAll()
         flightControl.purgeAnswerDrafts()
+        intakeDrafts?.purgeAll()
     }
 
     /// One short, structural word per state — never the Mac's name, which is a user-chosen

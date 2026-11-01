@@ -4,7 +4,7 @@
 "Fleet replication" section of [ARCHITECTURE.md](ARCHITECTURE.md)). This doc is what only a
 device on a network can prove, plus how to get a build onto one.
 
-Flight Control (planning intakes) is not on the phone yet; its design handoff is [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
+Flight Control (planning intakes) is on the phone: watch, steer, answer, choose a fidelity, edit rounds and start a new intake from a project header's +. The design handoff is [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 
 **Some of it now runs.** `FlightDeckMobileTests` is an app-hosted unit suite on the simulator —
 `./scripts/test-ios.sh` — and it covers the phone's decision-making: the typed-code field, the
@@ -823,6 +823,22 @@ page.
     keep their old behaviour. Against a Mac from before this the viewer says "Update Flight Deck
     on your Mac to open files from the phone." Wrong: a spinner that never ends, a split character (`�`) mid-file, or the whole file fetched
     before anything draws.
+
+105. **Start an intake from the phone.** On a project with Flight Control on, press and hold the
+    header's + : "New Intake…" is the first row, a divider, then the session rows. (A plain tap
+    still opens a new session.) The sheet reads Cancel · New Intake · Triage, with the Project row
+    preselected to the header you used and a large "Describe the outcome…" field with the
+    keyboard up; Triage is dimmed until there is text. Type, tap Cancel, reopen: the text is
+    still there, and a different project has its own draft. Tap Triage: the sheet closes onto the
+    new intake's screen ("Sending to your Mac…" for a moment at most), the Mac shows the intake
+    triaging with the same text, and the draft is gone from the sheet. Wrong: the + tap opening the
+    sheet, the intake missing from the Mac, the draft surviving a successful Triage, an error
+    flashing on the new intake's screen. Then Airplane Mode on and Triage: the sheet stays up
+    with "Not connected to your Mac, so this wasn't sent." and the text intact. Last, turn
+    Flight Control off for the project on the Mac and Triage from a sheet that was already open:
+    back on the sheet with "Flight Control isn't turned on for that project on your Mac." and the
+    draft intact. Version skew: this phone against a Mac from before this shows no "New Intake…"
+    row anywhere and stays connected.
 
 ## A second checklist: the iOS plumbing
 

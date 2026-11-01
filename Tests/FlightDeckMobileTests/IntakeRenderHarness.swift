@@ -74,6 +74,26 @@ final class IntakeRenderHarness: XCTestCase {
         }
     }
 
+    /// The New Intake sheet (spec §4.10): empty with its placeholder, and with a draft.
+    func testDrawNewIntakeSheet() throws {
+        try begin()
+        let flightControl = FlightControlModel(fetcher: stub(Fixture.states[0].1))
+        let model = NewIntakeModel(flightControl: flightControl, drafts: nil, open: { _ in 0 }, close: { _ in })
+        let projects = [
+            WireProject(id: UUID(), name: "larkOS", path: "/w/larkOS", intakes: [], canCreateIntake: true),
+            WireProject(id: UUID(), name: "flight-deck", path: "/w/flight-deck", intakes: [], canCreateIntake: true)]
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let name = Self.styleName(style)
+            model.present(project: projects[0].id)
+            try write(screenImage(of: NewIntakeSheet(model: model, projects: projects), style: style, size: nil),
+                      to: "new-intake-empty-\(name).png")
+            model.text = "Let a phone start an intake: a + on the project header, a sheet with one field, and the draft kept per project."
+            try write(screenImage(of: NewIntakeSheet(model: model, projects: projects), style: style, size: nil),
+                      to: "new-intake-draft-\(name).png")
+            model.text = ""
+        }
+    }
+
     /// The five strips stacked, measured then drawn (two passes, as `ProseRenderHarness` does), so
     /// the tones can be compared side by side without the list around them.
     func testDrawStrips() throws {

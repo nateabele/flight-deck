@@ -29,6 +29,13 @@ final class DraftStore: @unchecked Sendable {
         return support.appendingPathComponent("FlightDeckDrafts", isDirectory: true)
     }
 
+    /// Where the New Intake drafts live, keyed by project id. A directory of its own because
+    /// `prune(keeping:)` drops every file whose id is not a live session's, which would sweep a
+    /// project's draft away with it.
+    static func defaultIntakeDirectory() -> URL {
+        defaultDirectory().deletingLastPathComponent().appendingPathComponent("FlightDeckIntakeDrafts", isDirectory: true)
+    }
+
     private func url(_ session: UUID) -> URL {
         directory.appendingPathComponent("\(session.uuidString).txt")
     }

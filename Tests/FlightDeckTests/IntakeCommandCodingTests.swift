@@ -63,6 +63,13 @@ final class IntakeCommandCodingTests: XCTestCase {
         XCTAssertEqual((json["base"] as? [String: Any])?["refinementCap"] as? Int, 3)
     }
 
+    func testCreateRoundTripsWithItsProjectAndIntent() throws {
+        try roundTrip(.intakeCreate(id: id, token: token, project: UUID(), intent: "Add dark mode\nto settings"), op: "intake.create")
+        let data = try JSONEncoder().encode(FleetCommand.intakeCreate(id: id, token: token, project: UUID(), intent: "x"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["op", "id", "token", "project", "intent"])
+    }
+
     /// A start with no config is `intake.choose`, unchanged on the wire: an edit never rides on a
     /// command an older Mac would read and drop the edit from.
     func testChooseIsUnchangedOnTheWire() throws {
@@ -81,7 +88,8 @@ final class IntakeCommandCodingTests: XCTestCase {
             .intakeRemoveNote(id: id, token: token, noteID: noteID),
             .intakeChoose(id: id, token: token, preset: "sketch"),
             .intakeStart(id: id, token: token, preset: "sketch", config: IntakeWireCodingTests.config, base: IntakeWireCodingTests.config),
-            .intakeRounds(id: id, token: token, config: IntakeWireCodingTests.config, base: IntakeWireCodingTests.config)]
+            .intakeRounds(id: id, token: token, config: IntakeWireCodingTests.config, base: IntakeWireCodingTests.config),
+            .intakeCreate(id: id, token: token, project: UUID(), intent: "x")]
         for c in all {
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(me)), "\(c)")
             XCTAssertFalse(ControlScope.permits(c, level: .ownSession, caller: .session(id)), "\(c)")

@@ -181,6 +181,9 @@ struct FleetListScreen: View {
             // a list to show.
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: Bindable(model.newIntake).isPresented) {
+                NewIntakeSheet(model: model.newIntake, projects: model.fleet.projects.filter(NewIntakeModel.offers))
+            }
             .toolbar {
                 // The Mac's name rides in the title area as a subtitle rather than taking a
                 // list row of its own. It is context, not content: there is only ever one
@@ -469,6 +472,16 @@ struct FleetListScreen: View {
     /// can only fail.
     @ViewBuilder
     private func newSessionMenu(for project: WireProject) -> some View {
+        // First, apart from the session rows: it starts a different kind of work, and the tap on
+        // the `+` itself stays a new session.
+        if NewIntakeModel.offers(project) {
+            Button {
+                model.newIntake.present(project: project.id)
+            } label: {
+                Label("New Intake…", systemImage: "sparkles")
+            }
+            Divider()
+        }
         let options = model.newSessionOptions[project.id]
         if let options, !options.isEmpty {
             // Grouped by agent, in arrival order — `Dictionary(grouping:)` would lose it, and

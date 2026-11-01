@@ -97,6 +97,30 @@ final class IntakeSteerCommandServiceTests: XCTestCase {
     }
 }
 
+extension IntakeSteerCommandServiceTests {
+    /// `intake.create` through the real arm: a project the Mac does not have, and one with Flight
+    /// Control off, are each refused by name and make nothing. (The accepted path is
+    /// `IntakePhoneCommandTests`; it starts a triage run this harness has no stand-in for.)
+    func testCreateRefusesAnUnknownProjectAndOneWithFlightControlOff() async throws {
+        let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
+                                 preferences: prefs, daemonControl: LiveDaemonControl(), intakesRoot: root)
+        store.newSession(in: URL(fileURLWithPath: "/w/larkOS-\(UUID().uuidString.prefix(6))", isDirectory: true))
+        let project = store.repos[0].id
+        harness = FleetTestHarness(store: store)
+        try await harness.start()
+
+        let unknown = try await send(.intakeCreate(id: UUID(), token: UUID(), project: UUID(), intent: "Do it"))
+        guard case .err(_, let unknownCode, _) = unknown else { return XCTFail("expected err, got \(unknown)") }
+        XCTAssertEqual(unknownCode, "unknown_project")
+
+        let off = try await send(.intakeCreate(id: UUID(), token: UUID(), project: project, intent: "Do it"))
+        guard case .err(_, let offCode, _) = off else { return XCTFail("expected err, got \(off)") }
+        XCTAssertEqual(offCode, "no_flight_control")
+        XCTAssertTrue(store.intakeService.intakes.isEmpty)
+    }
+}
+
 private enum WireIntakeDetailFixture {
     static let config = IntakeDetailProjection.wireConfig(PresetExpansion.config(for: .fullPlan, available: .defaults)!)
 }

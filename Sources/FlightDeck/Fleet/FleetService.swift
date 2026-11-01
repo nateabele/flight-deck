@@ -1502,6 +1502,16 @@ final class FleetService: ObservableObject {
                                                                accept: accept) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeCreate(let id, let token, let project, let intent):
+            // The two refusals that need what only the store knows — which project this id is,
+            // and whether Flight Control is on for it — are made here; the rest is the service's.
+            guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
+            guard store.preferences?.projectSettings(path).flywheelEnabled == true else {
+                return .err(cid: cid, code: "no_flight_control")
+            }
+            if let code = store.intakeService.phoneCreate(id, token: token, project: path, intent: intent) {
+                return .err(cid: cid, code: code)
+            }
         case .swarmPause(let project):
             guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
             guard store.swarmServiceIfBuilt?.pause(project: path) == true else { return .err(cid: cid, code: "no_swarm") }

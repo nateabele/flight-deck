@@ -1009,9 +1009,11 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Pipeline
 
-    func capture(intent: String, project: String) {
+    /// `id` is the phone's own when the intake starts there (`phoneCreate`); the Mac's button
+    /// leaves it to mint one.
+    func capture(intent: String, project: String, id: UUID = UUID()) {
         guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now())
+        let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now(), id: id)
         save(intake)
         // The start of an intake is when the model menus are refreshed (and what they list is
         // re-read from each CLI); off the main actor, so triage never waits on it.
@@ -1476,6 +1478,21 @@ final class IntakeService: ObservableObject {
         guard let play = PlayMode(rawValue: mode) else { return refuse("unknown_mode", id) }
         accept(token, for: id)
         setDefaultPlay(id, play)
+        return nil
+    }
+
+    /// The phone starting an intake (`intakeCreate`): the same `capture` the Mac's Triage button
+    /// runs, under the id the phone minted. `project` is the path `FleetService` resolved from the
+    /// phone's project id, after checking Flight Control is on for it — this service knows
+    /// neither project ids nor their settings. An id that already exists is a retry of a create
+    /// whose ack was lost (the phone reuses the id for the same press) and is acked whatever its
+    /// token, since a phone that restarted between the two sends a new one; it never overwrites
+    /// the intake already there.
+    func phoneCreate(_ id: UUID, token: UUID, project: String, intent: String) -> String? {
+        if alreadyAccepted(token, for: id) || intake(id) != nil { return nil }
+        guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return refuse("empty_intent", id) }
+        accept(token, for: id)
+        capture(intent: intent, project: project, id: id)
         return nil
     }
 
