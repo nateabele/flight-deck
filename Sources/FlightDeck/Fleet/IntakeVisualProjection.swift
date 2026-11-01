@@ -26,13 +26,19 @@ enum IntakeVisualProjection {
                 id: block.id.rawValue, revision: primary.revision.r,
                 kinds: reps.map(\.revision.manifest.kind),
                 alternates: reps.enumerated().filter { $0.offset != model.primaryIndex }.map { _, rep in
-                    WireVisualAlternate(revision: rep.revision.r, kind: rep.revision.manifest.kind, reason: rep.reason)
+                    WireVisualAlternate(revision: rep.revision.r, kind: rep.revision.manifest.kind, reason: rep.reason,
+                                        files: wireFiles(rep.revision.manifest))
                 },
                 states: m.states, sizes: m.sizes,
                 aspect: PlanExporter.defaultSnapshot(m).flatMap { aspect(reader, block.id, r: primary.revision.r, png: $0) },
-                files: m.files.map { WireVisualFile(path: $0.path, size: $0.size, sha256: $0.sha256) }))
+                files: wireFiles(m)))
         }
         return out
+    }
+
+    /// A revision's fetchable files as the wire lists them: an alternate's too, so the phone can open it.
+    static func wireFiles(_ m: VisualManifest) -> [WireVisualFile] {
+        m.files.map { WireVisualFile(path: $0.path, size: $0.size, sha256: $0.sha256) }
     }
 
     /// Width over height from a PNG's IHDR (bytes 16–23), read through the store like any other

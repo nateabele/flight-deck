@@ -139,6 +139,9 @@ final class VisualIntegrationTests: XCTestCase {
         XCTAssertEqual(ref.kinds, ["sequence", "component"])
         XCTAssertEqual(ref.alternates.map(\.revision), [2])
         XCTAssertEqual(ref.alternates.map(\.kind), ["component"])
+        let r2 = try XCTUnwrap(DiskVisualStore(tape: t).revision(id, r: 2)).manifest
+        XCTAssertEqual(ref.alternates.first?.files, r2.files.map { WireVisualFile(path: $0.path, size: $0.size, sha256: $0.sha256) },
+                       "an alternate lists its own files, so the phone can open it")
     }
 
     /// The store hook V1 reads through is always a disk store, so the editor's hooks never go
