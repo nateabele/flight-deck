@@ -777,6 +777,62 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(runner.calls("encoder").first).prompt.contains(work.appendingPathComponent("graph.json").path))
     }
 
+    // MARK: - Visuals (P2a V4)
+
+    let visualPlan = "# Plan\n\n## Scope\nOne\n\n```fd-visual id=pairing\nPairing handshake\n```\n"
+    func citing(_ id: String) -> ChangeOp {
+        .createBead(NewBead(tempId: "t1", title: "New", description: "d", visualRefs: [VisualRef(visualID: id, states: ["default"])]))
+    }
+
+    /// A plan with no visuals validates against `Set()`, not nil: a cited id is `unknownVisual`,
+    /// and goes back to the same session once, like any other validation error.
+    func testEncodeRefusesACitedVisualThePlanDoesNotHave() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "encoder" ? ok(call, "enc-1", self.changeSetReply(pre: self.existingPre, extra: [self.citing("ghost")]))
+                : ok(call, "enc-1", self.changeSetReply(pre: self.existingPre))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .encode, round: 0, major: true),
+                                                                    inputs(config(), tape: try refineTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        let correction = try XCTUnwrap(runner.calls("correction").first)
+        XCTAssertEqual(correction.prompt, RoundPrompts.changeSetCorrection(errors: [.unknownVisual("ghost")], observedAt: now))
+        XCTAssertFalse(try XCTUnwrap(runner.calls("encoder").first).prompt.contains("Visuals in this plan"),
+                       "no catalogue for a plan with none")
+    }
+
+    /// A stored visual in the head plan is in encode's catalogue, and a task citing it validates.
+    func testEncodeGetsTheVisualsCatalogueAndMayCiteIt() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "enc", self.changeSetReply(pre: self.existingPre, extra: [self.citing("pairing")]))
+        }
+        let tape = try refineTape()
+        try writeUserEdits(visualPlan, checkpoint: 2)
+        try VisualDiskFixture.install(store, id: "pairing")
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .encode, round: 0, major: true),
+                                                                        inputs(config(), tape: tape)))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertTrue(runner.calls("correction").isEmpty)
+        let encoder = try XCTUnwrap(runner.calls("encoder").first)
+        XCTAssertTrue(encoder.prompt.contains("Visuals in this plan"), encoder.prompt)
+        XCTAssertTrue(encoder.prompt.contains("`pairing` — sequence: Pairing handshake"), encoder.prompt)
+        let cs = try ChangeSet.decode(try XCTUnwrap(files["changeset.json"]))
+        guard case .createBead(let b) = cs.ops.last else { return XCTFail("\(cs.ops)") }
+        XCTAssertEqual(b.visualRefs?.map(\.visualID), ["pairing"])
+    }
+
+    /// A polish patch is held to the same rule: a visual the plan does not have is refused once.
+    func testAPolishPatchCitingAnUnknownVisualIsCorrected() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "polisher" ? ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.citing("ghost")])))
+                : ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.newBead])))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                    inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        let correction = try XCTUnwrap(runner.calls("correction").first)
+        XCTAssertTrue(correction.prompt.contains("ghost"), correction.prompt)
+    }
+
     func testEncodeSecondFailurePauses() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             ok(call, "enc", self.changeSetReply(pre: Precondition(status: "closed", assignee: nil)))

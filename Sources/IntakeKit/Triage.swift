@@ -18,10 +18,14 @@ public enum Triage {
     /// schema stays byte-stable for `triage-schema.json`; an unknown dimension is dropped when
     /// the proposal is registered instead of rejected by the CLI.
     private static let kindProposal = #"{"type":["object","null"],"additionalProperties":false,"required":["name","description","dimensions"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"dimensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["dimension","weight"],"properties":{"dimension":{"type":"string"},"weight":{"type":"number"}}}}}}"#
+    /// `visualRefs` (planning v2 §12, V-R3): the visuals a new task is built to match. Every op
+    /// carries it (strict mode lists every property); only a `createTask`, in a round given a
+    /// visuals catalogue, sets it.
+    private static let visualRefs = #"{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"required":["visualID","states"],"properties":{"visualID":{"type":"string"},"states":{"type":"array","items":{"type":"string"}}}}}"#
     /// One op's schema — also every op inside a polish-family patch (`RoundSchemas.patch`).
     static let op = """
     {"type":"object","additionalProperties":false,
-     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
+     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal","visualRefs"],
      "properties":{
       "op":{"type":"string","enum":["createTask","addEdge","editTask","reopen","followUp"]},
       "tempId":\(nullableString),"title":\(nullableString),"type":\(nullableString),
@@ -36,7 +40,7 @@ public enum Triage {
       "delivery":{"type":["object","null"],"additionalProperties":false,"required":["rating","reason"],
                   "properties":{"rating":{"type":"string","enum":["clarifying","scopeChange","invalidating"]},"reason":{"type":"string"}}},
       "reason":\(nullableString),"of":\(nullableString),
-      "taskKind":\(nullableString),"kindProposal":\(kindProposal)}}
+      "taskKind":\(nullableString),"kindProposal":\(kindProposal),"visualRefs":\(visualRefs)}}
     """
 
     /// The `changeSet` object on its own — a nullable `{graphObservedAt, ops}` shape, `ops`
@@ -243,6 +247,7 @@ public enum Triage {
           `pre`; also `delivery` when the task you are editing is `in_progress`.
         - `reopen`: `id`, `reason`, and `pre`.
         - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
+        - `visualRefs` is null on every op, unless a visuals list below says when to set it.
         """ + kindsRulesText(kinds)
     }
 

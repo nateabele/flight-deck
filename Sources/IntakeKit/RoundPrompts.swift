@@ -217,9 +217,12 @@ public struct RoundContext: Sendable {
     public var kinds: [TaskKind]
     /// What the human decided in ask threads since the last round (spec §11).
     public var threadDecisions: [ThreadDecision]
+    /// The plan's visuals a task may cite (spec §12), for encode. Empty for a plan with none.
+    public var visuals: [VisualCatalogueEntry]
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
                 readmeFile: String?, notes: [PlanNote] = [], noteVersions: [UUID: String] = [:], humanEdits: String? = nil,
-                observedAt: Date, kinds: [TaskKind] = [], threadDecisions: [ThreadDecision] = []) {
+                observedAt: Date, kinds: [TaskKind] = [], threadDecisions: [ThreadDecision] = [],
+                visuals: [VisualCatalogueEntry] = []) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
@@ -231,6 +234,7 @@ public struct RoundContext: Sendable {
         self.observedAt = observedAt
         self.kinds = kinds
         self.threadDecisions = threadDecisions
+        self.visuals = visuals
     }
 }
 
@@ -557,10 +561,39 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """)
+    }
+
+    /// The visuals catalogue encode reads (spec §12): each visual a task may cite, with the files
+    /// to open, and the rule for `visualRefs`. Empty for a plan with no visuals, so such a plan's
+    /// prompt is what it always was.
+    public static func visualsCatalogue(_ visuals: [VisualCatalogueEntry]) -> String {
+        guard !visuals.isEmpty else { return "" }
+        let list = visuals.map { v in
+            var line = "- `\(v.id)` — \(v.kind)"
+            let name = v.caption ?? (v.title.isEmpty ? nil : v.title)
+            if let name { line += ": \(name)" }
+            if let section = v.section { line += " (under \"\(section)\")" }
+            line += "\n  States: " + v.states.joined(separator: ", ")
+            line += "\n  Source: \(v.sourcePath)"
+            if let snap = v.snapshotPath { line += "\n  Snapshot: \(snap) (an image: open it with your file-reading tool if it reads images)" }
+            return line
+        }.joined(separator: "\n")
+        return """
+
+
+        Visuals in this plan (diagrams the work must match):
+        \(list)
+
+        For each `createTask` that implements one of these visuals, set `visualRefs` to the \
+        visuals it implements, each as `{"visualID": "<id>", "states": [...]}` with the states \
+        that task must match (an empty list means every state). Cite only ids listed above. \
+        FD adds the "Fidelity references" section to the task's description itself, so do not \
+        write one. Every other op, and a task that implements no visual, sets `visualRefs` to null.
+        """
     }
 
     public static func polish(_ c: RoundContext, planFile: String, changeSetFile: String, round: Int,

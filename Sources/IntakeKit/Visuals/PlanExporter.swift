@@ -145,9 +145,9 @@ public enum PlanExporter {
         var i = 0
         while i < lines.count {
             let line = lines[i]
-            guard let open = fenceOpen(line) else { md.append(line); i += 1; continue }
+            guard let open = PlanVisualFence.fenceOpen(line) else { md.append(line); i += 1; continue }
             var j = i + 1
-            while j < lines.count, !isClose(lines[j], of: open) { j += 1 }
+            while j < lines.count, !PlanVisualFence.isClose(lines[j], of: open) { j += 1 }
             let closed = j < lines.count
             let end = closed ? j : lines.count - 1
             if closed, let v = PlanVisualFence.parse(open.info), let id = VisualID(rawValue: v.id) {
@@ -228,7 +228,9 @@ public enum PlanExporter {
         return parts[0] != Substring(alternatesDir)
     }
 
-    private static func defaultSnapshot(_ m: VisualManifest) -> String? {
+    /// The snapshot a plan shows for a revision: the `default` state (else the first) at the
+    /// first size. Also the catalogue's snapshot path, so a round reads the picture release exports.
+    static func defaultSnapshot(_ m: VisualManifest) -> String? {
         let state = m.states.contains("default") ? "default" : (m.states.first ?? "default")
         let pngs = m.files.map(\.path).filter { $0.hasPrefix("snapshot@") && $0.hasSuffix(".png") && isSafe($0) }
         if let size = m.sizes.first, pngs.contains("snapshot@\(state)-\(size).png") { return "snapshot@\(state)-\(size).png" }
@@ -252,25 +254,6 @@ public enum PlanExporter {
 
     private static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
-    }
-
-    // Fence scanning follows the editor's rules: a closer has the same character, at least the
-    // opener's length, and no info string; a backtick opener's info has no backtick.
-    private struct Fence { var char: Character; var length: Int; var info: String }
-
-    private static func fenceOpen(_ line: String) -> Fence? {
-        let t = line.drop(while: { $0 == " " }).self
-        guard line.count - t.count <= 3, let c = t.first, c == "`" || c == "~" else { return nil }
-        let run = t.prefix(while: { $0 == c })
-        guard run.count >= 3 else { return nil }
-        let info = t.dropFirst(run.count).trimmingCharacters(in: .whitespaces)
-        if c == "`", info.contains("`") { return nil }
-        return Fence(char: c, length: run.count, info: info)
-    }
-
-    private static func isClose(_ line: String, of f: Fence) -> Bool {
-        guard let o = fenceOpen(line) else { return false }
-        return o.char == f.char && o.length >= f.length && o.info.isEmpty
     }
 }
 
