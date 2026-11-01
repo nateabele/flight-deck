@@ -114,8 +114,10 @@ extension IntakeService {
             case .notOwned(let p): return "\(p)/ is not this plan's folder, so release will not overwrite it."
             case .ignored(let paths): return "git ignores files the export must commit: " + paths.joined(separator: ", ")
             case .badSlug(let s): return "\"\(s)\" is not a usable folder name for the plan export."
+            case .notARepo(let path):
+                return "\(path) is not in a git repo, so release cannot commit the plan there. Run git init (or open the project inside its repo), then release again."
             case .notRepoRoot(let top):
-                return "The project is not the root of its git repo (git says \(top.isEmpty ? "none" : top)), so the plan cannot be exported."
+                return "The project is not inside the git repo git reports (\(top.isEmpty ? "none" : top)), so the plan cannot be exported."
             case .timeout(let step): return "git \(step) did not finish while exporting the plan (a hook may be stuck)."
             case .io(let detail): return "Writing the plan export failed: \(detail)"
             }

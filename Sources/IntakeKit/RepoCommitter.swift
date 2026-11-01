@@ -17,7 +17,10 @@ public struct RepoCommitter: Sendable {
         case notOwned(String)
         case ignored([String])
         case badSlug(String)
+        /// git's top (the payload) does not contain the project, or the project folder changed under us.
         case notRepoRoot(String)
+        /// The project is in no git repo; the path is the project's.
+        case notARepo(String)
         case timeout(step: String)
         /// A file operation failed.
         case io(String)
@@ -89,9 +92,20 @@ public struct RepoCommitter: Sendable {
         let dir = export.directory
         let spec = ":(literal)\(dir)"
 
+        // The project may be the repo's top or any folder inside it (a monorepo app): the export is
+        // `<project>/docs/plans/<slug>/`. Every git call runs with the project as its directory,
+        // so each pathspec is project-relative; what git reports back is top-relative.
         let repoReal = Self.realpath(repo.path) ?? repo.path
-        let top = try await git(repo, "rev-parse", "--show-toplevel").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.realpath(top) == repoReal else { throw Failure.notRepoRoot(top) }
+        let top: String
+        do {
+            top = try await git(repo, "rev-parse", "--show-toplevel").trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch Failure.git(_, let stderr) where stderr.lowercased().contains("not a git repository") {
+            throw Failure.notARepo(repo.path)
+        }
+        let topReal = Self.realpath(top) ?? top
+        guard repoReal == topReal || repoReal.hasPrefix(topReal.hasSuffix("/") ? topReal : topReal + "/") else {
+            throw Failure.notRepoRoot(top)
+        }
 
         // From here every delete, write and rollback goes through these descriptors, opened one
         // component at a time without following links. A path would be looked up again at each
@@ -100,7 +114,8 @@ public struct RepoCommitter: Sendable {
         var docsDir: SafeTree.Dir?, plansDir: SafeTree.Dir?, slugDir: SafeTree.Dir?
         do {
             rootDir = try SafeTree.openRoot(repoReal)
-            let a = SafeTree.identity(rootDir), b = SafeTree.identity(ofPath: top)
+            // The descriptor is the project folder git just placed inside its repo, not a swap.
+            let a = SafeTree.identity(rootDir), b = SafeTree.identity(ofPath: repo.path)
             guard let a, let b, a.dev == b.dev, a.ino == b.ino else { throw Failure.notRepoRoot(top) }
             docsDir = try SafeTree.openChild(rootDir, "docs")
             plansDir = try docsDir.flatMap { try SafeTree.openChild($0, "plans") }

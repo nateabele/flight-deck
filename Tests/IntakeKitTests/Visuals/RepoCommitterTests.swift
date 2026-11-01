@@ -258,11 +258,48 @@ final class RepoCommitterTests: XCTestCase {
         }
     }
 
-    func testAFolderInsideAnOuterRepoIsNotARepoRoot() async throws {
-        let inner = repo.appendingPathComponent("sub", isDirectory: true)
-        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
-        do { _ = try await committer().commit(sample(), repo: inner); XCTFail() } catch RepoCommitter.Failure.notRepoRoot {}
-        XCTAssertFalse(exists("sub/docs"))
+    /// A project in a subfolder of a repo (a monorepo app): the export lands in
+    /// `<project>/docs/plans/<slug>/`, and only that folder is committed, named from the top.
+    func testAProjectInASubfolderOfARepoExportsIntoItselfAndCommitsOnlyThatFolder() async throws {
+        let project = repo.appendingPathComponent("apps/web", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try write("apps/web/src.txt", "mine\n")
+        try write("other.txt", "edited\n")
+        let result = try await committer().commit(sample(), repo: project)
+        XCTAssertFalse(result.noChange)
+        XCTAssertEqual(Set(result.paths), ["apps/web/docs/plans/demo/plan.md", "apps/web/docs/plans/demo/.flightdeck-intake",
+                                            "apps/web/docs/plans/demo/visuals/a/x.txt"])
+        XCTAssertEqual(read("apps/web/docs/plans/demo/plan.md"), "plan v1")
+        XCTAssertFalse(exists("docs/plans"), "nothing at the repo's top")
+        let committed = try await git("show", "--name-only", "--format=", "HEAD")
+        XCTAssertTrue(committed.split(separator: "\n").allSatisfy { $0.hasPrefix("apps/web/docs/plans/demo/") }, committed)
+        let status = try await git("status", "--porcelain")
+        XCTAssertTrue(status.contains(" M other.txt") && status.contains("?? apps/web/src.txt"), status)
+        // The re-release and the preview see the same folder.
+        let preview = try await committer().preview(sample("plan v2"), repo: project)
+        XCTAssertTrue(preview.paths.contains("docs/plans/demo/plan.md"), "\(preview.paths)")
+        let again = try await committer().commit(sample("plan v2"), repo: project)
+        XCTAssertFalse(again.noChange)
+    }
+
+    /// Uncommitted changes in a nested project's own plan folder still refuse.
+    func testANestedProjectsDirtyPlanFolderRefuses() async throws {
+        let project = repo.appendingPathComponent("apps/web", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        _ = try await committer().commit(sample(), repo: project)
+        try write("apps/web/docs/plans/demo/notes.md", "mine\n")
+        do { _ = try await committer().commit(sample("plan v2"), repo: project); XCTFail("should refuse") }
+        catch RepoCommitter.Failure.dirty {}
+        XCTAssertEqual(read("apps/web/docs/plans/demo/plan.md"), "plan v1")
+    }
+
+    /// A project in no git repo at all is refused in plain words, with nothing written.
+    func testAProjectInNoRepoIsRefusedPlainly() async throws {
+        let loose = FileManager.default.temporaryDirectory.appendingPathComponent("rc-loose-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: loose, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: loose) }
+        await assertFails(.notARepo(loose.path)) { _ = try await committer().commit(sample(), repo: loose) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: loose.appendingPathComponent("docs").path))
     }
 
     func testABlockedHookTimesOutInsteadOfHanging() async throws {
