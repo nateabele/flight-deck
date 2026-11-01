@@ -119,9 +119,46 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
     private var _hold = false
     var holdApply: Bool { get { lock.withLock { _hold } } set { lock.withLock { _hold = newValue } } }
 
-    func apply(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
+    private var _state: [String: [TofuResource]] = [:]
+    private var _upChanges: [TofuChange]?
+    private var _foreign: [String: [TofuChange]] = [:]
+    /// Each work directory's state, by machine name: what `resources` reads and a destroy plan deletes.
+    var state: [String: [TofuResource]] { get { lock.withLock { _state } } set { lock.withLock { _state = newValue } } }
+    /// What an `up` plan answers in place of creating `created(name)`: an import, say.
+    var upChanges: [TofuChange]? { get { lock.withLock { _upChanges } } set { lock.withLock { _upChanges = newValue } } }
+    /// Deletes a destroy plan adds for a machine, beyond its state: resources Flight Deck never made.
+    var foreign: [String: [TofuChange]] { get { lock.withLock { _foreign } } set { lock.withLock { _foreign = newValue } } }
+
+    /// What an `up` of `name` creates.
+    static func created(_ name: String) -> [TofuResource] {
+        [TofuResource(address: "aws_instance.this", type: "aws_instance", id: "i-\(name)"),
+         TofuResource(address: "aws_security_group.this", type: "aws_security_group", id: "sg-\(name)")]
+    }
+
+    func plan(workdir: URL, destroy: Bool) async throws -> [TofuChange] {
+        let name = workdir.lastPathComponent
+        record(destroy ? "plan -destroy" : "plan")
+        guard destroy else {
+            return upChanges ?? Self.created(name).map {
+                TofuChange(address: $0.address, type: $0.type, managed: true, actions: ["create"], importing: false, id: nil)
+            }
+        }
+        return (state[name] ?? []).map {
+            TofuChange(address: $0.address, type: $0.type, managed: true, actions: ["delete"], importing: false, id: $0.id)
+        } + (foreign[name] ?? [])
+    }
+
+    func applyPlan(workdir: URL, destroy: Bool, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
+        destroy ? try await destroyPlan(workdir: workdir) : try await apply(workdir: workdir, progress: progress)
+    }
+
+    func resources(workdir: URL) async throws -> [TofuResource] { state[workdir.lastPathComponent] ?? [] }
+
+    private func apply(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
         record("apply")
         if holdApply { await applyGate.wait() }
+        // Created before any failure: a failed apply can still leave resources behind.
+        lock.withLock { _state[workdir.lastPathComponent] = Self.created(workdir.lastPathComponent) }
         // From a background-priority thread, as the live runner's stdout reader is: a caller
         // that hops each event to the main actor without waiting can see them after it moved on.
         await Task.detached(priority: .background) {
@@ -132,10 +169,13 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
         await afterApply?(workdir)
     }
 
-    func destroy(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
+    private func destroyPlan(workdir: URL) async throws {
         record("destroy")
         if let failDestroy { throw failDestroy }
-        _ = lock.withLock { _destroyed.insert(workdir.lastPathComponent) }
+        lock.withLock {
+            _destroyed.insert(workdir.lastPathComponent)
+            _state[workdir.lastPathComponent] = nil
+        }
     }
 
     func outputs(workdir: URL) async throws -> TofuOutputs {
@@ -366,6 +406,7 @@ final class InfraHarness {
     let registry: InfraRegistry
     let ledger: CostLedger
     let budgets: SessionBudgets
+    let provenance: ResourceProvenance
     let dialer = InfraHostDialer()
     /// The one clock for everything: the hosts' links, the Reaper, and the service's `now`.
     let clock = ManualHostLinkClock(now: InfraMachine.fixtureNow)
@@ -390,7 +431,8 @@ final class InfraHarness {
     /// What `env.baseEnvironment` answers; a test may make it slow or record where it ran.
     var baseEnvironment: @Sendable () async -> [String: String] = { ["PATH": "/usr/bin:/bin:/login/shell/bin"] }
 
-    lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, budgets: budgets, hosts: hosts, env: environment())
+    lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, budgets: budgets, provenance: provenance,
+                                                  hosts: hosts, env: environment())
 
     init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("infra-h-\(UUID().uuidString)")
@@ -405,6 +447,7 @@ final class InfraHarness {
         registry = InfraRegistry(fileURL: root.appendingPathComponent("infra.json"), workRoot: root.appendingPathComponent("infra"))
         ledger = CostLedger(fileURL: root.appendingPathComponent("infra-ledger.json"))
         budgets = SessionBudgets(fileURL: root.appendingPathComponent("infra-budgets.json"))
+        provenance = ResourceProvenance(fileURL: root.appendingPathComponent("infra-provenance.json"))
         hosts = HostService(registry: HostRegistry(fileURL: root.appendingPathComponent("hosts.json"), secrets: InMemoryHostSecretStore()),
                             controllerName: "test-mac", dial: dialer, clock: clock)
         tailnet = TailnetIntegration(cli: nil, http: FakeHTTP(), secrets: MemoryTailnetSecrets())
@@ -500,11 +543,21 @@ final class InfraHarness {
         m.session = session
         try registry.upsert(m)
         try prepareWorkdir(name)
+        // As `up` leaves it: the state holds what it created, and the provenance says so.
+        tofu.state[name] = FakeTofu.created(name)
+        try provenance.record(FakeTofu.created(name).map {
+            ProvenanceRecord(cloud: m.cloud, type: $0.type, id: $0.id, address: $0.address, machine: name, createdAt: createdAt)
+        })
         let vars: [String: Any] = ["fd_name": name, "fd_allow_cidr": m.allowCIDR ?? ""]
         try JSONSerialization.data(withJSONObject: vars).write(
             to: registry.workdir(for: name).appendingPathComponent("module").appendingPathComponent(InfraWorkdir.varsFile))
         if let hourlyUSD { try ledger.open(name: name, hourlyUSD: hourlyUSD, at: createdAt, session: session) }
         return m
+    }
+
+    /// Records `id` as a resource Flight Deck created, as an `up` would have.
+    func recordCreated(_ type: String, _ id: String, cloud: String = "aws", machine: String = "old") throws {
+        try provenance.record([ProvenanceRecord(cloud: cloud, type: type, id: id, address: "\(type).this", machine: machine, createdAt: now)])
     }
 
     /// What `name`'s host answers `host.info` with from now on.

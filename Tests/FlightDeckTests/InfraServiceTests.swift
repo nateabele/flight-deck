@@ -27,7 +27,7 @@ final class InfraServiceTests: XCTestCase {
         XCTAssertTrue((vars["fd_user_data"] as? String)?.contains("enroll --file") == true)
         XCTAssertEqual((vars["fd_labels"] as? [String: String])?["flightdeck-name"], "gpu")
         XCTAssertTrue(h.events.contains { if case .cost = $0 { return true }; return false })
-        XCTAssertEqual(h.tofu.calls, ["init", "apply", "output"])
+        XCTAssertEqual(h.tofu.calls, ["init", "plan", "apply", "output"])
         XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
         XCTAssertEqual(m.hourlyUSD, 0.5)
     }
@@ -449,6 +449,7 @@ extension InfraServiceTests {
     /// Spec §7.3: doctor runs the orphan scan too, listing each orphan with how to delete it,
     /// and each account it could not read — never a passing "orphans" check when one was.
     func testDoctorListsOrphansAndUnreadableAccounts() async throws {
+        try h.recordCreated("aws_instance", "i-9")
         h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost")]
         h.gcpAccount.listError = CloudAccountError.failed("gcloud: not signed in")
         let checks = await h.service.doctor()
@@ -577,8 +578,22 @@ extension InfraServiceTests {
         h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: "gpu"), lost]
         do { try await h.service.downOrphan(id: "instance:i-1"); XCTFail("a known machine is never an orphan") }
         catch InfraError.notFound(let id) { XCTAssertEqual(id, "instance:i-1") }
+        try h.recordCreated("aws_instance", "i-9")
         try await h.service.downOrphan(id: "instance:i-9")
         XCTAssertEqual(h.account.deleted, [lost])
+    }
+
+    /// The owner tag is any string anyone can set: an orphan Flight Deck has no record of
+    /// creating is reported, and never deleted.
+    func testAnOrphanFlightDeckDidNotCreateIsNeverDeleted() async throws {
+        let stranger = OwnedResource(cloud: "aws", kind: .instance, id: "i-5", region: "us-east-1", name: "theirs")
+        h.account.owned = [stranger]
+        do { try await h.service.downOrphan(id: "instance:i-5"); XCTFail("no record of creating it") }
+        catch InfraError.refused(let why) { XCTAssertTrue(why.contains("no record of creating instance:i-5"), why) }
+        XCTAssertEqual(h.account.deleted, [])
+        let checks = await h.service.doctor()
+        let row = try XCTUnwrap(checks.first { $0.name == "orphan instance:i-5" })
+        XCTAssertFalse(row.fix?.contains("infra down") ?? true, row.fix ?? "")
     }
 
     /// GCE names an instance and its firewall rule alike; the kind says which one goes.
@@ -589,6 +604,7 @@ extension InfraServiceTests {
         XCTAssertEqual(instance.ref, "instance:fd-x-gpu")
         do { try await h.service.downOrphan(id: "fd-x-gpu"); XCTFail("an unqualified id is ambiguous") }
         catch InfraError.notFound {}
+        try h.recordCreated("google_compute_firewall", "projects/p/global/firewalls/fd-x-gpu", cloud: "gcp")
         try await h.service.downOrphan(id: "firewall:fd-x-gpu")
         XCTAssertEqual(h.gcpAccount.deleted, [firewall])
     }

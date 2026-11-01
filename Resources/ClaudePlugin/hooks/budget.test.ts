@@ -30,7 +30,9 @@ const typed = (args: string) => ({
 
 test('each form asks the CLI for this tab and relays its line', async ($, on) => {
   mock.env(on, IN_TAB)
-  const seen = host(on, { exitCode: 0, stdout: 'session budget $20.00 · spent ~$0.00 · $20.00 left\n' })
+  // With no terminal on stdout, as under `process.run`, the CLI answers in JSON.
+  const line = 'session budget $20.00 · spent ~$0.00 · $20.00 left'
+  const seen = host(on, { exitCode: 0, stdout: JSON.stringify({ capUsd: 20, spentUsd: 0, line }) + '\n' })
   for (const args of ['', '20', 'renew', 'renew 5', 'clear']) {
     expect((await $.command.run(typed(args))).text).toBe('session budget $20.00 · spent ~$0.00 · $20.00 left')
   }
@@ -52,13 +54,14 @@ test('a refusal reaches the user line by line, without the program prefix', asyn
 test("the agent cannot change the session's budget from Bash", async ($, on) => {
   mock.env(on, IN_TAB)
   const seen = host(on, { exitCode: 0 })
-  for (const command of ['flightdeck infra budget 500', 'flightdeck infra budget renew', '/fd/flightdeck infra budget set $9', 'flightdeck infra budget clear']) {
+  for (const command of ['flightdeck infra budget 500', 'flightdeck infra budget 0.5 2>&1', 'flightdeck infra budget renew', '/fd/flightdeck infra budget set $9', 'flightdeck infra budget clear']) {
     const ran = await $.tool.call({ tool: 'Bash', command })
     expect(ran.deny).toContain('/budget')
   }
   await $.tool.call({ tool: 'Bash', command: 'flightdeck infra budget' })
   await $.tool.call({ tool: 'Bash', command: 'flightdeck infra budget show --json' })
-  expect(seen.bash).toEqual(['flightdeck infra budget', 'flightdeck infra budget show --json'])
+  await $.tool.call({ tool: 'Bash', command: 'flightdeck infra budget 2>&1' })
+  expect(seen.bash).toEqual(['flightdeck infra budget', 'flightdeck infra budget show --json', 'flightdeck infra budget 2>&1'])
 })
 
 test('outside a Flight Deck tab Bash is left alone', async ($, on) => {

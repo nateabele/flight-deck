@@ -83,7 +83,7 @@ public enum SessionBudgetModel {
         return .allowed(deadline: end)
     }
 
-    static func usd(_ x: Double) -> String { String(format: "$%.2f", x) }
+    static func usd(_ x: Double) -> String { CostModel.usd(x) }
 
     private static func minutes(_ interval: TimeInterval) -> String {
         let m = max(0, Int(interval / 60))

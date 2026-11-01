@@ -65,7 +65,13 @@ public enum CostModel {
         hourly * Double(ttl.seconds) / 3600
     }
 
-    private static func usd(_ x: Double) -> String { String(format: "$%.2f", x) }
+    /// Dollars as cloud machines are priced: cents, but a small machine's $0.012/h or a $0.004
+    /// session budget keeps the digits that tell it from $0.00.
+    public static func usd(_ x: Double) -> String {
+        let size = abs(x)
+        let digits = size == 0 || size >= 0.1 ? 2 : size >= 0.01 ? 3 : 4
+        return String(format: "$%.\(digits)f", x)
+    }
 
     public static func checkLaunch(hourly: Double?, ttl: Duration, idle: Duration, instanceType: String,
                                    cloud: String, running: Int, monthToDate: Double,

@@ -63,6 +63,8 @@ final class InfraService {
     let registry: InfraRegistry
     let ledger: CostLedger
     let budgets: SessionBudgets
+    /// What Flight Deck created, and so all it ever deletes.
+    let provenance: ResourceProvenance
     let hosts: HostService
     private let env: InfraEnvironment
     /// One provisioning task per tool: a second caller awaits the first's download instead of
@@ -82,7 +84,9 @@ final class InfraService {
     /// Tailscale auth keys outlive the boot that redeems them by this much at most.
     static let authKeyExpiry = HostKit.Duration(seconds: 900)
 
-    init(registry: InfraRegistry, ledger: CostLedger, budgets: SessionBudgets, hosts: HostService, env: InfraEnvironment) {
+    init(registry: InfraRegistry, ledger: CostLedger, budgets: SessionBudgets, provenance: ResourceProvenance,
+         hosts: HostService, env: InfraEnvironment) {
+        self.provenance = provenance
         self.registry = registry
         self.ledger = ledger
         self.budgets = budgets
@@ -226,12 +230,22 @@ final class InfraService {
         let tofu = try await tofu(cloud: machine.cloud)
         events(.progress("tofu init"))
         try await tofu.initialize(workdir: workdir)
+        // The plan is checked before anything exists, and the apply runs only that plan.
+        let changes = try await tofu.plan(workdir: workdir, destroy: false)
+        try ResourceProvenance.checkUp(changes, name: name)
         // Billing starts with the apply, not with `ready`: a failed apply can still leave a
         // running instance, and its hours are real until `down` closes the segment.
         let applyStart = env.now()
         applyBegan = true
         if let rate = machine.hourlyUSD { try ledger.open(name: name, hourlyUSD: rate, at: applyStart, session: machine.session) }
-        try await Self.forwardingProgress(events) { try await tofu.apply(workdir: workdir, progress: $0) }
+        do {
+            try await Self.forwardingProgress(events) { try await tofu.applyPlan(workdir: workdir, destroy: false, progress: $0) }
+        } catch {
+            // A failed apply may still have created some of it, which the rollback deletes.
+            await recordCreated(changes, tofu: tofu, workdir: workdir, machine: machine)
+            throw error
+        }
+        await recordCreated(changes, tofu: tofu, workdir: workdir, machine: machine)
 
         let outputs = try await tofu.outputs(workdir: workdir)
         machine.instanceID = outputs.instanceID
@@ -313,6 +327,19 @@ final class InfraService {
     /// `events`, but a destroy failure only as progress: the `up`'s own failure stays the one
     /// reported. A failed destroy leaves the machine `failed` with its attempt counted, for the
     /// Reaper to retry.
+    /// Records what an apply of `changes` created. A failure is logged, never thrown: the
+    /// resources exist either way, and without a record the destroy that follows refuses to
+    /// touch them, which leaves them for the user rather than deleting the unknown.
+    private func recordCreated(_ changes: [TofuChange], tofu: TofuRunning, workdir: URL, machine: InfraMachine) async {
+        do {
+            let state = try await tofu.resources(workdir: workdir)
+            try provenance.record(ResourceProvenance.created(by: changes, state: state, cloud: machine.cloud,
+                                                              machine: machine.name, at: env.now()))
+        } catch {
+            Self.logger.error("\(machine.name, privacy: .public): created resources not recorded: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     private func rollBack(_ name: String, events: @escaping (InfraEvent) -> Void) async {
         events(.progress("destroying \(name), which failed before it was ready"))
         do {
@@ -394,7 +421,11 @@ final class InfraService {
             do {
                 let tofu = try await tofu(cloud: machine.cloud)
                 events(.progress("destroying \(name)"))
-                try await Self.forwardingProgress(events) { try await tofu.destroy(workdir: workdir, progress: $0) }
+                // Every resource the plan would delete must be one Flight Deck created, or
+                // nothing is deleted at all; then exactly that plan runs.
+                let changes = try await tofu.plan(workdir: workdir, destroy: true)
+                try provenance.checkDestroy(changes, cloud: machine.cloud, name: name)
+                try await Self.forwardingProgress(events) { try await tofu.applyPlan(workdir: workdir, destroy: true, progress: $0) }
             } catch {
                 // Never removed while resources may still exist: the record is how anyone finds them.
                 let message = "destroy: " + Self.failureText(error)
@@ -585,7 +616,9 @@ final class InfraService {
         }
         if s.hourly > 0 { parts.append("\(usd(s.hourly))/h now") }
         if s.budget != nil {
-            if s.exhausted { parts.append("used up: its machines are being destroyed") }
+            if s.exhausted {
+                parts.append(s.machines.isEmpty ? "used up; `/budget renew` starts a fresh one" : "used up: its machines are being destroyed")
+            }
             else if let end = s.exhaustsAt { parts.append("runs out in \(Self.span(end.timeIntervalSince(s.now)))") }
             else if s.hourly > 0 { parts.append("lasts past every machine's TTL") }
         }
@@ -627,9 +660,14 @@ final class InfraService {
     /// account that could not be read, and an all-clear only when every account was.
     private func orphanChecks(_ scan: OrphanScan) -> [PreflightCheck] {
         var checks = scan.found.map { r in
-            PreflightCheck(name: "orphan \(r.ref)", ok: false,
-                           detail: "\(r.cloud) \(r.region)\(r.name.map { " (\($0))" } ?? "") is labelled as this Mac's but no machine owns it",
-                           fix: "flightdeck infra down --orphan \(r.ref)")
+            // Only a resource Flight Deck recorded creating is one `down --orphan` deletes.
+            provenance.created(r)
+                ? PreflightCheck(name: "orphan \(r.ref)", ok: false,
+                                 detail: "\(r.cloud) \(r.region)\(r.name.map { " (\($0))" } ?? "") is labelled as this Mac's but no machine owns it",
+                                 fix: "flightdeck infra down --orphan \(r.ref)")
+                : PreflightCheck(name: "orphan \(r.ref)", ok: false,
+                                 detail: "\(r.cloud) \(r.region)\(r.name.map { " (\($0))" } ?? "") is labelled as this Mac's, but Flight Deck has no record of creating it",
+                                 fix: "delete it in the \(r.cloud) console if it is yours; Flight Deck will not")
         }
         for (cloud, why) in scan.unreadable.sorted(by: { $0.key < $1.key }) {
             checks.append(PreflightCheck(name: "orphan scan \(cloud)", ok: false, detail: "could not scan \(cloud): \(why)",
@@ -750,7 +788,14 @@ final class InfraService {
         guard cidr != m.allowCIDR else { return nil }
         let workdir = registry.workdir(for: name)
         try InfraWorkdir.setVar(workdir: workdir, "fd_allow_cidr", cidr)
-        try await tofu(cloud: m.cloud).apply(workdir: workdir) { _ in }
+        let tofu = try await tofu(cloud: m.cloud)
+        let changes = try await tofu.plan(workdir: workdir, destroy: false)
+        try provenance.checkChange(changes, cloud: m.cloud, name: name)
+        do { try await tofu.applyPlan(workdir: workdir, destroy: false) { _ in } } catch {
+            await recordCreated(changes, tofu: tofu, workdir: workdir, machine: m)
+            throw error
+        }
+        await recordCreated(changes, tofu: tofu, workdir: workdir, machine: m)
         // Re-read: only the address is this call's to change.
         guard var current = registry.machine(named: name) else { return cidr }
         current.allowCIDR = cidr
@@ -782,6 +827,10 @@ final class InfraService {
     func downOrphan(id ref: String) async throws {
         guard let orphan = await orphans().found.first(where: { $0.ref == ref }), let account = env.accounts[orphan.cloud] else {
             throw InfraError.notFound(ref)
+        }
+        // The owner tag found it; only the record says Flight Deck made it.
+        guard provenance.created(orphan) else {
+            throw InfraError.refused("Flight Deck has no record of creating \(ref), so it will not delete it. If it is yours, delete it in the cloud console.")
         }
         try await account.deleteOwned(orphan)
     }

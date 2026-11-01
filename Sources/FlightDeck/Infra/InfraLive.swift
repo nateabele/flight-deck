@@ -319,11 +319,20 @@ extension InfraLive {
             controllerID: controllerID,
             now: { Date() },
             budget: { choices.current.budget })
+        let registry = InfraRegistry(fileURL: root.appendingPathComponent("infra.json"),
+                                     workRoot: root.appendingPathComponent("infra", isDirectory: true))
+        let provenance = ResourceProvenance(fileURL: root.appendingPathComponent("infra-provenance.json")) {
+            registry.machines.flatMap { m in
+                ResourceProvenance.stateResources(workdir: registry.workdir(for: m.name)).map {
+                    ProvenanceRecord(cloud: m.cloud, type: $0.type, id: $0.id, address: $0.address, machine: m.name, createdAt: m.createdAt)
+                }
+            }
+        }
         let service = InfraService(
-            registry: InfraRegistry(fileURL: root.appendingPathComponent("infra.json"),
-                                    workRoot: root.appendingPathComponent("infra", isDirectory: true)),
+            registry: registry,
             ledger: CostLedger(fileURL: root.appendingPathComponent("infra-ledger.json")),
             budgets: SessionBudgets(fileURL: root.appendingPathComponent("infra-budgets.json")),
+            provenance: provenance,
             hosts: hosts, env: env)
 
         var reaper: Reaper?

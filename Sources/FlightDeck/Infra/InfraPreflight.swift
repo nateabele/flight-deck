@@ -208,7 +208,7 @@ enum InfraPreflight {
 
     // MARK: - Formatting
 
-    static func usd(_ x: Double) -> String { String(format: "$%.2f", x) }
+    static func usd(_ x: Double) -> String { CostModel.usd(x) }
 
     private static func format(_ x: Double) -> String {
         x == x.rounded() ? String(Int(x)) : String(format: "%.1f", x)

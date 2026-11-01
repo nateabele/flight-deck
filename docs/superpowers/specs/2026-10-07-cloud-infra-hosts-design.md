@@ -276,6 +276,11 @@ Enforced twice, so either side alone suffices:
 - **Orphans**: `infra ls --orphans` (and `doctor`) query each configured account for resources
   carrying `flightdeck-owner=<this controller>` that no workdir knows, and offer
   `infra down --orphan <id>`.
+- **Provenance (added 2026-11-01)**: Flight Deck never deletes a resource it did not create.
+  `infra-provenance.json` records the `(cloud, type, id)` of everything an `up` plan created,
+  and an `up` plan may only create. Every destroy (`down`, the `Reaper`, a rollback) and every
+  orphan delete is checked against it first, and refused whole if it would touch anything
+  unrecorded. Each change is a saved plan applied as checked. ARCHITECTURE.md has the detail.
 
 ## 8. Budgets and cost
 

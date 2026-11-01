@@ -21,8 +21,23 @@ export function budgetArgs(line: string): string[] {
   return ['infra', 'budget', ...words]
 }
 
-/** A shell command that changes this session's budget through the CLI. */
-const CHANGES_BUDGET = /\bflightdeck\b[^\n;|&]*\binfra\s+budget\s+(set|renew|clear|off|\$?\d)/
+/**
+ * A shell command that changes this session's budget through the CLI. An amount is a whole
+ * word, so a redirect after a bare `budget` (`2>&1`) is not read as $2.
+ */
+const CHANGES_BUDGET = /\bflightdeck\b[^\n;|&]*\binfra\s+budget\s+(set|renew|clear|off|\$?\d[\d.]*(?=$|[\s;|&)]))/
+
+/**
+ * The budget's one-line summary. The CLI answers in JSON when its stdout is not a terminal, as
+ * here, and the summary is that JSON's `line`.
+ */
+function line(stdout: string): string {
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    if (parsed && typeof parsed === 'object' && 'line' in parsed && typeof parsed.line === 'string') return parsed.line
+  } catch {}
+  return stdout
+}
 
 /** Registered by flight-deck.tsx, inside a Flight Deck tab only. */
 export const command = {
@@ -33,7 +48,8 @@ export const command = {
 
 export const register: Register = on => {
   on('command.run', { command: 'budget' }, async ($, e) => {
-    return { text: (await flightdeck($, budgetArgs(e.args))).text }
+    const ran = await flightdeck($, budgetArgs(e.args))
+    return { text: ran.ok ? line(ran.text) : ran.text }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

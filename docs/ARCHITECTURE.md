@@ -691,6 +691,19 @@ controller's owner label that `infra.json` does not know, as kind-qualified refs
 name). An account it could not read lands in `unreadable` with the reason, so "none" is only
 ever said when every account was actually scanned. `infra doctor` includes the scan.
 
+**Flight Deck deletes only what it created** (`ResourceProvenance`, `infra-provenance.json`).
+Every change to the cloud is a saved OpenTofu plan, checked, then applied as that file: OpenTofu
+refuses a saved plan whose state has moved, so what was checked is what runs. `TofuRunning` has
+no other way to apply or destroy. An `up` plan may only create (an `import` block in a repo's
+module would adopt someone else's resource into state, for a later destroy to delete). After the
+apply, failed or not, each resource that plan created is recorded by `(cloud, type, id)`. A
+destroy plan, from `down`, the `Reaper` or a rollback, must delete only recorded resources, or
+nothing is deleted at all. The re-apply that moves a public machine's inbound rule may create,
+and may update or delete only recorded resources. `down --orphan` deletes only a recorded
+resource: the owner tag finds candidates, but anyone can set a tag. Records are never removed.
+The first launch with the file seeds it from the local states of the machines `infra.json`
+already lists.
+
 **Secrets never leave in text.** `SecretRedaction` replaces `tskey-…` and any run of 64+ hex
 characters (the enrollment secret) in OpenTofu output and console text before it becomes an
 event, an error, a notification or an `infra.json` failure note: a failed apply's diagnostics

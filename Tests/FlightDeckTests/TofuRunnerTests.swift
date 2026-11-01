@@ -35,9 +35,28 @@ final class TofuRunnerTests: XCTestCase {
         echo '{"@level":"info","type":"apply_complete","hook":{"resource":{"addr":"aws_instance.this"},"action":"create"}}'
         """)
         let seen = ProgressLog()
-        try await runner(tofu).apply(workdir: dir) { seen.append($0) }
+        try await runner(tofu).applyPlan(workdir: dir, destroy: false) { seen.append($0) }
         XCTAssertEqual(seen.value, [TofuProgress(resource: "aws_instance.this", action: "create", done: false),
                                     TofuProgress(resource: "aws_instance.this", action: "create", done: true)])
+    }
+
+    /// The plan is saved, shown, and that file and nothing else is applied.
+    func testAppliesOnlyTheSavedPlan() async throws {
+        let log = dir.appendingPathComponent("args.log")
+        let tofu = try fakeTofu("""
+        echo "$*" >> '\(log.path)'
+        case "$2" in show) echo '{"resource_changes":[{"address":"aws_instance.this","mode":"managed","type":"aws_instance","change":{"actions":["delete"],"before":{"id":"i-1"}}}]}' ;; esac
+        """)
+        let r = runner(tofu)
+        let changes = try await r.plan(workdir: dir, destroy: true)
+        XCTAssertEqual(changes.map(\.id), ["i-1"])
+        try await r.applyPlan(workdir: dir, destroy: true) { _ in }
+        let module = "-chdir=\(dir.appendingPathComponent("module").path)"
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init), [
+            "\(module) plan -input=false -json -out=fd-destroy.tfplan -destroy",
+            "\(module) show -json fd-destroy.tfplan",
+            "\(module) apply -auto-approve -input=false -json fd-destroy.tfplan",
+        ])
     }
 
     func testFailureCarriesTheDiagnostic() async throws {
@@ -45,7 +64,7 @@ final class TofuRunnerTests: XCTestCase {
         echo '{"@level":"error","type":"diagnostic","diagnostic":{"summary":"UnauthorizedOperation","detail":"not allowed"}}'
         exit 1
         """)
-        do { try await runner(tofu).apply(workdir: dir) { _ in }; XCTFail("expected a failure") }
+        do { try await runner(tofu).applyPlan(workdir: dir, destroy: false) { _ in }; XCTFail("expected a failure") }
         catch TofuError.failed(let step, let message) {
             XCTAssertEqual(step, "apply"); XCTAssertTrue(message.contains("UnauthorizedOperation"))
         }

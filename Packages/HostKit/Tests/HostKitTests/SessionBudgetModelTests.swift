@@ -65,4 +65,16 @@ final class SessionBudgetModelTests: XCTestCase {
         XCTAssertEqual(M.checkLaunch(name: "gpu", hourly: 1, ttlDeadline: at(4), remaining: 0.25, capUSD: 5, burns: [], now: now),
                        .allowed(deadline: at(0.25)))
     }
+
+    func testSmallAmountsKeepTheirDigits() {
+        // Live, 2026-11-01: a $0.004 budget read "$0.00 of $0.00 left".
+        XCTAssertEqual(CostModel.usd(0), "$0.00")
+        XCTAssertEqual(CostModel.usd(0.004), "$0.0040")
+        XCTAssertEqual(CostModel.usd(0.0122), "$0.012")
+        XCTAssertEqual(CostModel.usd(0.8), "$0.80")
+        XCTAssertEqual(CostModel.usd(50), "$50.00")
+        let why = M.checkLaunch(name: "b", hourly: 0.0122, ttlDeadline: at(2), remaining: 0.0018, capUSD: 0.004,
+                                burns: [], now: now)
+        XCTAssertEqual(why, .refused("This session's budget has $0.0018 of $0.0040 left, which runs b at $0.012/h for only 8 minutes alongside the session's other machines; `/budget <usd>` raises it."))
+    }
 }
