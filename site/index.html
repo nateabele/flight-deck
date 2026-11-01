@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Flight Deck — an orchestration-native terminal for macOS</title>
-<meta name="description" content="Run many coding agents across repos in one window. Live status for every session, context you own and can inspect, and a real terminal underneath.">
+<title>Flight Deck: a Mac terminal for running many coding agents</title>
+<meta name="description" content="Run many coding agents across your projects in one Mac window, with live status for every session and a real terminal for each one.">
 
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://flightdeckapp.dev/">
-<meta property="og:title" content="Flight Deck — an orchestration-native terminal for macOS">
-<meta property="og:description" content="Run many coding agents across repos in one window. Live status for every session, context you own and can inspect, and a real terminal underneath.">
+<meta property="og:title" content="Flight Deck: a Mac terminal for running many coding agents">
+<meta property="og:description" content="Run many coding agents across your projects in one Mac window, with live status for every session and a real terminal for each one.">
 <meta property="og:image" content="https://flightdeckapp.dev/assets/icon-512.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#070b14">
@@ -42,7 +42,7 @@
          does: the translucent rounded highlight behind the icon and the accent
          pill behind the name appear together, never one without the other. -->
     <div class="finder-item" id="fd-app" tabindex="0" role="button"
-         aria-label="Flight Deck.app — open to see it running"
+         aria-label="Flight Deck.app: double-click to see it running"
          title="Double-click to open">
       <span class="finder-icon">
         <img class="hero-icon" src="assets/icon-512.png" alt="Flight Deck app icon" width="116" height="116">
@@ -168,8 +168,8 @@
       <span class="kicker">What you get</span>
       <h2>Built for the whole fleet</h2>
       <p>
-        Running one agent is a terminal problem. Running twelve is an attention problem,
-        a continuity problem, and a coordination problem. Flight Deck is built around those.
+        Flight Deck keeps track of every agent you run: which ones need you, what each one
+        is working on, and where it stopped.
       </p>
     </div>
     <div class="hl-scrolly">
@@ -276,7 +276,7 @@
               </div>
             </div>
             <h3 class="hl-title">Plan with a fleet</h3>
-            <p class="hl-blurb">Agents from several model families work your plan over in rounds, with a second family cross-checking the first. Annotate it in place, watch it settle, and steer from your phone.</p>
+            <p class="hl-blurb">Agents from several model families revise your plan in rounds, and a second family checks the first. Annotate the plan in place, see when the rounds stop changing it, and steer from your phone.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -438,7 +438,7 @@
               </div>
             </div>
             <h3 class="hl-title">The fleet in your pocket</h3>
-            <p class="hl-blurb">Read any conversation on your iPhone, and answer from there: questions, permission prompts, menus and sign-ins, subagents included. The agent picks up as if you were at the Mac.</p>
+            <p class="hl-blurb">Read any conversation on your iPhone, and answer from there: questions, permission prompts, menus and sign-ins, subagents included. The agent continues as soon as you reply.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -476,7 +476,7 @@
               <div class="hl05-cli"><span class="hl05-prompt">$</span> flightdeck peer send web …<span class="hl05-cover"></span></div>
             </div>
             <h3 class="hl-title">Agents that talk to each other</h3>
-            <p class="hl-blurb">Agent tabs message each other by name through Flight Deck, and any agent can drive the fleet with the <code>flightdeck</code> command. A message that would cross permission settings waits for you.</p>
+            <p class="hl-blurb">Agent tabs message each other by name through Flight Deck, and any agent can drive the fleet with the <code>flightdeck</code> command. If the two tabs have different permission settings, the message waits for your approval.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -492,7 +492,7 @@
               <span class="hl06-lbl">still running</span>
             </div>
             <h3 class="hl-title">Sessions that outlive the app</h3>
-            <p class="hl-blurb">Each session runs in its own background process, so a quit or crash never ends a conversation. Idle agents sleep to save battery; work cut short is told to keep going.</p>
+            <p class="hl-blurb">Each session runs in its own background process, so the conversation continues if the app quits or crashes. Idle agents sleep to save battery, and work that stopped early is told to continue.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -517,7 +517,7 @@
               <span class="hl07-lbl hl07-l2">paired host</span>
             </div>
             <h3 class="hl-title">Run it on another machine</h3>
-            <p class="hl-blurb">Pair a Mac or Linux box and <code>run --on</code> it: uncommitted work goes over, output streams back, changes come home as a diff. Agents can route UI tests and heavy builds there.</p>
+            <p class="hl-blurb">Pair a Mac or Linux box and send work to it with <code>run --on</code>. Your uncommitted changes are copied over, the output streams back, and the results return as a diff. Agents can send UI tests and heavy builds there.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -546,7 +546,7 @@
               </div>
             </div>
             <h3 class="hl-title">Cloud machines on demand</h3>
-            <p class="hl-blurb">A machine appears in your own AWS or GCP account when a run needs one, its cost on every command. A spent budget, an expired limit or a failed start destroys it.</p>
+            <p class="hl-blurb">Flight Deck starts a machine in your own AWS or GCP account when a run needs one, and shows its cost on every command. The machine is destroyed when its budget or time limit runs out, or if it fails to start.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -581,7 +581,7 @@
               </div>
             </div>
             <h3 class="hl-title">Accounts, pools and usage</h3>
-            <p class="hl-blurb">Pool several logins per agent, and each new tab takes one still under its limit. Live meters show usage and resets. A spent login’s conversation moves to another, or on demand with /switch-account.</p>
+            <p class="hl-blurb">Put several logins per agent in a pool, and each new tab uses one that is under its limit. Meters show usage and reset times. When a login runs out, its conversation moves to another, or you move it with /switch-account.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -630,7 +630,7 @@
               </div>
             </div>
             <h3 class="hl-title">Swarms on the task list</h3>
-            <p class="hl-blurb">Plain-words rules send each released task to the model that suits it. A swarm fills its slots, hands an agent running low to a fresh account, and pauses from your phone.</p>
+            <p class="hl-blurb">Rules written in plain English send each released task to a suitable model. A swarm fills its slots, moves an agent that runs low to a fresh account, and can be paused from your phone.</p>
           </article>
         </li>
         <li class="hl-item reveal">
@@ -666,7 +666,7 @@
               </div>
             </div>
             <h3 class="hl-title">Search every conversation</h3>
-            <p class="hl-blurb">⌘K searches the transcripts of all five agents. Jump straight to a live session, or reopen an old conversation in a new tab.</p>
+            <p class="hl-blurb">⌘K searches the transcripts of all five agents. Jump to a live session, or reopen an old conversation in a new tab.</p>
           </article>
         </li>
       </ol>
@@ -845,8 +845,8 @@
           </div>
           <h3 class="hl-d-title">Plan with a fleet</h3>
           <ul class="hl-points">
-            <li><h4>Flight Control: plan with a fleet</h4><p>Turn a rough idea into a plan that agents from up to five families have worked over in rounds, with a second family cross-checking the first. Edit and annotate the plan in place, watch a live board of who's doing what, and see how much of it is covered and when it has settled. Steer, choose fidelity and edit rounds from your phone.</p></li>
-            <li><h4>Plans that read like documents</h4><p>Tables edit as real grids, Diff vs Previous draws a round's changes inline, and the Task Graph shows every task in full, with what each round added, removed and changed.</p></li>
+            <li><h4>Flight Control: plan with a fleet</h4><p>Start from a rough idea. Agents from up to five model families revise the plan in rounds, and a second family checks the first. Edit and annotate the plan in place, follow a live board of what each agent is doing, and see how much of the idea the plan covers and when it stops changing. From your phone you can steer, choose fidelity and edit rounds.</p></li>
+            <li><h4>Plans as documents</h4><p>Tables edit as real grids, Diff vs Previous draws a round's changes inline, and the Task Graph shows every task in full, with what each round added, removed and changed.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-02" data-hl="02">
@@ -973,11 +973,11 @@
           <h3 class="hl-d-title">Every agent, one window</h3>
           <ul class="hl-points">
             <li><h4>Every agent in one place</h4><p>Sessions nest under the project they belong to. Add a project by dropping a folder on the sidebar.</p></li>
-            <li><h4>Five agents, side by side</h4><p>Open a tab on Claude Code, Codex, Grok, Gemini or OpenCode. Each is a first-class row with live status, transcript search, and a model you pick per agent and per project.</p></li>
-            <li><h4>Real terminals, not log viewers</h4><p>Each session is a genuine PTY rendered by the Ghostty engine on Metal — full escape-sequence fidelity, real scrollback, real input. Your agent behaves exactly as it does in a terminal, because it is in one.</p></li>
-            <li><h4>Per-project agent configuration</h4><p>Set each agent's flags and model globally, then override them per project, from real controls instead of a remembered command line. Flags the app doesn't recognise are preserved verbatim rather than dropped.</p></li>
-            <li><h4>Move at keyboard speed</h4><p>⌘N opens a session, ⌘⇧[ and ⌘⇧] walk the whole fleet across project boundaries, ⌘W closes the session rather than the window, and ⌘⇧T brings back what you just closed. ⌃⌘← and ⌃⌘→ go back and forward through the tabs you've visited, like a browser. ⌘⇧/ lists every shortcut.</p></li>
-            <li><h4>Arranged the way you think</h4><p>Reorder sessions within a project and drag projects themselves into the order you want. Collapse the ones you're not watching.</p></li>
+            <li><h4>Five agents, side by side</h4><p>Open a tab on Claude Code, Codex, Grok, Gemini or OpenCode. Each one gets its own sidebar row with live status, transcript search, and a model you pick per agent and per project.</p></li>
+            <li><h4>Real terminals</h4><p>Each session is a real PTY, drawn by the Ghostty engine on Metal, with full escape-sequence support, scrollback and input. Your agent runs exactly as it does in any other terminal.</p></li>
+            <li><h4>Per-project agent configuration</h4><p>Set each agent's flags and model globally, then override them per project, from controls in Settings. Flags the app doesn't recognise are kept as you wrote them.</p></li>
+            <li><h4>Keyboard shortcuts</h4><p>⌘N opens a session, ⌘⇧[ and ⌘⇧] move through every session in every project, ⌘W closes the session and keeps the window open, and ⌘⇧T reopens the last one you closed. ⌃⌘← and ⌃⌘→ go back and forward through the tabs you've visited. ⌘⇧/ lists every shortcut.</p></li>
+            <li><h4>Your own order</h4><p>Reorder sessions within a project, drag projects into the order you want, and collapse the ones you're not watching.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-03" data-hl="03">
@@ -1096,12 +1096,12 @@
           </div>
           <h3 class="hl-d-title">Know who needs you</h3>
           <ul class="hl-points">
-            <li><h4>Four states, told by shape and colour</h4><p>Working, blocked on you, running a background command, or idle. Distinct glyph and distinct tint for each — never colour alone — with the same distinction in the tooltip and for VoiceOver.</p></li>
-            <li><h4>Subagent fan-out, live</h4><p>When a session dispatches parallel subagents, the count appears next to its spinner, and the tooltip names the one waiting on you. You can see which sessions are genuinely expensive right now.</p></li>
-            <li><h4>Nothing finishes into the void</h4><p>A session that completes while you're in another tab keeps an unread mark until you actually look at it — and the mark survives a relaunch.</p></li>
-            <li><h4>Folded projects still tell the truth</h4><p>A collapsed project shows its session count and the most demanding state underneath it. A blocked agent can't hide inside a group you closed.</p></li>
-            <li><h4>Notified only when it matters</h4><p>A system notification when a session starts waiting on you or a plan is ready for review — and only while you're in another app. Never on every token.</p></li>
-            <li><h4>Names stay honest</h4><p>A session's title tracks what its agent is actually working on, in both directions — rename from the sidebar and the agent follows, or let the conversation name the row.</p></li>
+            <li><h4>Four states</h4><p>Working, waiting on you, running a background command, or idle. Each state has its own glyph as well as its own colour, and the tooltip and VoiceOver name it too.</p></li>
+            <li><h4>Subagent counts</h4><p>When a session starts parallel subagents, their count shows next to its spinner, and the tooltip names the one that is waiting on you.</p></li>
+            <li><h4>Unread marks</h4><p>A session that finishes while you're in another tab keeps an unread mark until you open it. The mark stays after a relaunch.</p></li>
+            <li><h4>Collapsed projects</h4><p>A collapsed project shows its session count and the most urgent state of the sessions in it, so you still see a blocked agent.</p></li>
+            <li><h4>Notifications</h4><p>You get a system notification when a session starts waiting on you or a plan is ready for review, and only while you're in another app.</p></li>
+            <li><h4>Session names</h4><p>A session's title follows what its agent is working on. Rename it in the sidebar and the agent uses the new name, or let the conversation name the row.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-04" data-hl="04">
@@ -1231,9 +1231,9 @@
           </div>
           <h3 class="hl-d-title">The fleet in your pocket</h3>
           <ul class="hl-points">
-            <li><h4>The fleet in your pocket</h4><p>An iPhone companion pairs with your Mac over the local network — scan a QR code or type a short code — and shows the same fleet: every project, every session, with the conversation readable. It opens instantly on the fleet it last saw. Rename, mark read, or close from either side.</p></li>
-            <li><h4>Answer a blocked agent from the phone</h4><p>When an agent stops to ask you something, the question or permission prompt appears on your phone, for every supported agent. Pick an option, type an answer, or dismiss it, and the agent carries on. A half-written reply survives a crash.</p></li>
-            <li><h4>Subagents, menus and sign-ins too</h4><p>See a session's subagents on the phone and answer the one that is actually asking. Numbered menus and sign-in prompts that only appear on an agent's screen reach the phone as well, so a login never strands an agent.</p></li>
+            <li><h4>The fleet in your pocket</h4><p>The iPhone app pairs with your Mac over the local network with a QR code or a short code. It shows the same projects and sessions, and you can read each conversation. It opens straight to the fleet it last saw. Rename, mark read or close a session from either device.</p></li>
+            <li><h4>Answer a blocked agent from the phone</h4><p>When an agent stops to ask you something, the question or permission prompt appears on your phone, for every supported agent. Pick an option, type an answer, or dismiss it, and the agent continues. A half-written reply survives a crash.</p></li>
+            <li><h4>Subagents, menus and sign-ins too</h4><p>The phone lists a session's subagents, so you can answer the one that asked. Numbered menus and sign-in prompts that appear only in an agent's terminal reach the phone too.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-05" data-hl="05">
@@ -1414,8 +1414,8 @@
           </div>
           <h3 class="hl-d-title">Agents that talk to each other</h3>
           <ul class="hl-points">
-            <li><h4>Agents that talk to each other</h4><p>Agent tabs message one another directly through Flight Deck: ask another session a question, hand it work, or hear when it goes idle. Each message shows who it's from, and permission prompts stay with you.</p></li>
-            <li><h4>Drive the fleet from a script</h4><p>A <code>flightdeck</code> command-line tool talks to the running app over a local control socket, from any tab's own shell: list sessions, send one a prompt, wait for the answer, or run a command on another machine. Agents can orchestrate agents.</p></li>
+            <li><h4>Agents that talk to each other</h4><p>Agent tabs send messages to each other through Flight Deck. An agent can ask another session a question, give it work, or get told when it goes idle. Each message shows its sender, and permission prompts still come to you.</p></li>
+            <li><h4>Drive the fleet from a script</h4><p>A <code>flightdeck</code> command-line tool talks to the running app over a local control socket, from any tab's own shell: list sessions, send one a prompt, wait for the answer, or run a command on another machine. Agents can use it to run other agents.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-06" data-hl="06">
@@ -1597,12 +1597,12 @@
           </div>
           <h3 class="hl-d-title">Sessions that outlive the app</h3>
           <ul class="hl-points">
-            <li><h4>Sessions survive a relaunch</h4><p>Every session returns, each reattached to its own conversation rather than starting a fresh one — along with its project grouping, order, and collapsed state.</p></li>
-            <li><h4>Agents keep running when the app doesn't</h4><p>Each session lives in a small background daemon, so quitting or crashing Flight Deck doesn't take the agent down with it. Reopen the app and reattach to a terminal that kept going.</p></li>
-            <li><h4>Idle sessions go to sleep</h4><p>A session that's been quiet for a while is paused and its terminal released, so a big fleet doesn't cost you battery. Select it and it wakes with nothing lost. Threshold is a preference, with an Off switch.</p></li>
-            <li><h4>Work in flight gets picked back up</h4><p>Sessions that were mid-task at shutdown are offered a nudge to continue once they settle, so a restart costs you a keystroke instead of the thread. Per-session toggle if you'd rather it didn't.</p></li>
-            <li><h4>Retry through API hiccups</h4><p>A transient API failure can retry on a backing-off ladder, with the attempt shown on the row and a countdown on your phone, instead of leaving an agent stalled overnight. Off by default; turn it on in preferences.</p></li>
-            <li><h4>Two tabs on one conversation, caught</h4><p>If two sessions end up pointed at the same conversation, both rows say so instead of silently interleaving their turns.</p></li>
+            <li><h4>Sessions survive a relaunch</h4><p>After a relaunch, every session comes back attached to its own conversation, with its project, position and collapsed state.</p></li>
+            <li><h4>Agents keep running when the app doesn't</h4><p>Each session runs in a small background daemon, so the agent keeps running if you quit Flight Deck or it crashes. Reopen the app to reattach to the terminal.</p></li>
+            <li><h4>Idle sessions go to sleep</h4><p>A session that has been idle for a while is paused and its terminal released, which saves battery with a large fleet. Select it and it wakes up where it stopped. Set the idle time in Settings, or turn sleep off.</p></li>
+            <li><h4>Work in flight gets picked back up</h4><p>Sessions that were in the middle of a task when the app quit are told to continue once they settle. You can turn this off per session.</p></li>
+            <li><h4>Retry after API errors</h4><p>When a turn fails on a temporary API error, Flight Deck can retry it, waiting longer between each try. The row shows the attempt number and the phone shows a countdown. It is off by default; turn it on in Settings.</p></li>
+            <li><h4>Duplicate conversations</h4><p>If two sessions point at the same conversation, both rows show a warning.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-07" data-hl="07">
@@ -1759,7 +1759,7 @@
           <h3 class="hl-d-title">Run it on another machine</h3>
           <ul class="hl-points">
             <li><h4>Pair another Mac or Linux box</h4><p>Settings → Hosts pairs a second Mac with a short code, or a Linux machine with one pasted command, over the LAN or Tailscale.</p></li>
-            <li><h4>Run it on another machine</h4><p><code>flightdeck run --on &lt;host&gt;</code> syncs your uncommitted work, streams the output and returns the remote exit code. Bring the changes back with <code>diff</code> and <code>apply</code>, and keep services up with their ports forwarded. Recipes and routes let agents send UI tests or heavy builds elsewhere on their own.</p></li>
+            <li><h4>Run it on another machine</h4><p><code>flightdeck run --on &lt;host&gt;</code> syncs your uncommitted work, streams the output and returns the remote exit code. Bring the changes back with <code>diff</code> and <code>apply</code>, and keep services up with their ports forwarded. With recipes and routes, agents send UI tests and heavy builds to another machine by themselves.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-08" data-hl="08">
@@ -1912,7 +1912,7 @@
           </div>
           <h3 class="hl-d-title">Cloud machines on demand</h3>
           <ul class="hl-points">
-            <li><h4>Cloud machines on demand</h4><p>Declare a machine and Flight Deck creates it in your own AWS or GCP account when a run needs it, with a cost line on every command, a budget per session, and a hard time, idle and budget limit that destroys it. A machine that fails to come up is destroyed, not left billing.</p></li>
+            <li><h4>Cloud machines on demand</h4><p>Declare a machine, and Flight Deck creates it in your own AWS or GCP account when a run needs it. Every command shows its cost, each session has a budget, and the machine is destroyed when it reaches its time, idle or budget limit. A machine that fails to start is destroyed too.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-09" data-hl="09">
@@ -2118,7 +2118,7 @@
           <h3 class="hl-d-title">Accounts, pools and usage</h3>
           <ul class="hl-points">
             <li><h4>Accounts and pools</h4><p>Add several logins per agent, group them into pools, and assign an account or pool per agent, per project or per folder. Each new tab takes a login that is still under its limit, and <code>/switch-account</code> moves a live conversation to another login.</p></li>
-            <li><h4>Usage you can see coming</h4><p>Each account's rate-limit windows show as meters with soft and hard limits, fed by every tab and planning run that bills it.</p></li>
+            <li><h4>Usage meters</h4><p>Each account's rate-limit windows show as meters with soft and hard limits. Every tab and planning run that uses the account counts toward them.</p></li>
           </ul>
         </div>
         <div class="hl-detail" id="hl-d-10" data-hl="10">
@@ -2330,7 +2330,7 @@
           </div>
           <h3 class="hl-d-title">Swarms on the task list</h3>
           <ul class="hl-points">
-            <li><h4>Tasks routed to the right model</h4><p>Write routing rules in plain words. Flight Control compiles them, ranks models from a cited benchmark index, and sends each released task to the model that suits its kind.</p></li>
+            <li><h4>Tasks routed to the right model</h4><p>Write routing rules in plain English. Flight Control compiles them, ranks models from a cited benchmark index, and sends each released task to the model that suits its kind.</p></li>
             <li><h4>Swarms that work the task list</h4><p>Launch a swarm on a project's released tasks. It fills slots, hands an agent to a fresh account when one runs low, and pauses or resumes from your phone.</p></li>
           </ul>
         </div>
@@ -2505,7 +2505,7 @@
   <div class="wrap">
     <div class="section-head reveal">
       <span class="kicker">Under the hood</span>
-      <h2>Authentically Apple</h2>
+      <h2>Built for the Mac</h2>
     </div>
 
     <div class="grid-3 reveal">
@@ -2513,24 +2513,24 @@
         <div class="ico">
           <svg viewBox="0 0 16 16" fill="none"><path d="M2 3.2h12v8.2H2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.2 13.6h5.6M2 5.8h12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </div>
-        <h3>Mac-native, from chrome to core</h3>
-        <p>Swift + AppKit + SwiftUI on Metal. It behaves the way the rest of your Mac behaves — sidebar materials, real menus, keyboard conventions, VoiceOver.</p>
+        <h3>A native Mac app</h3>
+        <p>Swift, AppKit and SwiftUI on Metal. It uses the standard sidebar materials, menus, keyboard conventions and VoiceOver.</p>
       </div>
 
       <div class="card">
         <div class="ico">
           <svg viewBox="0 0 16 16" fill="none"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8 14 5M8 8v6.2M8 8 2 5" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
         </div>
-        <h3>A real terminal, reused</h3>
-        <p>The terminal isn't a reimplementation. Flight Deck embeds Ghostty's engine and surface — the same renderer, input encoding, and escape handling — pinned to a known-good release.</p>
+        <h3>Ghostty inside</h3>
+        <p>Flight Deck embeds Ghostty's engine and surface, with its renderer, input encoding and escape handling, pinned to a tested release.</p>
       </div>
 
       <div class="card">
         <div class="ico">
           <svg viewBox="0 0 16 16" fill="none"><path d="M3 3.6h10v9H3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.4 6.6h5.2M5.4 9.3h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </div>
-        <h3>Your state, on your disk</h3>
-        <p>Sessions live in a plain JSON file in Application Support and preferences in the standard defaults domain. Nothing about your fleet is stored anywhere but your machines.</p>
+        <h3>Your data stays local</h3>
+        <p>Sessions are stored in a plain JSON file in Application Support, and preferences in the standard defaults domain. Flight Deck stores nothing about your fleet outside your own machines.</p>
       </div>
     </div>
   </div>
@@ -2544,7 +2544,7 @@
   <div class="wrap">
     <h2 class="reveal">All hands on deck</h2>
     <p class="reveal">
-      One window for every agent, in a robust, snappy terminal
+      Every coding agent you use, in one window
     </p>
     <div class="reveal">
       <!-- Always the newest release: .github/workflows/stable-download.yml gives
@@ -2568,7 +2568,7 @@
 <footer class="footer">
   <div class="wrap footer-inner">
     <img src="assets/icon-256.png" alt="" width="22" height="22">
-    <span>Flight Deck — an orchestration-native terminal for macOS</span>
+    <span>Flight Deck: a Mac terminal for running many coding agents</span>
     <div class="footer-links">
       <a href="#demo">Demo</a>
       <a href="#features">Features</a>
