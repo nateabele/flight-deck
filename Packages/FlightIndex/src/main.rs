@@ -3,6 +3,9 @@
 //! ```text
 //! fdindex daemon [--foreground] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon
 //! fdindex status [--json] | stop                                            ask it, or stop it
+//! fdindex mcp [--no-start]                                                  stdio MCP server (a client of the daemon)
+//! fdindex service install|uninstall|start|stop|status|restart [--label L]   keep it running at login
+//! (install, uninstall, start, restart are also top-level verbs; started as `qartez` this is the qartez alias)
 //! fdindex <tool> [first-arg] [--flag value]...                              query it
 //!
 //! tools: map find grep read outline deps stats impact refs calls
@@ -15,12 +18,15 @@
 //! `file_path`), so there is no per-tool flag table to keep in step with the tools themselves;
 //! the first positional argument fills the tool's required parameter.
 
+use flightindex::alias;
 use flightindex::client::{connect_or_start, Client};
 use flightindex::daemon;
+use flightindex::mcp;
 use flightindex::error::{Error, Result};
 use flightindex::proto::state;
 use flightindex::runtime::Paths;
 use flightindex::service::Config;
+use flightindex::service_install;
 use flightindex::store::default_store_root;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -28,7 +34,7 @@ use std::time::Duration;
 
 /// Flags that never take a value, so `find --regex foo` reads `foo` as the name, not as regex's value.
 const BOOLEAN_FLAGS: &[&str] = &[
-    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force",
+    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start",
 ];
 
 fn main() {
@@ -91,6 +97,7 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
             ("store", Some(v)) => cli.store = PathBuf::from(v),
             ("socket", Some(v)) => cli.socket = Some(PathBuf::from(v)),
             ("cwd", Some(v)) => cli.cwd = Some(v),
+            ("root", Some(v)) => cli.cwd = Some(v),
             ("json", _) => cli.json = true,
             ("foreground", _) => cli.foreground = true,
             ("graph_budget_mb", Some(v)) => cli.graph_budget_mb = Some(v.parse().map_err(|_| "--graph-budget-mb takes a number")?),
@@ -128,9 +135,10 @@ fn positional_param(tool: &str, first: &str) -> Option<&'static str> {
 }
 
 fn run() -> Result<i32> {
-    let cli = parse(std::env::args().skip(1).collect()).map_err(Error::Msg)?;
+    let argv0 = std::env::args().next().unwrap_or_default();
+    let cli = parse(alias::normalize(&argv0, std::env::args().skip(1).collect())).map_err(Error::Msg)?;
     if cli.verb.is_empty() {
-        eprintln!("usage: fdindex <daemon|status|stop|map|find|grep|read|outline|deps|stats|impact|refs|calls|build|gc|add_root> [args] [--flags]");
+        eprintln!("usage: fdindex <daemon|mcp|service|status|start|stop|restart|install|uninstall|map|find|grep|read|outline|deps|stats|impact|refs|calls|build|gc|add_root> [args] [--flags]");
         return Ok(2);
     }
     let paths = Paths::new(&cli.store, cli.socket.clone());
@@ -148,6 +156,25 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    // Verbs that manage or front the daemon rather than query it. None of them starts it by itself.
+    let label = cli.args.get("label").and_then(Value::as_str).map(str::to_string);
+    match cli.verb.as_str() {
+        "stop" => {
+            service_install::stop(&paths)?;
+            return Ok(0);
+        }
+        "service" => return service_install::run(cli.positional.first().map_or("status", String::as_str), paths, label),
+        "install" | "uninstall" | "start" | "restart" => return service_install::run(&cli.verb, paths, label),
+        "status" if !cli.json => return service_install::run("status", paths, label),
+        "mcp" => {
+            let cwd = absolute_cwd(&cli)?;
+            let auto_start = !cli.args.contains_key("no_start") && std::env::var_os("FLIGHTDECK_INDEX_NO_START").is_none();
+            mcp::run(mcp::Options { paths, cwd, auto_start, daemon_args: daemon_args(&cli) })?;
+            return Ok(0);
+        }
+        _ => {}
+    }
+
     let mut args = cli.args.clone();
     if let Some(first) = cli.positional.first() {
         match positional_param(&cli.verb, first) {
@@ -157,31 +184,15 @@ fn run() -> Result<i32> {
             None => return Err(Error::Msg(format!("{} takes no positional argument (got '{first}')", cli.verb))),
         }
     }
-    let cwd = match &cli.cwd {
-        Some(c) => c.clone(),
-        None => std::env::current_dir().map_err(|e| Error::Msg(format!("cannot read the current directory: {e}")))?.to_string_lossy().to_string(),
+    let cwd = absolute_cwd(&cli)?;
+
+    let connected = if cli.verb == "status" {
+        // Asking is not a reason to start it.
+        Client::connect(&paths.socket).map_err(|e| Error::Msg(format!("the index daemon is not running ({e})")))
+    } else {
+        connect_or_start(&paths, &daemon_args(&cli))
     };
-
-    if cli.verb == "stop" {
-        return match Client::connect(&paths.socket) {
-            Ok(mut c) => {
-                let _ = c.call(&cwd, 0, "shutdown", Map::new());
-                // Return only once the daemon is really gone, so `stop` then any query starts a
-                // fresh daemon instead of racing the dying one for the lock.
-                if !flightindex::runtime::wait_until_stopped(&paths.pidfile, Duration::from_secs(10)) {
-                    return Err(Error::Msg("asked the daemon to stop but it is still running after 10s".into()));
-                }
-                println!("stopped");
-                Ok(0)
-            }
-            Err(_) => {
-                println!("not running");
-                Ok(0)
-            }
-        };
-    }
-
-    let mut client = match connect_or_start(&paths, &daemon_args(&cli)) {
+    let mut client = match connected {
         Ok(c) => c,
         Err(e) => {
             // The state a shim reports when it cannot reach the daemon: agents fall back to rg.
@@ -217,4 +228,13 @@ fn daemon_args(cli: &Cli) -> Vec<String> {
         a.extend(["--graph-budget-mb".to_string(), mb.to_string()]);
     }
     a
+}
+
+/// The caller's directory: `--cwd` (or qartez's `--root`) made absolute, else the process's own.
+fn absolute_cwd(cli: &Cli) -> Result<String> {
+    let here = std::env::current_dir().map_err(|e| Error::Msg(format!("cannot read the current directory: {e}")))?;
+    Ok(match &cli.cwd {
+        Some(c) => here.join(c).to_string_lossy().to_string(),
+        None => here.to_string_lossy().to_string(),
+    })
 }

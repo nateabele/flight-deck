@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod client;
 pub mod cochange;
 pub mod daemon;
@@ -7,10 +8,12 @@ pub mod facts;
 pub mod git;
 pub mod graph;
 pub mod lang;
+pub mod mcp;
 pub mod proto;
 pub mod query;
 pub mod resolve;
 pub mod runtime;
 pub mod service;
+pub mod service_install;
 pub mod store;
 pub mod tools;

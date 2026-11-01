@@ -33,6 +33,8 @@ impl Daemon {
     }
 
     fn pid(&self, cwd: &std::path::Path) -> u64 {
+        // `status` only asks; `hello` is what starts a daemon that is not there.
+        self.stdout(cwd, &["hello"]);
         let v: serde_json::Value = serde_json::from_str(&self.stdout(cwd, &["status", "--json"])).unwrap();
         v["data"]["pid"].as_u64().unwrap()
     }
@@ -69,7 +71,7 @@ fn a_query_starts_the_daemon_and_later_queries_reuse_it() {
 fn a_second_daemon_on_the_same_store_exits_cleanly() {
     let d = Daemon::new();
     let r = repo();
-    d.stdout(&r.root, &["status"]);
+    d.stdout(&r.root, &["hello"]);
     let pid = d.pid(&r.root);
     let o = d.fdindex(&r.root, &["daemon"]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
@@ -81,7 +83,7 @@ fn a_second_daemon_on_the_same_store_exits_cleanly() {
 fn the_socket_is_private_to_the_user() {
     let d = Daemon::new();
     let r = repo();
-    d.stdout(&r.root, &["status"]);
+    d.stdout(&r.root, &["hello"]);
     let mode = std::fs::metadata(&d.socket).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
@@ -99,7 +101,7 @@ fn a_stale_socket_file_from_a_dead_daemon_does_not_block_a_new_one() {
 fn bad_input_is_an_error_line_and_the_connection_survives() {
     let d = Daemon::new();
     let r = repo();
-    d.stdout(&r.root, &["status"]);
+    d.stdout(&r.root, &["hello"]);
     let mut s = UnixStream::connect(&d.socket).unwrap();
     s.write_all(b"this is not json\n").unwrap();
     let mut rd = BufReader::new(s.try_clone().unwrap());
@@ -121,7 +123,7 @@ fn bad_input_is_an_error_line_and_the_connection_survives() {
 fn the_client_refuses_a_daemon_that_speaks_another_protocol() {
     let d = Daemon::new();
     let r = repo();
-    d.stdout(&r.root, &["status"]);
+    d.stdout(&r.root, &["hello"]);
     let mut c = Client::connect(&d.socket).unwrap();
     let mut args = serde_json::Map::new();
     args.insert("name".into(), "x".into());

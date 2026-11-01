@@ -1,0 +1,1204 @@
+[
+ {
+  "name": "qartez_map",
+  "description": "Start here. Returns the codebase skeleton: files ranked by importance (PageRank), their exports, and blast radii. Use boost_files/boost_terms to focus on areas relevant to your current task.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "all_files": {
+     "default": null,
+     "description": "If true, return all files sorted by PageRank (ignores top_n). Watch for token-budget truncation on large repos.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "boost_files": {
+     "default": null,
+     "description": "File paths to boost in ranking (e.g., recently edited or mentioned files)",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "boost_terms": {
+     "default": null,
+     "description": "Search terms to boost files containing matching symbols",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "by": {
+     "description": "Ranking axis. Must be one of: 'files' (default) shows top files by PageRank; 'symbols' shows top symbols by symbol-level PageRank + their defining file. Unknown values are rejected with a list of valid options.",
+     "enum": [
+      "files",
+      "symbols"
+     ],
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = file list only, 'detailed' (default) = files + exported symbols"
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "top_n": {
+     "default": null,
+     "description": "Number of top-ranked files to include. Default: 20. `top_n=0` follows the tool-wide no-cap convention (same as qartez_unused / qartez_context `limit=0`) and is equivalent to `all_files=true`. Watch for token-budget truncation on large repos; the response adds a `raise token_budget=` footer when the render is clipped.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "with_health": {
+     "default": null,
+     "description": "When true, annotate each top-ranked file row with its max cyclomatic complexity (`CC=N`) and a smell tag when one fires (`god_function` / `long_params`). Same heuristics as qartez_health: CC>=15 with body>=50 lines = god_function, signature with >=5 params = long_params. Lets a single qartez_map call surface hotspot pressure on top of PageRank without a follow-up qartez_health round-trip. Default false.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Project Map",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_find",
+  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, and visibility for every match. Use kind filter to disambiguate (e.g., kind='struct').",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = name + file only, 'detailed' (default) = full info with signatures"
+    },
+    "kind": {
+     "description": "Filter by symbol kind (function, struct, class, etc.)",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Maximum number of results to return in regex mode. Default 100. Ignored for exact-name lookups.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "name": {
+     "description": "Exact symbol name to search for (or regex when regex=true). Accepts aliases `symbol`, `symbol_name`, and `query`.",
+     "type": "string"
+    },
+    "regex": {
+     "default": null,
+     "description": "If true, interpret `name` as a regex applied to indexed symbol names. Uses `regex::Regex::is_match` (find anywhere, not anchored - prepend `^` for start-anchored, `$` for end-anchored, both for full-match). Case-insensitive by default; prepend `(?-i)` to force case-sensitive. Default false (exact name lookup).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Find Symbol",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_grep",
+  "description": "Search indexed symbols by name, kind, or file path using FTS5. Prefix matching is anchored to the symbol name column (e.g. 'Config*' matches symbols whose name starts with 'Config', not file paths that happen to contain it). Use the `kind` param to filter results by symbol kind (function / struct / method / etc.). Returns symbol locations with export status. Faster than Grep because it searches the pre-built index, not disk.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = names only, 'detailed' (default) = names + kind + file + lines"
+    },
+    "kind": {
+     "description": "Filter results by symbol kind (e.g., 'function', 'struct', 'method', 'class'). Applied after the FTS/regex match so it narrows name-search results down to one category without changing the query grammar.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Max number of results (default: 200). The active governor is `token_budget`; raise `limit` only if you need more than 200 rows.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "query": {
+     "description": "FTS5 search query. Prefix matching is anchored to the symbol name column (e.g. `Parser*` only matches symbols whose name starts with `Parser`, not file paths that happen to contain `parser`). Accepts the alias `pattern` for parity with Grep. Interpreted as a regex when regex=true.",
+     "type": "string"
+    },
+    "regex": {
+     "default": null,
+     "description": "If true, interpret query as a regex applied to indexed symbol names (not bodies). Default false (FTS5 prefix).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "search_bodies": {
+     "default": null,
+     "description": "If true, search pre-indexed function bodies via FTS5 instead of symbol names. Useful for finding strings/comments/identifiers that don't appear in declarations. Default false.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Search Symbols",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_read",
+  "description": "Read one or more symbols' source code from disk with line numbers. Faster than Read \u2014 jumps directly to the symbol without scanning. Pass `symbol_name` for a single symbol, or `symbols=[...]` to batch-fetch multiple in one call. Use file_path to disambiguate. Passing just `file_path` (no symbol) reads the whole file or a slice via start_line/end_line/limit \u2014 replaces the built-in Read for module headers, imports, and small files.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "context_lines": {
+     "default": null,
+     "description": "Lines of source context to include BEFORE the symbol's own range (default: 0). Use when you need to see surrounding use-blocks or comments.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "end_line": {
+     "default": null,
+     "description": "Partial-body end line (inclusive). Pairs with `start_line`.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Filter all symbols to a specific file path. When set without any symbol, reads the raw file contents - the whole file by default, or the slice defined by start_line/end_line/limit. max_bytes still bounds the output. Aliases: `file`, `path`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Partial-body line count. Alternative to `end_line`: when set, reads `limit` lines starting at `start_line` (defaults to 1). Mirrors the built-in Read tool's `limit` parameter so callers can copy-paste the same shape.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "max_bytes": {
+     "default": null,
+     "description": "Max response size in bytes (default: 25000). Symbols past the cap are omitted with a truncation marker.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "start_line": {
+     "default": null,
+     "description": "Read partial body: 1-based start line. Combined with `end_line` or `limit`. When set together with `file_path` but without any symbol, dumps that raw line range from the file - lets you read non-symbol code (imports, module headers) without falling back to Read. Alias: `offset`.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "symbol_name": {
+     "description": "Name of a single symbol to read. For batch reads, use `symbols` instead. Accepts the aliases `symbol` and `name`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbols": {
+     "default": null,
+     "description": "Batch mode: list of symbol names to read in one call. Results are concatenated in order. Cheaper than multiple qartez_read calls. Either `symbols` or `symbol_name` must be set.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Read Symbol",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_outline",
+  "description": "List every symbol in a file grouped by kind (functions, classes, structs, etc.) with line numbers and signatures. Like a table of contents for the file.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "File path (absolute, or relative to the caller's working directory) to get outline for. Aliases: `file`, `path`.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = names + lines only, 'detailed' (default) = grouped by kind with signatures"
+    },
+    "offset": {
+     "default": null,
+     "description": "Skip the first N non-field symbols before rendering. Pair with token_budget to page through very large files.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "file_path"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "File Outline",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_deps",
+  "description": "Show a file's dependency graph: what it imports (outgoing) and what imports it (incoming). Reveals coupling and helps plan safe changes.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "File path (absolute, or relative to the caller's working directory) to show dependencies for. Aliases: `file`, `path`.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = file paths only, 'detailed' (default) = paths + edge kinds, 'mermaid' = dependency graph as a Mermaid diagram (use only when the user asks for a visual)"
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "file_path"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "File Dependencies",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_stats",
+  "description": "Codebase metrics at a glance: files, symbols, edges by language, most connected files, and index coverage percentage.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "Optional file path (absolute, or relative to the caller's working directory) for per-file stats: LOC, symbol count, imports, importers. Aliases: `file`, `path`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Codebase Stats",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_impact",
+  "description": "MUST call before modifying any file with exports. Shows direct importers, transitive dependents, and co-change partners \u2014 the full set of files that could break.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "File path (absolute, or relative to the caller's working directory) to analyze blast radius for. Aliases: `file`, `path`, `name`.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = counts only, 'detailed' (default) = full file lists"
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Include test files in the transitive blast radius (default: false)",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "file_path"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Impact Analysis",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_refs",
+  "description": "Trace all usages of a symbol: which files import it, and (with transitive=true) the full dependency chain. Essential before renaming, moving, or deleting a symbol.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = file paths only (duplicate paths collapsed to `path xN`), 'detailed' (default) = full import chain grouped per importer"
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Include refs from test files in the listing. Default true for back-compat. Set false when investigating production usages of a hub symbol whose test imports would otherwise dominate the output.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name to find references for. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "transitive": {
+     "default": null,
+     "description": "Include transitive dependents (default: false)",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Symbol References",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_calls",
+  "description": "Show call hierarchy for a function: who calls it (callers) and what it calls (callees). Uses tree-sitter AST analysis. Distinguishes actual calls from type annotations, unlike qartez_refs.",
+  "inputSchema": {
+   "$defs": {
+    "CallDirection": {
+     "description": "Call hierarchy direction for `qartez_calls`. `Both` is the default because it\nis the most useful on a cold exploration.",
+     "enum": [
+      "callers",
+      "callees",
+      "both"
+     ],
+     "type": "string"
+    },
+    "Format": {
+     "description": "Output verbosity for query tools. Encoded as a proper JSON Schema enum so\nclients see the allowed values at tool-listing time instead of having to\ntry-and-fail on a free-form string.\n\n`mermaid` is ONLY honoured by `qartez_deps`, `qartez_calls`, and\n`qartez_hierarchy`. Every other tool rejects it explicitly via\n`reject_mermaid` - the enum is shared for schema economy, not because\nevery tool renders graphs.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "depth": {
+     "default": null,
+     "description": "Max depth for call chain traversal. Default 1, max 10. Values above 10 are clamped. `depth=0` is the seed-only mode: prints the resolved target symbol header without expanding callers or callees.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "direction": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/CallDirection"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Which edges to walk. `both` is the default and shows callers and callees."
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory. Required together with or instead of `kind` when the name has multiple function-like candidates.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "'concise' = names only, 'detailed' (default) = with file paths and lines, 'mermaid' = call graph as a Mermaid diagram (use only when the user asks for a visual). Mermaid output honours `token_budget`: nodes beyond the budget are replaced with a `truncated` marker."
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Include test-file callers in the listing (default: false). Tests are excluded by default so hub-function output stays focused on production callers.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name resolves to multiple definitions (e.g. 'function' vs 'method'). Required together with or instead of `file_path` when the name has multiple function-like candidates; without it the tool refuses to count callers or list callees because the counts would not be attributable to a single definition.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Max rows per caller/callee section (default: 50). Rows beyond the cap are truncated with a `... +N more, raise limit=` footer.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "name": {
+     "description": "Function/method name to analyze call hierarchy for. Accepts aliases `symbol` and `symbol_name`.",
+     "type": "string"
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Approximate token budget for output (default: 4000)",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Call Hierarchy",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_replace_symbol",
+  "description": "Replace a symbol's whole source range (lines L[line_start..line_end]) with `new_code`. Caller supplies the new definition including its signature - this is a precise line-range rewrite, not a body-only splice. The tool refuses to run when `new_code` does not start with a recognised definition introducer (`fn`, `pub fn`, `struct`, `class`, `def`, etc.). Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the replace. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "Full new source for the symbol (replaces lines L[line_start..line_end] inclusive). Must include the signature - this is a whole-symbol replace, not a body-only splice.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Symbol name to replace. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Replace Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_insert_before_symbol",
+  "description": "Insert `new_code` on the line immediately before the anchor symbol's first line. Use to add helpers, tests, or new items next to related code without needing the exact surrounding context. Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the insert. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "Source text to insert. A trailing newline is added if missing so the anchor symbol stays on its own line.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Anchor symbol name. New code is inserted before (or after) its line range. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Insert Before Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_insert_after_symbol",
+  "description": "Insert `new_code` on the line immediately after the anchor symbol's last line. Use to add helpers, tests, or new items next to related code without needing the exact surrounding context. Preview by default; set apply=true to execute. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the insert. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "Source text to insert. A trailing newline is added if missing so the anchor symbol stays on its own line.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Anchor symbol name. New code is inserted before (or after) its line range. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Insert After Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_rename",
+  "description": "Rename a symbol across the entire codebase: definition, imports, and all usages. Uses tree-sitter AST matching when available, falls back to word-boundary matching. When the name is shared by multiple kinds or defined in multiple files, pass `kind` and/or `file_path` to disambiguate - the tool refuses to run otherwise. Set `allow_collision=true` to proceed when `new_name` already exists as a defined symbol in a touched file. Preview by default; set apply=true to execute.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "allow_collision": {
+     "default": null,
+     "description": "If true, allow the rename even when `new_name` already exists as a defined symbol in one of the files that will be rewritten. Default false refuses to apply when a collision is detected.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "apply": {
+     "default": null,
+     "description": "If true, apply the rename. If false (default), show a preview of changes.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory. Required when the old_name is defined in multiple files unless the matches collapse to a single symbol via `kind`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method'). Required when the old_name matches multiple symbol kinds unless `file_path` is set.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_name": {
+     "description": "New name for the symbol",
+     "type": "string"
+    },
+    "old_name": {
+     "description": "Current symbol name to rename",
+     "type": "string"
+    }
+   },
+   "required": [
+    "old_name",
+    "new_name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Rename Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_move",
+  "description": "Move a symbol to another file and update all import paths automatically. Handles extraction, insertion, and importer rewrites in one step. Importer count is sourced from the full symbol reference graph (same data as `qartez_refs`), not just the file-level `use` edges. Use `kind` / `file_path` to disambiguate when the name is shared. Preview by default; set apply=true to execute.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the move. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name is defined in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method'). Accepts the kinds returned by qartez_find.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name to move. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    },
+    "to_file": {
+     "description": "Target file path (absolute, or relative to the caller's working directory). Created if it doesn't exist.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "to_file"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Move Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_safe_delete",
+  "description": "Delete a symbol after reporting every file that still references it. Preview by default, always listing importers that would break. Apply refuses to run when importers exist unless `force=true`; the caller is then responsible for fixing the dangling uses. Use `kind` / `file_path` to disambiguate when the name is shared.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the delete. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Disambiguate by file when the name exists in multiple files. Path: absolute, or relative to the caller's working directory.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "force": {
+     "default": null,
+     "description": "If true, delete even when the symbol still has importers (they will be left dangling for the caller to fix). Default false refuses to apply when importers exist.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Disambiguate by symbol kind when the name is shared (e.g. 'function' vs 'method').",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name to delete. Accepts aliases `name` and `symbol_name`.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Safe Delete Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_rename_file",
+  "description": "Rename/move a file and rewrite all import paths pointing to it in one atomic operation. Also rewrites the `mod <stem>;` declaration in the parent module file so renaming a .rs file keeps the crate compiling. Refuses to rename `mod.rs` (module root) or to create a `mod.rs` over an existing one. Preview by default; set apply=true to execute.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "If true, apply the rename. If false (default), show a preview.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "from": {
+     "description": "Current file path (absolute, or relative to the caller's working directory)",
+     "type": "string"
+    },
+    "to": {
+     "description": "New file path (absolute, or relative to the caller's working directory)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "from",
+    "to"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Rename File",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_add_root",
+  "description": "Hint that a directory will be queried soon, so the index starts building its view now. It never changes what queries can see: any path is indexed on demand. Returns without waiting for the build.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "alias": {
+     "description": "Accepted for compatibility and ignored.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "path": {
+     "description": "Directory to start building (default: the caller's working directory). Absolute, or relative to the caller's working directory.",
+     "type": "string"
+    },
+    "persist": {
+     "default": null,
+     "description": "Accepted for compatibility and ignored.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "watch": {
+     "default": null,
+     "description": "Accepted for compatibility and ignored.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Add Project Root",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": true
+  }
+ },
+ {
+  "name": "qartez_workspace",
+  "description": "Hint that a directory will be queried soon (action=add starts building its view now). It never changes what queries can see; action=remove does nothing.",
+  "inputSchema": {
+   "$defs": {
+    "WorkspaceAction": {
+     "enum": [
+      "add",
+      "remove"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "action": {
+     "$ref": "#/$defs/WorkspaceAction",
+     "description": "add: start building the view of `path`. remove: accepted, does nothing."
+    },
+    "alias": {
+     "description": "Accepted for compatibility and ignored.",
+     "type": "string"
+    },
+    "path": {
+     "description": "Directory (default: the caller's working directory).",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "action"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Workspace Management",
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": true
+  }
+ }
+]
