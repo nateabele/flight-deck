@@ -622,6 +622,29 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertThrowsError(try DelegationService.command(argv: [], recipe: nil, routed: false))
     }
 
+    /// A backslash or quote in a word is written so sh and fish both read it back unchanged.
+    func testBackslashesAndQuotesInAWordAreQuotedForEveryShell() throws {
+        XCTAssertEqual(try DelegationService.command(argv: ["echo", #"a\\b"#, "it's"], recipe: nil, routed: false),
+                       #"echo 'a'\\''\\'b' 'it'\''s'"#)
+    }
+
+    /// The positional-words form mirrors `command`: nothing for a single word of shell text, the
+    /// whole argv for several, and the recipe's `run` as the prefix of its extra arguments.
+    func testPositionalWordsFollowTheCommandComposition() {
+        typealias S = DelegationService
+        XCTAssertNil(S.positional(argv: ["make && make test"], recipe: nil, routed: false))
+        XCTAssertNil(S.positional(argv: [], recipe: Recipe(run: "make"), routed: false))
+        let plain = S.positional(argv: ["xcodebuild", "-scheme", #"My\\App"#], recipe: nil, routed: false)
+        XCTAssertEqual(plain?.words, ["xcodebuild", "-scheme", #"My\\App"#])
+        XCTAssertNil(plain?.prefix)
+        let recipe = S.positional(argv: ["one"], recipe: Recipe(run: "xcodebuild test"), routed: false)
+        XCTAssertEqual(recipe?.words, ["one"])
+        XCTAssertEqual(recipe?.prefix, "xcodebuild test")
+        let routed = S.positional(argv: ["xcodebuild", "test"], recipe: Recipe(run: "ignored"), routed: true)
+        XCTAssertEqual(routed?.words, ["xcodebuild", "test"], "a routed command is its own argv")
+        XCTAssertNil(routed?.prefix)
+    }
+
     // MARK: Fix round 1
 
     /// A `long` recipe run without `detach` streams to its end: only the request's `detach`

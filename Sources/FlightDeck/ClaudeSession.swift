@@ -1,5 +1,6 @@
 import Foundation
 import FleetKit
+import HostKit
 import IntakeKit
 
 /// Pure rules for locating and reading a Claude Code session transcript, and for
@@ -86,12 +87,14 @@ enum ClaudeSession {
         AgentTitle.sanitized(raw, removing: CharacterSet())
     }
 
-    /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`. Also used by
+    /// Single-quoting that sh, bash, zsh and fish all read the same way (`ShellQuote.quoted`:
+    /// `'` becomes `'\''` and `\` becomes `'\\'`, since fish reads `\\` inside `'…'` as an
+    /// escape and a POSIX shell does not). Also used by
     /// `ClaudeFlagSerializer.quotedValue` to force-quote a flag value that would otherwise
     /// reparse as a flag or trigger zsh's equals-expansion — one implementation shared by
     /// both call sites rather than two copies of the same escaping logic.
     static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        ShellQuote.quoted(value)
     }
 
     /// The app-managed portion of the command, always a contiguous prefix. The command

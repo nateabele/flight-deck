@@ -34,10 +34,19 @@ public struct RunSpec: Codable, Sendable, Equatable {
     /// For a service: seconds with no controller connected before the host runs `down`
     /// itself (§6.2, default 30 min); nil for the host default.
     public var orphanTimeout: Int?
+    /// The run's words, to reach the process unparsed (1.1, `HostCapability.runArgv`). With
+    /// `argvPrefix` nil they are the whole program and its arguments; otherwise they follow
+    /// `argvPrefix` as its arguments. `command` always holds the equivalent shell text: it is
+    /// what a host without the capability runs, and what `ps` shows.
+    public var argv: [String]?
+    /// Shell text the `argv` words are the arguments of (a recipe's `run`); nil when they are
+    /// the whole command.
+    public var argvPrefix: String?
 
     public init(command: String, subdir: String, env: [String: String], pty: Bool, screen: Bool,
                 service: Bool, downCommand: String?, ports: [PortMapping], ptySize: TerminalSize? = nil,
-                fetch: [String] = [], pool: Int? = nil, orphanTimeout: Int? = nil) {
+                fetch: [String] = [], pool: Int? = nil, orphanTimeout: Int? = nil,
+                argv: [String]? = nil, argvPrefix: String? = nil) {
         self.command = command
         self.subdir = subdir
         self.env = env
@@ -50,6 +59,8 @@ public struct RunSpec: Codable, Sendable, Equatable {
         self.fetch = fetch
         self.pool = pool
         self.orphanTimeout = orphanTimeout
+        self.argv = argv
+        self.argvPrefix = argvPrefix
     }
 
     // Explicit raw values: a Swift rename must not change the wire. Optionals are omitted
@@ -67,6 +78,8 @@ public struct RunSpec: Codable, Sendable, Equatable {
         case fetch = "fetch"
         case pool = "pool"
         case orphanTimeout = "orphanTimeout"
+        case argv = "argv"
+        case argvPrefix = "argvPrefix"
     }
 
     /// Lenient past the first wire version: `command` through `ports` are required, and every
@@ -84,7 +97,9 @@ public struct RunSpec: Codable, Sendable, Equatable {
                   ptySize: try c.decodeIfPresent(TerminalSize.self, forKey: .ptySize),
                   fetch: try c.decodeIfPresent([String].self, forKey: .fetch) ?? [],
                   pool: try c.decodeIfPresent(Int.self, forKey: .pool),
-                  orphanTimeout: try c.decodeIfPresent(Int.self, forKey: .orphanTimeout))
+                  orphanTimeout: try c.decodeIfPresent(Int.self, forKey: .orphanTimeout),
+                  argv: try c.decodeIfPresent([String].self, forKey: .argv),
+                  argvPrefix: try c.decodeIfPresent(String.self, forKey: .argvPrefix))
     }
 }
 

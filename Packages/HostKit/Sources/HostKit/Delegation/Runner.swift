@@ -475,7 +475,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
         let cwd: String
         do {
             cwd = try Self.workingDirectory(lease.path, spec.subdir)
-            process = try Spawner.spawn(shell: shell, command: spec.command, cwd: cwd,
+            process = try Spawner.spawn(shell: shell, command: spec.command, argv: spec.argv, argvPrefix: spec.argvPrefix, cwd: cwd,
                                         env: hostEnvironment.merging(spec.env) { $1 },
                                         pty: spec.pty ? (spec.ptySize ?? TerminalSize(columns: 80, rows: 24)) : nil)
         } catch {
@@ -1027,6 +1027,26 @@ private final class OutputPump: @unchecked Sendable {
     }
 }
 
+/// The argv hostd execs for a run (§6.1). Internal, not inside `Spawner`, so tests can drive it.
+enum LoginShellArgv {
+    /// What to exec for a run. With `words`, the login shell gets a fixed script and the words as
+    /// positional parameters, so it never parses them: `exec "$@"` (or `<prefix> "$@"`) for a
+    /// POSIX shell, `exec $argv` for fish. Any other login shell (csh, nu, ...) keeps the
+    /// shell text in `command`, which the controller quoted for every shell `ShellQuote` knows.
+    static func make(shell: String, command: String, words: [String]?, prefix: String?) -> [String] {
+        guard let words else { return [shell, "-lc", command] }
+        let base = prefix ?? "exec"
+        switch (shell as NSString).lastPathComponent {
+        case "sh", "bash", "zsh", "dash", "ash", "ksh", "mksh":
+            return [shell, "-lc", base + " \"$@\"", "flightdeck-run"] + words
+        case "fish":
+            return [shell, "-lc", base + " $argv"] + words
+        default:
+            return [shell, "-lc", command]
+        }
+    }
+}
+
 // MARK: - Spawning
 
 private struct SpawnedProcess {
@@ -1044,8 +1064,8 @@ private struct SpawnedProcess {
 /// close-on-exec atomically (`pipe2`, `O_CLOEXEC`), so a `Process` spawned elsewhere in hostd
 /// cannot catch one mid-setup either.
 private enum Spawner {
-    static func spawn(shell: String, command: String, cwd: String, env: [String: String],
-                      pty: TerminalSize?) throws -> SpawnedProcess {
+    static func spawn(shell: String, command: String, argv words: [String]? = nil, argvPrefix: String? = nil,
+                      cwd: String, env: [String: String], pty: TerminalSize?) throws -> SpawnedProcess {
         #if canImport(Glibc)
         var actions = posix_spawn_file_actions_t()
         var attr = posix_spawnattr_t()
@@ -1136,7 +1156,7 @@ private enum Spawner {
         #endif
         posix_spawnattr_setflags(&attr, Int16(flags))
 
-        let argv = [shell, "-lc", command]
+        let argv = LoginShellArgv.make(shell: shell, command: command, words: words, prefix: argvPrefix)
         let envp = env.map { "\($0.key)=\($0.value)" }
         var pid: pid_t = 0
         let rc = withCStrings(argv) { cargv in

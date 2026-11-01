@@ -2183,6 +2183,10 @@ different things — `ReleaseCounts` is the one count ("Release 3 New Tasks" ove
   characters. The default path (`~/Library/Application Support/Flight Deck/control.sock`)
   contains neither, so it is unaffected. The round-trip test
   (`testAPathWithSpacesAndQuotesIsQuotedForShellAndToml`) runs through `/bin/sh`, not fish.
+  **Shell half FIXED 2026-11-01:** `ClaudeSession.shellQuoted` is now `HostKit.ShellQuote.quoted`,
+  which writes `\` unquoted (`'a'\\'b'`), the one form sh, bash, zsh and fish all read as one
+  backslash; `ShellQuotingTests` round-trips it through real sh, bash, zsh and fish. The TOML
+  control-character gap in `tomlEscaped` is still open.
 - **Two live tests were already failing before this branch, and it did not cause them.**
   `./scripts/test-codex-live.sh` on 2026-09-26:
   - `CodexIntegrationTests.testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed`
@@ -2645,6 +2649,41 @@ paired-host link (plan: [the delegated-execution plan](superpowers/plans/2026-10
 as built: ARCHITECTURE.md, "Delegated execution"). Built in parallel tracks C0–C8. Every result
 below comes from unit tests, the end-to-end `DelegationLoopbackTests` and the Linux hostd in a local
 container; **nothing has run against a real second machine.**
+
+### Multi-word commands and EXTRA_ARGS are quoted for POSIX, and break on a fish host (FIXED 2026-11-01, was open 2026-10-27)
+
+`DelegationService.shellQuote` quoted each word with POSIX single quotes, and hostd runs the
+joined string as `$SHELL -lc`. Inside single quotes, fish treats `\\` and `\'` as escapes. So on a
+fish host such as m3, `a\\b` arrived as `a\b`, and `a\'b` was a parse error (measured, fish 4.8.0).
+There was also no real argv mode: one word after `--` is shell text, and recipe EXTRA_ARGS were
+joined into the string. Clients like testq therefore quote everything themselves and inline
+their helpers. The analysis, the limits (128 KiB per string on Linux) and a `--file`
+helper-shipping design are in
+[run argv without shell quoting](superpowers/notes/2026-10-27-run-argv-without-shell-quoting.md).
+
+**Fixed (the note's 4a), in two layers:**
+- **Positional argv.** `RunSpec` gained `argv` and `argvPrefix`, and hostd advertises the
+  `run.argv` capability. For a multi-word `-- a b c`, a routed command, or a recipe's EXTRA_ARGS,
+  the controller sends the words and `LoginShellArgv` execs the login shell with a fixed script
+  and the words as positional parameters (`exec "$@"` for sh, bash, zsh, dash, ash, ksh;
+  `exec $argv` for fish), so no shell parses a word. A recipe's `run` stays shell text, as the
+  prefix. One word after `--` stays shell text, as over ssh.
+- **Quoting every shell reads the same.** `command` is still sent beside `argv`, for `ps` and for
+  a hostd without `run.argv` (the controller only sends `argv` once the link's hello lists it),
+  and for a login shell outside the list above (csh, nu). It is now built with
+  `HostKit.ShellQuote`, which writes `\` and `'` unquoted and escaped between single-quoted runs,
+  so it means the same under fish. The same function replaced the POSIX-only copies in
+  `ClaudeSession.shellQuoted`, `ClaudeFlagQuoting.quoteIfNeeded`, `ToolTemplate.quote` and
+  `RouteShims`.
+
+Tests: `ShellQuoteTests` (HostKit) round-trips words with `\\`, `\'`, `'`, spaces, `$`, `(`,
+newlines and an empty word through real sh, bash, zsh, dash and fish, both as quoted text and as
+positional argv; `ShellQuotingTests` and `DelegationServiceTests` cover the app call sites. The
+fish cases skip when fish is not installed.
+
+Not done: the note's 4b (`--file LOCAL=PATH`, shipping a helper without writing it into the
+tree) and `--argv` (making even one word an argv) are still design only. The Linux hostd's
+capability assertion (`DelegationRouterTests`) was updated but needs Docker to run.
 
 ### Unverified live, and the maintainer's
 

@@ -67,6 +67,17 @@ final class DelegationWireTests: XCTestCase {
                        #"{"command":"true","env":{},"fetch":[],"ports":[],"pty":false,"screen":false,"service":false,"subdir":""}"#)
     }
 
+    /// `argv` is additive: a spec carrying it round-trips, and `command` stays beside it for a
+    /// hostd that predates `run.argv`.
+    func testRunSpecCarriesPositionalWordsBesideTheCommand() throws {
+        let spec = RunSpec(command: "make 'a b'", subdir: "", env: [:], pty: false, screen: false, service: false,
+                           downCommand: nil, ports: [], argv: ["a b", #"c\d"#], argvPrefix: "make")
+        let json = try HostWire.encode(spec)
+        XCTAssertEqual(json, #"{"argv":["a b","c\\d"],"argvPrefix":"make","command":"make 'a b'","env":{},"fetch":[],"#
+                       + #""ports":[],"pty":false,"screen":false,"service":false,"subdir":""}"#)
+        XCTAssertEqual(try HostWire.decode(RunSpec.self, from: json), spec)
+    }
+
     /// Every field added after the first wire version decodes when absent, so a 1.1 peer built
     /// before it (C0's shape) is still read: `fetch` as [], the optionals as nil.
     func testRunSpecDecodesTheFirstVersionsShape() throws {

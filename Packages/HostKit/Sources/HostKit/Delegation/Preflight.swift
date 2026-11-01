@@ -242,6 +242,7 @@ public enum Preflight {
         case .service: return "services"
         case .screen: return "screen runs"
         case .submodules: return "submodules"
+        case .runArgv: return "positional run arguments"
         }
     }
 

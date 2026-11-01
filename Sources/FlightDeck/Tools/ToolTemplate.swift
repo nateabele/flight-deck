@@ -1,4 +1,5 @@
 import Foundation
+import HostKit
 
 /// Expands a tool's command template against one session's context.
 ///
@@ -14,11 +15,12 @@ enum ToolTemplate {
 
     /// Wraps a value so the shell sees exactly one argument.
     ///
-    /// Single quotes rather than backslash escaping because inside single quotes the shell
-    /// interprets nothing at all — no `$`, no backtick, no glob. The one character that cannot
-    /// appear is `'` itself, which is closed, escaped, and reopened.
+    /// Single quotes rather than backslash escaping because inside single quotes a POSIX shell
+    /// interprets nothing at all — no `$`, no backtick, no glob. The two characters that cannot
+    /// appear are `'` and `\` (fish reads `\\` and `\'` inside quotes as escapes), which are
+    /// closed out, escaped, and reopened: see `ShellQuote`.
     static func quote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+        ShellQuote.quoted(value)
     }
 
     /// Substitutes `${name}` for every name in `knownNames`; leaves everything else alone.

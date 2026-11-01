@@ -1,4 +1,5 @@
 import Foundation
+import HostKit
 
 /// The shell-syntax boundary: turning a command-line string into tokens, and a value
 /// back into a token that survives the shell.
@@ -110,6 +111,6 @@ enum ClaudeFlagQuoting {
         guard !value.isEmpty else { return "''" }
         let needsQuoting = value.unicodeScalars.contains { !safe.contains($0) }
         guard needsQuoting else { return value }
-        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return ShellQuote.quoted(value)
     }
 }

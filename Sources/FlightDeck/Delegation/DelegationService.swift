@@ -462,7 +462,7 @@ final class DelegationService {
         let service = mode == .up || recipe?.service == true
         let include = config.include + run.include
         let fetch = (recipe?.fetch ?? []) + run.fetch
-        let spec = RunSpec(
+        var spec = RunSpec(
             command: command, subdir: subdir,
             env: (recipe?.env ?? [:]).merging(run.env) { _, cli in cli },
             pty: run.pty, screen: run.screen || recipe?.screen == true, service: service,
@@ -481,6 +481,13 @@ final class DelegationService {
         let plan = DelegationPlan(host: host, worktree: worktree, subdir: subdir, spec: spec,
                                   include: include, fetch: fetch, sync: mode != .exec)
         let reservation = try await deps.preflight.preflight(plan, link: link)
+        // Only for a host that says it takes them (the preflight has just talked to it); an
+        // older hostd reads `command` alone, which is quoted for every shell either way.
+        if (link as? LiveHostLink)?.capabilities?.contains(.runArgv) == true,
+           let positional = Self.positional(argv: run.command, recipe: recipe, routed: run.recipe == nil) {
+            spec.argv = positional.words
+            spec.argvPrefix = positional.prefix
+        }
         // Nothing after this point may leave the reservation held on failure.
         let hostRunID: String
         let snapshot: SnapshotRef
@@ -1132,18 +1139,21 @@ final class DelegationService {
     /// reaches the host as the three words it was.
     static func command(argv: [String], recipe: Recipe?, routed: Bool) throws -> String {
         if let recipe, !routed || argv.isEmpty {
-            return ([recipe.run] + argv.map(shellQuote)).joined(separator: " ")
+            return ([recipe.run] + argv.map(ShellQuote.word)).joined(separator: " ")
         }
         guard !argv.isEmpty else {
             throw DelegationError(code: "no_command", message: "nothing to run — name a recipe, or give the command after --")
         }
-        return argv.count == 1 ? argv[0] : argv.map(shellQuote).joined(separator: " ")
+        return argv.count == 1 ? argv[0] : argv.map(ShellQuote.word).joined(separator: " ")
     }
 
-    static func shellQuote(_ word: String) -> String {
-        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "@%_+=:,./-"))
-        if !word.isEmpty, word.unicodeScalars.allSatisfy(safe.contains) { return word }
-        return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    /// The words to hand a host's login shell as positional parameters instead of as shell
+    /// text, with the shell text they follow (nil when they are the whole command): the same
+    /// split `command` makes, but nothing parses them on the host, so no quoting can go wrong
+    /// there. nil where `command` is a single word of shell text, which stays shell text.
+    static func positional(argv: [String], recipe: Recipe?, routed: Bool) -> (words: [String], prefix: String?)? {
+        if let recipe, !routed || argv.isEmpty { return argv.isEmpty ? nil : (argv, recipe.run) }
+        return argv.count > 1 ? (argv, nil) : nil
     }
 
     // MARK: Transfer

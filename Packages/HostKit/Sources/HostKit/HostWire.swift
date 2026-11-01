@@ -72,6 +72,10 @@ public enum HostCapability: String, Codable, Sendable {
     /// A host without it ignores the pins, so a controller never sends it a snapshot that has
     /// any (`SnapshotRef.unsupported(on:capabilities:)`).
     case submodules = "submodules"
+    /// `RunSpec.argv`: the host hands a run's words to its login shell as positional
+    /// parameters instead of parsing them as shell text. A host without it only reads
+    /// `RunSpec.command`, so a controller sends it both.
+    case runArgv = "run.argv"
 }
 
 extension KeyedDecodingContainer {

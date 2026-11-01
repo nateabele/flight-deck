@@ -159,15 +159,10 @@ struct RouteShims {
             result["ZDOTDIR"] = zsh
         }
 
-        let bash = ". " + shellQuote(integration.appendingPathComponent("bash/flightdeck-route-shim.bash").path)
+        let bash = ". " + ShellQuote.quoted(integration.appendingPathComponent("bash/flightdeck-route-shim.bash").path)
         let prompt = current("PROMPT_COMMAND") ?? ""
         if !prompt.contains(bash) { result["PROMPT_COMMAND"] = prompt.isEmpty ? bash : bash + "; " + prompt }
         return result
-    }
-
-    /// Single-quoted for a POSIX shell: the bundle's path has a space in it.
-    private static func shellQuote(_ text: String) -> String {
-        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
