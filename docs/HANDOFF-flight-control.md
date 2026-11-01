@@ -49,6 +49,7 @@ not cover it.
 | Agents | `Sources/IntakeKit/AgentID.swift`, `Agents/*Profile.swift`, `Headless.swift`, `ModelOptions.swift` |
 | App orchestration | `Sources/FlightDeck/Intake/IntakeService.swift` (`@MainActor`, about 2,500 lines). It is the only part of the app that starts triage, spawns runners and releases. |
 | Runner process | `flightdeck intake run <id> --root` (`Sources/FlightDeckTool/main.swift`), spawned by `IntakeRunnerController.swift` |
+| Ask threads (planning v2 P1) | Engine: `Sources/IntakeKit/Threads/` (`ThreadRunner`, `ThreadStore`, `ThreadCommand(Store)`, `ThreadTurnExecutor`, `ThreadWorkspace`, `ProvenanceIndex`, `ActionValidator`, `ThreadAccept`, `ThreadDecisions`). Process: `flightdeck intake threads <id> --root`, spawned by a second `IntakeRunnerController` (`kind: .threads`). App: `Intake/IntakeService+Threads.swift`, `+PhoneThreads.swift`. Mac UI: `Intake/Planning/Threads/`. Phone: `ThreadScreen.swift`, `ThreadOutbox.swift`, `PhoneDiffGutter.swift`. See 2.11. |
 | Mac UI | `Sources/FlightDeck/ProjectView.swift`, `Sources/FlightDeck/Intake/*.swift`, `Intake/Planning/*.swift`, `Intake/Planning/PlanEditor/*.swift` |
 | Phone projection (Mac side) | `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift`, `IntakePlanProjection.swift`; dispatch in `Fleet/FleetService.swift` |
 | Wire | `Sources/FleetKit/IntakeWire.swift`, `Frames.swift`, `TimelineFrames.swift`, `PlanBlocks.swift` |
@@ -95,12 +96,39 @@ Triage runs in the app process, not in the runner. `IntakeService.runTriage` use
 `HeadlessCommand.build`.
 
 - **Types** (`Sources/IntakeKit/Triage.swift`):
-  - `TriageResult` is `.questions([String])` or `.recommendation(preset:reason:changeSet:)`.
+  - `TriageResult` is `.questions([StructuredQuestion])` or `.recommendation(preset:reason:changeSet:)`.
   - `enum Triage` holds the schema and the prompts: initial, answers, correction and encodeNow.
-  - `TriageExchange` (`Intake.swift`) holds one round of questions and answers.
-  - `HeadlessSession` (`Intake.swift`) is stored under the JSON key `harness`. The key is legacy; do not rename it.
+  - `TriageExchange` (`Intake.swift`) holds one round of questions and answers. `questions` and
+    `answers` are the plain strings, which the rounds still read. `structured` and
+    `structuredAnswers` are optional, so an old `intake.json` decodes unchanged.
+  - `StructuredQuestion` (`StructuredQuestion.swift`) has `id`, `text`, `kind` (`single`,
+    `multi`, `toggle` or `text`), `options` (id, label, detail), `recommended` (option ids) and
+    `allowOther`. `StructuredAnswer` has `questionID`, `selected` (option ids) and `other`.
+  - `presentedQuestions` is what the UI shows: `structured`, or the strings as text questions
+    `q1`, `q2` and so on.
+  - `questionsDigest` names a round by its questions' ids, texts, kinds and option ids (FNV-1a
+    64, 16 hex digits). `retry` clears the exchanges, so a round index is not unique. Drafts and
+    phone answers key on the digest.
+  - `isComplete`, `accepts` and `render` check and render one answer. `accepts` refuses an
+    unknown option id, a duplicate id, and a selection on a text question. A choice renders as
+    its label. Other renders as `labels; Other: text`.
+- **Schema:** each item of `questions` is an object with `id`, `text`, `kind`, `options`,
+  `recommended` and `allowOther`. The decoder still accepts a plain string. A malformed object
+  (an unknown kind, missing fields) degrades to a text question instead of failing triage. Only an
+  item with no text is dropped.
+- **`Triage.normalize`** makes duplicate or empty ids unique, drops `recommended` ids that are
+  not options, turns a choice with too few options into text (the options become hints), and sets
+  `allowOther` on every single and multi question.
+- **`HeadlessSession`** (`Intake.swift`) is stored under the JSON key `harness`. The key is legacy;
+  do not rename it.
 - **Files:** `<intake>/triage/{graph.json, bv.json, schema.json}`. Unsent answers go to
-  `<intake>/answer-drafts.json`, written with a 400 ms debounce.
+  `<intake>/answer-drafts.json`, written with a 400 ms debounce. The file holds the round index,
+  the round's digest and the `structured` answers beside the old strings. Drafts for another
+  round or digest are deleted. A file without a digest or `structured` still loads while its
+  round and question texts match. On load, each answer's `selected` is filtered to the
+  question's own option ids, so a stray id can't make the round refuse the send.
+- **A refused send is shown.** `answer(_:structured:)` returns an `AnswerRefusal`; the Mac's
+  form shows it in words (`IntakeDetailView.words`) under the questions until the next edit.
 - **Validation:** a change set that fails validation gets one correction turn. A second failure
   sets the intake to `failed`.
 
@@ -217,7 +245,9 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
 | `intake.json`, `archived` (marker), `answer-drafts.json`, `accounts.json`, `triage/` | app |
 | `commands.jsonl` | app and phone (append only) |
 | `tape.json`, `runner.lock`, `checkpoints/<n>/` | runner |
-| `checkpoints/<n>/`: `drafts/<i>.md`, `plan.md`, `plan.user.md`, `changes.json`, `verdicts.json`, `crosscheck.json`, `changeset.json`, `graph.json` | runner |
+| `checkpoints/<n>/`: `drafts/<i>.md`, `plan.md`, `plan.user.md`, `plan.user.threads.json`, `changes.json`, `verdicts.json`, `crosscheck.json`, `changeset.json`, `graph.json` | runner |
+| `threads/commands.jsonl` | app and phone (append only, under the same `flock` as `commands.jsonl`) |
+| `threads/` (everything else: `cursor`, `runner.json`, `runner.lock`, `<thread>/thread.json`, `turns.jsonl`, `diffs/`, `activity.json`, `workspace/`, `runs/`) | ThreadRunner (2.11) |
 | `work/` (with `carry/`, `shadow/`), `runs/<stage>-<round>-<role>…/` (`run.json`, `stdout`, `stderr`, `activity.json`, `result.json`) | executor |
 | `intakes/model-lists/<agent>-<key>.json` (shared, not per intake) | app |
 
@@ -259,15 +289,90 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
 - **`ChangeSetValidator`** checks for unknown ids, undefined or duplicate temp ids, self edges,
   cycles, missing delivery ratings and precondition mismatches. An edge from an existing task
   onto a new one is held to the end of the release (`heldOpIndices`).
+  - **Visuals (planning v2 P2a).** A new task may carry `visualRefs` (`[{visualID, states}]`), the
+    visuals it is built to match. Every caller passes `knownVisuals`: the head plan's stored,
+    non-pending `fd-visual` ids (`PlanVisualFence.knownVisuals`). It is `Set()`, never nil, for a
+    plan with none and at triage (no plan yet), so a cited id there is `unknownVisual`. The
+    callers are `RoundExecutor.changeSetSeat` and `patchSeat`, triage, `reviewModel` and both
+    `runRelease` checks. A visual counts only with a block state on the released (head plan)
+    checkpoint, its `visuals.json` first and `block.json` as the fallback. The strict op schema (`Triage.op`) lists `visualRefs` on every op.
+  - **Encode, polish, fresh eyes and dedup read the visuals catalogue** (`VisualCatalogue`,
+    `RoundPrompts.visualsCatalogue`): each visual's id, kind, section, states, and its source and
+    default-snapshot paths. The seat may read `visuals/`. A polish-family `replace` of a create that
+    leaves `visualRefs` null keeps the refs its tempId had (`ChangeSetPatch.apply`); `[]` drops them. A plan with no visuals gets exactly the old prompt.
 - **`DriftClassifier`** compares each op's precondition with the live graph. The result is
   `holds`, `drifted` or `impossible`.
 - **Release** (`IntakeService.runRelease`):
   1. Re-read the graph and classify drift.
   2. Apply the person's drift confirmations and drops, then re-validate.
-  3. `ApplyPlanner.plan` orders the steps: creates, edges, edits, reopens, held edges.
-  4. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
-  5. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
-  6. `ReleaseRecord` is saved into the intake.
+  3. **Export the plan** (D14, spec §12, V-R4; `IntakeService+Visuals.swift`). Every release of an
+     intake with a plan exports it, visuals or not; an identical re-release is a no-change, not an
+     error. Only Single-task intakes, which have no plan, skip it. `PlanExporter` (pure; it and
+     every disk read before it run off the main actor) builds `docs/plans/<slug>/`: `plan.md` with
+     each block as an image link plus a folder link, `visuals/<id>/` with the primary's files and
+     a `README.md`, `_unused-alternates/<n>/README.md`, and the `.flightdeck-intake` marker. The
+     slug comes from the intake's title, with `-2`, `-3`, … past a folder that is not this
+     intake's. `RepoCommitter` then commits that folder only (`git commit -- <pathspec>`).
+     Uncommitted, ignored or hidden changes in the folder, a symlink, or a folder this intake
+     does not own refuse the release with the path named, and nothing is written, tasks included.
+     So does a block whose visual has nothing stored (the export would mark it missing): the
+     release is refused with the visual's id named, so no task cites a folder that is not
+     written. The block states exported are the ones the plan's checkpoint recorded, with
+     `block.json` as the fallback; `knownVisuals` and the catalogue use the same rule. A cancel
+     after the commit would leave the plan committed with no tasks; nothing cancels a release today.
+  4. `ApplyPlanner.plan` orders the steps: creates, edges, edits, reopens, held edges.
+  5. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
+     With an export, a task with `visualRefs` gets a "Fidelity references" section in its
+     description, written by code (V-R3), naming `docs/plans/<slug>/visuals/<id>/` and its states.
+  6. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
+  7. `ReleaseRecord` is saved into the intake.
+- **Checkpoints record block states.** IntakeRunner writes `checkpoints/<n>/visuals.json`
+  (`CheckpointBlockStates`) from `visuals/` whenever it lands a checkpoint, so an old plan shows
+  its visuals as they were. An intake with no visuals gets no file.
+
+### 2.11 Ask threads (planning v2 P1)
+
+Spec §5, §6, §10, §11, with the plan's rulings R1–R9 and the ledger's rulings (spec "Errata").
+
+- **One ThreadRunner per shaping intake**, `flightdeck intake threads <id> --root`, detached under
+  `fd-abduco` on `threads-<uuid>.sock`, beside the round runner. `IntakeService.kickThreads`
+  starts it after every thread append; `pollThreads` brings it back each tick when a command is
+  past the cursor or a turn is queued, and collects its daemon once idle. The work check is
+  memoized on the thread files' stamps. `threads/runner.lock` (`flock`) makes a second runner exit
+  at once. It carries the intake's runner token in `FLIGHT_DECK_CALLER` and resolves no accounts:
+  turns bill what the round runner's `accounts.json` says.
+- **Single writers.** ThreadRunner is the only writer of `threads/` (except `commands.jsonl`). It
+  appends to the tape only a thread's notes and its auto-accepted diffs. The app and the phone
+  only append: thread commands to `threads/commands.jsonl` (R8), an accepted diff's
+  `applyThreadDiff` to the tape's `commands.jsonl`.
+- **A turn** is one resumed headless run (`ThreadTurnExecutor`) with `.threadRead` access (R1),
+  cwd the repo, the workspace readable, and the `ThreadActions` schema. Its CLI carries
+  `FLIGHT_DECK_CALLER = ThreadTurnExecutor.agentCaller` ("thread-agent:none"), which the socket
+  reads as `.invalid`. Round seats carry the same value (`RoundExecutor`), never the runner's token.
+  Grok and OpenCode read files only (`HeadlessCommand.threadReadsFilesOnly`; OpenCode has no bash).
+  At most 2 turns run at once per intake (R3). Actions are validated (R6) and retried twice.
+- **Accepting a diff** (`ThreadAccept.append`, used by the Mac's `decideDiff` and the phone's
+  `phoneDiffDecide`): `applyThreadDiff` is composed on the newest version of the head — the last
+  edit still queued for it, else its effective plan — inside the commands lock
+  (`TapeStore.appendCommand(composing:)`). A diff from an older checkpoint applies when its
+  passage is found exactly once on the head, else it is `diff_stale`. Edit then Accept edited sends
+  `editedMarkdown`, which is the `applyThreadDiff` markdown and an accept (ruling). Order: the
+  tape's `applyThreadDiff` first, then the thread's `decideDiff`, so a half-failed accept leaves the
+  edit and a retry adds only the decision.
+- **IntakeRunner applies `applyThreadDiff`** like `editPlan` (`plan.user.md`), and records
+  `{thread, diff}` in `checkpoints/<n>/plan.user.threads.json` (`TapeStore.threadEditSources`).
+- **Rounds read the decisions** (spec §11): `RoundPrompts.steering` adds "What the human decided in
+  ask threads since the last round" — each unresolved thread with a turn that ended after the head
+  checkpoint landed: title, anchor, latest `decision`, and whether its change is among the human's
+  edits (`ThreadDecisions.since`). Resolved threads never feed rounds.
+- **Runner callers get least privilege** (ruling): `ControlScope` refuses an `.intakeRunner` caller
+  every command and request (`out_of_scope`), its own intake's included, as on the canvas branch.
+- **Tests:** `AskThreadEndToEndTests` (logic lane) runs Ask → reply → accept → next round with the
+  real ThreadRunner, ThreadAccept and IntakeRunner. `ThreadRunnerTests`, `ThreadStore*Tests`,
+  `ActionValidatorTests`, `IntakeThreadServiceTests`, `PhoneThreadCommandTests`. The UI flow is
+  `AskThreadUITests` (`FD_UITEST_ONLY=FlightDeckUITests/AskThreadUITests ./scripts/smoke-remote.sh`)
+  on `-FlightDeckPlanningFixture threads`: a seeded thread with a reply and a pending diff, and no
+  ThreadRunner (a turn would spend real tokens on the UI-test Mac), so the Ask it sends stays queued.
 
 ---
 
@@ -336,9 +441,10 @@ the heatmap.
 | Control bar | `Planning/ControlBar.swift`, `LCDModel.swift`, `TransportRules.swift` | Transport (Back · Pause \| Step · Next major · To review \| Stop), the LCD (round, elapsed, agents done, so far, billed, convergence, coverage, stops at), Extend, Annotate. `TransportRules` is shared with the phone. |
 | Run menu | `Planning/RunMenu.swift` | AppKit menu: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘., Extend ⌘=, Remove a Round ⌘-, Annotate ⌥⌘A, Section Heatmap |
 | Departures board | `Planning/DeparturesBoard.swift`, `BoardModel.swift`, `SplitFlapText.swift`, `FlapPolicy.swift`, `LabelFit.swift` | NOW / IN THE AIR / STOPS AT / CALLING AT, then the tape of slots (CLR, DRFT, SYN, RF{n}, ENC, PL{n}, FRSH, DDUP, REV) with groups and +/− handles that send extend and trim. `LabelFit` picks the full name or the code. |
-| Live card | `Planning/LiveCard.swift` | Control bar, board, pause and edit-conflict banners, "N notes queued", seat rows, finished rounds. One 1 Hz `TimelineView` drives every clock. |
+| Live card | `Planning/LiveCard.swift` | Control bar, board, the halt panel, the edit-conflict banner, "N notes queued", seat rows, finished rounds. One 1 Hz `TimelineView` drives every clock. |
 | Seat rows | `Planning/SeatRow.swift`, `SeatRowModel.swift`, `AgentStack.swift` | One row per agent: role, model, headline, footprint chips, context gauge, time, result, cost |
 | Round chips | `Planning/RoundChip.swift`, `RoundTimeline.swift`, `FinishedRounds*.swift` | Finished-round cards with one detail panel; the timeline chips in the Rounds editor |
+| Halt panel | `Planning/HaltPanel.swift`, `HaltReseat.swift`, `HaltStatus.swift` | The ONE place a halt is told (round failed, intake failed or interrupted, paused, stopped, rate limited): title, reason, what to do, a HALTED FOR clock, the failed seat, and Retry · Retry with another model · To review · Resume · Show agent output. `HaltStatus` (pure, shared with the phone) decides the words and the actions from `TransportRules`; the view only draws. It replaces the board's failure hover card and the live card's pause banner; the LCD's red SO FAR cell stays as the compact indicator. Retry sends Step (or `IntakeService.retry` for an intake-level failure); Retry with another model saves the choice to the failed seat (`HaltReseat` over `RoundConfigEditor.updatingChoice`, refused while a runner is live) and then sends Step; `IntakeDetailView.haltPanel` wires it, in the live card for a shaping tape and in the stage body for `.failed`/`.interrupted`. |
 | Floating cards | `Planning/FloatingCard.swift` | Hover cards in a non-activating child panel (`CardPlacement`). The notes selection toolbar uses it too. |
 
 ### 3.4 The convergence card and the section-churn heatmap
@@ -425,13 +531,51 @@ the heatmap.
   - The position survives tab and project switches, but not a relaunch.
 - **File drops** (`DroppedPaths.swift`):
   - On the plan, a drop inserts `[path](path)` links at the drop point as one undo step. Paths are relative to the project, or start with `~`. Several items become a list on an empty line.
-  - On the new-note draft and the question answers, `.dropsFilePaths` appends plain paths.
+  - On the new-note draft, a text question's answer and the Other field of a choice question,
+    `.dropsFilePaths` appends plain paths. Option rows and toggles take no drop.
+- **Visual blocks** (planning v2 P2a, `Intake/Planning/Visuals/`). A ```` ```fd-visual id=<id> ```` fence
+  is a block (`MarkdownBlock.Kind.visual`). The styler hides its source lines and holds them to a
+  fixed paragraph height. `VisualBlockOverlay` lays a `VisualBlockView` over them, as tables are
+  laid (V-R1). The view has a header, the body, a filmstrip when there is more than one
+  representation, Compare, and the states and sizes controls (`visual-sizes`). Mermaid draws in a
+  `WKWebView` that loads only `fdvisual://<id>/r<n>/…` through `VisualSchemeHandler`: manifest-listed
+  files, a non-persistent store, every other scheme cancelled (V-R2). Mermaid 12.2.0 is vendored
+  in `Resources/Visuals/mermaid/` with its SHA-256 (V-R5). At most 3 web views are live, counting
+  any still waiting on their picture; an off-screen block shows its snapshot, drawn one at a time
+  by one shared `VisualRenderHost` into a cache bounded at 64 MB, and a render that times out is
+  not queued again in the session. The body's height follows the stored snapshot's shape (else
+  the live drawing's), within 160–640 pt; the size switch lays the live drawing out at that size's
+  width. A block whose id has no stored revision is a fixed-height "missing visual" placeholder;
+  a parse error shows Mermaid's own message. An older checkpoint shows the block states it
+  recorded. A Find match inside a block reveals its source (the reveal comes before the
+  indicator; closing Find hides it again), and lines removed just above a block draw their ghost.
+  The block's accessibility value says what it shows ("live, drawn, wide, 840 pt", "picture", or
+  Mermaid's error); its controls are labelled State and Size.
 - **Links** (`PlanLinks.swift`): ⌘-click opens a link. Holding ⌘ shows a tip with the target. `:42` and `#L42` suffixes are stripped. In-document `#anchor` links are not supported.
 - **Outline and breadcrumb:** `PlanReadingPosition` shows "§ Title" in the pinned board's footer, and a click jumps there. `PlanFocus` is how a heatmap cell asks for a Diff at a section.
 
-### 3.8 The notes rail
+### 3.8 The notes rail and ask threads
 
-See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
+See section 6 for notes. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
+
+Ask threads (spec §6, files under `Intake/Planning/Threads/`):
+- **✦ Ask** is the last button on `SelectionToolbar`: on a selection it opens the panel on a new
+  thread anchored there; with none, on the whole plan. The Question note kind is gone from the
+  toolbar (old Question notes still read and feed rounds).
+- **Ask cards** (`AskCard.swift`) sit in the rail's aligned lane beside their quote: title, live
+  activity, excerpt, counts, Open ⤢, and a stale pill with Re-propose.
+- **The thread panel** (`ThreadPanel.swift`, `ThreadPanelModel.swift`) replaces the rail in the
+  inspector (R7): an index (Open by section, Needs you, Resolved; a filter; "＋ New thread on
+  whole plan") and the conversation. The header has the title, Resolve, the agent menu, the
+  auto-accept switch, the version followed, and "reads files only" for grok and opencode. ⌘↩
+  sends, ⌘⇧↩ sends and resolves, ⌘[ ⌘] move between threads. The model polls the binding's reader
+  (`IntakeThreadBinding`), and its refusals read as words (`ThreadPanelModel.words`).
+- **Diffs in the plan** (`DiffGutter.swift`, D17 option B): the proposed text drawn in place of
+  its paragraph (`PlanProposal`) with a green bar; on hover the old text struck through and ✓ ✗ Edit
+  ✦. Edit puts the words in the plan; Accept edited sends the whole plan as the accept, Cancel
+  restores the passage by range. Undoing the insert, or a paste over the passage's edge, ends the
+  edit session (words left as typed). Switching thread in the panel lets the edit go.
+- The panel's open thread and width are remembered per intake for the session.
 
 ### 3.9 Release review
 
@@ -441,6 +585,11 @@ See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
   - The footer shows "N notes carried into task notes".
   - The Release button text comes from `UIText.releaseButton`.
 - `ReleaseSheetModel.swift` holds the text and counts. `ReleaseSummary.swift` (IntakeKit) holds the count line.
+- The sheet lists what release writes to the repo, what a re-release removes, and the commit
+  (`ReleaseReview.export`, from `RepoCommitter.preview`; spec §12 "Confirmation"), for every plan.
+  An export release would refuse (a missing visual, a dirty plan folder) shows in red before
+  Release is pressed (`exportRefusal`), and citations validation dropped show as warnings
+  (`visualWarnings`).
 - The sheet closes only on `released` or `partiallyReleased`.
 - Not verified: that `confirmedDrift`, `droppedOps` and `ratingOverrides` are saved to `intake.json` through `mutate`. It is likely, but `mutate` was not read.
 
@@ -450,6 +599,9 @@ See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
 -FlightDeckResetState YES` to seed a temp state dir with one paused Feature plan that has notes.
 `PlanningInspectorUITests` uses it. `-FlightDeckPlanningFixture synthesized` seeds a draft, a synthesis that
 consumed notes, and two refines, each a long plan with tables (`NotesToolbarUITests`).
+`-FlightDeckPlanningFixture visuals` seeds the shaping plan with one Mermaid `fd-visual` block
+stored `wide` and `narrow`, and no ThreadRunner (`VisualSizeUITests`:
+`FD_UITEST_ONLY=FlightDeckUITests/VisualSizeUITests ./scripts/smoke-remote.sh`).
 
 ### 3.11 The sidebar status
 
@@ -502,31 +654,52 @@ fidelity". Several working plans get a line each.
 | Screen | Files | What it does |
 |---|---|---|
 | Intake row | `IntakeRow.swift` | Glyph, title, pill and one fact in the Sessions list |
-| Intake screen | `IntakeScreen.swift`, `IntakeDetailModel.swift`, `IntakePresence.swift` | `BoardStrip` with transport keys (Stop asks first; a long press on a play key sets the default). Sections: questions ("Answer on your Mac for now."), clarifications, fidelity, review ("Review and release on your Mac for now."), failure, Rounds, agents, rounds (with −/+), plan. Polls every 1.5 s while visible, using an etag. |
+| Intake screen | `IntakeScreen.swift`, `IntakeDetailModel.swift`, `IntakePresence.swift` | `BoardStrip` with transport keys (Stop asks first; a long press on a play key sets the default). Sections: questions (`StructuredQuestionForm.swift`: choose, then Send; "Answer on your Mac for now." when the Mac does not set `structuredQuestions`), clarifications, fidelity, review ("Review and release on your Mac for now."), failure, Rounds, agents, rounds (with −/+), plan. Polls every 1.5 s while visible, using an etag. |
 | Fidelity chooser | `FidelityChooser` in `RoundInspectorModel.swift`, UI in `IntakeScreen.swift` | Sends `intake.choose`, or `intake.start` if the Rounds were edited |
 | Round inspector and editor | `RoundInspectorScreen.swift`, `RoundInspectorModel.swift`, `RoundEditorModel.swift` (`RoundEditor`, pure), `RoundEditorView.swift` | Read-only by stage, or an editor when `RoundEditing.make` allows it. Choosing: "Start sends these rounds." Shaping: Revert and Save (`intake.rounds`). Shows provider icons and "Claude > Opus 5.5" names. |
 | Round detail | `RoundDetailScreen.swift`, `RoundFacts.swift` | One landed round: facts, agents, sections changed (each links to the reader's changes), notes consumed |
 | Plan outline | `PlanOutlineScreen.swift` | Sections with churn and note counts |
 | Plan reader | `PlanReaderScreen.swift`, `PlanTableView.swift` (shared grid renderer) | Blocks from `PlanBlocks.split`, tables as grids, a Changes toggle, notes, other-version groups |
+| Visual blocks | `VisualBlockCard.swift`, `VisualViewerScreen.swift`, `VisualCache.swift`, `VisualLoader.swift` | An `fd-visual` block is a card: the snapshot, a filmstrip of states and alternates, the caption, sized from `WireVisualRef.aspect` before its bytes arrive. Tapping opens a full-screen live viewer built from the cached, hash-checked files, with networking off. Only when the detail's `visuals` flag is true; otherwise the block is plan text. |
 | Note sheet | `NoteSheet.swift`, `NoteComposer.swift` (`NoteComposer`, `NoteOutbox`) | Quote, kind chips, text. The outbox keeps sent notes visible until the plan shows them. |
 | Clarifications | `ClarificationsScreen.swift` | Answered Q&A, read-only |
 | Model | `FlightControlModel.swift`, `IntakeCommands.swift` | Banners, one detail and one command model per intake, a plan cache of 4. Commands time out after 10 s and reuse their token within 60 s. |
+| Answer form | `AnswerFormModel.swift`, `AnswerDraftStore.swift` | One per intake. Decides when the form shows, when it reads "Sending…", and when it starts again, all keyed on the round's digest. Chosen answers persist per intake and digest in UserDefaults until a send is acked. The intake screen settles the sent marker on every appearance (`observe` in `onAppear`), so a round that moved on while the screen was popped does not stay "Sending…". |
+| Ask threads | `ThreadScreen.swift`, `ThreadOutbox.swift`, `PhoneDiffGutter.swift`, `ThreadGate` | Ask in the reader's selection menu (and "Ask about the whole plan") opens a thread; the thread screen shows the conversation (fetched with `intake.thread.get`, polled while open), inline questions, "reads files only" for grok and opencode, and a composer. Pending diffs draw as a green bar beside the proposed text (in the plan's serif); a diff that can't be placed is a tinted card under its block. Tapping shows the old text struck through with Accept / ✗. Unsent notes and asks sit full width under their passage. The fleet row shows a "needs you" count. All of it only when the detail's `threads` flag is true. |
 
 `PlanReviewScreen` and `PlanReviewModel` are the Plannotator plan gate for sessions, not Flight
 Control.
 
 ### 4.2 Wire (`Sources/FleetKit/`)
 
-- **Requests** (`TimelineFrames.swift`): `intake.detail(id, ifNot: etag)` and
-  `intake.plan(id, checkpoint?, changes)`. A request is safe on any Mac: an unknown request gets
-  `err unsupported`.
+- **Requests** (`TimelineFrames.swift`): `intake.detail(id, ifNot: etag)`,
+  `intake.plan(id, checkpoint?, changes)`, `intake.thread.get(id, threadID, since?)` (answered
+  by `ServerFrame.intakeThread` with a `WireThreadPage`) and `intake.visualFetch(id, visualID,
+  revision, part, offset, limit)` (V-R6; answered with `fileChunk`). `part` is `file:<path>` or
+  `snapshot[@<state>-<size>]`; `VisualFetch.serve` serves only manifest-listed files, off the main
+  actor, and refuses `visuals_unavailable`, `unknown_visual`, `unknown_revision`, `bad_part`,
+  `bad_range`, `unknown_file`, `too_large`, `bad_manifest` or `unreadable`. A request is safe on any Mac: an unknown
+  request gets `err unsupported`.
 - **Replies:** `WireIntakeDetail` and `WireIntakePlan`.
+- **Halt status:** `WireIntakeDetail.halted` (`WireHalt`; `summary.haltKind`/`haltReason` for the list row)
+  says why planning stopped (`roundFailed`, `intakeFailed`, `interrupted`, `paused`, `stopped`,
+  `rateLimited`), the runner's `whatToDo`, the failed `slot` (role, what ran, `stage` + `slotIndex`
+  for the Rounds editor), the tail of its stderr+stdout (~4000 chars), and the `actions` the Mac
+  would accept right now: `retry`, `retryOther`, `toReview`, `resume`, `showOutput`. Built by the
+  pure `HaltStatus.make` (`Intake/Planning/HaltStatus.swift`), which the desktop panel reads too;
+  actions are derived from `TransportRules`, never a rule of their own. `retry` sends `intake.retry`
+  (a failed tape queues the same Step as ⏯; a failed/interrupted intake runs `IntakeService.retry`;
+  anything else is `not_allowed`/`intake_moved_on`); `toReview` and `resume` reuse `intake.tape`
+  (`toReview`, `step`); `retryOther` is client-side: save the new seat through `intake.rounds`
+  (a failed round has not landed, so `ShapingEdit` allows it once the runner is gone), then `intake.retry`.
+  `WireIntakeDetail.retry == true` is the licence to send `intake.retry`.
 - **Event:** `project.intakes`, which carries `WireProject.intakes`.
 - **Commands** (`Frames.swift`, `FleetCommand`):
 
 | Op | Fields | Gate |
 |---|---|---|
 | `intake.tape` | command, stage? | `steer` |
+| `intake.retry` | id, token | `retry` |
 | `intake.defaultPlay` | mode | `steer` |
 | `intake.note` | noteID, kind, text, checkpoint?, block?, quote? | `steer` |
 | `intake.removeNote` | noteID | `steer` |
@@ -534,19 +707,39 @@ Control.
 | `intake.choose` | preset | `choose` |
 | `intake.start` | preset, config, base | `editRounds` |
 | `intake.rounds` | config, base | `editRounds` |
+| `intake.answer` | id, token, round, digest, answers | `structuredQuestions` |
+| `intake.thread.send` | id, token, threadID?, anchor?, text | `threads` |
+| `intake.thread.answer` | id, token, threadID, answers | `threads` |
+| `intake.thread.resolve` | id, token, threadID | `threads` |
+| `intake.diff.decide` | id, token, threadID, diffID, accept | `threads` |
 
 - **Wire types** (`IntakeWire.swift`):
   - The core: `WireIntakeSummary`, `WireIntakeDetail`, `WireBoard`, `WireControls`, `WireRound`, `WireNote` (with optional `checkpoint` and `version`).
   - Rounds: `WireRoundConfig`, `WireRoundsMenu`, `WireRoundsLock`, `RoundsRefusal`.
-  - Others: `WireQuestions`, `WireChoice`, `WireFailure`, `WireIntakePlan`.
+  - Questions: `WireQuestions` (with `round`, `structured` and `digest` for the open round), `WireStructuredQuestion`, `WireOption`, `WireStructuredAnswer`.
+  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan` (with `threads`, `pendingDiffs` and
+    `visuals`).
+  - Visuals (`VisualWire.swift`): `WireVisualRef` (id, primary `revision`, `kinds`, `alternates`,
+    `states`, `sizes`, `aspect`, `files` with size and SHA-256), `WireVisualAlternate`,
+    `WireVisualFile`, `WireVisualPart`. `IntakeVisualProjection` fills `WireIntakePlan.visuals`
+    from the same read the Mac editor makes (`VisualBlockModel.load`), as the checkpoint
+    recorded it; `aspect` comes from the default snapshot's PNG header. A plan with no block
+    carries no list.
+  - Threads (`ThreadWire.swift`): `WireThreadSummary` (with `readsFilesOnly`), `WireThreadAnchor`,
+    `WireThreadCounts`, `WireThreadTurn`, `WirePendingDiff`, `WireThreadPage`;
+    `WireIntakeSummary.threadsNeedingYou`.
 - **Capability flags** are all on `WireIntakeDetail`:
-  - The flags are `steer`, `choose`, `noteKind` and `editRounds`.
+  - The flags are `steer`, `choose`, `noteKind`, `editRounds`, `structuredQuestions`, `threads`
+    and `visuals` (on while `VisualFetch.gateOpen`).
   - The payloads are `roundConfig`, `roundsMenu` (while choosing or shaping) and `roundsLock` (while shaping).
-  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (around line 148).
-  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options` and `RoundEditing.make`.
-- **Handlers** (`IntakeService.phone*`, about lines 1206 to 1427, dispatched from `FleetService.swift`):
-  - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote` and `phoneSetNoteKind`.
-  - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, and `refused: <sentence>`.
+  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (the flags at lines 155 to 166; `structuredQuestions` and `threads` at 163 to 166).
+  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make`, `AnswerFormModel.openRound` and `ThreadGate`.
+- **Handlers** (`IntakeService.phone*`, about lines 1332 to 1524, dispatched from `FleetService.swift`;
+  the thread ops are `IntakeService+PhoneThreads.swift`):
+  - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote`, `phoneSetNoteKind` and `phoneAnswer`.
+  - `phoneAnswer` refuses `stale_questions` when the round or digest is not the open round's, or the round is already answered. Otherwise it passes on `answer(_:structured:)`'s code: `unknown_question` (a missing, unknown or repeated question id) or `invalid_answer` (an incomplete answer, or one `accepts` refuses). An unknown intake is `unknown_intake`.
+  - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, `stale_questions`, `unknown_question`, `invalid_answer`, and `refused: <sentence>`.
+  - The thread ops add `empty_message`, `unknown_thread`, `thread_resolved`, `no_agent`, `unknown_diff`, `diff_stale`, `diff_decided` and `write_failed`. A new thread from the phone is named by its token (`ThreadID.opened(byToken:)`), so a retry opens no second thread. No shipped Mac answers `threads_unavailable` (the stubs never reached master): a Mac without threads has no `threads` flag, so the phone never sends it a thread op, and if one did arrive the older Mac would drop the socket (§4.3). The code stays as the app's own "no service" answer, and the phone still has words for it. `intake.thread.answer` carries an optional `turn`; a mismatch is `stale_questions`.
   - Each handler remembers the last 16 tokens, so a retry is idempotent.
   - The phone's words for each code are in `CommandCopy.message`.
 
@@ -639,6 +832,66 @@ the edit. Requests are safe, because an unknown request gets an error reply.
 - `Tests/FlightDeckTests/Intake/Planning/TerminologyGuardTests.swift` scans string literals in
   `Sources/FlightDeck`, `Sources/FlightDeckMobile` and `Sources/IntakeKit`. It matches
   the old word for tasks, `flywheel`, and `seat`/`seats`, with a few allow-listed paths.
+
+### 5.5 Visual providers (P3 core)
+
+A visual provider is a folder with a `provider.toml` that tells Flight Control which kinds of
+picture it can make. P3 core ships the loader, the trust gate, the sandbox, the checker, the
+Settings list and the authoring skill. Nothing in planning calls a provider yet (see
+`docs/FOLLOWUPS.md`, "Visual providers").
+
+**Where the code lives:**
+- `Packages/HostKit/Sources/HostKit/Providers/`: `ProviderManifest` and `ProviderManifestParser`.
+  They sit in HostKit beside `DelegateConfigParser` because the TOML reader is internal to HostKit.
+- `Sources/ProviderKit/`: `ProviderRegistry` (resolution), `ProviderTrust` (digest and approvals),
+  `ProviderSandbox` (generator runs), `ProviderCheck`. This folder is compiled into both the app
+  target and the CLI target in `project.yml`.
+- `flightdeck provider check DIR [--run-samples]`: local, not over the socket. It is caught in
+  `Sources/FlightDeckTool/main.swift` before the transport, like `intake run`.
+- Settings → Flight Control → Providers: `Sources/FlightDeck/Preferences/UI/ProvidersPane.swift` and
+  `ProvidersSettingsModel.swift`.
+- The skill: `Resources/ClaudePlugin/skills/visual-provider/`. Claude reaches it through the plugin.
+  Codex gets a copy from `Sources/FlightDeck/Agents/Codex/CodexBundledSkill.swift`, which copies a
+  whole folder and also installs `delegate` and `peer-messaging`.
+
+**Trust model.** A repo is untrusted input.
+- A repo provider with no `[generator]` is data only. It is used with no approval.
+- A repo provider with a generator needs a one-time Approve. The approval stores the SHA-256 of the
+  folder (path, NUL, length, owner-exec bit, bytes, in sorted path order). Any change asks again.
+- The Approve button takes the digest the row showed. If the folder changed since, it refuses.
+- Bundled and user providers are trusted, but are re-checked against the folder at run time.
+- Links are refused anywhere in a provider folder. xattrs are not hashed.
+- Size caps, because Settings reads every repo provider: `provider.toml` at most 256 KiB (read
+  through one descriptor, refused from its size); the digest refuses a file over 10 MiB or a folder
+  over 50 MiB before it reads a byte, then streams. Settings resolves off the main actor.
+- The digest does not hide `.DS_Store` or editor swap files. They change the digest and ask again.
+- Approvals live in `~/Library/Application Support/Flight Deck/provider-trust.json`. If that file is
+  corrupt, Approve is off and the pane offers "Move damaged file aside".
+
+**Sandbox.** A generator runs only in `ProviderSandbox`, never in the agent. It runs from a private
+copy of the folder, re-hashed against the approval. It has no network, writes only to its output and
+temp folders, and cannot read the home folder. It has a timeout, output caps and a small
+environment. If `/usr/bin/sandbox-exec` is missing, the generator is refused. The summary is in
+`docs/ARCHITECTURE.md`, "Visual providers".
+
+**`--run-samples`.** `provider check` validates the manifest, kinds, instruction files and assets.
+It checks only the path of `entry`: the agent writes that file in the draft folder (spec §9 step 5),
+so a provider does not ship one. A linked provider folder is refused. By default it does not run a generator. With `--run-samples` it first prints the
+argv, then runs the generator in the sandbox on `samples/<kind>/`, once per kind. This is intent, not
+a security boundary: an agent can already run shell. The skill tells agents to pass the flag only
+when the author asked for a sample run. Exit codes: 0 valid (warnings print), 1 problems or a failed
+sample, 2 usage error.
+
+**The disabled switch.** The on/off switch is stored in `UserDefaults` under
+`visualProviders.disabled.v2`. Each entry is `<source>:<id>`, with source `repo`, `user` or
+`bundled`. A bundled switch must not reach a repo override of the same id. The old key
+`visualProviders.disabled.v1` (ids only) is migrated on first read. Nothing reads the key yet:
+P3-integration must.
+
+**Skill installs.** Codex gets the skill folder under `~/.codex/skills/` with a
+`.flightdeck-managed` digest sidecar. The installer never follows a link and swaps a refresh in
+whole. A folder that holds a `.git` counts as edited by the user and is left frozen, so it never
+auto-upgrades.
 
 ---
 
@@ -817,6 +1070,17 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
   - edit rounds (`308b16f9`);
   - provider icons (`ad78cb54`).
 - **Agents** are told "tasks" in every prompt and schema (`148a97ad`).
+- **Planning v2 P0, structured questions** (branch `planning-v2-p0`):
+  - question model and schema (`ff2c81f4`, `4efd40ab`);
+  - triage asks choices and still reads strings (`17c0f5b2`, `08842183`);
+  - the Mac takes structured answers (`59ddd44b`) and answers by choosing (`49d97c84`);
+  - `intake.answer` and the phone form (`4348e14d`, `5d792468`);
+  - fixes: option ids checked (`86dc144e`); rounds named by digest on the Mac (`3d1d9709`) and on the wire (`570e90d4`); phone token, form and drafts per round (`24b0114f`); refusal words (`ecfaefdf`); Other takes file drops (`ff9478c4`).
+- **Planning v2 P1, ask threads** (branch `planning-v2-p1`, 2.11, 3.8, 4.1): the shapes and the
+  locked append (Task 0, Stream B), ThreadRunner (Stream A), the Mac UI (Stream C), the phone
+  (Stream D), the window-free logic test lane (Stream E), and the integration: the runner is
+  spawned and kept alive, the stubs are gone, accepted diffs carry their thread, rounds read the
+  decisions, and runner tokens reach nothing on the socket.
 - **Gemini** read-only seats run under an FD-owned agy project, so reads work again (`3416e35e`).
 - **Tests:** the unit suite runs on the UI-test Mac by default (`412f9a25`).
 
@@ -833,6 +1097,15 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 - **Idea:** `commands.jsonl` grows without bound.
 - **Gap:** there has been no live whole-tape run with Claude seats, and the main-thread cost during a run has not been measured.
 - **Ideas:** branches and rewind, an oracle seat, per-round agent overrides, a task graph review tab.
+- **Gap (threads):** a ThreadRunner resolves no accounts. Its turns bill whatever the round runner's
+  `accounts.json` says, an agent the round config does not use runs on its built-in home, and no
+  pool lease is held for a turn while no round runner is live.
+- **Gap (threads):** a pending diff is carried onto a newer round only by its thread's next turn. Until
+  then an accept lands it on the head when its passage is still there exactly once, and refuses it
+  `diff_stale` otherwise.
+- **Gap (threads):** codex and gemini thread agents, like round seats, can read files anywhere
+  (FOLLOWUPS, "Ask threads"). Triage agents, which the app spawns, carry no `FLIGHT_DECK_CALLER` and
+  read as the human on the socket.
 
 ### 7.4 Mac UI
 
@@ -849,6 +1122,7 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 - **Gap:** fresh eyes and dedup have no row in the Rounds timeline editor.
 - **Gap:** the live slot does not grow, and BILLED covers only the current round.
 - **Gap:** there is no UI to turn Flight Control off for a project (`ProjectHeaderRow.swift` has an inert button).
+- **Gap:** the ask-thread UI (P1) is unverified in the GUI: `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P1.
 - **Gap:** about 13 behaviours have never been checked by a person in the GUI. They are listed under FOLLOWUPS "Unverified in the GUI", "Inspector modes" and "Rounds timeline editor". The pinned notes rail and the newer table editing are not on that list but are in the same position.
 - **Gap:** stale comments.
   - `ProjectView`'s doc comment still promises a task-graph tab "with the next plan".
@@ -859,7 +1133,6 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 ### 7.5 Phone
 
 - **Gap (against the phone principle):** the phone cannot do these yet:
-  - answer triage questions;
   - review or release;
   - retry or discard;
   - start a new intake;
@@ -897,6 +1170,20 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 
 ### 8.1 Tests run on the UI-test Mac
 
+- **Which lane:**
+  - A test that imports only XCTest, Foundation, `IntakeKit` and/or `FleetKit` (no `@testable import FlightDeck`,
+    no window, no `Network` socket or Bonjour) goes in `Tests/IntakeKitTests` or `Tests/FleetKitTests`.
+    Run it with `./scripts/test-logic.sh`.
+  - Any other test stays in `Tests/FlightDeckTests` and runs through `test-unit.sh`.
+  - Put every new pure test file in the first group. It then runs in seconds, in parallel across
+    worktrees, with no wait for the remote lock.
+- `./scripts/test-logic.sh` runs on this Mac. It never uses the UI-test Mac or its lock, and it
+  exits non-zero on any failure. It takes `FD_TEST_FILTER=ClassA,ClassB/testX`, with the same comma form
+  as `test-unit.sh`, and `FD_SKIP_BUILD=1`. The two bundles have no test host, so xctest does not launch the app.
+  - Pure helpers that both lanes use stay in `Tests/FlightDeckTests` and are listed under the logic
+    targets in `project.yml`, so each bundle compiles its own copy.
+  - A new test in `IntakeKitTests` or `FleetKitTests` that uses a shared helper from `Tests/FlightDeckTests`
+    must have that helper listed in `project.yml` first, or the logic lane does not compile.
 - `./scripts/test-unit.sh` builds on this Mac and runs on the UI-test Mac (`FD_UITEST_HOST` in
   the git-ignored `scripts/local.env`), via `test-unit-remote.sh`. That is the default.
   - It rsyncs the checkout to the **same absolute path** there. It shares the remote lock with the XCUITests.
@@ -1023,7 +1310,7 @@ These principles come from the maintainer's recent requests. Apply them to new w
 | `docs/AGENT-OPERATIONS.md` | Running inside the app, the release ritual, remote tests, worktrees, the shared checkout | Current. It does not describe the merge lock. |
 | `docs/MOBILE.md` | Phone device checklist | **Stale line 7:** "Flight Control … is not on the phone yet". Items 75 to 103 match the code. It says "hundred and two items", but there are 103. |
 | `docs/MOBILE-UI.md` | How to work on phone screens; the Wi-Fi Bonjour proxy | Current. No Flight Control content. |
-| `docs/FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md` | Phone Phase 3 scope: answers, start, retry, discard, review, release | Mostly current. Choose and start were built. The rest was not. |
+| `docs/FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md` | Phone Phase 3 scope: answers, start, retry, discard, review, release | Mostly current. Choose, start and answers were built (answers as `intake.answer`, Planning v2 P0). The rest was not. |
 | `docs/FLIGHT-CONTROL-MOBILE-HANDOFF.md` | The original terrain map for phone Flight Control | Partly stale; §0.1 is marked superseded. |
 | `docs/FLIGHT-CONTROL-COVERAGE-HANDOFF.md` | Design brief for cross-check coverage | **Stale.** It says nothing is built; coverage, cross-check and rotations now exist. Historical. |
 | `docs/FLYWHEEL-INTAKE-CHECKLIST.md` | Manual GUI checklist for intake, triage, release and the planning UI | Never walked. It predates inspector modes, the timeline editor, notes pinning and archive. |

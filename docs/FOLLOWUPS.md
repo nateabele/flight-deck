@@ -5,6 +5,26 @@ as work lands. Last audited against the tree on **2026-08-11** (master, post ses
 and menu-key-equivalent merges) — every entry below was re-checked against the code, not
 carried forward on trust.
 
+## Visual providers (P3 core), deferred
+
+Found during the P3-core build (2026-11-01). Nothing here blocks the core.
+
+- **P3-integration must read `visualProviders.disabled.v2`.** The Settings switch stores entries `<source>:<id>` but nothing reads them yet, so a switched-off provider is still used.
+- **The bundled `VisualProviders` folder does not exist.** The registry's bundled source is empty, so `fd.diagram.mermaid` and `fd.diagram.svg` are not shipped yet.
+- **`ProviderHost` is deferred.** Nothing in ThreadRunner or a round calls a provider or its sandbox.
+- **The sample-per-kind cheap-model step of `provider check` is deferred.** It needs ProviderHost. Today `check` runs generators only (`--run-samples`).
+- **`fd.comp.canvas` is deferred** until P2b lands the canvas.
+- **xcrun seed `prepare()` refusals have no tests** (symlink, wrong owner, wrong mode), and neither has a failed warm. Inject a temp `xcrunSeedFolder` to test them.
+- **Cross-process warm race.** Two processes warming the seed at once can leave a partial or cold cache. It is slower, not unsafe.
+- **A failed warm is not retried in-process.** The runs after it use a cold cache until the app restarts.
+- **The xcrun tests warm the real** `~/Library/Caches/dev.flightdeck/xcrun-seed` on whichever Mac runs them.
+- **A broken repo provider falls through** to user and bundled silently in the registry. The Settings row shows the broken row beside the winner, but no other caller does.
+- **`.repoDataOnly` skips the digest.** Revisit if a contract adds executable fields.
+- **xattrs are not hashed**, and `.DS_Store` or swap files ask for re-approval. Both are accepted.
+- **Manifest minors:** the contract is read only after the full TOML parse (so contract-2 syntax gives a parse error, not "needs a newer Flight Deck"); the root missing-key line number is cosmetic; a self-loop hop limit (`a`→`a`) is untested; the fallback `[` break also matches a multi-line array line.
+- **`provider check` minors:** line numbers for missing files come from a text search of `provider.toml`.
+- **Skill installer:** the sidecar write and `removeStaging` were fixed for links and live staging folders, but a refresh of a folder that has a `.git` never happens by design.
+
 ## Resolved (kept for the reasoning trail)
 
 - **Phone log fetches blocked the phone's main thread and always timed out — FIXED
@@ -1324,26 +1344,18 @@ rather than fixed alongside the daemon wiring.
 
 ## Hook-fed composer state (2026-09-19)
 
-- **`events.ndjson` grows without bound, and faster than "log file" suggests.** Nothing ever
-  removes or rotates it. Launch-time truncation was considered and rejected on its merits
-  (ledger Ruling E): a shrink under a concurrently-running second instance would make that
-  instance's `HookEventWatcher` resume at the new end and miss everything in between, so
-  truncation trades a disk-space problem for a correctness one. What the ruling underweighted
-  is the rate. `PreToolUse` and `PostToolUse` payloads carry `tool_input` and `tool_response`
-  verbatim, and `record.sh` writes the whole payload, so a busy fleet writes **megabytes per
-  minute** — not the kilobytes-per-day a lifecycle log sounds like. Two candidate answers, both
-  deferred: size-triggered rotation (the watcher's `TailTruncationPolicy.resumeAtEnd` already
-  survives a shrink correctly, so this is mostly a question of who rotates and when), or
-  trimming the payload in `record.sh` to the two fields the decoder actually reads
-  (`session_id`, `hook_event_name`) — cheaper, and it shrinks the line rather than the file.
-  Trimming at the writer is probably the better first move: `HookEventRecord.decode` reads
-  nothing else, and it also removes tool arguments and tool output from a file that currently
-  accumulates them in plain text.
-
-- **`HookEventWatcher.drain()` decodes that delta synchronously on `@MainActor`, every
-  500 ms.** Harmless at today's line sizes and directly compounded by the entry above: the
-  bigger the per-tick delta, the more JSON parsing happens on the main thread. Trimming the
-  payload addresses both at once.
+- **RESOLVED 2026-11-01: `events.ndjson` grew without bound and kept every payload.** It had
+  reached 3.5 GB, holding every prompt and every tool's input and output in plain text. Both
+  halves are fixed. **Trimmed at the writer:** `record.sh` pipes each payload to
+  `flightdeck hook-record`, which writes only `session_id`, `hook_event_name`, `agent_id`,
+  `tool_use_id`, `tool_name` and a SHA-256 `tool_input_digest` (`HookEventLine`), to an
+  owner-only file. The digest is what `DialogAttribution` compares; legacy raw lines digest the
+  same way. The system perl was rejected as the parser: 381 ms on a 2 MB payload, in a hook
+  the agent waits on. **Rotated by the reader:** nothing reads a line twice, so once a drain
+  has caught up past 1 MiB, `HookEventWatcher` renames the file aside, finishes it on the next
+  drain, and deletes it. Ruling E's second-instance concern is met by tracking the inode: a
+  different file at the path is read from byte 0, not skipped as a shrink. Main-actor decoding
+  per tick is now of ~200-byte lines.
 
 - **A never-anchored claude tab sits at `.unknown` until its next turn, not "one beat".**
   `applyRegistry` demotes readiness whenever no status-registry row names a tab's conversation,
@@ -2502,6 +2514,66 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     `AgentAdapter`/`AgentKind` should share `ntm`'s agent taxonomy, and whether `ntm serve`'s
     event stream is worth a transport spike ([FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md)
     already ruled it out as FD's own runner).
+
+## Ask threads, planning v2 P1 (2026-10-31)
+
+**Out of scope for planning v2** (spec §2), recorded here as P1 lands:
+- d2-language and image-model providers;
+- pins on the phone;
+- a live MCP front end for thread actions;
+- re-running a planning stage from a thread;
+- checking a built UI against its comp after implementation;
+- moving a note forward onto text that replaced its quote.
+
+**Open, from the P1 reviews and rulings:**
+- **Confine every adapter's reads to the repo and the workspace.** Today codex and gemini shells,
+  round seats included, can read anywhere the user can. Thread agents keep round-seat parity
+  (ruling); OpenCode threads have no bash at all. A thread that reads hostile repo content with
+  an agent that has network can exfiltrate any readable file. A cross-cutting change: round seats
+  too.
+- **`.invalid` callers pass every command at the `.full` scope level**, as a tab does. Accepted:
+  `.full` is the user's explicit grant to all callers. A thread agent and a round seat carry
+  `thread-agent:none` (`.invalid`), so under `.full` they reach what any tab reaches.
+- **Triage agents carry no `FLIGHT_DECK_CALLER`.** The app spawns them with its own environment,
+  so on the socket they read as the human, unscoped. Give them the fail-closed value too.
+- **ThreadRunner resolves no accounts.** Turns bill what the round runner's `accounts.json`
+  says; an agent the round config does not use runs on its built-in home, and no pool lease is
+  held for a turn while no round runner is live.
+- **A pending diff moves onto a newer round only on its thread's next turn.** An accept before
+  then lands on the head when the passage is still there exactly once, and is `diff_stale`
+  otherwise. ThreadRunner could rebase pending diffs when it sees the head move, turn or not.
+- **The child-process test harness** (`LockedAppendTests`'s two appending processes) finds its
+  helper through the xctest host's bundle layout; a change to how test-unit.sh loads the bundle
+  breaks it before it breaks anything real.
+- **Runner refusals of `viewing` and `host.list`** (Stream B): revisit if a runner ever needs a read.
+- **The P1 GUI is unverified** until the maintainer runs `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P1.
+
+## Visual blocks, planning v2 P2a (2026-11-01)
+
+**Before P2b serves any page an agent wrote:**
+- **The Mac `VisualWebView` needs a block-everything `WKContentRuleList`.** Today the scheme
+  handler serves only manifest-listed `fdvisual://` files and cancels every other navigation, and
+  Mermaid is the only page. A page a provider or an agent writes could still ask for an `http`
+  subresource; the phone's viewer already blocks every non-`fdvisual` load with a rule list. Do
+  the same on the Mac before P2b.
+
+**Open, from the P2a reviews and rulings:**
+- **Rendering an old checkpoint from pinned blobs.** A comp revision is final only once its
+  export and snapshots are stored, and release, the phone and thumbnails read the stored export,
+  never re-export (the canvas session's ruling: export-checkpoint refuses `version_missing` once the
+  app's renderer moves on). Drawing an old revision again from its pinned sources is not built.
+- **Every release commits a docs folder** (`docs/plans/<slug>/`, D14 and §12, ruled for V4): one
+  commit in the user's repo per release that changes the plan. A project that is not a git repo
+  cannot be released until it is one.
+- **A cancel after the export commit** would leave the plan committed with no tasks written
+  (`IntakeService.runRelease`). Nothing cancels a release today; if something starts to, it must
+  either finish the tasks or say the plan is committed without them.
+- **The release export reads every exported byte** (up to 10 MB a file) whenever the release sheet
+  loads its preview. It runs off the main actor, but the sheet re-reads on each rating, drop or
+  confirm.
+- **Adapters that cannot read images** get the snapshot path in the catalogue anyway; the
+  `image.read` cell in `test-adapters.sh` (spec §11) is not built.
+- **The P2a GUI is unverified** until the maintainer runs `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P2a.
 
 ## Plan comments from the phone (2026-09-30)
 

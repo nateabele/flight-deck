@@ -6,6 +6,13 @@ import Foundation
 public enum HeadlessAccess: Sendable, Equatable {
     case readOnly
     case writeInWork(URL)
+    /// An ask-thread turn (planning v2 R1, D5): it may interrogate the repo with the reading
+    /// commands in `HeadlessCommand.threadReadCommands` as well as read files, and writes
+    /// nothing. A separate case rather than a change to `.readOnly`, so every round seat keeps
+    /// the argv it was probed with. Each adapter gets what it can actually enforce: claude an
+    /// allow-list of command patterns, codex and gemini their existing read-only sandboxes
+    /// (whose shells already run reads only), grok and opencode the file tools alone.
+    case threadRead
 }
 
 public struct HeadlessRequest: Sendable {
@@ -123,6 +130,38 @@ public enum HeadlessCommand {
                                            "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
                                            "-c", "sandbox_workspace_write.writable_roots=[]"]
 
+    // MARK: ask-thread reads (R1)
+
+    /// The commands a thread turn may run, as command prefixes (R1). Each one reads: search,
+    /// history, listing, and file contents. Patterns are built from these per adapter, so the
+    /// claude rules and the opencode patterns can't drift apart.
+    public static let threadReadCommands = ["rg", "git log", "git show", "git diff", "git blame", "git grep",
+                                            "ls", "cat", "head", "wc", "find"]
+
+    /// The flags that make an allowed reading command write or run something else, and a
+    /// redirect after any of them, as claude deny rules, which beat any allow.
+    public static let threadDeniedPatterns: [String] =
+        threadReadCommands.map { "\($0) *>*" }
+        + ["find *-delete*", "find *-exec*", "find *-ok*", "find *-fprint*", "find *-fls*"]
+        + ["git diff *--output*", "git log *--output*", "git show *--output*"]
+        + ["git grep *-O*", "git grep *--open-files-in-pager*"]
+        + ["rg *--pre*"]
+
+    /// Claude's thread tools: the file tools plus each read command, bare and with arguments.
+    public static let claudeThreadReadTools = (["Read", "Grep", "Glob"]
+        + threadReadCommands.flatMap { ["Bash(\($0))", "Bash(\($0) *)"] }).joined(separator: " ")
+
+    /// The `br` write denies every claude seat carries, plus the writing flags above.
+    public static let claudeThreadDeniedTools = ([claudeDeniedTools]
+        + threadDeniedPatterns.map { "Bash(\($0))" }).joined(separator: " ")
+
+    /// Whether a thread turn on `agent` can only read files, never run a reading command — the
+    /// thread header says "reads files only" for it. Grok's shell can't be confined to commands
+    /// by pattern, and OpenCode's bash checks path arguments only for a few commands, so an
+    /// allowed `head` could read outside the workspace (`OpenCodeProfile.threadPermission`);
+    /// neither gets a shell at all.
+    public static func threadReadsFilesOnly(_ agent: AgentID) -> Bool { agent == .grok || agent == .opencode }
+
     // MARK: grok (grok 1.0.30, 2026-10-07 — see GrokProfile for where each fact came from)
 
     /// grok has no single read-only switch, and `--permission-mode plan` is "accepted for
@@ -218,7 +257,9 @@ public enum HeadlessCommand {
             }
             let sandbox: [String]
             switch r.access {
-            case .readOnly: sandbox = ["-s", "read-only"]
+            // A thread turn's reads are the read-only sandbox's: its shell runs any reading
+            // command, and the sandbox refuses every write.
+            case .readOnly, .threadRead: sandbox = ["-s", "read-only"]
             case .writeInWork: sandbox = ["-s", "workspace-write"] + codexWriteSandbox
             }
             return ("codex", ["exec", "--json"] + effort + sandbox + tail + [r.prompt], [])
@@ -234,6 +275,15 @@ public enum HeadlessCommand {
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
                         "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
                         "--tools", claudeReadOnlyBuiltins, "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
+                for d in r.readableDirs { args += ["--add-dir", d.path] }
+            case .threadRead:
+                // The read-only seat's shape, with the read commands allowed instead of `br`'s:
+                // a thread reads the graph from its workspace, and the repo through git and rg.
+                // `--add-dir` is safe here as it is for a reviewer: no edit tool exists to use it.
+                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
+                        "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
+                        "--tools", claudeReadOnlyBuiltins, "--allowedTools", claudeThreadReadTools,
+                        "--disallowedTools", claudeThreadDeniedTools]
                 for d in r.readableDirs { args += ["--add-dir", d.path] }
             case .writeInWork(let dir):
                 // readableDirs is deliberately NOT added here: every `--add-dir` also grants
@@ -260,7 +310,9 @@ public enum HeadlessCommand {
             if !r.effort.isEmpty { args += ["--reasoning-effort", r.effort] }
             args += ["--cwd", r.cwd.path] + grokCommon + ["--permission-mode", "dontAsk"]
             switch r.access {
-            case .readOnly:
+            // A thread turn reads files only: grok can't confine a shell to reading commands,
+            // so Bash stays denied (`threadReadsFilesOnly`).
+            case .readOnly, .threadRead:
                 // `readableDirs` needs no flag: `read_file`/`grep` are not path-confined in
                 // grok, so the intake dir is already readable. Narrowing reads with
                 // `Read(...)` rules would only add a way to lock the seat out of its inputs.
@@ -279,7 +331,7 @@ public enum HeadlessCommand {
             // counted as the Gemini family by coverage and cross-check (see
             // `GeminiProfile.isGeminiModel`), so it is refused, never run.
             guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(agent: r.agent, model: r.model) }
-            if r.access == .readOnly { GeminiPlanningProject.install(home: home) }
+            if r.access == .readOnly || r.access == .threadRead { GeminiPlanningProject.install(home: home) }
             return ("agy", geminiArguments(r), [])
         case .opencode:
             return ("opencode", openCodeArguments(r), [])
@@ -305,6 +357,7 @@ public enum HeadlessCommand {
         switch r.access {
         case .readOnly: agent = OpenCodeProfile.readOnlyAgent
         case .writeInWork: agent = OpenCodeProfile.integratorAgent
+        case .threadRead: agent = OpenCodeProfile.threadAgent
         }
         var args = ["run", "--format", "json", "--agent", agent, "--dir", r.cwd.path]
         if !r.model.isEmpty { args += ["-m", r.model] }
@@ -337,7 +390,9 @@ public enum HeadlessCommand {
         var args = ["--output-format", "stream-json", "--json-schema", GeminiSchema.compatible(r.schemaJSON),
                     "--model", r.model, "--disable-slash-commands"]
         switch r.access {
-        case .readOnly:
+        // A thread turn keeps the planning project's rules: they already allow the reading
+        // commands and deny every writer by name.
+        case .readOnly, .threadRead:
             // READ-ONLY IS THE PERMISSION SYSTEM, NOT `--mode plan`. Probed: `--mode plan` only
             // changes the agent's workflow — with permissions skipped it wrote NOTES.md and
             // edited README.md. In the default mode every write needs a permission headless
@@ -376,11 +431,13 @@ public enum HeadlessCommand {
     /// `base` (`--restricted` drops the file that carries it), the account's home bound, and the
     /// child-session scrub — and then `build`'s unsets run, so nothing can re-introduce a
     /// variable `build` removed. `account` nil is the built-in account. `home` is injectable so
-    /// a test never reads the operator's own settings.
+    /// a test never reads the operator's own settings. `readable` is a thread turn's workspace:
+    /// the only place outside the repo an OpenCode thread agent may read (I3). It is handed in,
+    /// not read back off the argv, because no flag in the argv names it.
     public static func environment(
         for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser,
-        account: AgentAccountRef? = nil
+        account: AgentAccountRef? = nil, readable: [URL] = []
     ) -> [String: String] {
         var environment: [String: String]
         switch command.executable {
@@ -394,7 +451,8 @@ public enum HeadlessCommand {
         // The seat's permission set is environment (`OPENCODE_CONFIG_CONTENT`), not argv — so,
         // like grok's isolation, every opencode child must come through here.
         case OpenCodeProfile().binaryName:
-            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments)
+            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments,
+                                                        readable: readable)
         default: environment = base
         }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }

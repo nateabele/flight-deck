@@ -13,6 +13,10 @@ import Foundation
 //     infra.ls        {orphans}           orphans: also scan every account (slow; spends API calls)
 //     infra.doctor    {}
 //     infra.extend    {name, seconds}     the CLI parses `1h` itself
+//     infra.budget    {action, usd?}      the asking tab's session budget (`/budget`): action
+//                                         "show" | "set" (usd) | "renew" (usd optional, keeps
+//                                         the cap) | "clear". The session is the caller
+//                                         token's, never the request's: a tab reaches only its own
 //
 //   Replies, all `ServerFrame`s correlated by `cid`, all undotted tags:
 //     infraProgress   {line}              one step, printed `flightdeck: <line>` on stderr;
@@ -24,6 +28,7 @@ import Foundation
 //                                         empty `orphans` means "none" only when it is {} too
 //     infraDoctor     {checks:[WireInfraCheck]}  doctor
 //     infraDone       {}                  down finished: the machine (or orphan) is gone
+//     infraBudget     {budget:{WireSessionBudget}}  budget: the session's budget as it now is
 //   A failure is `err(code, message)`, the message being what the CLI prints after
 //   `flightdeck: `:
 //     infra_preflight       a check failed before anything was created; one failing check
@@ -31,11 +36,15 @@ import Foundation
 //     infra_name_in_use     the name is a paired host or another repo's machine
 //     infra_enroll_timeout  the machine never said hello; kept for `infra down`, its console
 //                           output (when the cloud had one) after the first line
+//     infra_enroll_failed   the machine ended before it enrolled (its boot could not install or
+//                           enroll hostd, and it powered itself off); destroyed, its console
+//                           output (when the cloud had one) after the first line
 //     infra_not_found       no such machine, orphan, or `[infra.<name>]` recipe
 //     infra_refused         a rule forbids it (extend past the machine's own timer or a cap,
 //                           a name already being created or destroyed)
 //     infra_failed          anything else: OpenTofu's diagnostics, with their fix
 //     infra_unavailable     this Flight Deck has no cloud service wired
+//     infra_no_session      `infra.budget` from a caller with no valid tab token
 //
 // Streams. `up` and `down` may draw many `infraProgress` frames on one `cid`; the stream ends
 // at its terminal frame (`infraMachine`, `infraDone` or `err`), after which nothing more is
@@ -61,12 +70,34 @@ public enum InfraRequest: Codable, Equatable, Sendable {
     case doctor
     /// Move the controller's deadline `seconds` later.
     case extend(name: String, seconds: Int)
+    /// Read or change the asking tab's session budget.
+    case budget(BudgetAction)
 
-    /// `ls` and `doctor` change nothing; the rest create, destroy or spend.
+    /// `ls`, `doctor` and `budget show` change nothing; the rest create, destroy or spend.
     public var isReadOnly: Bool {
         switch self {
         case .list, .doctor: return true
+        case .budget(let action): return action == .show
         case .up, .down, .extend: return false
+        }
+    }
+
+    /// What `infra.budget` does to the session's budget.
+    public enum BudgetAction: Equatable, Sendable {
+        case show
+        /// Sets the cap, keeping the window's start; a first budget starts now.
+        case set(usd: Double)
+        /// A fresh window from now, at `usd` or the cap it already has.
+        case renew(usd: Double?)
+        case clear
+
+        var name: String {
+            switch self {
+            case .show: return "show"
+            case .set: return "set"
+            case .renew: return "renew"
+            case .clear: return "clear"
+            }
         }
     }
 
@@ -76,9 +107,10 @@ public enum InfraRequest: Codable, Equatable, Sendable {
         case list = "infra.ls"
         case doctor = "infra.doctor"
         case extend = "infra.extend"
+        case budget = "infra.budget"
     }
 
-    enum CodingKeys: String, CodingKey { case op, name, cwd, orphanID, orphans, seconds }
+    enum CodingKeys: String, CodingKey { case op, name, cwd, orphanID, orphans, seconds, action, usd }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -100,6 +132,14 @@ public enum InfraRequest: Codable, Equatable, Sendable {
             try c.encode(Op.extend, forKey: .op)
             try c.encode(name, forKey: .name)
             try c.encode(seconds, forKey: .seconds)
+        case .budget(let action):
+            try c.encode(Op.budget, forKey: .op)
+            try c.encode(action.name, forKey: .action)
+            switch action {
+            case .set(let usd): try c.encode(usd, forKey: .usd)
+            case .renew(let usd): try c.encodeIfPresent(usd, forKey: .usd)
+            case .show, .clear: break
+            }
         }
     }
 
@@ -118,6 +158,18 @@ public enum InfraRequest: Codable, Equatable, Sendable {
             self = .doctor
         case .extend:
             self = .extend(name: try c.decode(String.self, forKey: .name), seconds: try c.decode(Int.self, forKey: .seconds))
+        case .budget:
+            let usd = try c.decodeIfPresent(Double.self, forKey: .usd)
+            switch try c.decode(String.self, forKey: .action) {
+            case "show": self = .budget(.show)
+            case "set":
+                guard let usd else { throw DecodingError.keyNotFound(CodingKeys.usd, .init(codingPath: c.codingPath, debugDescription: "set needs usd")) }
+                self = .budget(.set(usd: usd))
+            case "renew": self = .budget(.renew(usd: usd))
+            case "clear": self = .budget(.clear)
+            case let other:
+                throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "unknown budget action \(other)")
+            }
         }
     }
 }
@@ -180,5 +232,39 @@ public struct WireInfraCheck: Codable, Equatable, Sendable {
         self.ok = ok
         self.detail = detail
         self.fix = fix
+    }
+}
+
+/// A session's cloud budget as `infra.budget` answers it. Every figure counts only the
+/// machines that session created, from its window's start (`since`). Dollar figures are
+/// estimates; `line` is the one-line form the CLI and `/budget` print.
+public struct WireSessionBudget: Codable, Equatable, Sendable {
+    public let session: String
+    /// Nil when the session has no budget: `spentUsd` is then everything its machines cost.
+    public let capUsd: Double?
+    /// ISO 8601; nil with no budget.
+    public let since: String?
+    public let spentUsd: Double
+    public let remainingUsd: Double?
+    /// What the session's running machines bill per hour right now.
+    public let hourlyUsd: Double
+    /// Seconds until the budget runs out at the current rates; nil when the machines' TTLs end
+    /// first, or there is no budget. 0 is used up: its machines are being destroyed.
+    public let exhaustsIn: Int?
+    /// The session's machines that still exist.
+    public let machines: [String]
+    public let line: String
+
+    public init(session: String, capUsd: Double?, since: String?, spentUsd: Double, remainingUsd: Double?,
+                hourlyUsd: Double, exhaustsIn: Int?, machines: [String], line: String) {
+        self.session = session
+        self.capUsd = capUsd
+        self.since = since
+        self.spentUsd = spentUsd
+        self.remainingUsd = remainingUsd
+        self.hourlyUsd = hourlyUsd
+        self.exhaustsIn = exhaustsIn
+        self.machines = machines
+        self.line = line
     }
 }

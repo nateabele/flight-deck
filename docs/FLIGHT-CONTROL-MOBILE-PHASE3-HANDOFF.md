@@ -68,8 +68,9 @@ like Phase 1.
 ## 3. Phase 3 scope (spec §11 item 3, §4.5, §4.10, §6.4, §6.5)
 
 Answers (`needsAnswers` form, drafts persisted on the phone), fidelity + Start Planning
-(`awaitingChoice`), Retry (`failed`/`interrupted`), Discard (⋯ menu, confirmed), New intake (sheet
-from a project header's +, phone-supplied id so it can navigate before the ack), Review + Release
+(`awaitingChoice`), Retry (`failed`/`interrupted`), Discard (⋯ menu, confirmed), New intake (**built**: sheet
+from a project header's long-press menu, `intake.create` with a phone-supplied id so it can navigate
+before the ack, licensed by `WireProject.canCreateIntake`; MOBILE.md item 104), Review + Release
 (`intake.review` request + `intakeReviewOp`/`intakeRelease` commands, drift decisions gate the
 button, Release confirms). The Phase-1 waiting states currently say "… on your Mac for now" — those
 are the placeholders Phase 3 replaces. Process: `superpowers:brainstorming` is already done (the spec

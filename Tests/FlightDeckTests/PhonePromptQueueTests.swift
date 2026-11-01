@@ -52,6 +52,32 @@ final class PhonePromptQueueTests: XCTestCase {
         return made
     }
 
+    /// A prompt that keeps being refused for the same reason is traced once, not every tick:
+    /// the log reached 73 MB of identical `attempt` / `inject=false` pairs. The first attempt
+    /// and its outcome are still recorded, and so is a new head token.
+    func testARepeatedRefusalOfTheSameQueuedPromptIsLoggedOnce() {
+        let (store, _, id, conversation) = makeBusyStoreThatHoldsTheQueue()
+        var stages: [String] = []
+        store.promptLifecycleSink = {
+            if case .typing(let stage, _, _, _, _) = $0.event { stages.append(stage) }
+        }
+        let token = UUID()
+        store.submitPrompt("ship it", token: token, to: id)
+        XCTAssertNotNil(store.promptQueue[id], "held by the multi-row draft")
+        for _ in 0..<5 { goIdle(store, conversation) }
+
+        XCTAssertEqual(stages.filter { $0 == "attempt" }.count, 1, "\(stages)")
+        XCTAssertEqual(stages.filter { $0 == "inject=false" }.count, 1, "\(stages)")
+
+        // A different head token is a different prompt: traced afresh.
+        store.withdrawQueuedPrompt(token, from: id)
+        stages.removeAll()
+        store.submitPrompt("and this", token: UUID(), to: id)
+        goIdle(store, conversation)
+        goIdle(store, conversation)
+        XCTAssertEqual(stages.filter { $0 == "attempt" }.count, 1, "\(stages)")
+    }
+
     /// A busy tab whose input box holds a ONE-ROW draft — the case the kill-probe types AROUND
     /// rather than defers. Used only where the probe itself (kill, type, restore) is under test.
     private func makeBusyStoreWithAOneRowDraft() -> (SessionStore, SpyInjector, UUID, UUID) {

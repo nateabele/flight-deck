@@ -118,7 +118,7 @@ struct SplitFlapText: View {
     }
 }
 
-/// The board-style card an abbreviated label opens: dark glass, the full name in flap tiles, and
+/// The board-style card an abbreviated label opens: the board's glass, the full name in flap tiles, and
 /// the status line in phosphor under it — part of the instrument, never a system tooltip.
 struct SplitFlapCard: View {
     let full: String
@@ -133,7 +133,7 @@ struct SplitFlapCard: View {
     /// can't sample a running animation. Nil runs it live.
     var revealAt: TimeInterval?
 
-    static let phosphor = Color(red: 219 / 255, green: 230 / 255, blue: 247 / 255)
+    static let phosphor = Instrument.phosphor
     private static let detailFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
     private static let detailTracking: CGFloat = 1.2
     private static let maxDetailWidth: CGFloat = 340
@@ -168,11 +168,10 @@ struct SplitFlapCard: View {
         .frame(minWidth: 150, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 9)
-                .fill(LinearGradient(colors: [Color(red: 0.102, green: 0.118, blue: 0.145),
-                                              Color(red: 0.059, green: 0.071, blue: 0.086)],
+                .fill(LinearGradient(colors: [Instrument.cardTop, Instrument.cardBottom],
                                      startPoint: .top, endPoint: .bottom))
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Self.phosphor.opacity(0.16), lineWidth: 1))
-                .shadow(color: .black.opacity(0.6), radius: 17, y: 14)
+                .shadow(color: Instrument.cardShadow, radius: 17, y: 14)
         )
     }
 }
@@ -259,16 +258,16 @@ private struct CardTiles: View {
         } else {
             Text(String(ch))
                 .font(.system(size: 15, weight: .bold, design: .monospaced))
-                .foregroundStyle(Color(red: 0.949, green: 0.965, blue: 0.988))
+                .foregroundStyle(Instrument.tileText)
                 .frame(width: 15, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 3).fill(LinearGradient(
-                        stops: [.init(color: Color(red: 0.165, green: 0.188, blue: 0.227), location: 0.5),
-                                .init(color: Color(red: 0.137, green: 0.157, blue: 0.192), location: 0.5)],
+                        stops: [.init(color: Instrument.tileTop, location: 0.5),
+                                .init(color: Instrument.tileBottom, location: 0.5)],
                         startPoint: .top, endPoint: .bottom))
                 )
                 // The hinge line across the middle of a flap tile.
-                .overlay(Rectangle().fill(Color.black.opacity(0.65)).frame(height: 1))
+                .overlay(Rectangle().fill(Instrument.tileHinge).frame(height: 1))
         }
     }
 }

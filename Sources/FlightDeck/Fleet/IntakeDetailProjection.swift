@@ -96,7 +96,8 @@ enum IntakeDetailProjection {
         let tape = service.tapes[id]
         let files = service.seats.files(id)
         let summary = IntakeSummaryProjection.summary(i, tape: tape, seats: files,
-                                                      needsAttention: service.needsAttention(i))
+                                                      needsAttention: service.needsAttention(i),
+                                                      threadsNeedingYou: IntakeThreadProjection.needingYou(intake: id, service: service))
         let load: (Int, String) -> Data? = { service.checkpointFile(id, checkpoint: $0, $1) }
         let progress = tape.map { ProgressSummary.line(intake: i, tape: $0, triage: service.triageActivities[id], loadFile: load) } ?? []
 
@@ -123,6 +124,12 @@ enum IntakeDetailProjection {
         // Parked asks the same question as awaiting-choice (`IntakeService.choose` takes both). While
         // it is asked, the chooser's per-fidelity configs are the inspector's content, not `roundConfig`.
         let choosing = i.state == .awaitingChoice || i.state == .parked
+        let openRound = open == nil ? nil : i.exchanges.last
+        let wireQuestions: WireQuestions? = i.exchanges.isEmpty ? nil : WireQuestions(
+            open: open, answered: answered,
+            round: openRound == nil ? nil : i.exchanges.count - 1,
+            structured: openRound?.presentedQuestions.map(Self.wireQuestion),
+            digest: openRound?.questionsDigest)
         let choice: WireChoice? = choosing ? WireChoice(
             recommended: i.recommended?.rawValue, reason: i.recommendationReason, chosen: i.chosenPreset?.rawValue,
             roundsSummary: (i.chosenPreset ?? i.recommended).flatMap { p in i.roundConfig.map { RoundConfigEditor.summary(preset: p, config: $0) } },
@@ -137,12 +144,20 @@ enum IntakeDetailProjection {
             service.halts[id].flatMap { h in h.label(for: t) == nil ? nil : (h.kind == .pause ? "pausing" : "stopping") }
         }
 
+        // The seat that failed and what it printed, read only while a round is failed — the one
+        // moment a phone has a use for it.
+        let failedSeat = tape?.status == .failed ? service.failedSeat(id) : nil
+        let halted = HaltStatus.make(
+            intake: i, tape: tape, config: i.roundConfig, failedSeatOutput: failedSeat?.output,
+            rateLimitedAt: agents.compactMap(\.rateLimitedAt).max(), available: available,
+            failedRole: failedSeat?.role)?.wire
+
         var detail = WireIntakeDetail(
             etag: "", project: project, summary: summary, intent: i.intent,
             progress: progress.map { WireProgressPhase(label: $0.label, detail: $0.detail) },
             board: board, agents: agents,
             rounds: (tape?.checkpoints ?? []).reversed().map { round($0, available: available) },
-            questions: i.exchanges.isEmpty ? nil : WireQuestions(open: open, answered: answered),
+            questions: wireQuestions,
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
             headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
             steer: true, choose: true, noteKind: true,
@@ -152,9 +167,23 @@ enum IntakeDetailProjection {
                 ? PhoneRoundsEdit.menu(available: available, accounts: menus, naming: naming) : nil,
             roundsLock: i.state == .shaping ? i.roundConfig.map {
                 PhoneRoundsEdit.lock(service.shapingEdit(id), config: $0, editing: service.roundConfigEditing(id))
-            } : nil)
+            } : nil,
+            structuredQuestions: true,
+            // Ask threads (spec §10): this Mac runs a ThreadRunner per shaping intake, so the
+            // phone may offer Ask and send `intake.thread.*` / `intake.diff.decide`.
+            threads: true,
+            // Visual blocks (spec §10): the phone may send `intake.visual.fetch` and draw blocks.
+            visuals: service.visualsAvailable, halted: halted, retry: true)
         detail.etag = etag(detail)
         return detail
+    }
+
+    /// IntakeKit's question as the wire carries it; FleetKit cannot import IntakeKit.
+    static func wireQuestion(_ q: StructuredQuestion) -> WireStructuredQuestion {
+        WireStructuredQuestion(
+            id: q.id, text: q.text, kind: q.kind.rawValue,
+            options: q.options.map { WireOption(id: $0.id, label: $0.label, detail: $0.detail) },
+            recommended: q.recommended, allowOther: q.allowOther)
     }
 
     /// The four fidelities in the order the Mac's picker lists them, each with what it would seat

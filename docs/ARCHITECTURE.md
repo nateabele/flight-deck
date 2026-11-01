@@ -1,5 +1,29 @@
 # Flight Deck — Architecture (as built)
 
+## Native peer messaging
+
+`Sources/PeerKit` implements bounded NDJSON framing, private native registries,
+verified Unix-socket sender identities, permission holds, durable inbox cursors,
+and native receipt/idle controls. It is compiled into both the app and the small
+`PeerHelper` executable (`Sources/PeerTool`, bundled as `flightdeck-peer`).
+
+`Sources/FlightDeck/Peers` owns per-tab helpers, event-driven status updates,
+operator approval sheets, discovery, and delivery through `SessionStore`'s existing
+text adapters. It observes typed/expired prompt events only after their parent
+fleet batch is queued, preventing a nested delivery from broadcasting newer
+sequence numbers ahead of older ones. A queued message remains durable until typed.
+
+`WirePeerRequest` and an unsequenced `ServerFrame.peer` carry local CLI/MCP requests
+over the existing authenticated control socket; callers cannot supply another
+tab's identity. `Sources/FlightDeckCLI/PeerCLI.swift` parses the CLI surface and
+`Sources/FlightDeckTool/PeerToolEntry.swift` provides its real transport and optional
+MCP stdio facade. Peer responses are not fleet state and never move resume cursors.
+
+Claude's own native inbox remains authoritative. Non-Claude tabs publish genuine
+PID-backed native peer endpoints, allowing native ListAgents/SendMessage to reach
+them without modifying Claude. See [PEER-MESSAGING.md](PEER-MESSAGING.md) for the
+operator contract, current compatibility evidence, footprint, and test commands.
+
 This describes the code **as it exists today**. For the intended full design and the reasoning,
 see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md); for what is still
 unbuilt, see the last section here.
@@ -667,6 +691,19 @@ controller's owner label that `infra.json` does not know, as kind-qualified refs
 name). An account it could not read lands in `unreadable` with the reason, so "none" is only
 ever said when every account was actually scanned. `infra doctor` includes the scan.
 
+**Flight Deck deletes only what it created** (`ResourceProvenance`, `infra-provenance.json`).
+Every change to the cloud is a saved OpenTofu plan, checked, then applied as that file: OpenTofu
+refuses a saved plan whose state has moved, so what was checked is what runs. `TofuRunning` has
+no other way to apply or destroy. An `up` plan may only create (an `import` block in a repo's
+module would adopt someone else's resource into state, for a later destroy to delete). After the
+apply, failed or not, each resource that plan created is recorded by `(cloud, type, id)`. A
+destroy plan, from `down`, the `Reaper` or a rollback, must delete only recorded resources, or
+nothing is deleted at all. The re-apply that moves a public machine's inbound rule may create,
+and may update or delete only recorded resources. `down --orphan` deletes only a recorded
+resource: the owner tag finds candidates, but anyone can set a tag. Records are never removed.
+The first launch with the file seeds it from the local states of the machines `infra.json`
+already lists.
+
 **Secrets never leave in text.** `SecretRedaction` replaces `tskey-…` and any run of 64+ hex
 characters (the enrollment secret) in OpenTofu output and console text before it becomes an
 event, an error, a notification or an `infra.json` failure note: a failed apply's diagnostics
@@ -792,8 +829,94 @@ screen identity before answering. Hardware verification and unknown dialog shape
 the Mac rather than inventing an answer. The phone supports secret fields and explicit links;
 closed decision lists never acquire a free-text approval alternative.
 
+`CodexSubagentCounts` maintains spawned ancestry and active descendants from native thread
+and collaboration-item notifications. The native status poll also pages through
+`thread/list(ancestorThreadId, sourceKinds: [subAgent])`, without loading children or reading
+their histories. A full snapshot reconciles missed events; a failed or partial query keeps
+the last count, and newer live events win over an older snapshot. `AgentEvent.subagentCount`
+feeds the existing sidebar, background-work and phone wire behavior. Joining tabs replay
+the current count, and Codex's shared summary uses the same singular/plural text as Claude.
+
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
+
+## Index Service (`Packages/FlightIndex/`, `fdindex`)
+
+The machine-wide code index. One `fdindex daemon` per machine owns every index: it parses with
+tree-sitter, keeps facts in SQLite keyed by git blob, builds the import/call graph in memory, and
+answers every session, so two agents (or a Codex run on a box with no app) see the same code the
+same way. It is a Rust crate, **never in the Xcode project**; the app build only runs
+`scripts/build-fdindex.sh` (cargo `--release`, arm64, incremental) and embeds the result.
+
+- **Daemon and socket.** Newline-delimited JSON over a Unix socket, mode 0600, `v`/`id`/`cwd`/`seq`/
+  `tool`/`args` in, `ok`/`text`/`error`/`state` out. One daemon per store: a pidfile `flock`, so
+  a second one exits cleanly. Clients start it detached when it is absent. Wire protocol and tools:
+  `docs/superpowers/specs/2026-11-01-index-tool-contract.md`.
+- **Store.** `~/Library/Application Support/FlightDeck/index/` on macOS (`$XDG_DATA_HOME/flightdeck/
+  index` on Linux): `fdindex.sock`, `daemon.pid`, `daemon.log`, `launchd.log`, and one `.db` per
+  repository. `--store`, `--socket`, `FLIGHTDECK_INDEX_DIR` and `FLIGHTDECK_INDEX_SOCKET` move it,
+  which gives a fully separate daemon (tests and scratch runs). Facts are derived data: any `.db`
+  can be deleted and is rebuilt from git.
+- **Clients.** `fdindex <tool>` is the CLI. `fdindex mcp` is the stdio MCP shim: it holds no index,
+  sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
+  answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
+  (a symlink, installed at switch-over) it is the qartez alias with the same tool names.
+  `--no-start` (or `FLIGHTDECK_INDEX_NO_START`) forbids starting the daemon for every client verb.
+  **Codex needs the socket allowed.** Under `codex exec -s read-only` or `-s workspace-write` the
+  macOS seatbelt refuses `connect()` to a Unix socket with EPERM (measured). A client that gets
+  `PermissionDenied` does not spawn a daemon (it would die in the same sandbox); it answers
+  `state: UNAVAILABLE` with `cannot connect to <socket>: Operation not permitted - a sandbox is
+  blocking Unix sockets (for Codex: -s workspace-write -c sandbox_workspace_write.network_access=true,
+  or run outside the sandbox); fall back to rg`. `fdindex guard` still allows. With that flag the
+  same call answers from the daemon (verified).
+- **Freshness.** A request sees every edit made before it, by whatever tool, because it looks at
+  the file system itself: the daemon keeps each active worktree's view and, per request, `stat`s
+  every indexed file and every non-ignored directory (~2 ms on tessera, against 14 to 20 ms for the
+  `git status` it replaced), re-reads only what changed and asks git about new paths only. Racy
+  timestamps (ctime within 2 s) are re-read, as git does. HEAD is compared with the commit the
+  view was built on (two small file reads) and a move, a changed ignore file, a bulk change or a
+  worktree idle for 6 h (`--watch-hours`) is read in full with `git status`. `--no-watch` makes
+  every request do that. File *events* are deliberately not on this path: an FSEvents cookie
+  barrier was built first and measured unsound (4 misses in 115,000 external writes, an event
+  delivered after a cookie written after it); the numbers are in `src/sweep.rs`. Events do run
+  the ref watcher (macOS, one FSEvents stream over every known repository's common dir): a
+  commit, checkout or rebase re-reads the branch heads and prepares the new base tree of each kept
+  worktree before anyone asks (listing derived from the old tree with `git diff-tree`, only unseen
+  blobs parsed). Linux has no ref watcher yet; nothing depends on it.
+- **Retention.** A blob's facts live while a tree of a live worktree's HEAD, an overlay or a branch
+  head names the blob; every view a request answers from is recorded in the store, which is what
+  makes it a root. The daemon collects hourly, after a worktree's directory disappears (noticed
+  by a stat per known worktree every 5 s), and on `fdindex gc [--now]`: roots, then orphan facts
+  2000 at a time with the writer released between chunks, then free pages 256 at a time and a WAL
+  truncate. A repository whose common dir is gone has its database deleted. `fdindex status`
+  reports the last collection, bytes reclaimed and free pages.
+- **Memory.** `fdindex daemon --memory-mb N` (default 1536) is a target for the process's RSS. What
+  the daemon can free is heap, and RSS follows it only loosely on macOS (about 1.2 times the heap
+  plus 130 to 190 MB that is not graphs; freed pages stay resident until the kernel wants them,
+  and neither `malloc_zone_pressure_relief` nor mimalloc's `mi_collect` gave any back in
+  measurement), so the target becomes a limit on live heap, counted by the global allocator
+  (`src/alloc.rs`; `status` shows `heap_bytes` and the peak). Over the limit, idle graphs are
+  evicted least recently used first, then the kept views of idle worktrees; graphs a request holds
+  are never evicted (that frees nothing). The graph budget (`--graph-budget-mb`, estimated size of
+  cached graphs) defaults to the same allowance, and passing it alone raises the target to fit.
+  At most four graph builds run at once, after evicting to leave room for the last one's size:
+  thirty clients on cold worktrees used to build thirty graphs together and peak 700 MB above
+  what stayed live. On tessera with about 90 worktrees queried in turn: 1.8 GB RSS under the old
+  1.5 GB budget, 1.43 GB under the new default; with 30 busy clients 2.6 GB became 1.66 GB (the
+  contract spec has the table, and the latency price of a smaller cache).
+- **Shared blocks.** The graphs of one repository share each file's resolution (imports,
+  reference targets, file edges) as an `Arc` block, hash-consed by content in a per-repository
+  table (`src/graph/blocks.rs`), with file indices from a per-repository numbering so that blocks
+  of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
+  incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
+  before, 0.81 GB after.
+- **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
+  Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
+  Flight Deck app; without the unit, the first client starts the daemon.
+- **`flightdeck index …`.** A verb of the `flightdeck` CLI (`Sources/FlightDeckCLI/IndexCommand.swift`)
+  that `exec`s `fdindex` with the rest of the line. Local like `provider check`: no control socket,
+  works with the app closed. `fdindex` is `$FLIGHTDECK_FDINDEX`, else `Contents/MacOS/fdindex`
+  beside `flightdeck`, else `PATH`.
 
 ## Vendored layout (git-ignored build inputs/outputs)
 
@@ -805,6 +928,9 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/boringssl-artifacts/BoringSSL.xcframework` — build output of
   `scripts/build-boringssl.sh`; same shape as `ghostty-artifacts`, built from the submodule
   rather than committed after an earlier attempt (54 MB) was reverted — see docs/FOLLOWUPS.md.
+- `vendor/fdindex-artifacts/fdindex` — build output of `scripts/build-fdindex.sh` (cargo release of
+  `Packages/FlightIndex`); the FlightDeck target's pre-build script writes it and a Copy Files phase
+  signs it into `Contents/MacOS/fdindex`.
 
 ## Sidebar structure
 
@@ -1502,6 +1628,29 @@ intake's own configuration once shaping, a customized one included (`WireRoundCo
 field is optional and additive. `WireIntakeDetail.choose == true` is the phone's only licence to send
 `intake.choose`, because an older Mac drops the socket on an unknown op; without it the phone keeps
 "choose on your Mac". A send nobody answers ends at `IntakeCommandModel`'s deadline with a message.
+
+**Clarifying questions are choices.** Triage returns question objects in `questions`
+(`StructuredQuestion` in IntakeKit: `single`, `multi`, `toggle` or `text`, with options,
+`recommended` ids and `allowOther`); the decoder still takes plain strings. The exchange stores
+both: the plain `questions` strings that rounds read, and the objects in `structured`. An agent
+that returns only strings, and every intake saved before this, still shows as text questions
+(`TriageExchange.presentedQuestions`). A round is named by `TriageExchange.questionsDigest` (its
+questions' ids, texts, kinds and option ids), because `retry` clears the exchanges and a fresh
+round reuses index 0. The Mac form
+(`StructuredQuestionView`) preselects the recommended options, and ⌘↩ sends. `IntakeService.answer(_:structured:)`
+turns the answers back into the plain `answers: [String]` that later rounds always read.
+**The phone answers over `intake.answer`** (`FleetCommand.intakeAnswer`: `id`, `token`, `round`,
+`digest`, `answers: [WireStructuredAnswer]`). `WireQuestions` carries `round`, `structured` and `digest`, and
+`WireIntakeDetail.structuredQuestions == true` is the phone's licence to send it: an older Mac drops
+the socket on an unknown op, so without the flag the phone keeps "Answer on your Mac for now". The
+Mac refuses with `stale_questions` (the round or digest is not the open one's, or it was answered;
+the phone says "These questions were answered or replaced." and reloads), `unknown_intake`,
+`unknown_question` or `invalid_answer` (incomplete, or an option id the question lacks, repeated,
+or on a text question). The phone's Send rules (`WireStructuredQuestion.isComplete`
+and `initialAnswer` in FleetKit) mirror IntakeKit's; the Mac stays authoritative. The form
+(`StructuredQuestionForm`, driven by `AnswerFormModel`) shows "Sending…" until the intake leaves
+`needsAnswers` or the digest changes. The retry token, the form's identity and the kept answers
+(`AnswerDraftStore`, UserDefaults, cleared on an acked send) all key on the digest.
 
 **The phone edits rounds.** The inspector is the editor (`RoundEditorView`, over `RoundEditor`) when the
 detail has `editRounds == true`, `steer`, and the menus: `roundsMenu` (`WireRoundsMenu`: every agent
@@ -2284,7 +2433,7 @@ the runner:
 | File | Writer | What |
 |---|---|---|
 | `intake.json` | app | intent, Q&A, `chosenPreset`, `roundConfig`, state, the final change set |
-| `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; the runner acks by `seq` in the tape |
+| `commands.jsonl` | app, phone path, ThreadRunner (append-only, under `LockedAppend`'s `flock`) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; an accepted thread diff (`applyThreadDiff`, also the whole plan) from the app, the phone or auto-accept; a thread's notes from ThreadRunner. The runner acks by `seq` in the tape |
 | `tape.json` | runner | status, target, checkpoints (each record lists the notes its round consumed), `roundInProgress`, `pendingNotes`, extensions, heartbeat |
 | `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; refine and synthesis also keep `changes.json` (the proposals, `[]` when there were none) and `verdicts.json` (the integrator's per-change verdicts, only when it gave them); `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
@@ -2610,6 +2759,172 @@ directly, since there is no per-project status row to fold it into when every se
 already visible on its own. Every intake state except `.releasing` has a way off the list —
 Discard, or Dismiss once released — and Dismiss is the only thing that stops a
 `.partiallyReleased` intake counting (it hides the intake; its `ReleaseRecord` stays on disk).
+
+### Ask threads (planning v2 P1, `Sources/IntakeKit/Threads/`)
+
+Select a passage, press ✦ Ask, and a live agent answers with citations into the plan's own
+history; what it proposes — diffs, notes, questions — is acted on in the plan, from the Mac or
+the phone. Spec: [planning v2](superpowers/specs/2026-10-31-flight-control-planning-v2-design.md)
+§5–§6, §10–§11, and its errata.
+
+**A second detached runner per intake.** `ThreadRunner` (`flightdeck intake threads <id> --root`)
+runs beside `IntakeRunner`, under `fd-abduco` on `threads-<uuid>.sock`, spawned and reaped by a
+second `IntakeRunnerController` (`kind: .threads`). Its liveness is its own heartbeat
+(`threads/runner.json`), not the tape's; `threads/runner.lock` keeps a second one out. The app
+starts it when it appends a thread command and on any tick that finds work it has not done (a
+command past `threads/cursor`, or a queued turn), and it exits when idle after a late look, as
+`IntakeRunner` does. It carries the intake's runner token, which the control socket answers with
+`out_of_scope` for everything: neither runner uses the socket.
+
+*One writer per file, threads:*
+
+| File | Writer | What |
+|---|---|---|
+| `threads/commands.jsonl` | app, phone path (append-only, same `flock` helper) | `ThreadCommand` lines: open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff (R8: IntakeRunner never reads them) |
+| `threads/cursor`, `threads/runner.json`, `threads/runner.lock` | ThreadRunner | the last command seq folded; pid and heartbeat; one runner per intake |
+| `threads/<id>/thread.json`, `turns.jsonl`, `diffs/<diff>.json` | ThreadRunner | the thread, its turns (rewritten whole when one lands), its diffs and their state |
+| `threads/<id>/activity.json`, `workspace/`, `runs/<seq>-<n>/` | ThreadRunner | the running turn's live activity (R2); the workspace rebuilt per turn (outline, sections, anchor, provenance, intake); each run's stdout, stderr and schema |
+| `checkpoints/<n>/plan.user.threads.json` | IntakeRunner | which threads' accepted diffs are in `plan.user.md` |
+
+**A turn** is one resumed headless run of the thread's agent through `HeadlessCommand` with
+`.threadRead` access: the repo is the working directory, the workspace is readable, and the
+answer is the `ThreadActions` schema. Claude gets a read-command allow-list, codex and gemini
+keep their sandboxes, grok and OpenCode read files only. The agent CLI carries a
+`FLIGHT_DECK_CALLER` the socket reads as invalid; round seats now carry the same. A turn is
+written to `turns.jsonl` before the cursor moves past its command and keeps its seq for good,
+so a turn rerun after a crash makes the same note and diff ids, and nothing lands twice.
+`ActionValidator` refuses a diff whose quote is not found exactly once; two retries, then
+"couldn't apply". When a round lands, the next turn draws a divider, rebases pending diffs onto
+the new head (`PlanRebase`) or marks them stale.
+
+**Accepting a diff.** `applyThreadDiff` carries the whole plan, so `ThreadAccept` composes it on
+the newest version of the head — the last edit still queued for it, else its effective plan —
+inside the commands lock, and auto-accept does the same: no edit can land between the read and
+the append. The tape's edit is appended before the thread's `decideDiff`, so a half-failed accept
+leaves the edit and a retry adds only the decision. IntakeRunner applies it as a human edit and
+records the thread and diff beside the layer; the next round's steering lists each thread's
+decision since the last round, so a refine round keeps the change.
+
+**Reading.** The Mac's panel and the phone projection read `ThreadStore`, cached per file on
+(inode, size, mtime), so a poll of unchanged threads costs a stat per file. The phone gets
+summaries and pending diffs on `intake.plan`, the conversation on demand (`intake.thread.get`),
+and sends `intake.thread.*` and `intake.diff.decide` only while the detail's `threads` flag is set.
+
+### Visual blocks (planning v2 P2a, `Sources/IntakeKit/Visuals/`, `Intake/Planning/Visuals/`)
+
+A plan names a visual with a fenced block, ```` ```fd-visual id=<id> ```` and a caption line, so the
+plan stays plain text. Each revision is a folder, `visuals/<id>/r<n>/`, with a `manifest.json`
+that lists every file it serves (path, size, SHA-256); `visuals/<id>/block.json` names the
+representations in filmstrip order and the ★ primary. Spec:
+[planning v2](superpowers/specs/2026-10-31-flight-control-planning-v2-design.md) §7–§8, §10–§12,
+and its errata (V-R1–V-R6).
+
+*One writer per file, visuals:*
+
+| File | Writer | What |
+|---|---|---|
+| `visuals/<id>/r<n>/…`, `visuals/<id>/block.json` | ThreadRunner (none yet; the `visuals` UI fixture seeds one) | a revision, final once written; the block's representations and primary |
+| `checkpoints/<n>/visuals.json` | IntakeRunner | the block states the checkpoint saw (`CheckpointBlockStates`), so an old plan shows its visuals as they were |
+| `docs/plans/<slug>/` in the user's repo | release (`RepoCommitter`) | the exported plan and its visuals, committed by path |
+
+**Reading is bytes, never paths.** Everything reads `visuals/` through `VisualStoreReading`
+(`DiskVisualStore`): only manifest-listed files, each opened `O_NOFOLLOW` one component at a
+time, `fstat`-checked (a regular file, one link, the manifest's size, at most 10 MB), and read by
+`pread` on that descriptor. The Mac editor's web view (`VisualSchemeHandler`, `fdvisual://`), the
+phone's fetch (`intake.visualFetch` → `VisualFetch.serve`, off the main actor) and the release
+export all go through it.
+
+**Drawing.** On the Mac the block is a view laid over the block's hidden source lines, as tables
+are (V-R1), with Mermaid 12.2.0 vendored and hash-checked (V-R5) in a web view that loads nothing
+but `fdvisual://` (V-R2). On the phone the plan projection lists each block's primary, kinds,
+alternates, states, sizes, aspect and files (`IntakeVisualProjection`), and the card fetches and
+hash-checks them into a cache keyed by `(visual, revision, path)`, which never needs to expire
+because a revision never changes.
+
+**Rounds and release.** Encode reads a visuals catalogue and may cite visuals on new tasks
+(`NewBead.visualRefs`); every change-set check refuses an id the plan does not have
+(`knownVisuals`). Release writes every plan to `docs/plans/<slug>/` through
+`PlanExporter` (pure) and `RepoCommitter`, which commits that folder only and refuses a folder with
+uncommitted changes, then writes the tasks, each citing its visuals' exported folder.
+
+## Visual providers (`Packages/HostKit/.../Providers/`, `Sources/ProviderKit/`)
+
+A provider is a folder with `provider.toml`. P3 core is the loader, trust, sandbox, checker and
+Settings list. The planning flow does not call providers yet.
+
+**Manifest.** `ProviderManifestParser` (HostKit, on `TOMLReader`) reads `id`, `name`, `version`,
+`contract`, one `[[kind]]` per kind (`output`, `entry`, `pins`, `states`, `sizes`, `cost`,
+`instructions`, `assets`) and an optional `[generator]` (`command`, `timeout`, `network`). Problems
+come back as `ProviderManifestIssue` values with a line number, not as one thrown error. The id is a
+safe name (no path characters, no trailing newline). A contract higher than 1 gives "needs a newer
+Flight Deck", never a partial load. `network = true` parses and is refused at run time. Links that
+point outside the folder are refused.
+
+**Resolution (`ProviderRegistry`).** Sources in order: repo (`.flightdeck/visual-providers/`) ›
+user (`~/Library/Application Support/Flight Deck/visual-providers/`) › bundled. The first valid
+provider with an id wins, and a repo provider wins only in its own repo. A broken provider is listed
+with its reason and does not shadow a lower source. The Settings row shows the broken repo row next
+to the winner. Trust states: `bundled`, `user`, `repoDataOnly`, `repoApproved`, `repoNeedsApproval`,
+`unusable`.
+
+**Trust.** `ProviderTrust.digest(folder:)` is SHA-256 over sorted relative paths, each with a NUL,
+the length as 8 big-endian bytes, the owner-exec bit and the bytes. An approval is the digest of
+one exact folder, so it is a digest, not a promise about the author: any byte change, or `chmod u+x`,
+asks again. A failed read throws, and the code never guesses. `.DS_Store` and swap files are
+hashed, so they ask again (fail closed). Approve takes the digest that the UI showed and refuses on
+a mismatch. It also refuses over a corrupt `provider-trust.json`. The file is
+`~/Library/Application Support/Flight Deck/provider-trust.json`, entries
+`{repoPath, providerID, digest, approvedAt}`. The digest is point-in-time, so the sandbox closes the
+gap (below). A data-only repo provider skips the digest. Revisit this if a contract adds executable
+fields.
+
+**Sandbox (`ProviderSandbox`, spec §9).** Per run:
+1. Copy the folder to a private snapshot and re-hash it against the approval (bundled and user:
+   against the folder as it stood when the run began). A mismatch is `providerChanged`.
+2. Write a `.sb` profile and run `/usr/bin/sandbox-exec` through `/bin/bash` (never `/bin/sh`, whose
+   `ulimit -f` counts 512-byte blocks). No `sandbox-exec` means the generator is refused.
+3. Profile: `(allow default)`, then deny network, deny all file writes except the output folder,
+   the temp folder and `/dev/null`, deny reads of the home folder, the per-user
+   `/private/var/folders` parent, `/private/tmp`, `/private/var/tmp` and `/Users/Shared`, then allow
+   reads of the run root and the input. Also deny `lsopen`, `appleevent-send`, `mach-lookup` and
+   `signal` (signals to the same sandbox only). Paths are passed with `-D`, never spliced into the
+   text.
+4. Environment: a short fixed `PATH` and `HOME`, `TMPDIR`, `USER` and `LOGNAME`, nothing else.
+   Fds are closed on spawn (`POSIX_SPAWN_CLOEXEC_DEFAULT`).
+5. Limits (`Limits.standard`): stdout 1 MiB, `out/` 10 MiB, `tmp/` 256 MiB, 64 MiB per file. A run
+   over a limit returns `outputTooLarge` and delivers nothing. Hard links and non-regular files in
+   the output are refused. Output is delivered by copy after every holder of the run is gone.
+6. The timeout is raced, and the process group gets SIGTERM, then SIGKILL after `killGrace`.
+
+**The xcrun seed.** The first `xcrun` in a fresh `TMPDIR` rebuilds its cache and takes about 0.9 s per
+shim (`git`, `swift`). Copying the user's `T/xcrun_db` would fix that but leaks 2 MB of path history
+(13,000 paths). So Flight Deck warms its own cache once per process in
+`~/Library/Caches/dev.flightdeck/xcrun-seed` (0700, owned by this user, not a link): `xcrun --find`
+for git, swift, python3, clang and make, with HOME, TMPDIR and `xcrun_db` set to that folder, after
+`xcode-select -p` (so a Mac with no developer folder gets no install prompt). Each run gets a copy,
+and the copy is never saved back. The seed is 3.4 KB. Sandboxed `git --version` falls from about
+900 ms to about 140 ms.
+
+**`CommandRunner` pipe-holder and drain rules (shared app-wide).** These live in
+`Sources/IntakeKit/CommandRunner.swift` and apply to every `processGroup: true` run, not only
+providers:
+- A run drains stdout and stderr. After the leader is reaped, the drains get `drainGrace` (1 s).
+- Then the runner finds every other process that holds a write end of the run's pipes
+  (a process that called `setsid` leaves the group but keeps the pipe). It sends SIGTERM, waits
+  0.5 s, then SIGKILL to what is left, found by a fresh scan.
+- stderr gets a note with the count of stopped processes. Dropped stdout (past the keep limit) is flagged
+  by `CommandResult.stdoutTruncated`.
+- The drain is abandoned only while a writer may remain. Before this, the same cases hung.
+- A `PIPE_EOF` kernel bit says no writer is left. It is self-tested first. If the self-test fails and
+  the scan sees no holder, the drain waits at most `untrustedDrainLimit` (600 s plus the grace),
+  then abandons and notes it on stderr. A cancel abandons after one second of SIGKILL.
+- stderr is kept to 1 MiB and drained to EOF, so a flooding child never blocks.
+- Cost: a late write from a child in the same group is lost, and is now reported.
+
+**Settings and the skill.** Providers section in the Flight Control tab, rows keyed by source and
+folder. See HANDOFF §5.5. `CodexBundledSkill(name:)` copies a skill folder and keeps a
+`.flightdeck-managed` digest sidecar.
+
 
 ## Not yet built (design, not code)
 

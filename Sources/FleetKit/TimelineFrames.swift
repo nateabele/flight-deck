@@ -160,6 +160,7 @@ public struct TimelinePage: Codable, Equatable, Sendable {
 /// right contract for `markRead` and a wrong one for a page, whose whole point is the data it
 /// carries back. Two verbs, two reply shapes.
 public enum FleetRequest: Codable, Equatable, Sendable {
+    case peer(WirePeerRequest)
     /// `limit` counts source **records**, not items — one record can carry several. Clamped
     /// to `TimelineLimits.maxLimit` by the reader rather than refused here.
     case timeline(session: UUID, anchor: TimelineAnchor, limit: Int, agent: String? = nil)
@@ -217,6 +218,17 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     case intakeDetail(id: UUID, ifNot: String?)
     /// A checkpoint's plan (nil: the head), with a block diff against its parent when `changes`.
     case intakePlan(id: UUID, checkpoint: Int?, changes: Bool)
+    /// One ask thread's conversation (`intake.thread.get`): its turns after seq `since` (all of
+    /// them when nil), answered with `WireThreadPage`. A request, not a `FleetCommand`, because
+    /// it answers with data on its `cid` and writes nothing — `intakePlan`'s shape. Sent only
+    /// when the detail has `threads == true`.
+    case intakeThreadGet(id: UUID, threadID: UUID, since: Int?)
+    /// A byte range of one visual revision's snapshot or listed file (`intake.visual.fetch`), answered
+    /// with `WireFileChunk` as `fileRead` is. A request, not a `FleetCommand`: it answers with
+    /// bytes on its `cid` and writes nothing. Not a `fileRead` either, which is scoped to a tab
+    /// session and a path; this is scoped to an intake and a visual. `part` is a
+    /// `WireVisualPart` (`snapshot…` or `file:<path>`). Sent only when the detail has `visuals == true`.
+    case intakeVisualFetch(id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int)
     /// Every paired host and its link state — `flightdeck host ls`. Answered from the Mac's
     /// own registry, so it costs no round trip to any host and works with all of them offline.
     case hostList
@@ -240,14 +252,24 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// label or id (`flightdeck account switch`). Answered with `WireAccountSwitchResult`
     /// BEFORE the move starts: the agent that asked is the one the move retires.
     case accountSwitch(session: UUID, target: String)
+    /// Up to `limit` bytes of a file a link in tab `session`'s transcript names, from
+    /// `offset`. `path` is the link as written — absolute, `~/`, or relative, which the Mac
+    /// resolves against the tab's working directory, because that is what the agent that
+    /// wrote the link meant by it. `maxPixel`: the file is an image, and one larger than this
+    /// on its long side comes back re-encoded to fit (`WireFileChunk.downsampled`).
+    case fileRead(session: UUID, path: String, offset: Int64, limit: Int, maxPixel: Int? = nil)
 
     enum CodingKeys: String, CodingKey {
-        case op, session, anchor, cursor, limit, project
+        case op, session, anchor, cursor, limit, project, peer
         case query, conversationID, projectPath
         case intake, ifNot, checkpoint, changes, name, agent, target
+        case path, offset, maxPixel
+        case threadID, since
+        case visualID, revision, part
     }
 
     private enum Op: String, Codable {
+        case peer = "peer.request"
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
         case recentlyClosed = "session.recentlyClosed"
@@ -257,15 +279,21 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case openConversation = "search.open"
         case intakeDetail = "intake.detail"
         case intakePlan = "intake.plan"
+        case intakeThreadGet = "intake.thread.get"
+        case intakeVisualFetch = "intake.visual.fetch"
         case hostList = "host.list"
         case hostInfo = "host.info"
         case accountList = "account.list"
         case accountSwitch = "account.switch"
+        case fileRead = "file.read"
     }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case .peer(let request):
+            try c.encode(Op.peer, forKey: .op)
+            try c.encode(request, forKey: .peer)
         case .timeline(let session, let anchor, let limit, let agent):
             try c.encode(Op.timeline, forKey: .op)
             try c.encode(session, forKey: .session)
@@ -303,6 +331,19 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .intake)
             try c.encodeIfPresent(checkpoint, forKey: .checkpoint)
             try c.encode(changes, forKey: .changes)
+        case .intakeThreadGet(let id, let threadID, let since):
+            try c.encode(Op.intakeThreadGet, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encode(threadID, forKey: .threadID)
+            try c.encodeIfPresent(since, forKey: .since)
+        case .intakeVisualFetch(let id, let visualID, let revision, let part, let offset, let limit):
+            try c.encode(Op.intakeVisualFetch, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encode(visualID, forKey: .visualID)
+            try c.encode(revision, forKey: .revision)
+            try c.encode(part, forKey: .part)
+            try c.encode(offset, forKey: .offset)
+            try c.encode(limit, forKey: .limit)
         case .hostList:
             try c.encode(Op.hostList, forKey: .op)
         case .hostInfo(let name):
@@ -315,6 +356,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(Op.accountSwitch, forKey: .op)
             try c.encode(session, forKey: .session)
             try c.encode(target, forKey: .target)
+        case .fileRead(let session, let path, let offset, let limit, let maxPixel):
+            try c.encode(Op.fileRead, forKey: .op)
+            try c.encode(session, forKey: .session)
+            try c.encode(path, forKey: .path)
+            try c.encode(offset, forKey: .offset)
+            try c.encode(limit, forKey: .limit)
+            try c.encodeIfPresent(maxPixel, forKey: .maxPixel)
         case .delegate(let request):
             try request.encode(to: encoder)
         case .infra(let request):
@@ -339,6 +387,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             return
         }
         switch known {
+        case .peer:
+            self = .peer(try c.decode(WirePeerRequest.self, forKey: .peer))
         case .timeline:
             let name = try c.decode(String.self, forKey: .anchor)
             let cursor = try c.decodeIfPresent(Int.self, forKey: .cursor)
@@ -380,6 +430,17 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .intakePlan(id: try c.decode(UUID.self, forKey: .intake),
                                checkpoint: try c.decodeIfPresent(Int.self, forKey: .checkpoint),
                                changes: try c.decodeIfPresent(Bool.self, forKey: .changes) ?? false)
+        case .intakeThreadGet:
+            self = .intakeThreadGet(id: try c.decode(UUID.self, forKey: .intake),
+                                    threadID: try c.decode(UUID.self, forKey: .threadID),
+                                    since: try c.decodeIfPresent(Int.self, forKey: .since))
+        case .intakeVisualFetch:
+            self = .intakeVisualFetch(id: try c.decode(UUID.self, forKey: .intake),
+                                      visualID: try c.decode(String.self, forKey: .visualID),
+                                      revision: try c.decode(Int.self, forKey: .revision),
+                                      part: try c.decode(String.self, forKey: .part),
+                                      offset: try c.decodeIfPresent(Int64.self, forKey: .offset) ?? 0,
+                                      limit: try c.decode(Int.self, forKey: .limit))
         case .hostList:
             self = .hostList
         case .hostInfo:
@@ -389,6 +450,12 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .accountSwitch:
             self = .accountSwitch(session: try c.decode(UUID.self, forKey: .session),
                                   target: try c.decode(String.self, forKey: .target))
+        case .fileRead:
+            self = .fileRead(session: try c.decode(UUID.self, forKey: .session),
+                             path: try c.decode(String.self, forKey: .path),
+                             offset: try c.decodeIfPresent(Int64.self, forKey: .offset) ?? 0,
+                             limit: try c.decode(Int.self, forKey: .limit),
+                             maxPixel: try c.decodeIfPresent(Int.self, forKey: .maxPixel))
         }
     }
 }

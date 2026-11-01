@@ -39,6 +39,19 @@ final class ReleaseSheetModelTests: XCTestCase {
         XCTAssertNil(untouched.header, "nothing left out, nothing to say — there is no selection to count")
     }
 
+    /// Ruling (P2a concern 4): an export the preview says release would refuse blocks the
+    /// button, and its help names why. With no refusal the button is free and has no such help.
+    func testAnExportRefusalBlocksReleaseAndSaysWhy() {
+        let drift = Array(repeating: OpDrift.holds, count: 7)
+        let refusal = "docs/plans/pair/ has changes that are not committed."
+        let blocked = ReleaseSheetModel(ops: ops, drift: drift, dropped: [], titles: titles, exportRefusal: refusal)
+        XCTAssertTrue(blocked.exportBlocksRelease)
+        XCTAssertEqual(blocked.releaseHelp, "Release is blocked: \(refusal)")
+        let free = ReleaseSheetModel(ops: ops, drift: drift, dropped: [], titles: titles)
+        XCTAssertFalse(free.exportBlocksRelease)
+        XCTAssertNil(free.releaseHelp)
+    }
+
     /// An impossible op is left out exactly like a dropped one, by all three.
     func testImpossibleOpsAreLeftOutEverywhere() {
         var drift = Array(repeating: OpDrift.holds, count: 7)
@@ -97,5 +110,22 @@ final class ReleaseSheetModelTests: XCTestCase {
                        "BlueFalcon: task taken back + session message + mail")
         XCTAssertEqual(ReleaseSheetModel.plannedDelivery(assignee: "BlueFalcon", rating: .scopeChange, reason: "r", hasSession: false),
                        "BlueFalcon has no Flight Deck session — mail only")
+    }
+}
+
+final class ReleaseSheetExportLinesTests: XCTestCase {
+    func testTheSheetListsTheFilesAndTheCommit() {
+        let preview = PlanExportPreview(paths: ["docs/plans/p/plan.md", "docs/plans/p/visuals/a/README.md"],
+                                        commitMessage: "docs: plan p for release")
+        let model = ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:], export: preview)
+        XCTAssertEqual(model.exportLines, ["Writes 2 files to the repo", "docs/plans/p/plan.md",
+                                           "docs/plans/p/visuals/a/README.md",
+                                           "Commits only those paths: docs: plan p for release"])
+        XCTAssertEqual(ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:]).exportLines, [])
+        let withRemoval = PlanExportPreview(paths: ["docs/plans/p/plan.md"], commitMessage: "docs: plan p for release",
+                                            removed: ["docs/plans/p/visuals/old/a.txt"])
+        XCTAssertEqual(ReleaseSheetModel(ops: [], drift: [], dropped: [], titles: [:], export: withRemoval).exportLines,
+                       ["Writes 1 file to the repo", "docs/plans/p/plan.md",
+                        "Removes docs/plans/p/visuals/old/a.txt", "Commits only those paths: docs: plan p for release"])
     }
 }

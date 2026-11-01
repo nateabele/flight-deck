@@ -125,6 +125,9 @@ struct PlanSectionBody: View {
     @State private var incoming: Loaded?
     /// `incoming` is the human's own choice of round, not a head that landed — see `reload`.
     @State private var incomingIsNavigation = false
+    /// `incoming` is the checkpoint on screen with an accept or a merge in it, not a new round:
+    /// the editor applies it in place (N4).
+    @State private var incomingIsAccept = false
     /// The selection the last reload saw, to tell a round chosen on the timeline apart from
     /// a new head arriving while the view follows the head.
     @State private var loadedSelection: Int??
@@ -187,7 +190,7 @@ struct PlanSectionBody: View {
     }
 
     var body: some View {
-        let key = ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)
+        let key = ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape, accepted: hooks.acceptedStamp)
         let hunks = userHunks
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
@@ -234,7 +237,7 @@ struct PlanSectionBody: View {
         .onChange(of: focus, initial: true) { _, focus in
             guard let focus else { return }
             pendingFocus = focus
-            if mode == .diff { reload(ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)) } else { mode = .diff }
+            if mode == .diff { reload(ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape, accepted: hooks.acceptedStamp)) } else { mode = .diff }
         }
     }
 
@@ -310,7 +313,8 @@ struct PlanSectionBody: View {
         router.env = PlanEditRouter.Env(tape: { live?() ?? latest }, loadFile: loadFile, send: onSend,
                                         onConflict: hooks.onConflict,
                                         deliver: { checkpoint, plan in deliver(plan, to: checkpoint) },
-                                        runner: hooks.runner)
+                                        runner: hooks.runner, queued: hooks.queuedPlan,
+                                        typingWon: hooks.typingWon)
     }
 
     /// A merge's plan for `checkpoint`: offered to the editor as `incoming` — never written
@@ -319,6 +323,7 @@ struct PlanSectionBody: View {
     private func deliver(_ plan: String, to checkpoint: Int) {
         if let next = PlanSectionBody.offer(plan, for: checkpoint, shown: shown, incoming: incoming) {
             incomingIsNavigation = false
+            incomingIsAccept = next.checkpoint == shown?.checkpoint
             incoming = next
         }
     }
@@ -353,12 +358,13 @@ struct PlanSectionBody: View {
                              self.incoming = nil
                              incomingIsNavigation = false
                          },
-                         incomingIsNavigation: incomingIsNavigation)
+                         incomingIsNavigation: incomingIsNavigation, incomingIsAccept: incomingIsAccept)
                 .editLayer(generated: generated[shown.checkpoint])
                 .handle(editor)
                 .folds(hooks.folds)
                 .remembering(hooks.scroll)
                 .links(projectPath: hooks.projectPath)
+                .visuals(hooks.visuals, checkpoint: shown.checkpoint)
                 .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
@@ -373,6 +379,7 @@ struct PlanSectionBody: View {
                 .jump(diffJump)
                 .folds(hooks.folds)
                 .links(projectPath: hooks.projectPath)
+                .visuals(hooks.visuals, checkpoint: diff.checkpoint)
                 .annotating(notes)
                 .onChange(of: diff.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
         } else if mode == .taskGraph, let taskGraph {
@@ -447,6 +454,18 @@ struct PlanSectionBody: View {
         }
     }
 
+    /// What the editor loads for `checkpoint`: the newest plan queued for it, whoever queued it —
+    /// a hand edit, or a thread's accept that came later and was composed on it (and so supersedes
+    /// it) — else the plan on disk. Without the service's queue (renders, tests), the router's own
+    /// last send stands in for it: reloading from disk before the runner applied it would offer
+    /// the pre-edit plan back as if it were news.
+    static func planToShow(checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?,
+                           queued: ((Int) -> String?)?, sent: [Int: String]) -> String? {
+        if let queued, let plan = queued(checkpoint) { return plan }
+        if queued == nil, let plan = sent[checkpoint] { return plan }
+        return PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile)
+    }
+
     private func reload(_ key: ShapingModel.ViewerKey) {
         let navigated = loadedSelection.map { $0 != selection } ?? false
         loadedSelection = .some(selection)
@@ -481,7 +500,8 @@ struct PlanSectionBody: View {
         // polish checkpoint carries a change set, and resolving to it literally made the
         // editor vanish into "No plan at this checkpoint" the moment encoding began.
         if selection == nil, let head = PlanSection.planHead(tape: tape, loadFile: loadFile) { checkpoint = head }
-        guard let plan = router.sent[checkpoint] ?? PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile) else {
+        guard let plan = Self.planToShow(checkpoint: checkpoint, tape: tape, loadFile: loadFile, queued: hooks.queuedPlan,
+                                         sent: router.sent) else {
             message = "No plan at this checkpoint."
             return
         }
@@ -502,6 +522,7 @@ struct PlanSectionBody: View {
             // hold it behind the banner. A round the human chose is never held — the editor
             // commits their edit to its own checkpoint and loads the choice.
             incomingIsNavigation = navigated
+            incomingIsAccept = !navigated && loaded.checkpoint == shown?.checkpoint
             incoming = loaded
         }
     }

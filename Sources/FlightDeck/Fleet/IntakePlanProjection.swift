@@ -122,9 +122,16 @@ enum IntakePlanProjection {
             (added, removed) = blockDiff(current: blocks, parent: PlanBlocks.split(parentText))
         }
         let edits = load(checkpointID, PlanLayers.userName).map(IntakeDetailProjection.hash) ?? ""
-        return WireIntakePlan(checkpoint: checkpointID, roundName: BoardModel.name(stage: checkpoint.stage, round: checkpoint.round),
+        var wire = WireIntakePlan(checkpoint: checkpointID, roundName: BoardModel.name(stage: checkpoint.stage, round: checkpoint.round),
                               editsVersion: edits, markdown: markdown,
                               outline: outline(markdown: markdown, blocks: blocks, churn: churn, divergingSection: diverging),
                               notes: notes, added: added, removed: removed)
+        IntakeThreadProjection.fill(&wire, intake: id, blocks: blocks, service: service)
+        // Only while the gate is open, as for the detail's flag: a phone told nothing of visuals
+        // gets a plan with nothing to fetch.
+        if service.visualsAvailable {
+            wire.visuals = IntakeVisualProjection.refs(markdown: markdown, checkpoint: checkpointID, reader: service.visualReader(id))
+        }
+        return wire
     }
 }

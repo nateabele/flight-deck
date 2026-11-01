@@ -335,18 +335,31 @@ public struct Tape: Codable, Equatable, Sendable {
 ///   runner never has to reconstruct it) and the runner stores it as that checkpoint's
 ///   `plan.user.md`. Markdown identical to the generated plan clears the layer. Send it on a
 ///   save, not per keystroke: every command is a line the runner re-reads.
+/// - `applyThreadDiff` is an ask thread's accepted diff (R8): the whole edited plan for
+///   `checkpoint`, like `editPlan`, plus the thread and diff it came from, and the runner stores
+///   it exactly as it stores `editPlan`. The app appends it on ✓, or ThreadRunner when the thread
+///   auto-accepts. A runner that predates it drops the
+///   line as an unknown kind. Thread-only commands never come here: they go to
+///   `threads/commands.jsonl` (`ThreadCommand`), which IntakeRunner never reads.
 public enum TapeCommand: Codable, Equatable, Sendable {
     case step, nextMajor, toReview, pause, stop, extend(Stage, by: Int), trim(Stage, by: Int)
     case note(PlanNote), removeNote(UUID), editPlan(checkpoint: Int, markdown: String)
     case setNoteKind(UUID, NoteKind)
+    case applyThreadDiff(thread: ThreadID, diff: UUID, checkpoint: Int, markdown: String)
+    /// N1: an accepted diff whose change the human's typing replaced before it landed. The runner
+    /// drops its source from `checkpoint`'s `plan.user.threads.json`; the plan is the typing's.
+    case withdrawThreadEdit(thread: ThreadID, diff: UUID, checkpoint: Int)
 
     /// The old free-text ✎ — now an unanchored comment. Its id is derived from the text (see
     /// `PlanNote.legacy`), so it equals itself however many times it is built or decoded.
     public static func annotate(_ text: String) -> TapeCommand { .note(.legacy(text)) }
 
     /// `annotate` is decode-only: a `commands.jsonl` written before `PlanNote` may still hold one.
-    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan, setNoteKind }
-    private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown, noteKind }
+    private enum Kind: String, Codable {
+        case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan, setNoteKind
+        case applyThreadDiff, withdrawThreadEdit
+    }
+    private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown, noteKind, thread, diff }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -364,6 +377,15 @@ public enum TapeCommand: Codable, Equatable, Sendable {
         case .editPlan:
             self = .editPlan(checkpoint: try c.decode(Int.self, forKey: .checkpoint),
                              markdown: try c.decode(String.self, forKey: .markdown))
+        case .applyThreadDiff:
+            self = .applyThreadDiff(thread: try c.decode(ThreadID.self, forKey: .thread),
+                                    diff: try c.decode(UUID.self, forKey: .diff),
+                                    checkpoint: try c.decode(Int.self, forKey: .checkpoint),
+                                    markdown: try c.decode(String.self, forKey: .markdown))
+        case .withdrawThreadEdit:
+            self = .withdrawThreadEdit(thread: try c.decode(ThreadID.self, forKey: .thread),
+                                       diff: try c.decode(UUID.self, forKey: .diff),
+                                       checkpoint: try c.decode(Int.self, forKey: .checkpoint))
         case .extend:
             self = .extend(try c.decode(Stage.self, forKey: .stage), by: try c.decode(Int.self, forKey: .by))
         case .trim:
@@ -393,6 +415,17 @@ public enum TapeCommand: Codable, Equatable, Sendable {
             try c.encode(Kind.editPlan, forKey: .kind)
             try c.encode(checkpoint, forKey: .checkpoint)
             try c.encode(markdown, forKey: .markdown)
+        case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
+            try c.encode(Kind.applyThreadDiff, forKey: .kind)
+            try c.encode(thread, forKey: .thread)
+            try c.encode(diff, forKey: .diff)
+            try c.encode(checkpoint, forKey: .checkpoint)
+            try c.encode(markdown, forKey: .markdown)
+        case .withdrawThreadEdit(let thread, let diff, let checkpoint):
+            try c.encode(Kind.withdrawThreadEdit, forKey: .kind)
+            try c.encode(thread, forKey: .thread)
+            try c.encode(diff, forKey: .diff)
+            try c.encode(checkpoint, forKey: .checkpoint)
         case .extend(let stage, let by):
             try c.encode(Kind.extend, forKey: .kind)
             try c.encode(stage, forKey: .stage)

@@ -15,12 +15,14 @@ This suite is the same idea at the scope of a whole adapter: `capabilities.py` d
 **row** per claim `AgentAdapter` makes, and `run.py` derives a **verdict** for each row against
 both `claude` and `codex` — sometimes against a checked-in corpus (cheap, no agent spawned),
 sometimes against a live agent driven through a real pty inside a throwaway sandbox (`full`,
-spends real API tokens). The output is a matrix: 28 rows (most checked against both agents,
+spends real API tokens). The output is a matrix: 29 rows (most checked against both agents,
 five — `askUserQuestionShape`, `escapeDeniesPermission`, `agentAsyncLaunchMarker`,
 `agentCompletionNotification`, `agentNotificationSites`, `agentResumeClosesByEitherId`,
 `codexPasteDetectsSameBurstReturn` —
-checked against only the one they claim something about) = 49 cells, refreshed on demand rather
-than trusted forever.
+checked against only the one they claim something about) = 51 cells, refreshed on demand rather
+than trusted forever. `thread.turn` is the one row about headless planning rather than an
+`AgentAdapter` claim: it checks the argv an ask-thread turn would run (`HeadlessAccess.threadRead`)
+allows the reading commands and nothing that writes, in the cheap tier, with no agent spawned.
 
 ## Verdict vocabulary
 

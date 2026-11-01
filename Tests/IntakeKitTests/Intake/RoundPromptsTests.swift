@@ -1,0 +1,548 @@
+import XCTest
+import IntakeKit
+
+final class RoundPromptsTests: XCTestCase {
+    private let observedAt = Date(timeIntervalSince1970: 1_798_920_000)
+
+    private func context(annotations: [String] = [], qa: [TriageExchange] = []) -> RoundContext {
+        RoundContext(intent: "Ship the thing", qa: qa, graphFile: "/i/graph.json",
+                     agentsFile: "/p/AGENTS.md", readmeFile: nil, notes: annotations.map { PlanNote(note: $0) },
+                     observedAt: observedAt)
+    }
+
+    /// Walks every object-shaped node in a parsed JSON Schema and asserts strict mode:
+    /// `additionalProperties: false`, and `required` exactly equal to `properties`' keys.
+    /// Recurses into `properties` values and array `items` — the two places a nested object
+    /// can hide.
+    private func assertStrict(_ node: Any, file: StaticString = #filePath, line: UInt = #line) {
+        guard let obj = node as? [String: Any] else { return }
+        if let props = obj["properties"] as? [String: Any] {
+            XCTAssertEqual(obj["additionalProperties"] as? Bool, false,
+                           "missing additionalProperties:false", file: file, line: line)
+            XCTAssertEqual(Set(obj["required"] as? [String] ?? []), Set(props.keys),
+                           "required does not match properties' keys", file: file, line: line)
+            for value in props.values { assertStrict(value, file: file, line: line) }
+        }
+        if let items = obj["items"] { assertStrict(items, file: file, line: line) }
+    }
+
+    private func parse(_ json: String) throws -> Any {
+        try JSONSerialization.jsonObject(with: Data(json.utf8))
+    }
+
+    // MARK: - Schemas
+
+    func testDraftSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.draft)) }
+    func testReviewSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.review)) }
+    func testIntegrateSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.integrate)) }
+    func testPatchSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.patch)) }
+
+    func testIntegrateClusteredSchemaIsStrictAndRequiresClusters() throws {
+        let schema = try parse(RoundSchemas.integrateClustered)
+        assertStrict(schema)
+        let outer = try XCTUnwrap(schema as? [String: Any])
+        XCTAssertTrue((outer["required"] as? [String])?.contains("clusters") ?? false)
+        XCTAssertFalse(RoundSchemas.integrate.contains("clusters"), "a normal round keeps today's exact shape")
+    }
+
+    /// Convergence needs to know WHICH proposals the integrator took, not just how many: a
+    /// re-proposed change it had rejected is the oscillation red flag. So the schema asks for a
+    /// verdict per change, each one of the three words the counts already use.
+    func testIntegrateSchemaAsksForAVerdictPerChange() throws {
+        let outer = try XCTUnwrap(try parse(RoundSchemas.integrate) as? [String: Any])
+        XCTAssertTrue((outer["required"] as? [String] ?? []).contains("verdicts"))
+        let props = try XCTUnwrap(outer["properties"] as? [String: Any])
+        let verdicts = try XCTUnwrap(props["verdicts"] as? [String: Any])
+        XCTAssertEqual(verdicts["type"] as? String, "array")
+        let item = try XCTUnwrap(verdicts["items"] as? [String: Any])
+        let itemProps = try XCTUnwrap(item["properties"] as? [String: Any])
+        XCTAssertEqual((itemProps["index"] as? [String: Any])?["type"] as? String, "integer")
+        let verdict = try XCTUnwrap(itemProps["verdict"] as? [String: Any])
+        XCTAssertEqual(verdict["enum"] as? [String], ["agree", "somewhat", "disagree"])
+    }
+
+    /// An integrate output written before per-change verdicts existed — a checkpoint's slot
+    /// replayed, a fixture, a model that ignored the new key — still decodes, with no verdicts.
+    func testIntegrateOutputWithoutVerdictsStillDecodes() throws {
+        let old = Data(#"{"agree":2,"somewhat":1,"disagree":0,"notes":"applied"}"#.utf8)
+        let out = try RoundPrompts.decode(IntegrateOutput.self, old)
+        XCTAssertNil(out.verdicts)
+        XCTAssertEqual(out.tally(forChanges: 3), VerdictTally(agree: 2, somewhat: 1, disagree: 0))
+        XCTAssertNil(out.verdicts(forChanges: 3))
+    }
+
+    /// With verdicts present the totals come from them, never from the integrator's own
+    /// arithmetic — the two can disagree, and the list is the one that names the changes.
+    /// Out-of-range and repeated indices are dropped (first one wins), so a sloppy list can
+    /// never count a change twice or count one that doesn't exist.
+    func testVerdictTotalsDeriveFromTheVerdictList() throws {
+        let data = Data(#"""
+        {"agree":9,"somewhat":9,"disagree":9,"notes":"n",
+         "verdicts":[{"index":2,"verdict":"disagree"},{"index":0,"verdict":"agree"},
+                     {"index":0,"verdict":"disagree"},{"index":7,"verdict":"agree"},
+                     {"index":1,"verdict":"somewhat"}]}
+        """#.utf8)
+        let out = try RoundPrompts.decode(IntegrateOutput.self, data)
+        XCTAssertEqual(out.tally(forChanges: 3), VerdictTally(agree: 1, somewhat: 1, disagree: 1))
+        XCTAssertEqual(out.verdicts(forChanges: 3), [ChangeVerdict(index: 0, verdict: .agree),
+                                                    ChangeVerdict(index: 1, verdict: .somewhat),
+                                                    ChangeVerdict(index: 2, verdict: .disagree)])
+    }
+
+    /// An empty list is no list: the counts are all there is to go on.
+    func testEmptyVerdictListFallsBackToTheCounts() {
+        let out = IntegrateOutput(agree: 1, somewhat: 0, disagree: 1, notes: "", verdicts: [])
+        XCTAssertEqual(out.tally(forChanges: 2), VerdictTally(agree: 1, somewhat: 0, disagree: 1))
+        XCTAssertNil(out.verdicts(forChanges: 2))
+    }
+    func testChangeSetSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.changeSet)) }
+
+    func testChangeSetSchemaEmbedsTriageFragmentExactly() throws {
+        let outer = try XCTUnwrap(try parse(RoundSchemas.changeSet) as? [String: Any])
+        let props = try XCTUnwrap(outer["properties"] as? [String: Any])
+        let embedded = try XCTUnwrap(props["changeSet"])
+        let embeddedData = try JSONSerialization.data(withJSONObject: embedded, options: [.sortedKeys])
+        let fragment = try parse(Triage.changeSetSchemaFragment)
+        let fragmentData = try JSONSerialization.data(withJSONObject: fragment, options: [.sortedKeys])
+        XCTAssertEqual(embeddedData, fragmentData)
+    }
+
+    /// `Triage.schemaJSON` byte for byte. Captured from the source when `changeSetSchemaFragment`
+    /// was extracted (see task-4-report.md), then deliberately regenerated when L3-R added
+    /// `taskKind` and `kindProposal` to the op. A change to the schema must be a change to this
+    /// file too: both CLIs were probed against exactly these bytes.
+    func testTriageSchemaJSONUnchangedByTheRefactor() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(
+            forResource: "triage-schema", withExtension: "json", subdirectory: "Fixtures/Intake"))
+        let fixture = try Data(contentsOf: url)
+        XCTAssertEqual(Data(Triage.schemaJSON.utf8), fixture)
+    }
+
+    // MARK: - Draft
+
+    func testDraftPromptNamesInputFilesAndQATranscript() {
+        let qa = [TriageExchange(questions: ["Mac only?"], answers: ["Yes"])]
+        let p = RoundPrompts.draft(context(qa: qa), persona: .general)
+        XCTAssertTrue(p.contains("/i/graph.json"))
+        XCTAssertTrue(p.contains("/p/AGENTS.md"))
+        XCTAssertTrue(p.contains("Mac only?"))
+        XCTAssertTrue(p.contains("Yes"))
+        XCTAssertTrue(p.contains("complete, detailed, granular markdown plan"))
+        XCTAssertTrue(p.contains("dependent")) // graph-shape paragraph, same as Triage's
+    }
+
+    func testDraftPromptOmitsQATranscriptWhenThereIsNone() {
+        let p = RoundPrompts.draft(context(), persona: .general)
+        XCTAssertFalse(p.contains("Q&A transcript"))
+    }
+
+    func testDraftPromptHasNoLensForGeneralPersona() {
+        let p = RoundPrompts.draft(context(), persona: .general)
+        XCTAssertFalse(p.contains("Your lens:"))
+    }
+
+    func testDraftPromptPersonaLenses() {
+        XCTAssertTrue(RoundPrompts.draft(context(), persona: .arbiter).contains("global coherence"))
+        XCTAssertTrue(RoundPrompts.draft(context(), persona: .realist).contains("implementability and sequencing"))
+        XCTAssertTrue(RoundPrompts.draft(context(), persona: .coverage).contains("every feature, edge case and workflow"))
+        XCTAssertTrue(RoundPrompts.draft(context(), persona: .stressTest).contains("challenge every assumption"))
+    }
+
+    // MARK: - Synthesis
+
+    func testSynthesisPromptNamesDraftPathsAndAsksForOwnEdits() {
+        let p = RoundPrompts.synthesis(context(), ownDraft: "/i/draft-a.md",
+                                       otherDrafts: ["/i/draft-b.md", "/i/draft-c.md"])
+        XCTAssertTrue(p.contains("Read-only files:"))
+        XCTAssertTrue(p.contains("/i/draft-a.md"))
+        XCTAssertTrue(p.contains("/i/draft-b.md"))
+        XCTAssertTrue(p.contains("/i/draft-c.md"))
+        XCTAssertTrue(p.contains("intellectually honest"))
+    }
+
+    // MARK: - Review
+
+    func testReviewPromptHasOvershootPhraseAndPlanFile() {
+        let p = RoundPrompts.review(context(), planFile: "/i/plan.md", round: 2)
+        XCTAssertTrue(p.contains("/i/plan.md"))
+        XCTAssertTrue(p.contains("at least 40 elements"))
+    }
+
+    func testReviewPromptCarriesAnnotationsWhenPresent() {
+        let p = RoundPrompts.review(context(annotations: ["Keep it Mac-only"]), planFile: "/i/plan.md", round: 1)
+        XCTAssertTrue(p.contains("The human steering this plan says:"))
+        XCTAssertTrue(p.contains("Keep it Mac-only"))
+    }
+
+    func testReviewPromptOmitsAnnotationsHeaderWhenNone() {
+        let p = RoundPrompts.review(context(), planFile: "/i/plan.md", round: 1)
+        XCTAssertFalse(p.contains("The human steering this plan says:"))
+    }
+
+    // MARK: - Notes from an earlier version
+
+    private func passageNote(_ body: String) -> PlanNote {
+        PlanNote(kind: .question, note: body,
+                 anchor: NoteAnchor(checkpoint: 1, quote: "Run PostgreSQL on encrypted gp3 EBS storage", section: "## Phase 3"))
+    }
+
+    /// A note written on a plan other than the one the round reads says which, after its quote —
+    /// the quote is how the passage read THERE.
+    func testANoteFromAnEarlierVersionSaysWhichVersionItsQuoteIsFrom() {
+        let note = passageNote("Why not SQLite?")
+        var c = context()
+        c.notes = [note]
+        c.noteVersions = [note.id: "Draft · Round 0"]
+        let p = RoundPrompts.review(c, planFile: "/i/plan.md", round: 1)
+        XCTAssertTrue(p.contains("""
+        1. [question] in section "## Phase 3":
+           > Run PostgreSQL on encrypted gp3 EBS storage
+           (Quoted from the Draft · Round 0 version of the plan, not the one you are reading; the passage may read differently here, or be gone.)
+           Question (answer it in the plan): Why not SQLite?
+        """), p)
+        XCTAssertFalse(p.lowercased().contains("bead"))
+    }
+
+    /// A note on the plan the round reads gets no such line, and a plan-wide note never does.
+    func testANoteOnThePlanBeingReadHasNoVersionLine() {
+        var c = context()
+        c.notes = [passageNote("Why not SQLite?"), PlanNote(note: "Keep it Mac-only")]
+        let p = RoundPrompts.review(c, planFile: "/i/plan.md", round: 1)
+        XCTAssertFalse(p.contains("Quoted from the"), p)
+        XCTAssertTrue(p.contains("> Run PostgreSQL on encrypted gp3 EBS storage"))
+    }
+
+    // MARK: - Steering and context, every stage
+
+    /// Every stage that reads the intake takes the human's annotations, in the same words —
+    /// an annotation left while polish is next must not wait for a refine round that never
+    /// comes. Integrate is the exception: it applies someone else's edits and never judges.
+    func testEveryStagePromptCarriesAnnotationsThroughOneClause() {
+        let c = context(annotations: ["Keep it Mac-only", "No new deps"])
+        let prompts = [
+            RoundPrompts.draft(c, persona: .general),
+            RoundPrompts.synthesis(c, ownDraft: "/i/a.md", otherDrafts: ["/i/b.md"]),
+            RoundPrompts.review(c, planFile: "/i/plan.md", round: 1),
+            RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for p in prompts {
+            XCTAssertTrue(p.contains("The human steering this plan says:\n- Keep it Mac-only\n- No new deps"), p)
+        }
+        XCTAssertFalse(RoundPrompts.encode(context(), planFile: "/i/plan.md").contains("The human steering this plan says:"))
+        XCTAssertFalse(RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json").contains("The human steering this plan says:"))
+    }
+
+    // MARK: - Thread decisions (spec §11)
+
+    /// Every stage that takes steering also takes what the human decided in ask threads since the
+    /// last round: title, anchor and decision line, and whether its change is already one of the
+    /// human's edits. The decision is the reason behind an accepted diff, so a refine round that
+    /// sees it doesn't quietly undo the change. With none, no header.
+    func testEveryStagePromptCarriesTheThreadDecisions() {
+        var c = context()
+        c.threadDecisions = [
+            ThreadDecision(title: "Queue store", quote: "Use SQLite for the queue.", section: "Storage",
+                           decision: "Files, not SQLite: no new deps.\nRevisit at 10k jobs.", acceptedEdit: true),
+            ThreadDecision(title: "Whole plan", quote: nil, section: nil, decision: "Mac only for v1.", acceptedEdit: false),
+        ]
+        let prompts = [
+            RoundPrompts.draft(c, persona: .general),
+            RoundPrompts.synthesis(c, ownDraft: "/i/a.md", otherDrafts: ["/i/b.md"]),
+            RoundPrompts.review(c, planFile: "/i/plan.md", round: 1),
+            RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for p in prompts {
+            XCTAssertTrue(p.contains(RoundPrompts.threadDecisionsHeader), p)
+            XCTAssertTrue(p.contains("""
+            - "Queue store", on "Use SQLite for the queue." (Storage): Files, not SQLite: no new deps.
+              Revisit at 10k jobs.
+              Its change is already in the plan, among the human's edits.
+            """), p)
+            XCTAssertTrue(p.contains("- \"Whole plan\", on the whole plan: Mac only for v1."), p)
+        }
+        XCTAssertFalse(RoundPrompts.review(context(), planFile: "/i/plan.md", round: 1).contains(RoundPrompts.threadDecisionsHeader))
+    }
+
+    /// What a round is told: for each thread not resolved, its latest decision from a turn that
+    /// ended since the last round landed, and whether one of its diffs is among the head's
+    /// edits. A thread with neither, a divider, an empty decision, a decision from before the
+    /// round, and a resolved thread (which never feeds rounds, spec §5) say nothing.
+    func testThreadDecisionsAreEachUnresolvedThreadsLatestSinceTheLastRound() {
+        let landed = Date(timeIntervalSince1970: 1_000)
+        func turn(_ seq: Int, _ decision: String?, endedAt: TimeInterval?, divider: Bool = false) -> ThreadTurn {
+            ThreadTurn(seq: seq, messageID: divider ? ThreadTurn.dividerPrefix + "2" : "m\(seq)", decision: decision,
+                       checkpoint: 1, startedAt: Date(timeIntervalSince1970: 0),
+                       endedAt: endedAt.map { Date(timeIntervalSince1970: $0) })
+        }
+        func record(_ title: String, _ status: ThreadStatus = .open, anchor: ThreadAnchor = .wholePlan) -> ThreadRecord {
+            ThreadRecord(id: ThreadID(), title: title, anchor: anchor, status: status, agent: .claude, model: "m",
+                         effort: "e", followsCheckpoint: 1, createdAt: Date(timeIntervalSince1970: 0))
+        }
+        let storage = record("Queue store", anchor: ThreadAnchor(note: NoteAnchor(checkpoint: 1, quote: "Use SQLite.", section: "Storage")))
+        let old = record("Old news"), resolved = record("Done", .resolved), quiet = record("Quiet"), accepted = record("Accepted only")
+        let reader = FakeThreads(records: [storage, old, resolved, quiet, accepted], turnsByThread: [
+            storage.id: [turn(1, "First call.", endedAt: 1_500), turn(2, "Files, not SQLite.", endedAt: 1_600),
+                         turn(3, "", endedAt: 1_700), turn(4, nil, endedAt: nil), turn(5, "Now reading", endedAt: 1_800, divider: true)],
+            old.id: [turn(1, "Before the round.", endedAt: 900)],
+            resolved.id: [turn(1, "Resolved call.", endedAt: 1_500)],
+            quiet.id: [turn(1, nil, endedAt: 1_500)],
+            accepted.id: [turn(1, "  ", endedAt: 1_500)],
+        ])
+        let decisions = ThreadDecisions.since(landed, reader: reader,
+                                              accepted: [ThreadEditSource(thread: accepted.id, diff: UUID()),
+                                                         ThreadEditSource(thread: resolved.id, diff: UUID())])
+        XCTAssertEqual(decisions, [
+            ThreadDecision(title: "Queue store", quote: "Use SQLite.", section: "Storage", decision: "Files, not SQLite.",
+                           acceptedEdit: false),
+            ThreadDecision(title: "Accepted only", quote: nil, section: nil, decision: nil, acceptedEdit: true),
+        ])
+        XCTAssertEqual(ThreadDecisions.since(nil, reader: reader, accepted: []).map(\.title), ["Queue store", "Old news"],
+                       "before any round, every decision is since the last one")
+    }
+
+    /// A synthesizer is a fresh session: "the drafting task you were just given" pointed at a
+    /// conversation it never had. It needs the intent, the Q&A and the project files itself.
+    func testSynthesisPromptStandsOnItsOwn() {
+        let qa = [TriageExchange(questions: ["Which platforms?"], answers: ["Mac only"])]
+        let p = RoundPrompts.synthesis(context(qa: qa), ownDraft: "/i/draft-a.md", otherDrafts: ["/i/draft-b.md"])
+        XCTAssertTrue(p.contains("Ship the thing"))
+        XCTAssertTrue(p.contains("Q: Which platforms?\nA: Mac only"))
+        XCTAssertTrue(p.contains("/p/AGENTS.md"))
+        XCTAssertTrue(p.contains("the draft at /i/draft-a.md (yours to revise)"), p)
+        XCTAssertFalse(p.contains("you were just given"))
+    }
+
+    func testReviewPromptCarriesIntentQAAndProjectFiles() {
+        let qa = [TriageExchange(questions: ["Which platforms?"], answers: ["Mac only"])]
+        let p = RoundPrompts.review(context(qa: qa), planFile: "/i/plan.md", round: 2)
+        XCTAssertTrue(p.contains("Ship the thing"))
+        XCTAssertTrue(p.contains("Q: Which platforms?\nA: Mac only"))
+        XCTAssertTrue(p.contains("/p/AGENTS.md"))
+    }
+
+    /// "Reread AGENTS.md" names no file — the seat's cwd is the project, but the instruction
+    /// should point at the path FD found, and say nothing when there is none.
+    func testPolishFamilyPromptsNameTheAgentsFile() {
+        let c = context()
+        for p in [RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+                  RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+                  RoundPrompts.dedup(c, changeSetFile: "/i/cs.json")] {
+            XCTAssertTrue(p.contains("Reread the project's agent instructions at /p/AGENTS.md"), p)
+        }
+        let none = RoundContext(intent: "x", qa: [], graphFile: "/g", agentsFile: nil, readmeFile: nil,
+                                observedAt: observedAt)
+        XCTAssertFalse(RoundPrompts.polish(none, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1)
+            .contains("AGENTS.md"))
+    }
+
+    // MARK: - Integrate
+
+    func testIntegratePromptEditsOnlyThatFile() {
+        let p = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json")
+        XCTAssertTrue(p.contains("/i/plan.md"))
+        XCTAssertTrue(p.contains("/i/changes.json"))
+        XCTAssertTrue(p.contains("edit only that file"))
+    }
+
+    func testIntegratePromptAsksForAVerdictPerChange() {
+        let p = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json")
+        XCTAssertTrue(p.contains("`verdicts`"), p)
+        XCTAssertTrue(p.contains("0-based"), p)
+        XCTAssertTrue(p.contains(#""verdicts": [{"index": 0, "verdict": "agree"}"#), p)
+    }
+
+    func testClusteredIntegratePromptAsksForClustersOnlyWhenClustered() {
+        let plain = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json")
+        let clustered = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json", clustered: true)
+        XCTAssertFalse(plain.contains("clusters"))
+        XCTAssertTrue(clustered.contains("same underlying issue"))
+        XCTAssertTrue(clustered.contains("Apply each issue at most once"))
+        XCTAssertTrue(clustered.contains(#""clusters": [[0, 3]"#))
+    }
+
+    func testIntegrateOutputWithoutClustersDecodes() throws {
+        let old = #"{"agree":1,"somewhat":0,"disagree":0,"notes":"n","verdicts":[{"index":0,"verdict":"agree"}]}"#
+        XCTAssertNil(try IntakeJSON.decoder.decode(IntegrateOutput.self, from: Data(old.utf8)).clusters)
+    }
+
+    // MARK: - Encode
+
+    func testEncodePromptHasObservedAtAndNeverLoseAFeature() {
+        let p = RoundPrompts.encode(context(), planFile: "/i/plan.md")
+        XCTAssertTrue(p.contains("/i/plan.md"))
+        XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
+        XCTAssertTrue(p.contains("Never lose a feature"))
+    }
+
+    /// Every change-set round copies `pre` out of the graph, so each must be told where it is.
+    func testChangeSetPromptsNameTheGraphFile() {
+        let c = context()
+        let prompts = [
+            "encode": RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            "polish": RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            "freshEyes": RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            "dedup": RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for (name, p) in prompts {
+            XCTAssertTrue(p.contains("Read-only files:"), name)
+            XCTAssertTrue(p.contains("- Live task graph: /i/graph.json"), name)
+            XCTAssertTrue(p.contains("/i/graph.json is a JSON snapshot shaped"), name)
+        }
+    }
+
+    func testChangeSetCorrectionAsksForTheWholeChangeSetNotARecommendation() {
+        let p = RoundPrompts.changeSetCorrection(errors: [.unknownBead("fd-9"), .cycle], observedAt: observedAt)
+        XCTAssertTrue(p.contains("failed validation"))
+        XCTAssertTrue(p.contains(ValidationError.unknownBead("fd-9").message))
+        XCTAssertTrue(p.contains(ValidationError.cycle.message))
+        XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
+        XCTAssertTrue(p.contains(#"{"changeSet": {...}, "summary": "..."}"#))
+        XCTAssertTrue(p.contains("complete corrected change set"))
+        XCTAssertFalse(p.lowercased().contains("recommendation"))
+    }
+
+    // MARK: - Polish
+
+    func testPolishPromptHasDoNotOversimplifyAndObservedAt() {
+        let p = RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 3)
+        XCTAssertTrue(p.contains("DO NOT OVERSIMPLIFY"))
+        XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
+        XCTAssertTrue(p.contains("/i/plan.md"))
+        XCTAssertTrue(p.contains("/i/cs.json"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
+    }
+
+    /// The polish family hands back a patch, never the whole set retyped (`ChangeSetPatch`).
+    func testPolishFamilyPromptsAskForAPatch() {
+        let prompts = [RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 3),
+                       RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+                       RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json")]
+        for p in prompts {
+            XCTAssertTrue(p.contains("Return only your changes, as a patch against /i/cs.json"), p)
+            XCTAssertTrue(p.contains(#"{"patch": {"remove""#), p)
+            XCTAssertFalse(p.contains("complete revised change set"), p)
+            XCTAssertFalse(p.contains(#"`{"changeSet": {...}"#), p)
+        }
+        let correction = RoundPrompts.patchCorrection(problems: ["index 9 is not in the change set"], changeSetFile: "/i/cs.json")
+        XCTAssertTrue(correction.contains("- index 9 is not in the change set"))
+        XCTAssertTrue(correction.contains("complete corrected patch") && correction.contains("/i/cs.json"))
+    }
+
+    private let analytics = ShadowAnalytics(insights: "/i/shadow/bv-insights.json", plan: "/i/shadow/bv-plan.json",
+                                            priority: "/i/shadow/bv-priority.json")
+
+    func testPolishPromptOmitsShadowAnalyticsClauseWhenNil() {
+        let p = RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 3)
+        XCTAssertFalse(p.contains("bv-insights.json"))
+    }
+
+    func testPolishPromptAddsShadowAnalyticsClauseWhenPresent() {
+        let p = RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json",
+                                    round: 3, analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-insights.json"))
+        XCTAssertTrue(p.contains("/i/shadow/bv-plan.json"))
+        XCTAssertTrue(p.contains("/i/shadow/bv-priority.json"))
+        XCTAssertTrue(p.contains("do not run `bv` yourself"))
+        XCTAssertTrue(p.contains("restructure"))
+    }
+
+    // MARK: - Fresh eyes
+
+    func testFreshEyesPromptOmitsShadowAnalyticsClauseWhenNil() {
+        let p = RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json")
+        XCTAssertTrue(p.contains("/i/plan.md"))
+        XCTAssertTrue(p.contains("/i/cs.json"))
+        XCTAssertTrue(p.contains("fresh"))
+        XCTAssertFalse(p.contains("bv-insights.json"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
+    }
+
+    func testFreshEyesPromptAddsShadowAnalyticsClauseWhenPresent() {
+        let p = RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json",
+                                       analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-insights.json"))
+    }
+
+    // MARK: - Dedup
+
+    func testDedupPromptOmitsShadowAnalyticsClauseWhenNil() {
+        let p = RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json")
+        XCTAssertTrue(p.contains("/i/cs.json"))
+        XCTAssertTrue(p.contains("duplicative"))
+        XCTAssertFalse(p.contains("bv-plan.json"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
+    }
+
+    func testDedupPromptAddsShadowAnalyticsClauseWhenPresent() {
+        let p = RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json", analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-plan.json"))
+    }
+
+    // MARK: - decode
+
+    func testDecodeRejectsProse() {
+        XCTAssertThrowsError(try RoundPrompts.decode(DraftOutput.self, Data("Sure, here's my plan".utf8)))
+    }
+
+    func testDecodeAcceptsValidDraftOutput() throws {
+        let out = try RoundPrompts.decode(DraftOutput.self, Data(#"{"plan":"the plan"}"#.utf8))
+        XCTAssertEqual(out.plan, "the plan")
+    }
+
+    func testDecodeAcceptsValidChangeSetOutput() throws {
+        let json = #"{"changeSet":{"graphObservedAt":"2026-09-26T20:00:00Z","ops":[]},"summary":"none"}"#
+        let out = try RoundPrompts.decode(ChangeSetOutput.self, Data(json.utf8))
+        XCTAssertEqual(out.summary, "none")
+        XCTAssertEqual(out.changeSet.ops.count, 0)
+    }
+
+    // MARK: - Live probe fixtures (2026-09-27): real codex/claude output for RoundSchemas.review
+    // and RoundSchemas.changeSet, captured once (see task-4-report.md). Decoding these
+    // end-to-end is what the schema is for — a schema that merely parses proves nothing about
+    // whether a real strict-mode CLI accepts it.
+
+    private func liveFixture(_ name: String, _ ext: String) throws -> Data {
+        try Data(contentsOf: try XCTUnwrap(Bundle(for: Self.self).url(
+            forResource: name, withExtension: ext, subdirectory: "Fixtures/Intake")))
+    }
+
+    func testDecodesLiveCodexReviewOutput() throws {
+        let out = try HeadlessOutput.parse(.codex, stdout: try liveFixture("round-review-codex-live", "jsonl"))
+        let review = try RoundPrompts.decode(ReviewOutput.self, out.structured)
+        XCTAssertFalse(review.changes.isEmpty)
+    }
+
+    func testDecodesLiveClaudeReviewOutput() throws {
+        let out = try HeadlessOutput.parse(.claude, stdout: try liveFixture("round-review-claude-live", "json"))
+        let review = try RoundPrompts.decode(ReviewOutput.self, out.structured)
+        XCTAssertFalse(review.changes.isEmpty)
+    }
+
+    func testDecodesLiveCodexChangeSetOutput() throws {
+        let out = try HeadlessOutput.parse(.codex, stdout: try liveFixture("round-changeset-codex-live", "jsonl"))
+        let cs = try RoundPrompts.decode(ChangeSetOutput.self, out.structured)
+        XCTAssertEqual(cs.changeSet.ops.count, 0)
+    }
+
+    func testDecodesLiveClaudeChangeSetOutput() throws {
+        let out = try HeadlessOutput.parse(.claude, stdout: try liveFixture("round-changeset-claude-live", "json"))
+        let cs = try RoundPrompts.decode(ChangeSetOutput.self, out.structured)
+        XCTAssertEqual(cs.changeSet.ops.count, 0)
+    }
+}
+
+/// A `ThreadStoreReading` over fixed values, in the order given.
+private struct FakeThreads: ThreadStoreReading {
+    var records: [ThreadRecord]
+    var turnsByThread: [ThreadID: [ThreadTurn]]
+    func threads() -> [ThreadRecord] { records }
+    func turns(_ id: ThreadID) -> [ThreadTurn] { turnsByThread[id] ?? [] }
+    func diffs(_ id: ThreadID) -> [ThreadDiff] { [] }
+    func activity(_ id: ThreadID) -> String? { nil }
+}

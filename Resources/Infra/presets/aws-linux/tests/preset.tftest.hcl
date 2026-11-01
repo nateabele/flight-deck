@@ -95,6 +95,12 @@ run "spot" {
     condition     = length(aws_instance.this.instance_market_options) == 1
     error_message = "spot market options"
   }
+  # AWS refuses the post-launch ModifyInstanceAttribute the provider would send for it. The local,
+  # not the attribute: a mock provider fills an unset computed attribute with a random string.
+  assert {
+    condition     = local.shutdown_behavior == null
+    error_message = "no shutdown behavior on a spot instance"
+  }
 }
 
 # A running machine must survive a re-apply (spec §6.2 re-applies when this Mac's public IP

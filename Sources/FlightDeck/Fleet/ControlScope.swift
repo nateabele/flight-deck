@@ -36,6 +36,11 @@ enum ControlCaller: Equatable {
     /// different secret. Treated the same as a caller with no standing at all: scoped levels
     /// fail closed rather than falling back to `.human`'s trust.
     case invalid
+    /// A detached planning runner (IntakeRunner or ThreadRunner) for intake `UUID`, proven by
+    /// `ControlEnvironment.intakeRunner(forToken:)`. Least privilege: neither runner uses the
+    /// socket for intake ops (each writes its own files), so it reaches no command and no request
+    /// at any level (`out_of_scope`). The canvas branch adds its own canvas requests back.
+    case intakeRunner(UUID)
 }
 
 /// A pure policy for whether a `flightdeck` CLI caller may issue a given fleet command or
@@ -71,15 +76,23 @@ enum ControlScope {
     /// scoped level, not fall back to a human's unrestricted trust.
     static func caller(token: String?, secret: Data) -> ControlCaller {
         guard let token else { return .human }
-        guard let session = ControlEnvironment.session(forToken: token, secret: secret) else {
-            return .invalid
+        if let session = ControlEnvironment.session(forToken: token, secret: secret) {
+            return .session(session)
         }
-        return .session(session)
+        if let intake = ControlEnvironment.intakeRunner(forToken: token, secret: secret) {
+            return .intakeRunner(intake)
+        }
+        return .invalid
     }
 
     /// Exhaustive with no `default`, so a new `FleetCommand` case cannot compile until someone
     /// here decides whether it is a write reachable only by its own session, or fleet-wide.
     static func permits(_ command: FleetCommand, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
+        // An intake's runner is not a tab and not a person: no command is its to issue (not even
+        // presence), at any scope level, so this comes before every shortcut below. Its own
+        // intake's commands included: both runners write their files directly, so an allowance
+        // would be unused reach for anything that gets the runner's environment.
+        if case .intakeRunner = caller { return false }
         if case .viewing = command { return true }
         if level == .full || caller == .human { return true }
         guard case .session(let me) = caller, level == .ownSession else { return false }
@@ -101,9 +114,11 @@ enum ControlScope {
             return id == me
         case .viewing:
             return true
-        case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
-             .intakeStart, .intakeRounds:
-            // An intake is a project's, not the asking session's: no session id names it.
+        case .intakeTape, .intakeRetry, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
+             .intakeAnswer, .intakeStart, .intakeRounds, .intakeThreadSend, .intakeThreadAnswer, .intakeThreadResolve, .intakeDiffDecide,
+             .intakeCreate:
+            // An intake is a project's, not the asking session's: no session id names it. Its
+            // ask threads too — a thread's agent is not the tab that asked.
             return false
         case .swarmPause, .swarmResume, .handoffConfirm, .handoffDecline:
             // A swarm and its hand-offs are a project's, not the asking session's.
@@ -120,10 +135,35 @@ enum ControlScope {
     /// (`.full` or `.human` only), as do the infra requests that write. The delegation requests
     /// that write follow the own-session rule instead (see their arm). Every other request only
     /// reads and is always allowed.
-    static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
+    /// What an intake's runner may ask, listed arm by arm with no `default` so a new request kind
+    /// cannot compile until it is decided here. Nothing on this branch: the canvas branch adds its
+    /// canvas requests (`case .canvas`) as the one reach.
+    private static func runnerPermits(_ request: FleetRequest, level: ControlScopeLevel) -> Bool {
         switch request {
+        case .peer, .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search, .openConversation,
+             .intakeDetail, .intakePlan, .intakeThreadGet, .intakeVisualFetch, .fileRead, .hostList, .hostInfo, .delegate,
+             .infra, .accountList, .accountSwitch:
+            // `.intakeVisualFetch` included: the fetch serves the phone, and a runner (the one
+            // process that writes `visuals/` and checkpoints) reads those files from disk itself.
+            return false
+        }
+    }
+
+    static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
+        // Before the full-scope and read shortcuts: a runner holds no tab's trust, so those
+        // shortcuts do not apply to it.
+        if case .intakeRunner = caller { return runnerPermits(request, level: level) }
+        switch request {
+        case .peer(let peer):
+            if caller == .invalid { return false }
+            if peer.operation == "list" || peer.operation == "receive" { return true }
+            // Messaging another tab is a cross-tab write, not a read disguised as a request.
+            return level == .full || caller == .human
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
-             .intakeDetail, .intakePlan:
+             .intakeDetail, .intakePlan, .intakeThreadGet, .intakeVisualFetch:
+            return true
+        case .fileRead:
+            // A read, and of nothing a local caller cannot already `cat` from its own shell.
             return true
         case .hostList, .hostInfo:
             // Reads too: `host.info` crosses to the host, but asks it only for facts and
@@ -164,7 +204,13 @@ enum ControlScope {
             // `infra ls` and `doctor` only read. `up`, `down` and `extend` create, destroy or
             // spend money on a machine that belongs to the Mac, not to the tab that asked (any
             // tab's runs may land on it), so they follow the fleet-wide rule, like `host prune`.
-            return infra.isReadOnly || level == .full || caller == .human
+            //
+            // `budget` is the exception the other way: it changes only the asking tab's own
+            // session budget (the app reads the session from the token), so it follows the
+            // own-session rule, as `delegate` does.
+            if infra.isReadOnly || level == .full || caller == .human { return true }
+            guard case .budget = infra, case .session = caller else { return false }
+            return level == .ownSession
         }
     }
 }

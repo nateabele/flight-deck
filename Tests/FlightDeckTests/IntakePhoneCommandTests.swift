@@ -139,6 +139,39 @@ final class IntakePhoneCommandTests: XCTestCase {
 
     // MARK: transport
 
+    // MARK: intake.create
+
+    func testCreateCapturesUnderThePhonesIdAndTriages() async throws {
+        let svc = await makeService()
+        let id = UUID()
+        XCTAssertNil(svc.phoneCreate(id, token: UUID(), project: "/p", intent: "Add dark mode"))
+        let made = try XCTUnwrap(svc.intakes.first { $0.id == id })
+        XCTAssertEqual(made.intent, "Add dark mode")
+        XCTAssertEqual(made.state, .triaging)
+        XCTAssertEqual(made.projectPath, IntakeService.projectKey("/p"))
+    }
+
+    /// A retry after a lost ack — same token, or a new one from a phone that restarted — meets
+    /// the intake its first delivery made, and is acked without making a second.
+    func testCreateIsIdempotentPerIdAndNeverOverwrites() async throws {
+        let svc = await makeService()
+        let id = UUID(), token = UUID()
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "first"))
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "first"))
+        XCTAssertNil(svc.phoneCreate(id, token: UUID(), project: "/p", intent: "second"))
+        XCTAssertEqual(svc.intakes.filter { $0.id == id }.count, 1)
+        XCTAssertEqual(svc.intakes.first { $0.id == id }?.intent, "first")
+    }
+
+    func testCreateRefusesBlankIntentAndLeavesTheTokenUsable() async throws {
+        let svc = await makeService()
+        let id = UUID(), token = UUID()
+        XCTAssertEqual(svc.phoneCreate(id, token: token, project: "/p", intent: " \n "), "empty_intent")
+        XCTAssertTrue(svc.intakes.isEmpty)
+        XCTAssertNil(svc.phoneCreate(id, token: token, project: "/p", intent: "now with words"))
+        XCTAssertEqual(svc.intakes.count, 1)
+    }
+
     func testAPauseWhileRunningIsQueued() async throws {
         let i = try seedTape(.running)
         let svc = await makeService()
@@ -442,5 +475,128 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: noteID, kind: "question"), "empty_note")
         XCTAssertEqual(svc.phoneSetNoteKind(i.id, token: UUID(), noteID: UUID(), kind: "question"), "note_consumed",
                        "no pending note by that id: a round has read it")
+    }
+
+    // MARK: structured answers
+
+    private func seedAsking(rounds: Int, answeredFirst: Bool = false) throws -> Intake {
+        var i = Intake(projectPath: "/p", intent: "Plan the thing")
+        i.state = .needsAnswers
+        i.exchanges = (0..<rounds).map { n in
+            TriageExchange(questions: ["Q\(n)?"], answers: n < rounds - 1 || answeredFirst ? ["done"] : nil)
+        }
+        try IntakeStore(root: root).save(i)
+        return i
+    }
+
+    /// The open round's digest, as the projection shows it to the phone.
+    private func digest(_ i: Intake) -> String { i.exchanges.last?.questionsDigest ?? "" }
+
+    func testPhoneAnswerForAReplacedRoundAtTheSameIndexIsStale() async throws {
+        // A retry clears the exchanges: the new round is index 0 again, asking something else.
+        // An answer to the old round 0 names the old digest and must not land on the new one.
+        var i = try seedAsking(rounds: 1)
+        let old = digest(i)
+        i.exchanges = [TriageExchange(questions: ["Something else?"])]
+        try IntakeStore(root: root).save(i)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "for the old question")]
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: old, answers: answers, token: UUID()), "stale_questions")
+        XCTAssertNil(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers)
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
+    }
+
+    func testPhoneAnswerAnswersTheOpenRound() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", selected: [], other: "the README")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
+        let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
+        XCTAssertEqual(after.exchanges[0].answers, ["the README"])
+        XCTAssertEqual(after.exchanges[0].structuredAnswers, [StructuredAnswer(questionID: "q1", selected: [], other: "the README")])
+    }
+
+    func testPhoneAnswerPassesOnTheServicesRefusal() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "zz", other: "x")], token: UUID()),
+                       "unknown_question")
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "q1", other: " ")], token: UUID()),
+                       "invalid_answer")
+        XCTAssertEqual(svc.phoneAnswer(UUID(), round: 0, digest: "", answers: [], token: UUID()), "unknown_intake")
+    }
+
+    func testPhoneAnswerForAnEarlierRoundIsRefusedAsStale() async throws {
+        // Round 0 answered on the Mac, round 1 now open: a phone still showing round 0 must not
+        // have its answers land on round 1's different questions.
+        let i = try seedAsking(rounds: 2)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "old")]
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()), "stale_questions")
+        let after = try XCTUnwrap(svc.intakes.first { $0.id == i.id })
+        XCTAssertNil(after.exchanges[1].answers)
+        XCTAssertEqual(after.state, .needsAnswers)
+    }
+
+    func testPhoneAnswerForAnAlreadyAnsweredRoundIsStale() async throws {
+        // Answered, no new round yet, and the intake still reads needsAnswers (as before triage
+        // moves it): a second phone with a fresh token gets the one "your round is gone" code.
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "first")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: UUID()))
+        XCTAssertEqual(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: [WireStructuredAnswer(questionID: "q1", other: "second")],
+                                       token: UUID()), "stale_questions")
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["first"])
+    }
+
+    func testPhoneAnswerTokenIsIdempotent() async throws {
+        let i = try seedAsking(rounds: 1)
+        let svc = await makeService()
+        let token = UUID()
+        let answers = [WireStructuredAnswer(questionID: "q1", other: "once")]
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: token))
+        // The retry meets a state its first delivery changed; it must be acked, not refused stale.
+        XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: token))
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["once"])
+    }
+
+    // MARK: retry
+
+    func testRetryOfAFailedTapeQueuesTheSameStepAsTheTransportKey() async throws {
+        let i = try seedTape(.failed)
+        let svc = await makeService()
+        let before = commandLines(i.id)
+        XCTAssertNil(svc.phoneRetry(i.id, token: UUID()))
+        XCTAssertEqual(commandLines(i.id), before + 1)
+        XCTAssertEqual(tapeStore(i.id).commands(after: 0).last?.command, .step)
+    }
+
+    func testARepeatedRetryTokenIsAckedOnce() async throws {
+        let i = try seedTape(.failed)
+        let svc = await makeService()
+        let before = commandLines(i.id)
+        let token = UUID()
+        XCTAssertNil(svc.phoneRetry(i.id, token: token))
+        XCTAssertNil(svc.phoneRetry(i.id, token: token))
+        XCTAssertEqual(commandLines(i.id), before + 1)
+    }
+
+    func testRetryIsRefusedWhereTheMacWouldRefuse() async throws {
+        let running = try seedTape(.running)
+        let paused = try seedTape(.paused)
+        let released = try seed(.released)
+        let svc = await makeService()
+        XCTAssertEqual(svc.phoneRetry(running.id, token: UUID()), "not_allowed")
+        XCTAssertEqual(svc.phoneRetry(paused.id, token: UUID()), "not_allowed", "Resume is a Step, not a retry")
+        XCTAssertEqual(svc.phoneRetry(released.id, token: UUID()), "intake_moved_on")
+        XCTAssertEqual(svc.phoneRetry(UUID(), token: UUID()), "unknown_intake")
+    }
+
+    func testRetryOfAnIntakeThatFailedRunsTheServicesOwnRetry() async throws {
+        let i = try seed(.failed)
+        let svc = await makeService()
+        XCTAssertNil(svc.phoneRetry(i.id, token: UUID()))
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.state, .shaping, "the same resume `retry(_:)` does")
     }
 }

@@ -7,82 +7,62 @@ import IntakeKit
 // the reader gone.
 signal(SIGPIPE, SIG_IGN)
 
-// Every verb from the spec's command table (docs/superpowers/specs/2026-09-24-flightdeck-cli-
-// design.md), one line each, then how `--` works, since a dash-led text is the one argument
-// shape the lines above cannot show. `--help`'s only output, and also what a usage error prints
-// below its own message.
-let usageLines = [
-    "flightdeck ls [--project P]",
-    "flightdeck tail [--session S] [--since SEQ] [--no-snapshot]",
-    "flightdeck wait S --for idle|busy|waiting|gone [--timeout D]",
-    "flightdeck send S \"text\" [--wait [--timeout D]]",
-    "flightdeck new P [--agent A [--account N]]",
-    "flightdeck close S",
-    "flightdeck reopen S",
-    "flightdeck rename S \"t\"",
-    "flightdeck read S",
-    "flightdeck unread S",
-    "flightdeck collapse P [--off]",
-    "flightdeck prompt S",
-    "flightdeck answer S '[[0,1],[2]]' [--call C]",
-    "flightdeck abort S",
-    "flightdeck plan approve S [--feedback F]",
-    "flightdeck plan reject S [--feedback F]",
-    "flightdeck plan annotate S \"text\" [--block N]",
-    "flightdeck timeline S [--before N|--after N|--around N] [--limit N]",
-    "flightdeck search \"q\" [--limit N]",
-    "flightdeck open CONVO --project PATH",
-    "flightdeck closed",
-    "flightdeck intake run ID --root DIR   run an intake's planning rounds (started by Flight Deck)",
-    "flightdeck options P",
-    "flightdeck host ls [--disk [HOST]]",
-    "flightdeck host info <host>",
-    "flightdeck host prune <host> [--repo R]",
-    "flightdeck account list [--json] [--session S]   accounts and pools this tab's agent can move to",
-    "flightdeck account switch TARGET [--session S]   move this conversation to an email, account or pool",
-    "flightdeck run [--on H] [--include P]... [--fetch G]... [--env K=V]... [--pty] [--screen] [--detach] -- cmd...",
-    "flightdeck run RECIPE [same flags] [-- extra args]",
-    "flightdeck exec --on H -- cmd...      run in the host's checkout without syncing",
-    "flightdeck up RECIPE | up --on H --port L:R... -- cmd...",
-    "flightdeck down|restart|sync SERVICE",
-    "flightdeck ps",
-    "flightdeck wait RUN [--timeout S]     exits with the run's status; 124 on timeout",
-    "flightdeck logs RUN [--follow]",
-    "flightdeck stop RUN",
-    "flightdeck diff|apply RUN",
-    "flightdeck recipe ls|check",
-    "flightdeck recipe add NAME --run CMD [--host H] [--service] [--long] [--screen] [--port P]... [--apply auto]",
-    "  (delegation failures exit 125 with one flightdeck: line naming the host and the next step)",
-    "flightdeck infra up <name>            create [infra.<name>] from this repo's delegate.toml",
-    "flightdeck infra down <name> | --orphan <id>",
-    "flightdeck infra ls [--orphans]",
-    "flightdeck infra doctor",
-    "flightdeck infra extend <name> <duration>",
-    "  (infra failures exit 125, one flightdeck: line per problem, each with its fix)",
-    "flightdeck raw '<ClientFrame JSON>'",
-    "",
-    "Flags go before or after operands. Put -- before text that starts with -:",
-    "  flightdeck send S --wait -- \"- text\"",
-]
-
 func writeStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
 }
 
 let env = ProcessInfo.processInfo.environment
 
+// Claude's hook plugin (`scripts/record.sh`) pipes every lifecycle payload here. Hidden from
+// help: no person runs it. It pares the payload to what Flight Deck reads (`HookEventLine`)
+// and appends that one line, touching no socket. Exits 0 on every path, because a hook that
+// fails blocks the agent, and reads stdin to its end so claude never meets a closed pipe.
+if CommandLine.arguments.dropFirst().first == "hook-record" {
+    let payload = FileHandle.standardInput.readDataToEndOfFile()
+    if let dir = env["FLIGHT_DECK_EVENT_DIR"], !dir.isEmpty, let line = HookEventLine.pare(payload) {
+        HookEventLine.append(line, toDirectory: URL(fileURLWithPath: dir, isDirectory: true))
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.dropFirst().first == "peer" {
+    PeerToolEntry.run(Array(CommandLine.arguments.dropFirst(2)), environment: env)
+}
+
 let invocation: CLIInvocation
 do {
     invocation = try CLIArguments.parse(Array(CommandLine.arguments.dropFirst()))
 } catch let error as CLIUsageError {
+    // The failing verb's usage, not every verb's: the full help is one --help away.
     writeStderr("flightdeck: \(error.message)")
-    usageLines.forEach(writeStderr)
+    CLIHelp.hint(for: Array(CommandLine.arguments.dropFirst())).forEach(writeStderr)
     exit(2)
 }
 
-if invocation.command == .help {
-    usageLines.forEach { print($0) }
+if case .help(let topic) = invocation.command {
+    print(CLIHelp.text(for: topic))
     exit(0)
+}
+
+// `index` is `fdindex` under flightdeck's name: the code index is its own daemon with its own
+// socket, so this runs before any control-socket setup and works with Flight Deck closed.
+// `exec` replaces this process; it comes back only when there is no `fdindex` to run.
+if case .index(let args) = invocation.command {
+    exit(IndexCommand.run(args, environment: env, executable: Bundle.main.executableURL?.resolvingSymlinksInPath(), report: writeStderr))
+}
+
+// `provider check` reads a folder and runs a sandboxed sample; it asks Flight Deck nothing, so it
+// is intercepted here, before the socket setup, and works with the app closed. Exit 0 valid,
+// 1 problems, 2 usage error (above).
+if case .providerCheck(let dir, let runSamples) = invocation.command {
+    let folder = URL(fileURLWithPath: dir, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+    Task {
+        let report = await ProviderCheck.run(folder: folder.standardizedFileURL, runSamples: runSamples)
+        print(report.text)
+        fflush(stdout)
+        exit(report.exitCode)
+    }
+    dispatchMain()
 }
 
 // The detached round runner Flight Deck launches under fd-abduco (Task 10). It has no fleet
@@ -132,6 +112,30 @@ if case .intakeRun(let id, let root) = invocation.command {
     }
 }
 
+// The detached ask-thread runner (planning v2 §5), mirroring `intake run` above: no fleet, no
+// socket, the environment inherited as the app built it. The app's spawn is what injects
+// anything the runner must carry (PATH, the intake's runner token in `FLIGHT_DECK_CALLER`);
+// the turns' CLIs get it through `ThreadTurnExecutor`'s base environment. A signal cancels the
+// task, which cancels the running turns: they stay queued for the next runner.
+if case .intakeThreads(let id, let root) = invocation.command {
+    let environment = ProcessInfo.processInfo.environment
+    let runner = ThreadRunner(
+        root: URL(fileURLWithPath: root),
+        intakeID: id,
+        executor: ThreadTurnExecutor(runner: SystemCommandRunner(), environment: environment)
+    )
+    final class TaskBox { var task: Task<Void, Never>? }
+    let box = TaskBox()
+    let signalSources = RunnerSignals.install { box.task?.cancel() }
+    box.task = Task {
+        await runner.run()
+        exit(0)
+    }
+    withExtendedLifetime(signalSources) {
+        dispatchMain()
+    }
+}
+
 // `--socket` → `$FLIGHT_DECK_CONTROL_SOCKET` → `$FLIGHT_DECK_STATE_DIR/control.sock` → the
 // default state dir, mirroring scripts/answer-trigger.sh's own fallback.
 let stateDir = env["FLIGHT_DECK_STATE_DIR"] ?? (NSHomeDirectory() + "/Library/Application Support/Flight Deck")
@@ -154,7 +158,7 @@ let context = CLIContext(
     socketPath: socketPath
 )
 
-let transport = LocalFleetTransport(path: socketPath, caller: env["FLIGHT_DECK_CALLER"])
+let transport = LocalFleetTransport(path: socketPath, caller: ControlCallerHello.compose(environment: env))
 
 let runner = CLIRunner(
     invocation: invocation,

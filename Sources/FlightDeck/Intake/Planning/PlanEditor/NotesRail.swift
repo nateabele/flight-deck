@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import IntakeKit
 import OSLog
 import SwiftUI
@@ -27,6 +28,10 @@ struct NoteCardModel: Equatable, Identifiable {
     /// Written on another version of the plan than the one shown: listed under that version
     /// (never as lost), with its quote, and openable there.
     var pin: NotePin?
+    /// An Ask thread rides the rail as a card of its own, placed like a note (`id` is the thread's).
+    var ask: AskCardModel?
+    /// The title of the thread that left this note, for its "✦ from thread" line.
+    var fromThread: String?
 }
 
 /// The rail decided without a view: which cards, in what order, where each sits, and the words
@@ -142,7 +147,10 @@ enum NotesRailModel {
 /// note's band is the one system highlight, so a plan with five kinds of note doesn't read as
 /// five competing colour codes, and Delete isn't the red of an error or of a deletion ghost.
 enum NoteStyle {
-    static let kinds: [NoteKind] = [.comment, .question, .mustChange, .replace, .delete]
+    /// What a human can start. Question is gone from the toolbar: ✦ Ask replaces it, with an
+    /// answer. A Question note already on a tape still shows (`label`, `symbol` and `placeholder`
+    /// keep their arm), and its card's tag still reads "Question".
+    static let kinds: [NoteKind] = [.comment, .mustChange, .replace, .delete]
 
     static func label(_ kind: NoteKind) -> String {
         switch kind {
@@ -268,6 +276,19 @@ final class PlanNotesController: ObservableObject {
 
     /// Queues a command for this intake's runner; bound by the detail pane.
     var send: (TapeCommand) -> Void = { _ in }
+    /// This intake's ask threads — what the Ask cards and the thread panel read, and the API they
+    /// send through (`IntakeService+Threads`); bound by the detail pane. nil before binding.
+    var threads: IntakeThreadBinding? { didSet { bindThreads() } }
+    /// The thread panel's model and the Ask cards' source; built when the detail pane binds
+    /// `threads`, and kept (with its session memory) while it stays on one intake.
+    private(set) var threadPanel: ThreadPanelModel?
+    private var threadWatch: AnyCancellable?
+    /// The editor redraws the proposed edits' bars when the threads change.
+    var onThreadsChanged: (() -> Void)?
+    /// The panel moved to another thread: a half-made Edit on the last one is let go.
+    var onThreadSwitched: (() -> Void)?
+    private var switchWatch: AnyCancellable?
+    private var threadRanges: [ThreadID: NSRange?] = [:]
     /// Opens the inspector in Notes mode so a draft started from the toolbar has somewhere to be
     /// written. An explicit switch, and the only one the rail makes: focus in the plan used to
     /// hand the rail the inspector too, which took the Rounds editor away whenever the human
@@ -510,9 +531,88 @@ final class PlanNotesController: ObservableObject {
         undoManager.setActionName(undoManager.isUndoing ? "Remove Note" : "Add Note")
     }
 
+    // MARK: Ask threads
+
+    private func bindThreads() {
+        guard let threads else {
+            threadPanel?.stop()
+            threadPanel = nil
+            threadWatch = nil
+            switchWatch = nil
+            return
+        }
+        // The detail pane binds on every update; the same intake keeps its model, whose polling
+        // and open thread must not restart with each one.
+        if threadPanel?.intakeID == threads.intakeID { return }
+        threadPanel?.stop()
+        let model = ThreadPanelModel(intakeID: threads.intakeID, reader: threads.reader, actions: .init(threads),
+                                     headings: { [weak self] in self?.planHeadings() ?? [] },
+                                     defaultsProvider: { threads.defaults() }, modelMenu: { threads.menu() })
+        model.versionLabel = { [weak self] in self?.versionLabel($0) }
+        threadPanel = model
+        threadWatch = model.$snapshot.dropFirst().sink { [weak self] _ in
+            // `$snapshot` publishes before the value lands; the rail reads it on the next turn.
+            DispatchQueue.main.async { self?.threadsChanged() }
+        }
+        switchWatch = model.$selected.dropFirst().removeDuplicates().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.onThreadSwitched?() }
+        }
+        model.refresh()
+    }
+
+    private func threadsChanged() {
+        threadRanges = [:]
+        objectWillChange.send()
+        geometry.bump()
+        onThreadsChanged?()
+    }
+
+    /// The `#` headings of the plan on screen, in order: what the index sorts Open by.
+    func planHeadings() -> [String] {
+        var inFence = false
+        var out: [String] = []
+        plan.enumerateLines { line, _ in
+            if line.hasPrefix("```") { inFence.toggle() }
+            if !inFence, line.hasPrefix("#"), line.drop(while: { $0 == "#" }).first == " " { out.append(line) }
+        }
+        return out
+    }
+
+    /// Where a thread's quote is in the plan on screen; nil for a whole-plan thread or a quote
+    /// the plan no longer holds. Kept until the text or the threads change.
+    func threadRange(_ record: ThreadRecord) -> NSRange? {
+        if let known = threadRanges[record.id] { return known }
+        let found = record.anchor.note.flatMap { $0.locate(in: plan) }.map { NSRange($0, in: plan) }
+        threadRanges[record.id] = .some(found)
+        return found
+    }
+
+    /// ✦ Ask on `range` of `text`: the panel opens on a new thread about it, composer ready. A
+    /// range that can't be anchored (no checkpoint, empty) asks about the whole plan instead.
+    func ask(range: NSRange?, in text: String) {
+        var anchor = ThreadAnchor.wholePlan
+        if let range, let checkpoint, let span = Range(range, in: text), !span.isEmpty {
+            anchor = ThreadAnchor(note: NoteAnchor(checkpoint: checkpoint, selecting: span, in: text))
+        }
+        threadPanel?.beginThread(on: anchor)
+        showRail()
+    }
+
+    /// Scrolls the plan to a thread's quote and flashes it: choosing a thread in the index.
+    func reveal(thread record: ThreadRecord) {
+        guard let anchor = record.anchor.note else { return }
+        pendingReveal = Reveal(checkpoint: checkpoint ?? anchor.checkpoint, anchor: anchor)
+        showPlan()
+        revealPending()
+    }
+
+    /// Withdraws a note the agent left, as the human withdraws one.
+    func withdrawNote(_ id: UUID) { remove(id) }
+
     /// The editor loaded or changed its text; `located` is where each mark's quote now is.
     func editorChanged(_ text: String, located: [UUID: NSRange] = [:]) {
         plan = text
+        threadRanges = [:]
         self.located = located
         geometry.bump()
         reportLost(in: text)
@@ -565,6 +665,14 @@ struct NotesRail: View {
     var focusesDraft = true
 
     var body: some View {
+        if let model = controller.threadPanel {
+            RailOrPanel(model: model, controller: controller, rail: { rail }, focusesComposer: focusesDraft)
+        } else {
+            rail
+        }
+    }
+
+    private var rail: some View {
         VStack(spacing: 0) {
             header
             Divider()
@@ -600,6 +708,7 @@ struct NotesRail: View {
                 Text("\(pending) for the next round").foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
+            if let model = controller.threadPanel { ThreadsHeaderButton(model: model) }
             Button { controller.annotate() } label: { Image(systemName: "plus") }
                 .buttonStyle(.borderless)
                 .help("Add a note about the whole plan (⌥⌘A)")
@@ -719,16 +828,37 @@ private struct NotesLane: View {
         }
         let lineTop = controller.lineTop
         let located = controller.located
-        return NotesRailModel.cards(notes: notes, located: { located[$0.id] }, pinned: { controller.pin(for: $0) }) { range in
+        let lineY: (NSRange) -> CGFloat? = { range in
             guard let laneTop, let lineTop, let y = lineTop(range) else { return nil }
             return laneTop - y
         }
+        var cards = NotesRailModel.cards(notes: notes, located: { located[$0.id] }, pinned: { controller.pin(for: $0) }, lineY: lineY)
+        guard let model = controller.threadPanel else { return cards }
+        // A note an agent left says which thread it came from.
+        let origins: [UUID: ThreadID] = notes.reduce(into: [:]) { out, entry in
+            if case .thread(let id)? = entry.note.source { out[entry.id] = id }
+        }
+        for at in cards.indices {
+            if let thread = origins[cards[at].id], let record = model.record(thread) { cards[at].fromThread = record.title }
+        }
+        // Ask cards sit where their quote is, like notes; one with no quote in this version (or
+        // about the whole plan) goes to the stack at the top. A resolved thread has left the rail.
+        for record in model.snapshot.threads where record.status != .resolved {
+            guard let ask = model.card(for: record.id) else { continue }
+            cards.append(NoteCardModel(id: record.id.raw, kind: .comment, quote: nil, note: "",
+                                       anchorY: controller.threadRange(record).flatMap(lineY), detached: false,
+                                       consumed: false, ask: ask))
+        }
+        return cards
     }
 
     @ViewBuilder
     private func card(for card: NoteCardModel) -> some View {
         Group {
-            if let draft = controller.draft, draft.id == card.id {
+            if let ask = card.ask {
+                AskCard(card: ask, open: { openThread(ask.id) },
+                        repropose: ask.pill == .stale ? staleDiff(ask.id).map { diff in { controller.threadPanel?.repropose(diff) } } : nil)
+            } else if let draft = controller.draft, draft.id == card.id {
                 NoteDraftCard(controller: controller, quote: card.quote, focusOnAppear: focusesDraft)
             } else {
                 let consumedBy = card.consumed ? controller.notes.first { $0.id == card.id }?.consumedBy : nil
@@ -742,6 +872,18 @@ private struct NotesLane: View {
         .background(GeometryReader { geo in
             Color.clear.preference(key: CardHeightKey.self, value: [card.id: geo.size.height])
         })
+    }
+}
+
+extension NotesLane {
+    fileprivate func openThread(_ id: ThreadID) {
+        guard let model = controller.threadPanel else { return }
+        model.open(id)
+        if let record = model.record(id) { controller.reveal(thread: record) }
+    }
+
+    fileprivate func staleDiff(_ id: ThreadID) -> ThreadDiff? {
+        controller.threadPanel?.diffs(id).last { $0.state == .stale }
     }
 }
 
@@ -864,6 +1006,12 @@ private struct NoteCard: View {
                     .font(.system(size: 12))
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+            }
+            if let thread = card.fromThread {
+                Text("✦ from thread “\(thread)”")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
             }
             if let onShow {
                 Button(action: onShow) { Label("Show in that version", systemImage: "arrow.turn.up.right") }

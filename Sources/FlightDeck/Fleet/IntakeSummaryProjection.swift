@@ -19,11 +19,12 @@ enum IntakeSummaryProjection {
         }
     }
 
-    static func summary(_ i: Intake, tape: Tape?, seats: SeatFiles?, needsAttention: Bool) -> WireIntakeSummary {
+    static func summary(_ i: Intake, tape: Tape?, seats: SeatFiles?, needsAttention: Bool,
+                        threadsNeedingYou: Int? = nil) -> WireIntakeSummary {
         var s = WireIntakeSummary(
             id: i.id, title: IntakeTitle(intent: i.intent).lead, state: i.state.rawValue,
             needsAttention: needsAttention, preset: (i.chosenPreset ?? i.recommended)?.rawValue,
-            createdAt: i.createdAt)
+            createdAt: i.createdAt, threadsNeedingYou: threadsNeedingYou)
         switch i.state {
         case .triaging:
             s.now = "Triage"
@@ -61,13 +62,19 @@ enum IntakeSummaryProjection {
                 s.agentsDone = rows.filter { $0.model.glyph == .done || $0.model.glyph == .failed }.count
             }
         }
+        if let halt = HaltStatus.make(intake: i, tape: tape, config: i.roundConfig, failedSeatOutput: nil,
+                                      rateLimitedAt: nil, available: .defaults) {
+            s.haltKind = halt.kind.rawValue
+            s.haltReason = halt.reason
+        }
         return s
     }
 
     @MainActor
     static func summaries(for intakes: [Intake], service: IntakeService, now: Date) -> [WireIntakeSummary] {
         intakes.filter { isListed($0, now: now) }.map { i in
-            summary(i, tape: service.tapes[i.id], seats: service.seats.files(i.id), needsAttention: service.needsAttention(i))
+            summary(i, tape: service.tapes[i.id], seats: service.seats.files(i.id), needsAttention: service.needsAttention(i),
+                    threadsNeedingYou: IntakeThreadProjection.needingYou(intake: i.id, service: service))
         }
     }
 

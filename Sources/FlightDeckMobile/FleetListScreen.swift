@@ -151,7 +151,8 @@ struct FleetListScreen: View {
                         .flatMap(\.sessions)
                         .first { $0.id == id },
                     model: model.timelineModel(for: id),
-                    onAbortBlocked: { await model.abortBlockedPrompt(session: $0) }
+                    onAbortBlocked: { await model.abortBlockedPrompt(session: $0) },
+                    loadAccounts: { await model.accountChoices(session: $0) }
                 )
             }
             .navigationDestination(for: IntakeRoute.self) { route in
@@ -168,6 +169,8 @@ struct FleetListScreen: View {
                                          flightControl: model.flightControl)
                 case .plan(let intake, let checkpoint):
                     PlanOutlineScreen(intake: intake, checkpoint: checkpoint, flightControl: model.flightControl)
+                case .thread(let intake, let thread):
+                    ThreadScreen(intake: intake, threadID: thread, flightControl: model.flightControl)
                 case .reader(let intake, let checkpoint, let block, let changes):
                     PlanReaderScreen(intake: intake, checkpoint: checkpoint, startBlock: block, changes: changes,
                                      flightControl: model.flightControl)
@@ -178,6 +181,9 @@ struct FleetListScreen: View {
             // a list to show.
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: Bindable(model.newIntake).isPresented) {
+                NewIntakeSheet(model: model.newIntake, projects: model.fleet.projects.filter(NewIntakeModel.offers))
+            }
             .toolbar {
                 // The Mac's name rides in the title area as a subtitle rather than taking a
                 // list row of its own. It is context, not content: there is only ever one
@@ -234,6 +240,9 @@ struct FleetListScreen: View {
             .onChange(of: model.fleet) { _, _ in refreshSearchCandidates() }
             .onChange(of: model.conversationCatalogue) { _, _ in refreshSearchCandidates() }
         }
+        // Every screen under the stack can open a transcript's file links — see `FileLinkRouting`.
+        .environment(\.fileReader, model)
+        .environment(\.visualLoader, model.visualLoader)
     }
 
     private func refreshSearchCandidates() {
@@ -463,6 +472,16 @@ struct FleetListScreen: View {
     /// can only fail.
     @ViewBuilder
     private func newSessionMenu(for project: WireProject) -> some View {
+        // First, apart from the session rows: it starts a different kind of work, and the tap on
+        // the `+` itself stays a new session.
+        if NewIntakeModel.offers(project) {
+            Button {
+                model.newIntake.present(project: project.id)
+            } label: {
+                Label("New Intake…", systemImage: "sparkles")
+            }
+            Divider()
+        }
         let options = model.newSessionOptions[project.id]
         if let options, !options.isEmpty {
             // Grouped by agent, in arrival order — `Dictionary(grouping:)` would lose it, and

@@ -16,6 +16,7 @@ import SwiftUI
 struct AccountsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    @ObservedObject var usage: UsageService
 
     @State private var collapsed: Set<PoolID> = []
     /// The pool whose settings popover is open: a pool id, or an agent's `<agent>-default`.
@@ -33,9 +34,10 @@ struct AccountsSettingsTab: View {
     @State private var dropTargetGroupEnd: AgentID?
     @State private var dropError: String?
 
-    init(preferences: PreferencesStore, sessions: SessionStore, popover: PoolID? = nil) {
+    init(preferences: PreferencesStore, sessions: SessionStore, popover: PoolID? = nil, usage: UsageService = .shared) {
         self.preferences = preferences
         self.sessions = sessions
+        self.usage = usage
         _popover = State(initialValue: popover)
     }
 
@@ -304,6 +306,8 @@ struct AccountsSettingsTab: View {
     /// Every row's leading icon sits in one column this wide, so account, pool and member text
     /// all start on a shared edge (members one column further in).
     static let iconColumn: CGFloat = 26
+    /// The "Default" capsule's width at .caption plus its padding, with a little to spare.
+    static let defaultSlot: CGFloat = 54
     static let iconSpacing: CGFloat = 10
 
     /// The "Default" tag, on whichever row is in effect: an account or a pool.
@@ -337,6 +341,8 @@ struct AccountsSettingsTab: View {
 
     private func accountRow(_ account: AgentAccount, pool: PoolID?, group: AccountsPaneModel.Group) -> some View {
         let isDefault = account.id == group.defaultAccountID
+        let _ = usage.revision
+        let usageModel = MeterFormatter.accountUsage(account: account.id, ledger: usage.ledger, now: Date())
         return HStack(spacing: Self.iconSpacing) {
             Image(systemName: account.cachedIdentity == nil ? "person.crop.circle.badge.questionmark" : "person.crop.circle.fill")
                 .font(.title2)
@@ -359,9 +365,14 @@ struct AccountsSettingsTab: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            if isDefault {
-                defaultCapsule(help: "Projects that haven't chosen an account use this one")
+            AccountUsageCluster(model: usageModel, accountName: account.displayName)
+            // The slot is reserved on every row so the usage clusters line up down the list.
+            ZStack(alignment: .trailing) {
+                if isDefault {
+                    defaultCapsule(help: "Projects that haven't chosen an account use this one")
+                }
             }
+            .frame(width: Self.defaultSlot, alignment: .trailing)
             Menu {
                 accountActions(account, pool: pool, group: group)
             } label: {

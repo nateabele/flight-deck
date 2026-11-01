@@ -15,16 +15,19 @@ struct BoardStrip: View {
 
     private var phosphor: Color {
         switch model.tone {
-        case .live: Color(red: 0.49, green: 0.88, blue: 1)
-        case .attention: .orange
-        case .failure: .red
-        case .quiet: Color(white: 0.8)
+        case .live: Instrument.blue
+        case .attention: Instrument.amber
+        case .failure: Instrument.red
+        case .quiet: Instrument.phosphor
         }
     }
 
-    /// The strip's secondary text. Fixed, never `.secondary`: the glass is near-black in BOTH
-    /// appearances, and light mode's `.secondary` is a dark grey that vanishes on it.
-    private static let dim = Color(white: 0.55)
+    /// The strip's secondary text. The instrument's own dim phosphor, never `.secondary`: the
+    /// glass is its own surface (pale in light, near-black in dark), not the system background,
+    /// so a system grey can vanish on it in one appearance or the other.
+    private static let dim = Palette.ph2
+    /// The hairlines: the glass's rim and the dividers between keys.
+    private static let rule = Instrument.lift.opacity(0.14)
 
     var body: some View {
         TimelineView(ClockSchedule(since: model.clockSince, offset: offset, frozenAt: frozenAt, idle: model.idle)) { context in
@@ -72,8 +75,8 @@ struct BoardStrip: View {
             // it grey and the strip's greys invisible on it.
             .opacity(frozenAt == nil ? 1 : 0.5)
             .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 0.05, green: 0.07, blue: 0.09)))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(white: 0.2), lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 12).fill(LinearGradient(colors: [Palette.glass0, Palette.glass1], startPoint: .top, endPoint: .bottom)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Self.rule, lineWidth: 1))
             .padding(.horizontal, 12)
         }
     }
@@ -84,13 +87,13 @@ struct BoardStrip: View {
     private var transportRow: some View {
         HStack(spacing: 0) {
             ForEach(Array(keys.enumerated()), id: \.element.id) { i, key in
-                if i > 0 { Rectangle().fill(Color(white: 0.2)).frame(width: 1, height: 28) }
+                if i > 0 { Rectangle().fill(Self.rule).frame(width: 1, height: 28) }
                 keyView(key)
             }
         }
         .frame(minHeight: 44)
         .fixedSize(horizontal: false, vertical: true)
-        .overlay(alignment: .top) { Rectangle().fill(Color(white: 0.2)).frame(height: 1).offset(y: -4) }
+        .overlay(alignment: .top) { Rectangle().fill(Self.rule).frame(height: 1).offset(y: -4) }
         .padding(.top, 4)
     }
 
@@ -162,17 +165,17 @@ struct BoardStrip: View {
     @ViewBuilder private var convergenceWord: some View {
         if let word = model.convergence {
             Text(word).font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(model.convergenceAmber ? .orange : Self.dim)
+                .foregroundStyle(model.convergenceAmber ? Instrument.amber : Self.dim)
                 .fixedSize()
         }
     }
 
     @ViewBuilder private func dotView(_ dot: BoardStripModel.Dot) -> some View {
         let fill: Color = switch dot.state {
-        case "done": Color(red: 0.11, green: 0.31, blue: 0.45)
-        case "live": model.tone == .live ? Color.accentColor : Color(white: 0.55)
-        case "failed": .red
-        default: Color(white: 0.12)
+        case "done": Instrument.blue.opacity(0.45)
+        case "live": model.tone == .live ? Color.accentColor : Palette.ph2
+        case "failed": Instrument.red
+        default: Instrument.lift.opacity(0.12)
         }
         let shape = Capsule().fill(fill).frame(height: dot.state == "live" ? 6 : 4)
             .frame(maxWidth: .infinity)

@@ -195,17 +195,6 @@ struct ShapingModel {
         return prior.stage == checkpoint.stage ? prior : nil
     }
 
-    // MARK: - Banner
-
-    /// The runner's reason for stopping, and what to do about it. The title is the category
-    /// in words plus the harness's own detail; the action is shown verbatim because
-    /// `FailureDiagnosis` already phrases it as an instruction.
-    var pauseBanner: (title: String, action: String)? {
-        guard let d = tape.pauseDiagnosis else { return nil }
-        let category = Self.categoryName(d.category)
-        return (title: category.prefix(1).uppercased() + category.dropFirst() + ": " + d.detail, action: d.action)
-    }
-
     // MARK: - Round cards
 
     var roundCards: [RoundCard] {
@@ -337,10 +326,14 @@ struct ShapingModel {
         var checkpoint: Int?
         var mode: ViewerMode
         var head: Int?
+        /// The newest thread accept queued and not yet folded (`IntakeService.threadEditStamp`):
+        /// an accept changes the head's plan without a new checkpoint, so the editor must reload
+        /// on it too, or it shows the old words and the next keystroke sends them back.
+        var accepted: Int? = nil
     }
 
-    static func viewerKey(selected: Int?, mode: ViewerMode, tape: Tape) -> ViewerKey {
-        ViewerKey(checkpoint: selected ?? tape.head?.id, mode: mode, head: tape.head?.id)
+    static func viewerKey(selected: Int?, mode: ViewerMode, tape: Tape, accepted: Int? = nil) -> ViewerKey {
+        ViewerKey(checkpoint: selected ?? tape.head?.id, mode: mode, head: tape.head?.id, accepted: accepted)
     }
 
     static func viewerContent(_ key: ViewerKey, tape: Tape, loadFile: (Int, String) -> Data?) -> String {

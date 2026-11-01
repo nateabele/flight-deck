@@ -252,6 +252,12 @@ updates `fd_allow_cidr`, then reconnect.
 (with the step and error) and `orphaned` (§7.3). Persisted in `infra.json`, so a relaunch
 resumes or cleans up rather than forgetting a machine.
 
+A failure before the apply began (preflight after registration, `tofu init`, or a plan
+`ResourceProvenance.checkUp` refuses) leaves nothing in the cloud and no cost segment, so
+`up` removes the record, its enrolled host and its work directory instead of keeping a
+`failed` one: it never appears in `infra doctor` or in a session's budget projection. A
+failure after the apply began keeps the record `failed` and rolls back.
+
 ### 7.2 Nothing outlives its TTL
 
 Enforced twice, so either side alone suffices:
@@ -276,6 +282,11 @@ Enforced twice, so either side alone suffices:
 - **Orphans**: `infra ls --orphans` (and `doctor`) query each configured account for resources
   carrying `flightdeck-owner=<this controller>` that no workdir knows, and offer
   `infra down --orphan <id>`.
+- **Provenance (added 2026-11-01)**: Flight Deck never deletes a resource it did not create.
+  `infra-provenance.json` records the `(cloud, type, id)` of everything an `up` plan created,
+  and an `up` plan may only create. Every destroy (`down`, the `Reaper`, a rollback) and every
+  orphan delete is checked against it first, and refused whole if it would touch anything
+  unrecorded. Each change is a saved plan applied as checked. ARCHITECTURE.md has the detail.
 
 ## 8. Budgets and cost
 
@@ -328,6 +339,29 @@ gpu · g6.xlarge · $0.80/h est. · up 1h12m · ~$0.96 · TTL 2h48m · month ~$1
 `--json` outputs carry the same fields (`hourlyUsd`, `spentUsd`, `ttlRemaining`,
 `monthUsd`, `monthCapUsd`). `infra ls` adds a total row. Settings → Hosts shows the rate and
 spend beside each cloud host.
+
+### 8.5 Session budgets (added 2026-10-24)
+
+A Flight Deck session (one tab) can carry a dollar budget of its own, set with `/budget` in
+Claude Code or `flightdeck infra budget` in the tab. `/budget 20` sets the cap and keeps the
+spend so far; `/budget renew [20]` starts a fresh window from now; `/budget clear` removes it.
+Settings → Cloud's caps and guardrails still apply on top.
+
+- **Attribution.** The session is the caller token's (`FLIGHT_DECK_CALLER`), never the request's.
+  Each machine an `up` or `run --on` auto-up creates records it (`InfraMachine.session`), and so
+  does each of its ledger segments (`CostSegment.session`). A session's spend is the sum of its own
+  segments inside its window: nothing else on the Mac, and no cloud billing API, changes it.
+- **Before `up`.** Refused when the budget is used up, when the machine can't be priced, or when
+  the budget would end it in under 15 minutes. Otherwise its deadline is the earlier of its TTL and
+  the instant the session's spend reaches the cap with every session machine billing to its
+  deadline (`SessionBudgetModel.exhaustion`, piecewise exact). That deadline is also the machine's
+  own timer (`ttl_seconds`, cloud-init's poweroff), so the budget holds with the Mac asleep.
+- **`extend`** is refused past that instant.
+- **While running.** Each Reaper pass recomputes the instant from the ledger. 10 minutes before it,
+  a warning; at it, every machine of the session is destroyed on that pass, with no grace.
+- **Who sets it.** The person, not the agent: the plugin's `/budget` module refuses a Bash call that
+  would change it. A guardrail like `ControlScope`, not a boundary. A tab may change its own budget
+  under the `ownSession` scope.
 
 ## 9. Guided setup
 

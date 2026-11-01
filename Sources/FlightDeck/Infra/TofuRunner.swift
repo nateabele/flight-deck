@@ -4,6 +4,20 @@ import IntakeKit
 struct TofuProgress: Equatable, Sendable { let resource: String; let action: String; let done: Bool }
 struct TofuOutputs: Equatable, Sendable { let address: String; let instanceID: String?; let hourlyUSD: Double? }
 
+/// One entry of a saved plan's `resource_changes`. `id` is the resource's id before the
+/// change: nil for a create, the cloud's id for a delete.
+struct TofuChange: Equatable, Sendable {
+    let address: String
+    let type: String
+    let managed: Bool
+    let actions: [String]
+    let importing: Bool
+    let id: String?
+}
+
+/// One managed resource the state holds, by its `id` attribute.
+struct TofuResource: Equatable, Sendable { let address: String; let type: String; let id: String }
+
 enum TofuError: Error, Equatable {
     case failed(step: String, message: String)
     case missingOutput(String)
@@ -11,8 +25,15 @@ enum TofuError: Error, Equatable {
 
 protocol TofuRunning: Sendable {
     func initialize(workdir: URL) async throws
-    func apply(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws
-    func destroy(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws
+    /// Saves a plan in the work directory, an `up` plan or a destroy plan, and returns what it
+    /// would change. Nothing changes in the cloud until `applyPlan`.
+    func plan(workdir: URL, destroy: Bool) async throws -> [TofuChange]
+    /// Applies exactly the plan `plan` saved, and nothing else: OpenTofu refuses a saved plan
+    /// whose state moved since, so what was checked is what runs. There is no other way to
+    /// change the cloud here, which is what makes `ResourceProvenance`'s checks a bound.
+    func applyPlan(workdir: URL, destroy: Bool, progress: @escaping @Sendable (TofuProgress) -> Void) async throws
+    /// The managed resources the state holds now.
+    func resources(workdir: URL) async throws -> [TofuResource]
     func outputs(workdir: URL) async throws -> TofuOutputs
     /// True when a refresh-only plan found the machine's instance deleted behind OpenTofu's
     /// back (a TTL timer, a console delete): the state is stale and the machine is `gone`.
@@ -35,12 +56,53 @@ struct LiveTofuRunner: TofuRunning {
         _ = try await run("init", ["init", "-input=false", "-no-color"], workdir: workdir)
     }
 
-    func apply(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
-        _ = try await run("apply", ["apply", "-auto-approve", "-input=false", "-json"], workdir: workdir, progress: progress)
+    /// Relative to `module/`, where every command runs.
+    static func planFile(destroy: Bool) -> String { destroy ? "fd-destroy.tfplan" : "fd-up.tfplan" }
+
+    func plan(workdir: URL, destroy: Bool) async throws -> [TofuChange] {
+        let file = Self.planFile(destroy: destroy)
+        _ = try await run(destroy ? "plan -destroy" : "plan",
+                          ["plan", "-input=false", "-json", "-out=\(file)"] + (destroy ? ["-destroy"] : []), workdir: workdir)
+        let shown = try await run("show", ["show", "-json", file], workdir: workdir)
+        let object = (try? JSONSerialization.jsonObject(with: shown.stdout)) as? [String: Any] ?? [:]
+        return Self.changes(object)
     }
 
-    func destroy(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
-        _ = try await run("destroy", ["destroy", "-auto-approve", "-input=false", "-json"], workdir: workdir, progress: progress)
+    func applyPlan(workdir: URL, destroy: Bool, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
+        let file = Self.planFile(destroy: destroy)
+        defer { try? FileManager.default.removeItem(at: workdir.appendingPathComponent("module/\(file)")) }
+        _ = try await run(destroy ? "destroy" : "apply", ["apply", "-auto-approve", "-input=false", "-json", file],
+                          workdir: workdir, progress: progress)
+    }
+
+    func resources(workdir: URL) async throws -> [TofuResource] {
+        let shown = try await run("show", ["show", "-json"], workdir: workdir)
+        let object = (try? JSONSerialization.jsonObject(with: shown.stdout)) as? [String: Any] ?? [:]
+        return Self.resources(object)
+    }
+
+    /// `resource_changes` of `tofu show -json <plan>`.
+    static func changes(_ plan: [String: Any]) -> [TofuChange] {
+        (plan["resource_changes"] as? [[String: Any]] ?? []).compactMap { c in
+            guard let address = c["address"] as? String, let change = c["change"] as? [String: Any] else { return nil }
+            return TofuChange(address: address, type: c["type"] as? String ?? "", managed: c["mode"] as? String != "data",
+                              actions: change["actions"] as? [String] ?? [], importing: change["importing"] != nil,
+                              id: (change["before"] as? [String: Any])?["id"] as? String)
+        }
+    }
+
+    /// Every managed resource in `tofu show -json`'s `values`, child modules included.
+    static func resources(_ state: [String: Any]) -> [TofuResource] {
+        func walk(_ module: [String: Any]?) -> [TofuResource] {
+            guard let module else { return [] }
+            let own = (module["resources"] as? [[String: Any]] ?? []).compactMap { r -> TofuResource? in
+                guard r["mode"] as? String == "managed", let address = r["address"] as? String, let type = r["type"] as? String,
+                      let id = (r["values"] as? [String: Any])?["id"] as? String else { return nil }
+                return TofuResource(address: address, type: type, id: id)
+            }
+            return own + (module["child_modules"] as? [[String: Any]] ?? []).flatMap { walk($0) }
+        }
+        return walk((state["values"] as? [String: Any])?["root_module"] as? [String: Any])
     }
 
     func outputs(workdir: URL) async throws -> TofuOutputs {

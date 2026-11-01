@@ -231,6 +231,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 do {
                     try await GitRunner.offload { [self] in
                         applyHook?()
+                        enforceFloorBeforeApply()
                         try apply(ref, at: path, controller: controller, exclusive: true)
                     }
                 } catch {
@@ -853,13 +854,28 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             if slot.lastUsed < cutoff, evict(slot) { continue }
             kept.append(slot)
         }
+        evictToFloor(kept)
+    }
+
+    /// Unleased slots, oldest first, until the volume is back above the high-water mark.
+    private func evictToFloor(_ slots: [SlotDir]) {
         guard var space = freeSpace(root) else { return }
         let mark = Self.highWaterMark(total: space.total)
-        for slot in kept where space.available < mark {
+        for slot in slots where space.available < mark {
             guard evict(slot) else { continue }
             guard let next = freeSpace(root) else { return }
             space = next
         }
+    }
+
+    /// The high-water mark, checked before a sync writes a tree rather than only by the hourly
+    /// `gc`. On 2026-10-27 jeeves's checkouts filled its 98 GB volume between two gc passes'
+    /// worth of syncs and every testq sync then failed with "no space". Cheap when there is
+    /// room: one `statfs`, and the slot walk only below the mark. The slot being applied is
+    /// leased by then, so `evict` passes over it.
+    private func enforceFloorBeforeApply() {
+        guard let space = freeSpace(root), space.available < Self.highWaterMark(total: space.total) else { return }
+        evictToFloor(slotDirs(root.appendingPathComponent("workspaces")).sorted { $0.lastUsed < $1.lastUsed })
     }
 
     /// Deletes one slot directory the way `prune` does (the directory, then `git worktree

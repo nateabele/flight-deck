@@ -68,6 +68,10 @@ protocol CloudAccount: Sendable {
     /// are there. Nil when the CLI fails or the cloud has nothing yet; this only ever adds
     /// detail to a failure already being reported.
     func consoleOutput(instanceID: String, region: String) async -> String?
+    /// True once the instance has stopped running for good: shutting down, terminated or
+    /// stopped (a boot that failed powers itself off), or no longer found. False while it runs,
+    /// and when the CLI fails: only a definite answer may end a wait early.
+    func instanceEnded(instanceID: String, region: String) async -> Bool
     /// Every live resource labelled `flightdeck-owner=<owner>` the account can see, in every
     /// place the presets create them. Throws when any part could not be read: an empty answer
     /// must only ever mean there is nothing there.

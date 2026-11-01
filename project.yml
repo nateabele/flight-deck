@@ -29,7 +29,7 @@ settings:
     # The version of both apps (Mac and phone), and the hostd release tag (`hostd-v<this>`) the
     # Add Host sheet's install command downloads from. scripts/build-hostd-linux.sh and the
     # release scripts read it from this line, so keep it the only MARKETING_VERSION in this file.
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.3.0"
     # The build number. scripts/release-ios.sh overrides it per upload, since App Store
     # Connect refuses a build number it has already seen.
     CURRENT_PROJECT_VERSION: "1"
@@ -76,6 +76,10 @@ targets:
     productName: Flight Deck
     sources:
       - Sources/FlightDeck
+      - Sources/PeerKit
+      # Compiled into the app and the CLI as a plain folder, not a framework: it is a few files
+      # of pure logic, and the CLI's `provider check` must hash and resolve exactly as the app does.
+      - Sources/ProviderKit
       # `fd-abduco` (scripts/build-fd-abduco.sh → vendor/fd-abduco-artifacts/fd-abduco) is a
       # plain Mach-O helper binary, not a framework — there is nothing to link. It rides into
       # the bundle via a real Copy Files build phase (destination: resources, not `resources:`
@@ -92,6 +96,19 @@ targets:
             subpath: ""
         # Re-signed with the app's identity on copy. The prebuilt binary carries only the
         # linker's ad-hoc signature, which notarization rejects.
+        attributes: [CodeSignOnCopy]
+      # `fdindex` (Packages/FlightIndex; scripts/build-fdindex.sh → vendor/fdindex-artifacts/fdindex,
+      # run by the pre-build script below) is the code index's daemon, MCP shim and query CLI in one
+      # Mach-O. It lands in `Contents/MacOS/fdindex` beside `flightdeck`, which is where
+      # `flightdeck index …` looks for it first (`IndexCommand.locate`). Plain Copy Files like
+      # fd-abduco, and `optional` for the same reason: the file is written by the script at build
+      # time, so it may not exist when xcodegen runs.
+      - path: vendor/fdindex-artifacts/fdindex
+        optional: true
+        buildPhase:
+          copyFiles:
+            destination: executables
+            subpath: ""
         attributes: [CodeSignOnCopy]
       # A folder reference, not a plain group — a plain group flattens subdirectories,
       # which would destroy `.claude-plugin/` and `hooks/`. This is the Claude Code
@@ -114,6 +131,13 @@ targets:
       - path: Resources/Infra
         type: folder
         buildPhase: resources
+      # The vendored web assets the plan's visual blocks draw with (planning v2 V-R5): today one
+      # pinned `mermaid/mermaid.min.js`, with its SHA-256 in `mermaid/manifest.json`, which
+      # `MermaidLibrary` checks every time it loads the file. A folder reference, so the
+      # `mermaid/` folder and its LICENSE and NOTICE land together at `Contents/Resources/Visuals/`.
+      - path: Resources/Visuals
+        type: folder
+        buildPhase: resources
       # The hostd's LaunchAgent, where `SMAppService.agent(plistName:)` looks for it:
       # `Contents/Library/LaunchAgents`. Its `BundleProgram` names the embedded binary below.
       - path: Sources/HostDaemon/dev.flightdeck.hostd.plist
@@ -121,6 +145,12 @@ targets:
           copyFiles:
             destination: wrapper
             subpath: Contents/Library/LaunchAgents
+    # Cargo-builds the code index's binary (see the `fdindex` source above). Always runs: cargo's
+    # own incremental build is what decides there is nothing to do, in a quarter of a second.
+    preBuildScripts:
+      - name: Build fdindex
+        script: '"${SRCROOT}/scripts/build-fdindex.sh"'
+        basedOnDependencyAnalysis: false
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false
@@ -129,12 +159,20 @@ targets:
       - target: IntakeKit
         embed: true
       - sdk: libsqlite3.tbd
+      # The visual blocks' web views (`VisualBlockView`, `VisualRenderHost`). Named, not left to
+      # Swift's autolinking, so the dependency is visible here with the other frameworks.
+      - sdk: WebKit.framework
       # Embeds the `flightdeck` CLI tool (xcodegen target `FlightDeckCLI`, defined below next
       # to `FleetKit` — see its comment for why the target name and product name differ) at
       # `Contents/MacOS/flightdeck`, next to the app's own binary — `destination: executables`
       # is the Copy Files phase for that location, as distinct from `frameworks` or
       # `resources`.
       - target: FlightDeckCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: PeerHelper
         embed: true
         codeSign: true
         copy:
@@ -256,6 +294,10 @@ targets:
       - path: Resources/ClaudePlugin
         type: folder
         buildPhase: resources
+      # Same reason again: the Mermaid tests load the vendored library from this bundle.
+      - path: Resources/Visuals
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: FlightDeck
       # Linked, not embedded: the copy inside "Flight Deck.app/Contents/Frameworks" is the
@@ -292,6 +334,64 @@ targets:
       - target: FlightDeck
     settings:
       base: { GENERATE_INFOPLIST_FILE: "YES" }
+  # The window-free logic lane (scripts/test-logic.sh). Deliberately NO `FlightDeck` dependency:
+  # xcodegen sets TEST_HOST/BUNDLE_LOADER only when a unit-test bundle depends on an application
+  # target, so these two are plain xctest bundles that `xcodebuild test` runs in the xctest process
+  # without launching the app or opening a window. A pure test (imports only XCTest, Foundation,
+  # IntakeKit/FleetKit; no `@testable import FlightDeck`) belongs in Tests/IntakeKitTests or
+  # Tests/FleetKitTests, which runs on any Mac in parallel with no UI-test-Mac lock.
+  # Swift 5 mode (the project floor): these files were written and compiled in the Swift 5
+  # FlightDeckTests bundle, and moving them must not change how they compile.
+  IntakeKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/IntakeKitTests
+      # Pure helpers that tests in both lanes use. Compiled into this bundle from where they
+      # already live instead of being moved or copied: each bundle gets its own module-internal
+      # copy, and the two bundles never share a process.
+      - path: Tests/FlightDeckTests/FlightControlL3/Index/IndexFixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/L3Fixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Fakes/ContractFakes.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RoutingTestData.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RoutingFixtures.swift
+      - path: Tests/FlightDeckTests/FlightControlL3/Routing/RuleWireTestData.swift
+      - path: Tests/FlightDeckTests/CPUTime.swift
+      - path: Tests/FlightDeckTests/Intake/ScriptedHarnessRunner.swift
+      - path: Tests/FlightDeckTests/Intake/VisualDiskFixture.swift
+      # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
+      # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
+      - path: Tests/FlightDeckTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: IntakeKit
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+  FleetKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/FleetKitTests
+      # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
+      # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
+      - path: Tests/FlightDeckTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: FleetKit
+        embed: false
+      # Same static-archive reasoning as FlightDeckTests: FleetKit is linked with this xcframework,
+      # and the bundle must resolve the same module graph (HEADER_SEARCH_PATHS for the shim).
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
   FleetKit:
     type: framework
     platform: macOS
@@ -383,12 +483,28 @@ targets:
   # case) unable to land in Products/Debug at all, so `@testable import FlightDeck` in
   # FlightDeckTests fails with "unable to resolve module dependency: 'FlightDeck'" on any clean
   # build. The earlier target rename fixed only the intermediates collision, not this one.
+  PeerHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/PeerKit
+      - Sources/PeerTool
+    settings:
+      base:
+        PRODUCT_NAME: flightdeck-peer
+        PRODUCT_MODULE_NAME: PeerHelper
+        SKIP_INSTALL: "YES"
+        DEVELOPMENT_TEAM: ZM74LQ6QWG
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+
   FlightDeckCLI:
     type: tool
     platform: macOS
     sources:
       - Sources/FlightDeckTool
       - Sources/FlightDeckCLI
+      - Sources/ProviderKit
     dependencies:
       - target: FleetKit
         embed: false
@@ -676,6 +792,15 @@ targets:
 # meant not to depend on. See the comment there for why `-scheme` is required at all on
 # this Xcode version.
 schemes:
+  # Only the two logic bundles; coverage off for the same reason as the FlightDeck scheme below.
+  FlightDeckLogic:
+    build:
+      targets:
+        IntakeKitTests: [test]
+        FleetKitTests: [test]
+    test:
+      gatherCoverageData: false
+      targets: [IntakeKitTests, FleetKitTests]
   FleetKitiOS:
     build:
       targets:

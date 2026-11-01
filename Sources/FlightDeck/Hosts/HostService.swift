@@ -300,7 +300,7 @@ final class HostService: ObservableObject {
     }
 
     private func linkChanged(_ slot: UUID, _ state: HostLinkState) {
-        statuses[slot] = state
+        if statuses[slot] != state { statuses[slot] = state }
         guard var record = registry.hosts.first(where: { $0.slot == slot }) else { return }
         switch state {
         case .online:
@@ -327,6 +327,9 @@ final class HostService: ObservableObject {
     }
 
     private func save(_ record: HostRecord) {
+        // A record the registry already holds changes nothing to persist, draw, or hand the
+        // link; a flapping link used to publish and rewrite on each of its state changes.
+        guard registry.hosts.first(where: { $0.slot == record.slot }) != record else { return }
         // The registry is not observable, so the Hosts tab would otherwise show a host's
         // platform and last-seen time only after some later status change happened to redraw it.
         objectWillChange.send()

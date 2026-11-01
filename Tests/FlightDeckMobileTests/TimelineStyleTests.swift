@@ -138,12 +138,14 @@ final class TimelineStyleTests: XCTestCase {
         )
     }
 
-    /// Headed by the session that sent it. "Cross session message" answers a question the
-    /// reader never had; which session is talking is the one they do.
+    /// Headed by the session that sent it, and as arriving. "Cross session message" answers a
+    /// question the reader never had; which session is talking, and which way, are the ones
+    /// they do.
     func testAPeerMessageIsHeadedBySenderAndFallsBackToAWord() {
-        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "The Plan Part 3")
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "From The Plan Part 3")
         XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi", sender: nil)),
-                       "Another session")
+                       "From another session")
+        XCTAssertEqual(TimelineStyle.symbol(for: peerMessage("hi")), "arrow.down.left.circle.fill")
         XCTAssertNotEqual(TimelineStyle.symbol(for: peerMessage("hi")), "gearshape.fill",
                           "an agent talking is not the harness")
     }
@@ -154,9 +156,44 @@ final class TimelineStyleTests: XCTestCase {
         let short = peerMessage("1. Task 14 (`relational`)\n2. Then rebase")
         XCTAssertTrue(TimelineStyle.rendersMarkdown(short))
         XCTAssertNil(TimelineStyle.proseLineLimit(for: peerMessage(
-            Array(repeating: "line", count: 40).joined(separator: "\n"))))
+            Array(repeating: "line", count: 40).joined(separator: "\n")), expanded: true),
+            "an opened peer message is drawn whole")
         XCTAssertFalse(TimelineStyle.opensDetail(short), "prose expands in place")
         XCTAssertEqual(TimelineStyle.rowCopyText(for: short), short.body.text)
+    }
+
+    /// A message this session sent (`TimelinePeerSend`) is the same prose going the other way,
+    /// headed with who it went to so the two halves of an exchange read as one conversation.
+    func testASentPeerMessageIsProseHeadedByItsRecipient() {
+        let sent = TimelineItem(
+            id: "9#2", kind: .systemNotice, status: .complete,
+            body: .init(text: "1. Ready\n2. `make`", tool: TimelinePeerSend.tool, sender: "Publish")
+        )
+        XCTAssertEqual(TimelineStyle.heading(for: sent), "To Publish")
+        XCTAssertEqual(TimelineStyle.symbol(for: sent), "arrow.up.right.circle.fill")
+        XCTAssertTrue(TimelineStyle.rendersMarkdown(sent))
+        XCTAssertFalse(TimelineStyle.opensDetail(sent))
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "From The Plan Part 3",
+                       "a received message is still headed by its sender")
+    }
+
+    /// Peer messages arrive collapsed to a three-line preview with a header chevron; the reader
+    /// asked for agent-to-agent traffic to step back from the conversation until opened.
+    func testAPeerMessageStartsCollapsedToThreeLinesAndOpensWhole() {
+        let long = peerMessage("one\ntwo\nthree\nfour\nfive")
+        XCTAssertEqual(TimelineStyle.proseLineLimit(for: long), 3)
+        XCTAssertTrue(TimelineStyle.expandsInPlace(long))
+        let collapsed = TimelineStyle.clampedProse(for: long)
+        XCTAssertTrue(collapsed.hasMore)
+        XCTAssertFalse(TimelineStyle.clampedProse(for: long, expanded: true).hasMore)
+
+        let short = peerMessage("one\ntwo")
+        XCTAssertNil(TimelineStyle.proseLineLimit(for: short))
+        XCTAssertFalse(TimelineStyle.expandsInPlace(short), "nothing hidden, nothing to open")
+
+        let answer = TimelineItem(id: "9#3", kind: .assistantText, status: .complete,
+                                  body: .init(text: "one\ntwo\nthree\nfour\nfive"))
+        XCTAssertNil(TimelineStyle.proseLineLimit(for: answer), "the agent's own prose is not collapsed")
     }
 
     /// Every other notice stays machine text: a `bash-stdout` must not be reflowed.

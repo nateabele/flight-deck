@@ -59,9 +59,16 @@ public struct HeadlessSession: Codable, Equatable, Sendable {
 public struct TriageExchange: Codable, Equatable, Sendable {
     public var questions: [String]
     public var answers: [String]?
-    public init(questions: [String], answers: [String]? = nil) {
+    /// Choice-style versions of `questions`, nil when the agent sent only strings. Optional so
+    /// every intake.json written before this decodes unchanged.
+    public var structured: [StructuredQuestion]?
+    public var structuredAnswers: [StructuredAnswer]?
+    public init(questions: [String], answers: [String]? = nil,
+                structured: [StructuredQuestion]? = nil, structuredAnswers: [StructuredAnswer]? = nil) {
         self.questions = questions
         self.answers = answers
+        self.structured = structured
+        self.structuredAnswers = structuredAnswers
     }
 }
 
@@ -128,12 +135,15 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
     ///   - createdAt: Timestamp for intake creation; rounded to millisecond precision because
     ///     persisted dates via ISO8601 with fractional seconds carry millisecond precision only.
     ///     An unrounded date would not equal itself after save/load. Defaults to the current time.
+    ///   - id: A caller-chosen id; the phone mints its intake's id before the Mac has heard of it,
+    ///     so it can open that intake's screen at once. Defaults to a fresh one.
     public init(
         projectPath: String,
         intent: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        id: UUID = UUID()
     ) {
-        self.id = UUID()
+        self.id = id
         self.projectPath = projectPath
         self.intent = intent
         // Round to milliseconds: ISO8601 with fractional seconds preserves millisecond precision.

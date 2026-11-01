@@ -35,8 +35,9 @@ OUT="dist/$VERSION"
 ARCHIVE="$OUT/FlightDeck.xcarchive"
 EXPORT="$OUT/export"
 APP="$EXPORT/Flight Deck.app"
-ZIP="$OUT/Flight Deck-$VERSION.zip"
-DMG="$OUT/Flight Deck-$VERSION.dmg"
+# Named as .github/workflows/stable-download.yml expects, so the site's latest link finds it.
+ZIP="$OUT/FlightDeck-v$VERSION-macOS-arm64.zip"
+DMG="$OUT/FlightDeck-v$VERSION-macOS-arm64.dmg"
 
 if [ "$NOTARIZE" = 1 ] && ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
   echo "no usable notarytool profile '$NOTARY_PROFILE' in the keychain (see the header of this script)" >&2

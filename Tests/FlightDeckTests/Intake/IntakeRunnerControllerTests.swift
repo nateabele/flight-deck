@@ -103,6 +103,8 @@ final class IntakeRunnerControllerTests: XCTestCase {
     private func makeFixture(
         flightdeckPath: (() -> String?)? = nil,
         environment: @escaping () -> [String: String]? = { ["PATH": "/fake/path"] },
+        runnerSecret: Data? = nil,
+        kind: RunnerKind = .rounds,
         now: @escaping () -> Date = Date.init
     ) throws -> Fixture {
         let daemonDir = tempDir.appendingPathComponent("daemon")
@@ -119,6 +121,8 @@ final class IntakeRunnerControllerTests: XCTestCase {
             flightdeckPath: flightdeckPath ?? { "/fake/flightdeck" },
             intakesRoot: intakesRoot,
             environment: environment,
+            runnerSecret: runnerSecret,
+            kind: kind,
             now: now
         )
         return Fixture(
@@ -128,6 +132,8 @@ final class IntakeRunnerControllerTests: XCTestCase {
 
     private func saveTape(_ tape: Tape, for id: UUID, intakesRoot: URL) throws {
         let dir = IntakeStore(root: intakesRoot).directory(for: id)
+        // A tape is saved only into an intake's existing folder (A-I1); `IntakeStore` makes it.
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try TapeStore(intakeDirectory: dir).saveTape(tape)
     }
 
@@ -172,6 +178,83 @@ final class IntakeRunnerControllerTests: XCTestCase {
             ]
         )
         XCTAssertEqual(call.environment, ["PATH": "/fake/path"])
+    }
+
+    /// The runner's `flightdeck` calls present a token for exactly its own intake.
+    func testTheRunnerIsLaunchedWithAnIntakeRunnerCallerToken() throws {
+        let secret = Data(repeating: 3, count: 32)
+        let fixture = try makeFixture(runnerSecret: secret)
+        let id = UUID()
+        expectSuccess(fixture.controller.ensureRunning(id))
+        let env = fixture.spawner.calls[0].environment
+        XCTAssertEqual(env["PATH"], "/fake/path")
+        XCTAssertEqual(env[ControlEnvironment.callerVariable], ControlEnvironment.intakeRunnerToken(for: id, secret: secret))
+        XCTAssertEqual(ControlScope.caller(token: env[ControlEnvironment.callerVariable], secret: secret), .intakeRunner(id))
+    }
+
+    // MARK: - ThreadRunner (planning v2 §5, R5)
+
+    /// The same controller, spawning `flightdeck intake threads` on its own socket: the runner
+    /// token for its intake (ruling: ThreadRunner gets FLIGHT_DECK_CALLER too), and never the
+    /// round runner's `accounts.json`, which a thread start must neither rewrite nor remove.
+    func testAThreadRunnerSpawnsOnItsOwnSocketWithTheIntakesRunnerToken() throws {
+        let secret = Data(repeating: 4, count: 32)
+        let fixture = try makeFixture(runnerSecret: secret, kind: .threads)
+        let id = UUID()
+        let accounts = IntakeStore(root: fixture.intakesRoot).directory(for: id).appendingPathComponent("accounts.json")
+        try FileManager.default.createDirectory(at: accounts.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: accounts)
+
+        expectSuccess(fixture.controller.ensureRunning(id))
+        let call = try XCTUnwrap(fixture.spawner.calls.first)
+        let socket = fixture.controller.socketPath(for: id)
+        XCTAssertTrue(socket.hasSuffix("/threads-\(id.uuidString.lowercased()).sock"), socket)
+        XCTAssertNotEqual(socket, try makeFixture().controller.socketPath(for: id), "never the round runner's socket")
+        XCTAssertEqual(call.arguments, ["-n", socket, "/fake/flightdeck", "intake", "threads", id.uuidString.lowercased(),
+                                        "--root", fixture.intakesRoot.path])
+        XCTAssertEqual(call.environment[ControlEnvironment.callerVariable],
+                       ControlEnvironment.intakeRunnerToken(for: id, secret: secret))
+        XCTAssertEqual(try Data(contentsOf: accounts), Data("{}".utf8), "the round runner's accounts are left alone")
+    }
+
+    /// A thread runner is judged by `threads/runner.json`, not the tape: fresh is running, stale
+    /// with no live pid is not, and no heartbeat at all (it finished, and removed it) is not.
+    func testAThreadRunnerIsRunningWhileItsOwnHeartbeatIsFresh() throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixture = try makeFixture(kind: .threads, now: { clock })
+        let id = UUID()
+        fixture.control.liveSockets.insert(fixture.controller.socketPath(for: id))
+        let threads = ThreadStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        XCTAssertFalse(fixture.controller.isRunning(id, tape: nil), "no heartbeat")
+
+        try FileManager.default.createDirectory(at: threads.threadsDirectory, withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(ThreadRunnerHeartbeat(pid: 1, heartbeat: clock)).write(to: threads.heartbeatURL)
+        // A tape whose own heartbeat is fresh says nothing about the thread runner.
+        var tape = Tape()
+        tape.heartbeat = clock.addingTimeInterval(-3600)
+        XCTAssertTrue(fixture.controller.isRunning(id, tape: tape))
+        clock = clock.addingTimeInterval(60)
+        XCTAssertFalse(fixture.controller.isRunning(id, tape: nil), "stale, and no daemon pid")
+    }
+
+    /// A-5: a thread runner that folded a ✓ and exited inside the spawn grace is not running:
+    /// its `runner.exited` mark is newer than the spawn, so the next ✓ starts a fresh one at once
+    /// rather than waiting out the 15 s grace behind the idle daemon.
+    func testAThreadRunnerThatExitedInsideTheSpawnGraceIsNotRunning() throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixture = try makeFixture(kind: .threads, now: { clock })
+        let id = UUID()
+        let threads = ThreadStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        try FileManager.default.createDirectory(at: threads.threadsDirectory, withIntermediateDirectories: true)
+        expectSuccess(fixture.controller.ensureRunning(id))
+        fixture.control.liveSockets.insert(fixture.controller.socketPath(for: id))
+        XCTAssertTrue(fixture.controller.isRunning(id, tape: nil), "just spawned: inside the grace")
+
+        clock = clock.addingTimeInterval(1)
+        threads.saveExited(clock)
+        XCTAssertFalse(fixture.controller.isRunning(id, tape: nil), "it came and went")
+        expectSuccess(fixture.controller.ensureRunning(id))
+        XCTAssertEqual(fixture.spawner.calls.count, 2, "started again at once")
     }
 
     /// The default `environment` recipe, exercised end to end: repaired PATH, no Claude
@@ -357,6 +440,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
         fixture.control.liveSockets.insert(socket)
         fixture.control.pidfiledSockets.insert(socket)
         let store = TapeStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        try FileManager.default.createDirectory(at: store.intakeDirectory, withIntermediateDirectories: true)
         try store.saveTape(Tape(status: .running, heartbeat: current))
 
         current = current.addingTimeInterval(11)      // stale — first sighting, within grace

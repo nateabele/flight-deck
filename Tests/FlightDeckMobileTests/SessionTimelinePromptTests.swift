@@ -287,4 +287,66 @@ final class SessionTimelinePromptTests: XCTestCase {
 
         XCTAssertTrue(model.outbox.entries.isEmpty)
     }
+
+    // MARK: - Retry
+
+    /// **Not connected: Retry is offered, and it resends the SAME message under the SAME
+    /// token.** The token is what makes it safe: if the first copy did reach the Mac, its
+    /// dedupe acks the second without typing it.
+    func testADisconnectedSendOffersRetryWhichResendsTheSameToken() {
+        let fleet = StubFleet()
+        fleet.answerCommandBeforeReturning = .failure(.disconnected)
+        let model = model(fleet)
+        model.send("ship it")
+        let entry = try! XCTUnwrap(model.outbox.entries.first)
+        XCTAssertTrue(entry.canRetry, "no Mac to send to is the one failure worth retrying")
+
+        fleet.answerCommandBeforeReturning = nil
+        model.retry(entry.id)
+
+        XCTAssertEqual(fleet.promptTexts, ["ship it", "ship it"])
+        XCTAssertEqual(fleet.promptTokens, [entry.id, entry.id], "same token, so never two messages")
+        XCTAssertEqual(model.outbox.entries.map(\.state), [.sending])
+        fleet.answerCommand(.success(()))
+        XCTAssertEqual(model.outbox.entries.map(\.state), [.accepted])
+    }
+
+    /// A retry that fails the same way is offered again.
+    func testARetryThatIsStillDisconnectedCanBeRetriedAgain() {
+        let fleet = StubFleet()
+        fleet.answerCommandBeforeReturning = .failure(.disconnected)
+        let model = model(fleet)
+        model.send("ship it")
+        let id = try! XCTUnwrap(model.outbox.entries.first?.id)
+        model.retry(id)
+        XCTAssertEqual(model.outbox.entries.first?.canRetry, true)
+        XCTAssertEqual(fleet.promptTokens.count, 2)
+    }
+
+    /// **Only a disconnect.** A Mac that answered with a refusal will refuse again, and a
+    /// timeout cannot rule out that the first copy is still on its way — neither offers Retry,
+    /// and a stray `retry` call on one sends nothing.
+    func testARefusalOrATimeoutOffersNoRetry() async {
+        let fleet = StubFleet()
+        let refused = model(fleet)
+        refused.send("ship it")
+        fleet.answerCommand(.failure(.server(code: "not_running")))
+        let refusedEntry = try! XCTUnwrap(refused.outbox.entries.first)
+        XCTAssertFalse(refusedEntry.canRetry)
+        refused.retry(refusedEntry.id)
+        XCTAssertEqual(fleet.promptTexts, ["ship it"], "nothing resent")
+
+        let silent = StubFleet()
+        let timedOut = model(silent, timeout: .milliseconds(10))
+        timedOut.send("hello")
+        let failed = expectation(description: "the deadline fired")
+        Task {
+            while timedOut.outbox.entries.first?.state == .sending {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            failed.fulfill()
+        }
+        await fulfillment(of: [failed], timeout: 5)
+        XCTAssertEqual(timedOut.outbox.entries.first?.canRetry, false)
+    }
 }

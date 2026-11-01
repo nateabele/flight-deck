@@ -274,6 +274,9 @@ final class FloatingCardAnchor: NSView {
         guard frame != placed || panel.parent == nil else { return }
         placed = frame
         placements += 1
+        // A child panel takes the app's appearance, not its parent's: under a window drawn in
+        // the other appearance the card would come out light over dark glass, or dark over light.
+        panel.appearance = window.effectiveAppearance
         panel.setFrame(frame, display: true)
         let opening = panel.parent == nil
         if opening {
@@ -442,7 +445,7 @@ private struct CardNub: View {
     let pointsDown: Bool
 
     var body: some View {
-        let fill = pointsDown ? Color(red: 0.059, green: 0.071, blue: 0.086) : Color(red: 0.102, green: 0.118, blue: 0.145)
+        let fill = pointsDown ? Instrument.cardBottom : Instrument.cardTop
         Canvas { context, size in
             let w = size.width, base = pointsDown ? Self.tab : size.height - Self.tab
             let tip = pointsDown ? size.height : 0

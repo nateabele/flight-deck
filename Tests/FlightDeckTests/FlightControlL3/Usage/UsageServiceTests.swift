@@ -165,6 +165,33 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertTrue(svc.ledger.sourceError(account: UsageRefs.codexID)?.hasPrefix("Codex app-server:") ?? false)
     }
 
+    /// Codex pushed ~2.5 readings a second and the status line files were re-read every second;
+    /// each bumped `revision` and re-rendered every meter though nothing on screen had moved.
+    func testOnlyAReadingThatChangesWhatIsDrawnBumpsTheRevision() {
+        let svc = service()
+        func reading(_ utilization: Double, at offset: TimeInterval = 0) -> UsageReading {
+            UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: utilization, resetsAt: nil)],
+                         readAt: clock.now.addingTimeInterval(offset), source: "claude status line", hardRejection: false)
+        }
+        svc.ingest(reading(0.3))
+        let first = svc.revision
+        svc.ingest(reading(0.3))
+        svc.ingest(reading(0.3, at: 5))
+        XCTAssertEqual(svc.revision, first, "same windows, only re-stamped: no bump")
+        svc.ingest(reading(0.4, at: 10))
+        XCTAssertEqual(svc.revision, first + 1, "a changed window bumps")
+        svc.ingest(UsageReading(account: UsageRefs.work, windows: [], readAt: clock.now.addingTimeInterval(11),
+                                source: "api error", hardRejection: true))
+        XCTAssertEqual(svc.revision, first + 2, "a new refusal bumps")
+    }
+
+    func testATickStillBumpsTheRevisionForTheClock() async {
+        let svc = service()
+        let before = svc.revision
+        await svc.tick()
+        XCTAssertGreaterThan(svc.revision, before)
+    }
+
     func testAPushedUpdateMergesForItsAccount() throws {
         let svc = service()
         svc.ingestCodexNotification(account: UsageRefs.codexID, method: "account/rateLimits/updated",

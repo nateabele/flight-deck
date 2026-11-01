@@ -122,6 +122,17 @@ struct GCPAccount: CloudAccount, ComputeAPIEnabling {
         return text.isEmpty ? nil : text
     }
 
+    func instanceEnded(instanceID: String, region: String) async -> Bool {
+        let parts = instanceID.split(separator: "/").map(String.init)
+        let zone = parts.firstIndex(of: "zones").flatMap { parts.indices.contains($0 + 1) ? parts[$0 + 1] : nil } ?? "\(region)-a"
+        guard let name = parts.last,
+              let result = try? await cli.run(["compute", "instances", "describe", name, "--zone", zone,
+                                               "--format", "value(status)"] + projectArgs) else { return false }
+        if result.exitCode != 0 { return result.stderr.contains("was not found") }
+        let status = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["STOPPING", "TERMINATED", "SUSPENDING", "SUSPENDED"].contains(status)
+    }
+
     // MARK: - Orphan scan (spec §7.3)
 
     /// The presets create one instance and two firewall rules per machine. Instances carry the

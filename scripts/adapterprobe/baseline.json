@@ -19,6 +19,7 @@
     "claude.runtimeObservation": "ok",
     "claude.sanitizedTitle": "ok",
     "claude.textChannel": "ok",
+    "claude.thread.turn": "ok",
     "claude.timelineItems": "ok",
     "claude.titleFromTranscript": "ok",
     "codex.binding": "ok",
@@ -40,6 +41,7 @@
     "codex.runtimeObservation": "broken",
     "codex.sanitizedTitle": "broken",
     "codex.textChannel": "ok",
+    "codex.thread.turn": "ok",
     "codex.timelineItems": "ok",
     "codex.titleFromTranscript": "ok"
   },
@@ -78,6 +80,7 @@
     "claude.runtimeObservation": "full",
     "claude.sanitizedTitle": "cheap",
     "claude.textChannel": "cheap",
+    "claude.thread.turn": "cheap",
     "claude.timelineItems": "cheap",
     "claude.titleFromTranscript": "cheap",
     "codex.binding": "cheap",
@@ -99,6 +102,7 @@
     "codex.runtimeObservation": "full",
     "codex.sanitizedTitle": "cheap",
     "codex.textChannel": "cheap",
+    "codex.thread.turn": "cheap",
     "codex.timelineItems": "cheap",
     "codex.titleFromTranscript": "cheap"
   },

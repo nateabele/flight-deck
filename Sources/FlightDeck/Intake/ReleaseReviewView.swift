@@ -12,6 +12,9 @@ struct ReleaseReviewView: View {
     @ObservedObject var store: SessionStore
     let intakeID: UUID
     let onClose: () -> Void
+    /// What release will write to the repo and commit, listed above the buttons, for a render
+    /// that has no service to ask. A loaded review's own `export` wins.
+    let exportPreview: PlanExportPreview?
 
     @State private var review: ReleaseReview?
     @State private var releasing = false
@@ -30,7 +33,9 @@ struct ReleaseReviewView: View {
     /// offscreen render's manual `RunLoop.run(until:)` pumping never redelivers that hop-back
     /// (GCD's main-queue drain doesn't reenter itself mid-frame), so the sheet would otherwise
     /// render its permanent spinner. Every real call site leaves this nil and loads normally.
-    init(store: SessionStore, intakeID: UUID, onClose: @escaping () -> Void, previewReview: ReleaseReview? = nil) {
+    init(store: SessionStore, intakeID: UUID, onClose: @escaping () -> Void, previewReview: ReleaseReview? = nil,
+         exportPreview: PlanExportPreview? = nil) {
+        self.exportPreview = exportPreview
         self.store = store
         self.intakeID = intakeID
         self.onClose = onClose
@@ -82,6 +87,17 @@ struct ReleaseReviewView: View {
                 // started — the sheet is the only guard, so every row control (and the
                 // Release button below) has to freeze together while releasing.
                 .disabled(releasing || review.intake.state == .releasing)
+
+                exportSection(model(review).exportLines)
+                // Why release would refuse to export (A-M4), before the button is pressed; and the
+                // visual citations validation dropped (A-I2), which release goes ahead without.
+                if let refusal = review.exportRefusal {
+                    Text(refusal).font(.caption).foregroundStyle(.red)
+                        .accessibilityIdentifier("release-review-export-refusal")
+                }
+                ForEach(review.visualWarnings, id: \.self) { warning in
+                    Text(warning).font(.caption2).foregroundStyle(.orange)
+                }
             } else if hasLoadedOnce {
                 VStack(spacing: 8) {
                     Text("Couldn't load the review").foregroundStyle(.secondary)
@@ -131,7 +147,9 @@ struct ReleaseReviewView: View {
                             Task { await release() }
                         }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!review.canRelease || model(review).counts.isEmpty || releasing || review.intake.state == .releasing)
+                        .disabled(!review.canRelease || model(review).counts.isEmpty || model(review).exportBlocksRelease
+                                  || releasing || review.intake.state == .releasing)
+                        .help(model(review).releaseHelp ?? "")
                         .accessibilityIdentifier("release-review-release")
                     }
                 }
@@ -397,10 +415,33 @@ struct ReleaseReviewView: View {
         return false
     }
 
+    /// The repo files and the commit (spec §12, "Confirmation"). Collapsed into a scroll box so a
+    /// plan with many visuals does not push the buttons off the sheet.
+    @ViewBuilder
+    private func exportSection(_ lines: [String]) -> some View {
+        if let head = lines.first, let tail = lines.last, lines.count >= 2 {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(head).font(.caption).bold()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(lines.dropFirst().dropLast().enumerated()), id: \.offset) { _, path in
+                            Text(path).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 150)
+                Text(tail).font(.caption2).foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("release-review-export")
+        }
+    }
+
     /// The button's, header's and rows' words (`ReleaseSheetModel`), off the same skip rule
     /// as the summary line.
     private func model(_ review: ReleaseReview) -> ReleaseSheetModel {
-        ReleaseSheetModel(ops: ops(review), drift: review.drift, dropped: review.intake.droppedOps, titles: review.titles)
+        ReleaseSheetModel(ops: ops(review), drift: review.drift, dropped: review.intake.droppedOps,
+                          titles: review.titles, export: review.export ?? exportPreview, exportRefusal: review.exportRefusal)
     }
 
     private func rowBackground(drift: OpDrift, dropped: Bool) -> Color {

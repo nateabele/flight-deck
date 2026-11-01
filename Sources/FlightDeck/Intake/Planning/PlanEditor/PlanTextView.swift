@@ -71,6 +71,14 @@ struct PlanEditSession {
         return true
     }
 
+    /// An accepted edit was applied in place (N4): `incoming` is now what is committed, and
+    /// `showing` — it with any uncommitted typing on top — is what the editor holds.
+    mutating func took(_ incoming: String, showing: String) {
+        committed = incoming
+        current = showing
+        held = nil
+    }
+
     /// The parent withdrew its offer (the human went back to the checkpoint on screen).
     mutating func dropHeld() { held = nil }
 
@@ -105,6 +113,10 @@ struct PlanTextView: NSViewRepresentable {
     let incoming: String?
     let onShowIncoming: () -> Void
     var incomingIsNavigation = false
+    /// `incoming` is the same checkpoint's plan with an accepted thread edit (or a merge) in it,
+    /// not a new round: applied in place as an edit, keeping caret, selection and undo (N4), and
+    /// named "Accepted edit applied" when it has to wait behind the banner.
+    var incomingIsAccept = false
     var theme: PlanTheme = .standard
     /// The agents' plan under `text` — set, the human's edits over it draw as a layer
     /// (`EditLayer`); nil draws none.
@@ -127,6 +139,11 @@ struct PlanTextView: NSViewRepresentable {
     var scrollMemory: PlanScrollMemory?
     /// What the plan's relative file links resolve against — the intake's project directory.
     var projectPath: String?
+    /// The intake's visuals, which the plan's `fd-visual` blocks draw (`VisualBlockOverlay`); nil
+    /// draws each as a "missing visual" placeholder.
+    var visuals: (any VisualStoreReading)?
+    /// The checkpoint whose plan is shown: its visuals are drawn as that checkpoint recorded them.
+    var visualCheckpoint: Int?
     /// Writes `text` on every keystroke rather than after `EditPolicy.idle`. For an editor whose
     /// binding is a draft read at once (the intake composer's Triage), where waiting two
     /// seconds would send the text from before the last few keystrokes. A plan keeps the idle
@@ -144,7 +161,7 @@ struct PlanTextView: NSViewRepresentable {
     var fillHeight: CGFloat = 0
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
-         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false,
+         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false, incomingIsAccept: Bool = false,
          theme: PlanTheme = .standard, compact: Bool = false, focusOnAppear: Bool = false, identifier: String = "plan-editor") {
         self.theme = theme
         self.compact = compact
@@ -156,6 +173,7 @@ struct PlanTextView: NSViewRepresentable {
         self.incoming = incoming
         self.onShowIncoming = onShowIncoming
         self.incomingIsNavigation = incomingIsNavigation
+        self.incomingIsAccept = incomingIsAccept
     }
 
     /// Draws the human's edits over `generated`, the agents' plan for the same checkpoint.
@@ -208,6 +226,14 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// Draws the plan's visual blocks from `store`, as checkpoint `checkpoint` recorded them — see `visuals`.
+    func visuals(_ store: (any VisualStoreReading)?, checkpoint: Int? = nil) -> PlanTextView {
+        var view = self
+        view.visuals = store
+        view.visualCheckpoint = checkpoint
+        return view
+    }
+
     /// This view committing on every keystroke — see `commitsEachKeystroke`.
     func committingEachKeystroke() -> PlanTextView {
         var view = self
@@ -237,6 +263,8 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.textView = container.textView
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.onFindMatch = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.visualBlocks.onHeightsChanged = { [weak coordinator] in coordinator?.restyleVisuals() }
         container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
         if let folds { coordinator.foldStore = folds }
         coordinator.readingMemory = scrollMemory
@@ -254,6 +282,9 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.revertButton = container.revert
         // Before the first load, which a pending "Show in that version" is waiting for.
         coordinator.notesBridge.attach(notes, to: container.textView)
+        // Before the first load too: the styler holds each visual block to its height from these.
+        container.textView.visualBlocks.store = visuals
+        container.textView.visualBlocks.checkpoint = visualCheckpoint
         coordinator.load(text)
         if focusOnAppear {
             // After the view is in a window; `makeNSView` runs before it is.
@@ -283,10 +314,12 @@ struct PlanTextView: NSViewRepresentable {
         // Before the load, so the first text an editor gets is already seen by the notes (a
         // pending "Show in that version" is waiting for exactly that load).
         coordinator.notesBridge.attach(notes, to: container.textView)
+        coordinator.visualsChanged(store: visuals, checkpoint: visualCheckpoint)
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
-        coordinator.receive(incoming, navigation: incomingIsNavigation)
+        coordinator.receive(incoming, navigation: incomingIsNavigation, accept: incomingIsAccept)
+        container.bannerAccept = incomingIsAccept
         container.bannerVisible = coordinator.session.held != nil
         coordinator.layEditLayer(over: generated)
         coordinator.jump(to: jump)
@@ -305,6 +338,8 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.undo.removeAllActions()
         if let text = coordinator.session.endEditing() { coordinator.commit(text) }
         coordinator.notesBridge.detach()
+        // Gives the blocks' live web views back to the shared pool.
+        container.textView.visualBlocks.tearDown()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
@@ -337,6 +372,9 @@ struct PlanTextView: NSViewRepresentable {
         /// (a paste-and-undo in one event), which falls back to a full restyle.
         private var pendingEdit: (range: NSRange, delta: Int)?
         private var editCount = 0
+        /// Every character edit of the pass, in order: a pass of several still moves the
+        /// proposals in this same pass (`PlanProposal.moved(_:by:)`), as a single edit does.
+        private var passEdits: [TextEdit] = []
         /// The edit layer: the agents' plan it was diffed against, the marks drawn, and the
         /// hunks Revert puts back — all as of the text in the view.
         private var layerBase: String?
@@ -389,6 +427,8 @@ struct PlanTextView: NSViewRepresentable {
             if textView.string != text { textView.string = text }
             undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
+            // A new text may be a round that made new revisions: the blocks read the store again.
+            MainActor.assumeIsolated { textView.visualBlocks.reload() }
             outline = nil
             // A new text (a round landed): folds follow their headings by text, and a fold
             // whose heading is gone is dropped.
@@ -399,13 +439,14 @@ struct PlanTextView: NSViewRepresentable {
             style(storage, indices: nil, reveal: revealed)
             pendingEdit = nil
             editCount = 0
+            passEdits = []
             taking = nil
             MainActor.assumeIsolated { notesBridge.textChanged() }
             textView.layOutWholePlan()
             resumeReading(reading, in: text, firstLoad: firstLoad)
         }
 
-        func receive(_ incoming: String?, navigation: Bool) {
+        func receive(_ incoming: String?, navigation: Bool, accept: Bool = false) {
             guard let incoming else { return session.dropHeld() }
             guard incoming != taking else { return }
             if navigation {
@@ -418,6 +459,7 @@ struct PlanTextView: NSViewRepresentable {
             }
             guard incoming != session.held else { return }
             session.editing = isFirstResponder
+            if accept, incoming != session.current, applyInPlace(incoming) { return }
             // Typed text identical to the new head loses nothing by being replaced by it.
             if incoming == session.current || EditPolicy.shouldReplace(editing: session.editing, dirty: session.dirty) {
                 // Commit anything unfocused-but-uncommitted before it is replaced.
@@ -435,6 +477,43 @@ struct PlanTextView: NSViewRepresentable {
             guard let held = session.held else { return }
             if let text = session.flush() { commit(text) }
             takeIncoming(held)
+        }
+
+        /// N4: the same checkpoint's plan with an accepted edit in it, put into the text as an
+        /// edit — the smallest one, through the editor's own change path — rather than loaded, so
+        /// the caret and selection follow their text and the undo stack is kept. With typing not
+        /// yet committed, the accept's lines are replayed onto it (`PlanRebase.replay`); when they
+        /// can't be (the typing touched them), false, and the banner holds it as before.
+        private func applyInPlace(_ incoming: String) -> Bool {
+            guard let textView, let storage = textView.textStorage, !textView.hasMarkedText() else { return false }
+            let showing: String
+            if session.dirty {
+                guard let replayed = PlanRebase.replay(base: session.committed, ours: incoming, onto: session.current) else { return false }
+                showing = replayed
+            } else {
+                showing = incoming
+            }
+            let old = textView.string as NSString, new = showing as NSString
+            if old != new {
+                var front = 0
+                while front < old.length, front < new.length, old.character(at: front) == new.character(at: front) { front += 1 }
+                var back = 0
+                while back < old.length - front, back < new.length - front,
+                      old.character(at: old.length - 1 - back) == new.character(at: new.length - 1 - back) { back += 1 }
+                let range = NSRange(location: front, length: old.length - front - back)
+                let replacement = new.substring(with: NSRange(location: front, length: new.length - front - back))
+                textView.breakUndoCoalescing()
+                guard textView.shouldChangeText(in: range, replacementString: replacement) else { return false }
+                storage.replaceCharacters(in: range, with: replacement)
+                textView.didChangeText()
+                undo.setActionName("Accepted Edit")
+                textView.breakUndoCoalescing()
+            }
+            session.took(incoming, showing: showing)
+            // The parent moves `incoming` into `text`; that is no load — it is on screen already.
+            lastBound = incoming
+            takeIncoming(incoming)
+            return true
         }
 
         private func takeIncoming(_ text: String) {
@@ -466,8 +545,16 @@ struct PlanTextView: NSViewRepresentable {
         /// The block whose syntax shows: the caret's, and only while the editor has focus — an
         /// unfocused plan reads fully rendered, with no stray `##` where the caret last was.
         private func caretBlock() -> Int? {
-            guard let textView, textView.isFocused,
-                  let index = MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks) else { return nil }
+            guard let textView else { return nil }
+            let selection = textView.selectedRange()
+            guard let index = MarkdownStyler.blockIndex(at: selection.location, in: blocks) else { return nil }
+            if !textView.isFocused {
+                // A Find match is selected while the find field has focus. A hidden visual block
+                // has the match under its view, so it shows its source. The caret alone does not, and nor
+                // does a selection left behind when focus moved elsewhere: only Find's own match.
+                guard selection.length > 0, textView.findMatch == selection, case .visual = blocks[index].kind else { return nil }
+                return index
+            }
             // A table never shows its source: the caret in it reveals nothing.
             return blocks[index].kind == .table ? nil : index
         }
@@ -489,6 +576,11 @@ struct PlanTextView: NSViewRepresentable {
             var theme = parent.theme
             if let container = textView?.textContainer, container.size.width < 10_000 {
                 theme.contentWidth = max(0, container.size.width - 2 * container.lineFragmentPadding)
+            }
+            if let overlay = textView?.visualBlocks {
+                theme.visualHeight = { [weak overlay] id, pending in
+                    MainActor.assumeIsolated { overlay?.height(id: id, pending: pending) } ?? VisualBlockLayout.placeholder
+                }
             }
             return theme
         }
@@ -518,22 +610,117 @@ struct PlanTextView: NSViewRepresentable {
             textView.layOutWholePlan()
         }
 
+        // MARK: Proposed edits
+
+        /// The proposed edits drawn in place of their paragraphs (`PlanProposal`).
+        private(set) var proposals: [PlanProposal] = []
+
+        /// One diff's passage and its replacement, for `layProposals`.
+        struct ProposalRequest {
+            let id: UUID
+            let range: NSRange
+            let replacement: String
+        }
+
+        /// Draws each request in place of the paragraph or list item holding it, and returns the ones
+        /// it could. A passage in a table or a code fence, or across blocks, is left to the gutter's bar
+        /// and card. Restyles only the blocks whose proposal changed.
+        @discardableResult
+        func layProposals(_ requests: [ProposalRequest]) -> Set<UUID> {
+            guard let storage = textView?.textStorage else { return [] }
+            let ns = storage.string as NSString
+            var next: [PlanProposal] = []
+            for request in requests {
+                guard let block = blocks.first(where: { block in
+                    switch block.kind {
+                    case .paragraph, .listItem:
+                        block.range.location <= request.range.location && NSMaxRange(request.range) <= NSMaxRange(block.range)
+                    default: false
+                    }
+                }) else { continue }
+                let old = ns.substring(with: block.range)
+                let inside = NSRange(location: request.range.location - block.range.location, length: request.range.length)
+                let source = (old as NSString).replacingCharacters(in: inside, with: request.replacement)
+                let hovered = proposals.first { $0.diff == request.id }?.hovered ?? false
+                next.append(PlanProposal(diff: request.id, block: block.range, source: source, old: old, hovered: hovered))
+            }
+            if next != proposals {
+                let touched = Set((proposals + next).map(\.block))
+                proposals = next
+                let indices = blocks.indices.filter { touched.contains(blocks[$0].range) }
+                if !indices.isEmpty { style(storage, indices: indices, reveal: revealed) }
+            }
+            return Set(next.map(\.diff))
+        }
+
+        /// Opens (or closes, for nil) the room above a proposal for the struck old text and the toolbar.
+        func hoverProposal(_ id: UUID?) {
+            guard let storage = textView?.textStorage else { return }
+            var changed: [NSRange] = []
+            for i in proposals.indices {
+                let on = proposals[i].diff == id
+                if proposals[i].hovered != on { proposals[i].hovered = on; changed.append(proposals[i].block) }
+            }
+            let indices = blocks.indices.filter { changed.contains(blocks[$0].range) }
+            if !indices.isEmpty { style(storage, indices: indices, reveal: revealed) }
+        }
+
+        /// The block a proposal stands in for, and whether it is drawn now (the caret is not in it).
+        func proposalBlock(_ id: UUID) -> (range: NSRange, drawn: Bool)? {
+            guard let proposal = proposals.first(where: { $0.diff == id }) else { return nil }
+            let at = blocks.firstIndex { $0.range == proposal.block }
+            return (proposal.block, at != nil && at != revealed)
+        }
+
         /// Every styler pass goes through here, so the edit layer is laid back over exactly
         /// the blocks the styler just reset (`EditLayer.apply`'s contract).
         private func style(_ storage: NSTextStorage, indices: [Int]?, reveal: Int?) {
             let theme = styleTheme
             tableWidth = theme.contentWidth
             if let indices {
-                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, edits: marks, theme: theme)
+                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, edits: marks, proposals: proposals, theme: theme)
                 let ranges = Set(indices).filter(blocks.indices.contains).map { i -> NSRange in
                     let r = blocks[i].range
                     return NSRange(location: r.location, length: min(r.length + 1, storage.length - r.location))
                 }
                 EditLayer.apply(marks, to: storage, within: ranges, theme: theme)
             } else {
-                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, theme: theme)
+                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, edits: marks, proposals: proposals, theme: theme)
                 EditLayer.apply(marks, to: storage, within: nil, theme: theme)
             }
+            // At once, not next turn: the restyle may have shown a block's source (the caret went
+            // in) or moved it (text typed above), and its view must not be drawn over that text
+            // even for one frame. Again next turn, for layout that settles after this.
+            MainActor.assumeIsolated {
+                textView?.visualBlocks.refresh()
+                textView?.visualBlocks.setNeedsRefresh()
+            }
+        }
+
+        /// The visuals the blocks draw from, or the checkpoint shown, may have changed: the
+        /// blocks' heights may differ, so their lines are styled again.
+        func visualsChanged(store: (any VisualStoreReading)?, checkpoint: Int?) {
+            guard let textView, let storage = textView.textStorage else { return }
+            let changed = MainActor.assumeIsolated {
+                let overlay = textView.visualBlocks
+                let before = overlay.store.map(VisualStoreIdentity.of)
+                let beforeCheckpoint = overlay.checkpoint
+                overlay.store = store
+                overlay.checkpoint = checkpoint
+                return before != store.map(VisualStoreIdentity.of) || beforeCheckpoint != checkpoint
+            }
+            guard changed else { return }
+            restyleVisuals()
+        }
+
+        /// The visual blocks take their heights again (their store changed, or a live drawing
+        /// reported its shape) and the plan is laid out around them.
+        func restyleVisuals() {
+            guard let textView, let storage = textView.textStorage else { return }
+            let visuals = blocks.indices.filter { if case .visual = blocks[$0].kind { true } else { false } }
+            guard !visuals.isEmpty else { return }
+            style(storage, indices: visuals, reveal: revealed)
+            textView.layOutWholePlan()
         }
 
         // MARK: Edit layer
@@ -724,6 +911,7 @@ struct PlanTextView: NSViewRepresentable {
             textView.onScroll = { [weak self] in
                 self?.layOutFoldGutter()
                 self?.scrollTick()
+                MainActor.assumeIsolated { self?.textView?.visualBlocks.setNeedsRefresh() }
             }
             textView.linkAt = { [weak self] location in self?.link(at: location) }
             foldGutter.measure = { [weak self] in self?.foldMarks() ?? [] }
@@ -912,6 +1100,7 @@ struct PlanTextView: NSViewRepresentable {
             guard editedMask.contains(.editedCharacters) else { return }
             editCount += 1
             pendingEdit = (editedRange, delta)
+            passEdits.append(TextEdit(range: editedRange, delta: delta))
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -932,18 +1121,24 @@ struct PlanTextView: NSViewRepresentable {
                 if let edit = single {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
+                    // Moved with the text in this same pass: left at the old ranges they would match no
+                    // block, and the proposal would show its source until the async refresh.
+                    proposals = PlanProposal.moved(proposals, by: TextEdit(range: edit.range, delta: edit.delta))
                     let layered = diffEditLayer(base: layerBase, text: textView.string,
                                                 shift: (edit.range.location + max(edit.range.length - edit.delta, 0), edit.delta),
                                                 edit: TextEdit(range: edit.range, delta: edit.delta))
                     style(storage, indices: changed + layered + [revealed, next].compactMap { $0 }, reveal: next)
                 } else {
                     blocks = fresh
+                    // Left at the old ranges, the proposals would show their source for a turn.
+                    proposals = PlanProposal.moved(proposals, by: passEdits)
                     diffEditLayer(base: layerBase, text: textView.string)
                     style(storage, indices: nil, reveal: next)
                 }
                 revealed = next
                 pendingEdit = nil
                 editCount = 0
+                passEdits = []
                 foldsFollowEdit()
                 if let edit = single, let memory = scrolling.memory, let anchor = memory.anchor {
                     memory.anchor = anchor.shifted(by: TextEdit(range: edit.range, delta: edit.delta))
@@ -1059,6 +1254,14 @@ final class PlanEditorContainer: NSView {
     private var observers: [NSObjectProtocol] = []
 
     override var isFlipped: Bool { true }
+
+    /// The banner names an accepted edit rather than a new round (N4).
+    var bannerAccept = false {
+        didSet {
+            guard bannerAccept != oldValue else { return }
+            banner.rootView = IncomingBanner(onShow: banner.rootView.onShow, accept: bannerAccept)
+        }
+    }
 
     var bannerVisible: Bool {
         get { !banner.isHidden }
@@ -1213,6 +1416,34 @@ final class PlanEditorContainer: NSView {
 class PlanNSTextView: NSTextView {
     var isFocused = false
     var onFocusChange: (() -> Void)?
+    /// The range Find last showed its indicator for: the one selection an unfocused plan reveals a
+    /// hidden visual block for. Cleared when the plan takes focus.
+    private(set) var findMatch: NSRange?
+    var onFindMatch: (() -> Void)?
+    /// How many times the system's find indicator was shown (tests check it comes after the reveal).
+    private(set) var indicatorShows = 0
+
+    override func showFindIndicator(for charRange: NSRange) {
+        // Reveal first: the block's source must be laid out before the indicator is placed on it.
+        findMatch = charRange
+        onFindMatch?()
+        if let layout = textLayoutManager, let content = textContentStorage,
+           let start = content.location(content.documentRange.location, offsetBy: charRange.location),
+           let end = content.location(start, offsetBy: charRange.length), let range = NSTextRange(location: start, end: end) {
+            layout.ensureLayout(for: range)
+        }
+        super.showFindIndicator(for: charRange)
+        indicatorShows += 1
+    }
+    /// Find closing forgets its match, so the block it revealed hides again.
+    override func performTextFinderAction(_ sender: Any?) {
+        super.performTextFinderAction(sender)
+        if (sender as? NSValidatedUserInterfaceItem)?.tag == NSTextFinder.Action.hideFindInterface.rawValue, findMatch != nil {
+            findMatch = nil
+            onFindMatch?()
+        }
+    }
+
     /// The text container took a new width: what the tables are laid out in.
     var onContainerWidth: (() -> Void)?
     /// How much of the page's top edge something is drawn over — the pinned control bar and
@@ -1360,6 +1591,8 @@ class PlanNSTextView: NSTextView {
         // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
         let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)
         if abs(height - frame.height) >= 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+        // Estimates above a visual block firmed up: its band may have moved.
+        visualBlocks.setNeedsRefresh()
     }
 
     /// An edit made while a pass was running may have replaced the text it was walking:
@@ -1470,6 +1703,8 @@ class PlanNSTextView: NSTextView {
 
     /// Editing a table in place — see `PlanTableController`.
     lazy var tables = PlanTableController(view: self)
+    /// The visual blocks' views, laid over their hidden source (V-R1).
+    lazy var visualBlocks = VisualBlockOverlay(view: self)
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         if let replacementString, !tables.structureEditing, !hasMarkedText() {
@@ -1532,9 +1767,17 @@ class PlanNSTextView: NSTextView {
         return menu
     }
 
-    /// The plan's tables for VoiceOver: rows of cells, beside the text.
+    /// The plan's tables for VoiceOver: rows of cells, beside the text. And its visual blocks: each
+    /// is a view laid over its hidden source lines, which a text view does not list on its own, so
+    /// without this VoiceOver (and XCUITest) never reaches a block's size or state controls.
     override func accessibilityChildren() -> [Any]? {
-        (super.accessibilityChildren() ?? []) + tables.accessibilityTables()
+        withVisualBlocks((super.accessibilityChildren() ?? []) + tables.accessibilityTables())
+    }
+
+    /// `children` plus each visual block view it does not already list, once.
+    private func withVisualBlocks(_ children: [Any]) -> [Any] {
+        let listed = Set(children.compactMap { ($0 as? NSView).map(ObjectIdentifier.init) })
+        return children + subviews.filter { $0 is VisualBlockView && !listed.contains(ObjectIdentifier($0)) }
     }
 
     /// The accessibility server asks for children by attribute, which a text view answers its own
@@ -1542,7 +1785,7 @@ class PlanNSTextView: NSTextView {
     override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
         let value = super.accessibilityAttributeValue(attribute)
         guard attribute == .children else { return value }
-        return ((value as? [Any]) ?? []) + tables.accessibilityTables()
+        return withVisualBlocks(((value as? [Any]) ?? []) + tables.accessibilityTables())
     }
 
     override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
@@ -1858,6 +2101,7 @@ class PlanNSTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
         isFocused = true
+        findMatch = nil
         onFocusChange?()
         tables.focusChanged()
         return true
@@ -1884,11 +2128,14 @@ extension EnvironmentValues {
 /// Review Focus 3's banner: a round landed while the human was typing, so it waits.
 struct IncomingBanner: View {
     let onShow: () -> Void
+    var accept = false
+
+    static func title(accept: Bool) -> String { accept ? "Accepted edit applied" : "A new round landed" }
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
-            Text("A new round landed").font(.callout.weight(.semibold))
+            Text(Self.title(accept: accept)).font(.callout.weight(.semibold))
             Spacer(minLength: 0)
             Button("Show it", action: onShow)
                 .accessibilityIdentifier("plan-show-incoming")

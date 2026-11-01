@@ -110,3 +110,25 @@ final class ToolOverlayVisibilityTests: XCTestCase {
         XCTAssertTrue(v.isVisible(at: at(10)))
     }
 }
+
+/// The model re-ran `refresh()` on every mouse move and key press and wrote `isVisible` each
+/// time; `@Published` announces every write, so each one re-rendered the overlay.
+@MainActor
+final class ToolOverlayModelPublishTests: XCTestCase {
+    func testOnlyAFlipOfVisibilityPublishes() {
+        let model = ToolOverlayModel()
+        var published = 0
+        let sub = model.$isVisible.dropFirst().sink { _ in published += 1 }
+        model.mouseMoved()
+        XCTAssertEqual(published, 1, "hidden to shown")
+        model.mouseMoved()
+        model.mouseMoved()
+        XCTAssertEqual(published, 1, "still shown: no write")
+        model.keyPressed()
+        XCTAssertEqual(published, 2, "shown to hidden")
+        model.keyPressed()
+        XCTAssertEqual(published, 2, "still hidden: no write")
+        sub.cancel()
+    }
+}
+

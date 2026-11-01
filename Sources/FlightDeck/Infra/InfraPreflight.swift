@@ -18,6 +18,9 @@ enum InfraError: Error, Equatable {
     case nameInUse(String)
     /// The machine never said hello. `console` is its boot console, when the cloud had one.
     case enrollTimeout(console: String?)
+    /// The machine ended before it enrolled: its boot could not install or enroll hostd, and it
+    /// powered itself off. `console` as for `enrollTimeout`.
+    case enrollFailed(console: String?)
     case notFound(String)
     /// An `extend` (or other request) the rules forbid; the text says which rule and what to do.
     case refused(String)
@@ -205,7 +208,7 @@ enum InfraPreflight {
 
     // MARK: - Formatting
 
-    static func usd(_ x: Double) -> String { String(format: "$%.2f", x) }
+    static func usd(_ x: Double) -> String { CostModel.usd(x) }
 
     private static func format(_ x: Double) -> String {
         x == x.rounded() ? String(Int(x)) : String(format: "%.1f", x)

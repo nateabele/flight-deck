@@ -362,6 +362,67 @@ final class SessionStoreInjectionGateTests: XCTestCase {
                       "and the tab injects again - `.absent` strands nothing")
     }
 
+    /// **An in-place `/clear` (or `/resume`) must not leave the tab refusing every injection.**
+    ///
+    /// The same `claude` process ends one conversation and starts another: the hook log gets
+    /// `SessionEnd` (reason `clear`) for the OLD id — which folds to `.absent` and reaches the
+    /// tab, still subscribed to it — then `SessionStart` for the NEW id, which reaches nobody,
+    /// because the tab is only repinned on the next registry tick. The watcher now remembers the
+    /// new id as `.live`, so every later event for it compares equal and is never emitted, and
+    /// the tab sat `.absent` for the life of the process: phone prompts and renames were
+    /// queued, acked, and never typed (2026-10-31, "Bathroom Floorplan").
+    func testAnInPlaceClearIntoANewConversationKeepsTheTabInjectable() throws {
+        let hookDirectory = projectsRoot.appendingPathComponent("hook-events", isDirectory: true)
+        try FileManager.default.createDirectory(at: hookDirectory, withIntermediateDirectories: true)
+
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.statusRootOverride = projectsRoot.appendingPathComponent("status", isDirectory: true)
+        store.hookEventDirectoryOverride = hookDirectory
+        store.promptLifecycleSink = { _ in }
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let session = store.newSession(in: tmp)
+        let old = session.pinnedConversationID
+        let new = UUID()
+
+        store.startStatusWatching()
+        let watcher = try XCTUnwrap(store.hookEventWatcherForTesting as? HookEventWatcher)
+        let log = hookDirectory.appendingPathComponent("events.ndjson")
+        func line(_ sid: UUID, _ event: String) -> String {
+            #"{"session_id":"\#(sid.uuidString.lowercased())","hook_event_name":"\#(event)"}"# + "\n"
+        }
+        var text = line(old, "SessionStart")
+        try text.write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+        store.applyRegistry([1: entry(old, .idle, cwd: tmp.path)])
+        XCTAssertEqual(store.composerReadiness(for: session.id), .live, "the premise")
+
+        // `/clear`: same process, old conversation ends, new one starts.
+        text += line(old, "SessionEnd") + line(new, "SessionStart")
+        try text.write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+        // The registry row now names the new conversation under the same pid.
+        store.applyRegistry([1: entry(new, .idle, cwd: tmp.path)])
+        XCTAssertEqual(store.repos.flatMap(\.sessions).first { $0.id == session.id }?.pinnedConversationID, new,
+                       "the premise: the tab followed the conversation")
+
+        // The user works in the new conversation from the Mac's keyboard.
+        text += line(new, "UserPromptSubmit") + line(new, "Stop")
+        try text.write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+        store.applyRegistry([1: entry(new, .idle, cwd: tmp.path)])
+
+        XCTAssertNotEqual(store.composerReadiness(for: session.id), .absent,
+                          "the old conversation's SessionEnd must not outlive the repin")
+        spy.viewportOverride = try screen("idle-empty-box")
+        spy.events.removeAll()
+        store.submitPrompt("from the phone", token: UUID(), to: session.id)
+        XCTAssertEqual(spy.sent, ["from the phone"], "a phone prompt is typed, not stranded")
+    }
+
     /// **The same window entered from the other side, and the ONE case that is still decided
     /// by the screen — so read what this pins carefully.**
     ///

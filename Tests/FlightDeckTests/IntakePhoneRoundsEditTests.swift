@@ -497,4 +497,25 @@ final class IntakePhoneRoundsEditTests: XCTestCase {
             XCTAssertEqual(PhoneRoundsEdit.roundConfig(wire(config)), config, "four families: \(preset)")
         }
     }
+
+    // MARK: a failed round's seat
+
+    /// "Retry with another model" is a rounds edit on a failed tape: the round that failed has
+    /// not landed, so its seat must still be changeable.
+    func testTheFailedRoundsSeatCanChangeModel() async throws {
+        let config = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        var tape = Tape()
+        while let round = TapePlanner.upcoming(after: tape, config: config).first, !(round.stage == .polish && round.round == 2) {
+            tape.checkpoints.append(Checkpoint(id: tape.checkpoints.count + 1, stage: round.stage, round: round.round,
+                                               major: round.major, createdAt: Date()))
+        }
+        let i = try seedShaping(.failed, checkpoints: tape.checkpoints)
+        let svc = await makeService()
+        let base = try XCTUnwrap(try intake(svc, i.id).roundConfig)
+        var edit = base
+        edit.polisher?.effort = "low"
+        edit.polishers = nil
+        XCTAssertNil(svc.phoneRounds(i.id, token: UUID(), config: wire(edit), base: wire(base)))
+        XCTAssertEqual(try intake(svc, i.id).roundConfig?.polisher?.effort, "low")
+    }
 }

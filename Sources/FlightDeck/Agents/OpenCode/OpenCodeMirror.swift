@@ -93,7 +93,7 @@ enum OpenCodeMirror {
     @discardableResult
     static func sync(sessionID: String, database: URL, mirror: URL) throws -> [String] {
         let messages = try OpenCodeDatabase(url: database).settledMessages(session: sessionID)
-        return try withLockedFile(mirror) { handle, existing in
+        return try LockedAppend.withLockedFile(mirror) { handle, existing in
             let written = writtenMessageIDs(in: existing)
             let fresh = messages.filter { !written.contains($0.id) }.map(\.line)
             guard !fresh.isEmpty else { return [] }
@@ -105,30 +105,11 @@ enum OpenCodeMirror {
 
     /// Appends one already-encoded record — a `prompt.asked` or `prompt.resolved` line.
     static func append(_ line: String, to mirror: URL) throws {
-        _ = try withLockedFile(mirror) { handle, _ in
+        _ = try LockedAppend.withLockedFile(mirror) { handle, _ in
             try handle.seekToEnd()
             try handle.write(contentsOf: Data((line + "\n").utf8))
             return [String]()
         }
-    }
-
-    private static func withLockedFile(
-        _ url: URL, _ body: (FileHandle, Data) throws -> [String]
-    ) throws -> [String] {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        let handle = try FileHandle(forUpdating: url)
-        defer { try? handle.close() }
-        guard flock(handle.fileDescriptor, LOCK_EX) == 0 else {
-            throw OpenCodeError.malformed("could not lock \(url.lastPathComponent)")
-        }
-        defer { flock(handle.fileDescriptor, LOCK_UN) }
-        let existing = try handle.readToEnd() ?? Data()
-        return try body(handle, existing)
     }
 
     /// Message ids already in a mirror. Every message line is written by `messageLine`, which

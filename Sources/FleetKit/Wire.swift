@@ -33,11 +33,17 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
     /// This project's swarm (L3-S §8), or nil when it has none. Optional so a snapshot from a Mac
     /// that predates it decodes.
     public var swarm: WireSwarm?
+    /// True from a Mac that handles `intake.create`. It is the licence to send that op, which
+    /// has no intake to carry a flag on (the per-intake flags ride the detail): an older Mac
+    /// drops the socket on an unknown op. Set for every project, never per project, so it cannot
+    /// change without a `projectAdded` and the event fold has nothing to keep in step; whether
+    /// Flight Control is on is `intakes != nil`. Optional so an older snapshot decodes.
+    public var canCreateIntake: Bool?
 
     public init(
         id: UUID, name: String, path: String, isCollapsed: Bool = false,
         sessions: [WireSession] = [], intakes: [WireIntakeSummary]? = nil,
-        swarm: WireSwarm? = nil
+        swarm: WireSwarm? = nil, canCreateIntake: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -46,6 +52,7 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
         self.sessions = sessions
         self.intakes = intakes
         self.swarm = swarm
+        self.canCreateIntake = canCreateIntake
     }
 }
 

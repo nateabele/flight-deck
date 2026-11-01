@@ -1,0 +1,144 @@
+<h2>Design §1: Architecture</h2>
+<p class="subtitle">Boxes outlined in blue are new and the grey ones already exist. Writes follow the house rule that each store has exactly one writer, and the app and phone only append commands.</p>
+
+<style>
+  svg text { font: 13px -apple-system, system-ui; fill: currentColor }
+  svg .s { font-size: 11.5px; opacity: .75 }
+  svg .h { font-weight: 600; font-size: 13.5px }
+  svg .zone { fill: #8880; stroke: currentColor; stroke-opacity: .25; stroke-dasharray: 6 5; }
+  svg .zl { font-weight: 700; font-size: 12px; letter-spacing: .06em; opacity: .55 }
+  svg .old { fill: #8881; stroke: currentColor; stroke-opacity: .45; stroke-width: 1.3 }
+  svg .new { fill: #4a7dff14; stroke: #4a7dff; stroke-width: 1.8 }
+  svg .file { fill: #e0a80012; stroke: #c99600; stroke-width: 1.3 }
+  svg .ln { stroke: currentColor; stroke-opacity: .55; fill: none; stroke-width: 1.4 }
+  svg .w { stroke: #d9534f; stroke-opacity: .85; fill: none; stroke-width: 1.8 }
+  .legend { display:flex; gap:22px; font-size:13px; margin: 6px 0 14px; flex-wrap: wrap }
+  .legend span { display:inline-flex; align-items:center; gap:6px }
+  .sw { width:16px; height:12px; border-radius:3px; display:inline-block }
+</style>
+
+<div class="legend">
+  <span><i class="sw" style="background:#4a7dff22;border:2px solid #4a7dff"></i>new</span>
+  <span><i class="sw" style="background:#8882;border:1px solid #8888"></i>exists today</span>
+  <span><i class="sw" style="background:#e0a80022;border:1px solid #c99600"></i>file on disk</span>
+  <span><i class="sw" style="background:none;border-top:2px solid #d9534f;height:0"></i>the only writer of that file</span>
+</div>
+
+<svg viewBox="0 0 1180 760" width="100%">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" fill-opacity=".6"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d9534f"/></marker>
+  </defs>
+
+  <!-- zones -->
+  <rect class="zone" x="10" y="10" width="560" height="330" rx="12"/><text class="zl" x="26" y="32">FLIGHT DECK.APP (MAC)</text>
+  <rect class="zone" x="600" y="10" width="570" height="330" rx="12"/><text class="zl" x="616" y="32">PHONE · FLIGHTDECKMOBILE</text>
+  <rect class="zone" x="10" y="370" width="560" height="380" rx="12"/><text class="zl" x="26" y="392">DETACHED RUNNERS (FD-ABDUCO)</text>
+  <rect class="zone" x="600" y="370" width="570" height="380" rx="12"/><text class="zl" x="616" y="392">intakes/&lt;uuid&gt;/ · AND THE REPO</text>
+
+  <!-- Mac UI -->
+  <rect class="old" x="30" y="50" width="250" height="120" rx="8"/>
+  <text class="h" x="45" y="72">Plan editor (PlanTextView)</text>
+  <rect class="new" x="45" y="84" width="220" height="74" rx="6"/>
+  <text x="58" y="104">VisualBlockView</text>
+  <text class="s" x="58" y="122">WKWebView attachment, full-width</text>
+  <text class="s" x="58" y="138">filmstrip · Compare · pins</text>
+  <text class="s" x="58" y="153">text/state edits in a comp</text>
+
+  <rect class="old" x="300" y="50" width="250" height="120" rx="8"/>
+  <text class="h" x="315" y="72">Notes rail</text>
+  <rect class="new" x="315" y="84" width="220" height="30" rx="6"/><text x="328" y="104">Ask cards (aligned)</text>
+  <rect class="new" x="315" y="122" width="220" height="38" rx="6"/><text x="328" y="140">ThreadPanel</text><text class="s" x="420" y="140">index · convo</text>
+
+  <rect class="new" x="30" y="190" width="250" height="60" rx="8"/>
+  <text class="h" x="45" y="214">StructuredQuestionView</text>
+  <text class="s" x="45" y="234">radio · checkbox · toggle · Other…</text>
+
+  <rect class="old" x="300" y="190" width="250" height="60" rx="8"/>
+  <text class="h" x="315" y="214">IntakeService</text>
+  <text class="s" x="315" y="234">send(TapeCommand) · + ThreadCommand</text>
+
+  <rect class="new" x="30" y="268" width="520" height="56" rx="8"/>
+  <text class="h" x="45" y="290">VisualRenderHost</text>
+  <text class="s" x="45" y="308">offscreen WKWebView → snapshot PNGs for the phone and reviewers</text>
+
+  <!-- Phone -->
+  <rect class="old" x="620" y="50" width="260" height="110" rx="8"/>
+  <text class="h" x="635" y="72">PlanReaderScreen</text>
+  <rect class="new" x="635" y="84" width="230" height="64" rx="6"/>
+  <text x="648" y="104">Inline visual: snapshot first,</text>
+  <text class="s" x="648" y="122">tap → live WKWebView (offline)</text>
+  <text class="s" x="648" y="138">filmstrip · no pins in v2</text>
+
+  <rect class="new" x="900" y="50" width="250" height="110" rx="8"/>
+  <text class="h" x="915" y="72">Threads + diffs</text>
+  <text class="s" x="915" y="94">read · reply · Ask from selection</text>
+  <text class="s" x="915" y="112">✓ / ✗ on diffs</text>
+  <text class="s" x="915" y="130">structured questions</text>
+
+  <rect class="old" x="620" y="190" width="530" height="60" rx="8"/>
+  <text class="h" x="635" y="214">FleetKit wire</text>
+  <text class="s" x="635" y="234">+ intake.thread.*, intake.answer(structured), visual.fetch, each behind a capability flag</text>
+
+  <rect class="old" x="620" y="268" width="530" height="56" rx="8"/>
+  <text class="h" x="635" y="290">FleetService · IntakePlanProjection</text>
+  <text class="s" x="635" y="308">the Mac side of the wire; projects threads and visuals to the phone</text>
+  <line class="ln" x1="600" y1="296" x2="552" y2="230" marker-end="url(#ar)"/>
+  <line class="ln" x1="885" y1="250" x2="885" y2="266" marker-end="url(#ar)"/>
+  <line class="ln" x1="885" y1="162" x2="885" y2="188" marker-end="url(#ar)"/>
+
+  <!-- runners -->
+  <rect class="old" x="30" y="410" width="250" height="150" rx="8"/>
+  <text class="h" x="45" y="432">IntakeRunner (rounds)</text>
+  <text class="s" x="45" y="454">RoundPrompts: + visuals as source</text>
+  <text class="s" x="45" y="470">  + snapshot images</text>
+  <text class="s" x="45" y="490">schemas: + addVisual, proposeAlternate,</text>
+  <text class="s" x="45" y="506">  visualNote (never replaces a primary)</text>
+  <text class="s" x="45" y="526">triage: + structured questions,</text>
+  <text class="s" x="45" y="542">  visual-cost toggles</text>
+
+  <rect class="new" x="300" y="410" width="250" height="230" rx="8"/>
+  <text class="h" x="315" y="432">ThreadRunner (1 per intake)</text>
+  <text class="s" x="315" y="454">one headless turn per message:</text>
+  <text class="s" x="315" y="470">  HeadlessCommand + --resume</text>
+  <text class="s" x="315" y="486">  + ThreadActions schema</text>
+  <rect class="new" x="315" y="498" width="220" height="30" rx="5"/><text class="s" x="326" y="518">ThreadWorkspace (lazy files)</text>
+  <rect class="new" x="315" y="534" width="220" height="30" rx="5"/><text class="s" x="326" y="554">ActionValidator (diff applies?)</text>
+  <rect class="new" x="315" y="570" width="220" height="56" rx="5"/><text class="s" x="326" y="590">ProviderHost: runs generator</text><text class="s" x="326" y="606">commands · repo trust gate</text><text class="s" x="326" y="620"></text>
+
+  <rect class="new" x="30" y="580" width="250" height="60" rx="8"/>
+  <text class="h" x="45" y="604">ProviderRegistry</text>
+  <text class="s" x="45" y="624">bundled · ~/…/visual-providers · repo</text>
+  <line class="ln" x1="280" y1="610" x2="313" y2="600" marker-end="url(#ar)"/>
+
+  <rect class="new" x="30" y="660" width="520" height="70" rx="8"/>
+  <text class="h" x="45" y="684">PlanExporter (at release)</text>
+  <text class="s" x="45" y="704">→ docs/plans/&lt;slug&gt;/plan.md + visuals/&lt;id&gt;/ (primary)</text>
+  <text class="s" x="45" y="720">   + visuals/&lt;id&gt;/_unused-alternates/  ·  tasks cite repo-relative paths</text>
+
+  <!-- files -->
+  <rect class="file" x="620" y="410" width="250" height="56" rx="6"/><text class="h" x="635" y="432">commands.jsonl</text><text class="s" x="635" y="452">append-only: app, phone (via Mac)</text>
+  <rect class="file" x="620" y="480" width="250" height="56" rx="6"/><text class="h" x="635" y="502">tape.json · checkpoints/</text><text class="s" x="635" y="522">plan.md has ```fd-visual id=…``` refs</text>
+  <rect class="file" x="890" y="410" width="260" height="56" rx="6"/><text class="h" x="905" y="432">threads/&lt;id&gt;/</text><text class="s" x="905" y="452">thread.json · turns · pending diffs</text>
+  <rect class="file" x="890" y="480" width="260" height="76" rx="6"/><text class="h" x="905" y="502">visuals/&lt;vid&gt;/r&lt;n&gt;/</text><text class="s" x="905" y="522">manifest.json · source · renderer</text><text class="s" x="905" y="540">snapshot.png · pins.json</text>
+  <rect class="file" x="620" y="570" width="530" height="56" rx="6"/><text class="h" x="635" y="592">repo: docs/plans/&lt;slug&gt;/</text><text class="s" x="635" y="612">exported once at release; in git; read by swarm, delegated hosts, teammates</text>
+
+  <!-- writer edges (red) -->
+  <path class="w" d="M280,520 C450,520 520,515 618,508" marker-end="url(#arw)"/>
+  <path class="w" d="M550,430 C700,400 820,420 888,438" marker-end="url(#arw)"/>
+  <path class="w" d="M550,600 C700,600 820,560 888,530" marker-end="url(#arw)"/>
+  <path class="w" d="M550,700 C640,700 700,660 760,628" marker-end="url(#arw)"/>
+  <!-- app appends commands -->
+  <path class="ln" d="M425,252 C425,330 640,360 700,408" marker-end="url(#ar)"/>
+  <text class="s" x="560" y="362">append</text>
+  <!-- thread runner appends tape commands for notes/accepted -->
+  <path class="ln" d="M550,470 C580,450 600,445 618,440" marker-end="url(#ar)"/>
+  <!-- runner reads commands -->
+  <path class="ln" d="M618,425 C450,400 330,405 260,408" marker-end="url(#ar)"/>
+</svg>
+
+<div class="section" style="font-size:14px;line-height:1.6;margin-top:12px">
+  <b>Read the red arrows as ownership.</b> <code>IntakeRunner</code> stays the only writer of <code>tape.json</code> and <code>checkpoints/</code>.
+  <code>ThreadRunner</code>, which is new, is the only writer of <code>threads/</code> and <code>visuals/</code>.
+  When something a thread does has to reach the plan (a note, or a diff you accepted), it goes in as a command appended to <code>commands.jsonl</code>, exactly the way your own hand edits do.
+</div>

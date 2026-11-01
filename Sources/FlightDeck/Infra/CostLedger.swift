@@ -7,6 +7,9 @@ struct CostSegment: Codable, Equatable, Sendable {
     let start: Date
     var end: Date?
     let hourlyUSD: Double
+    /// The Flight Deck session whose machine this is, which its budget counts; nil for a
+    /// machine a shell outside any tab created, and in a record written before sessions were.
+    var session: UUID? = nil
 }
 
 /// What the machines cost: `infra-ledger.json`, apart from `infra.json` so the history
@@ -24,9 +27,9 @@ final class CostLedger {
     }
 
     /// Closes any segment still open for `name` at `at` first, so one machine never bills twice.
-    func open(name: String, hourlyUSD: Double, at: Date) throws {
+    func open(name: String, hourlyUSD: Double, at: Date, session: UUID? = nil) throws {
         var next = Self.closing(segments, name: name, at: at)
-        next.append(CostSegment(name: name, start: at, end: nil, hourlyUSD: hourlyUSD))
+        next.append(CostSegment(name: name, start: at, end: nil, hourlyUSD: hourlyUSD, session: session))
         try file.write(next)
         segments = next
     }
@@ -40,6 +43,12 @@ final class CostLedger {
 
     func spent(name: String, now: Date) -> Double {
         segments.filter { $0.name == name }.reduce(0) { $0 + Self.cost($1, from: .distantPast, to: now) }
+    }
+
+    /// What `session`'s own machines have cost inside `[since, now]`: only segments recorded as
+    /// that session's, so the figure is the same whatever else this Mac runs.
+    func spent(session: UUID, since: Date, now: Date) -> Double {
+        segments.filter { $0.session == session }.reduce(0) { $0 + Self.cost($1, from: since, to: now) }
     }
 
     /// Only the part of each segment inside `[start of now's month, now]`, so a machine that

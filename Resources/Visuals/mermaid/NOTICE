@@ -1,0 +1,22 @@
+Flight Deck bundles Mermaid to draw the diagrams in a plan's visual blocks.
+
+Package:   mermaid 12.2.0 (published to npm on 2026-10-13)
+File:      dist/mermaid.min.js, copied unchanged as mermaid.min.js
+Source:    https://registry.npmjs.org/mermaid/-/mermaid-12.2.0.tgz
+Project:   https://github.com/mermaid-js/mermaid
+License:   MIT (see LICENSE in this folder, copied from the package)
+
+Verification when it was vendored:
+- The tarball's SHA-512 matched the npm registry's published integrity value
+  (sha512-w7nr/SFrLO7BaVTs3dQTvYSV6nYSBj0Yy9DjBhsIJtAcHqRzXSq4Pg32ujHZ/AdWsAMNEvvhbm5dt9E2tOiHzw==).
+- The file's SHA-256 matched jsDelivr's published hash for /dist/mermaid.min.js
+  (base64 qKam+AWwdKgmGiglyG+ZyAVKyzs19Qu34kpPnyw8O58=).
+
+manifest.json records the file's SHA-256. The app checks it every time it loads the file,
+and refuses to serve the file if it differs.
+
+mermaid.min.js contains third-party code that Mermaid bundles (for example d3, dagre,
+DOMPurify, KaTeX and cytoscape). Their license comments are kept in the file.
+
+To update: pick one exact version that has been published for at least two weeks, verify it
+the same way, then replace mermaid.min.js and update manifest.json and this file.

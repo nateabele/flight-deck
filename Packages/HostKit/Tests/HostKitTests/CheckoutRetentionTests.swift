@@ -158,8 +158,10 @@ final class CheckoutRetentionTests: XCTestCase {
         let gib: Int64 = 1 << 30
         let watched = Watched()
         // 100 GiB volume, so the mark is 15 GiB. 5 GiB free, and each slot evicted frees 6.
+        // Plenty while the slots are set up: every checkout now holds the mark too.
         let store = makeStore(clock: clock, freeSpace: { _ in
-            VolumeSpace(available: 5 * gib + 6 * gib * Int64(watched.gone), total: 100 * gib)
+            watched.slots.isEmpty ? VolumeSpace(available: 50 * gib, total: 100 * gib)
+                : VolumeSpace(available: 5 * gib + 6 * gib * Int64(watched.gone), total: 100 * gib)
         })
         let oldestButLeased = try await leased("leased", in: store)
         clock.advance(3600)
@@ -177,6 +179,36 @@ final class CheckoutRetentionTests: XCTestCase {
         XCTAssertFalse(exists(second.slot), "then the next, while free space is under the mark")
         XCTAssertTrue(exists(third.slot.appendingPathComponent("repo/a.txt")), "and none once it is back above")
         await store.release(oldestButLeased.lease)
+    }
+
+    /// The mark is also held at sync time, not only by the hourly gc: a checkout that writes a
+    /// new tree below the mark first evicts the oldest unleased slots. jeeves filled its volume
+    /// between gc passes on 2026-10-27.
+    func testASyncBelowTheMarkEvictsBeforeApplying() async throws {
+        let clock = Clock(Date())
+        let gib: Int64 = 1 << 30
+        let watched = Watched()
+        // 100 GiB volume, mark 15 GiB, 5 GiB free; each slot evicted frees 6.
+        // Plenty while the slots are set up: every checkout now holds the mark too.
+        let store = makeStore(clock: clock, freeSpace: { _ in
+            watched.slots.isEmpty ? VolumeSpace(available: 50 * gib, total: 100 * gib)
+                : VolumeSpace(available: 5 * gib + 6 * gib * Int64(watched.gone), total: 100 * gib)
+        })
+        let first = try await idle("first", in: store)
+        clock.advance(3600)
+        let second = try await idle("second", in: store)
+        clock.advance(3600)
+        let third = try await idle("third", in: store)
+        watched.slots = [first.slot, second.slot, third.slot]
+
+        // No gc: the new worktree's checkout alone has to make room.
+        let incoming = try await leased("incoming", in: store)
+
+        XCTAssertFalse(exists(first.slot), "the oldest unleased slot goes first")
+        XCTAssertFalse(exists(second.slot), "then the next, while free space is under the mark")
+        XCTAssertTrue(exists(third.slot.appendingPathComponent("repo/a.txt")), "and none once it is back above")
+        XCTAssertTrue(exists(incoming.lease.path.appendingPathComponent("a.txt")), "the new tree is applied")
+        await store.release(incoming.lease)
     }
 
     /// The probe's view of which slots are gone, for a free-space figure that tracks them.

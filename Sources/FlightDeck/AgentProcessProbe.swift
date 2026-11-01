@@ -24,12 +24,24 @@ struct AgentProcessProbe {
 
     /// True when a process descended from any of `roots` (the tab's fd-abduco daemon, its
     /// surface's shell) was started as `agent`'s binary.
-    func isRunning(_ agent: AgentID, under roots: [pid_t]) -> Bool {
+    ///
+    /// `knownPID` is the fast path for an agent that announces itself (claude's status
+    /// registry): the pid the store already follows for the tab. It is checked first, as a
+    /// process the inspector still lists whose argv[0] is the agent's binary — the same test
+    /// the walk applies — and a hit skips the walk. It is NOT trusted on its own, because the
+    /// registry row outlives nothing: a pid that is gone, recycled or exec'd into something
+    /// else fails the check and falls through to the walk, which stays the authority for
+    /// every other agent and for a tab with no row.
+    func isRunning(_ agent: AgentID, under roots: [pid_t], knownPID: pid_t? = nil) -> Bool {
         let name = AgentProfiles.profile(for: agent).binaryName
+        func runsAgent(_ pid: pid_t) -> Bool {
+            argv0(pid).map { ($0 as NSString).lastPathComponent == name } ?? false
+        }
+        if let known = knownPID, known > 0, inspector.startTime(of: known) != nil, runsAgent(known) { return true }
         var seen: Set<pid_t> = []
         for root in roots where root > 0 {
             for process in inspector.descendants(of: root) where seen.insert(process.pid).inserted {
-                if let first = argv0(process.pid), (first as NSString).lastPathComponent == name { return true }
+                if runsAgent(process.pid) { return true }
             }
         }
         return false

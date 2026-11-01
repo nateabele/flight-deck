@@ -88,8 +88,9 @@ protocol DelegationHostDirectory: AnyObject {
 protocol InfraUpProviding: AnyObject {
     /// Creates `[infra.<name>]` (or takes over the one already running), returning once it is
     /// a paired, online host. `notice` gets each progress line. Throws `DelegationError` with
-    /// the `infra_*` code and its finished line.
-    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL,
+    /// the `infra_*` code and its finished line. A machine it creates is `session`'s, and
+    /// counts against that session's budget.
+    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?,
                              notice: @escaping (String) -> Void) async throws
     /// The §8.4 line for a cloud machine; nil for any other host.
     @MainActor func costLine(host: String) -> String?
@@ -308,6 +309,10 @@ final class DelegationService {
             // about, so every answer would be wrong; refused like a scoped write is.
             return reply(.err(cid: cid, code: "out_of_scope",
                               message: "this tab's control token is not valid — reopen the tab and retry"))
+        case .intakeRunner:
+            // A planning runner delegates nothing; `ControlScope` already refuses it, and this
+            // arm keeps that true if a caller ever reaches here some other way.
+            return reply(.err(cid: cid, code: "out_of_scope", message: "a planning runner cannot delegate work"))
         }
         Task { @MainActor in
             do {
@@ -470,7 +475,7 @@ final class DelegationService {
             ptySize: run.columns.flatMap { columns in run.rows.map { TerminalSize(columns: columns, rows: $0) } },
             // Only a service is kept alive past a lost controller, so only a service's counts.
             fetch: fetch, pool: recipe?.pool, orphanTimeout: service ? recipe?.orphanTimeout : nil)
-        try await ensureCloudHost(host, config: config, worktree: worktree, cid: cid, reply: reply)
+        try await ensureCloudHost(host, config: config, worktree: worktree, owner: owner, cid: cid, reply: reply)
         let link = try deps.hosts.link(named: host)
         // Before anything streams, so a detached run (whose stream ends on `delegateStarted`)
         // still shows what the machine it lands on is costing.
@@ -546,7 +551,7 @@ final class DelegationService {
     /// A run aimed at a `[infra.<name>]` machine that is not a paired host yet: created first
     /// when the recipe says `auto_up`, with its progress as notices; otherwise refused with the
     /// command that creates it, rather than the directory's bare "unknown host".
-    private func ensureCloudHost(_ host: String, config: DelegateConfig, worktree: URL, cid: Int,
+    private func ensureCloudHost(_ host: String, config: DelegateConfig, worktree: URL, owner: UUID?, cid: Int,
                                  reply: @escaping (ServerFrame) -> Void) async throws {
         guard let recipe = config.infra[host],
               !deps.hosts.hostNames.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) else { return }
@@ -564,7 +569,7 @@ final class DelegationService {
         case .module(let path): what = "module \(path)"
         }
         reply(.delegateNotice(cid: cid, message: "creating \(host) (\(what))…"))
-        try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree) { line in
+        try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree, session: owner) { line in
             reply(.delegateNotice(cid: cid, message: line))
         }
     }
@@ -1280,7 +1285,14 @@ final class DelegationService {
         case "result_expired": return "the result expired on \(host) — rerun to get the changes again"
         case "unsafe_path": return "\(host) sent back a result with an unsafe path, so nothing was applied — check the run's changes on \(host)"
         case "git_too_old": return "\(host)'s git is older than 2.40 — update git on \(host), then rerun"
-        case "unsupported", "not_implemented": return "\(host) does not support this yet — update Flight Deck on \(host)"
+        // Only an op the host does not know is an outdated host. `unsupported` is also what a
+        // current host answers for a repo or run it refuses (an unborn HEAD, a tracked artifact,
+        // a missing subdirectory, a revoked pairing), and on 2026-10-27 telling The Plan to
+        // update an already-current jeeves hid which of those it was.
+        case "not_implemented": return "\(host) does not support this yet — update Flight Deck on \(host)"
+        case "unsupported" where message.isEmpty || message == "unknown request":
+            return "\(host) does not support this yet — update Flight Deck on \(host)"
+        case "unsupported": return "\(host) refused the run: \(message)"
         default: return "\(host): \(message)"
         }
     }

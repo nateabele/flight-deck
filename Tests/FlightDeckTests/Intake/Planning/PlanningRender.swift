@@ -11,9 +11,14 @@ import XCTest
 /// would silently leave every card out.
 @MainActor
 enum PlanningRender {
+    /// `FD_RENDER_APPEARANCE=light` draws every render that does not name its own appearance in
+    /// light, so a whole render run can be looked at in the other appearance.
+    nonisolated static let defaultAppearance: NSAppearance.Name =
+        ProcessInfo.processInfo.environment["FD_RENDER_APPEARANCE"] == "light" ? .aqua : .darkAqua
+
     /// `prepare` runs once the view has laid out and settled, before the picture is taken — to
     /// scroll it, say — and gets the hosting view. Dark unless `appearance` says otherwise.
-    static func write(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = .darkAqua,
+    static func write(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = defaultAppearance,
                       prepare: ((NSView) -> Void)? = nil) throws {
         let root = view.frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))

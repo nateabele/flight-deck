@@ -1,0 +1,43 @@
+pub mod ack;
+pub mod alloc;
+pub mod alias;
+pub mod client;
+pub mod chunk;
+pub mod cochange;
+pub mod daemon;
+pub mod edit;
+pub mod engine;
+pub mod error;
+#[cfg(feature = "eval")]
+pub mod eval;
+pub mod facts;
+pub mod git;
+pub mod graph;
+pub mod guard;
+pub mod history;
+pub mod indexstore;
+pub mod lang;
+pub mod near;
+pub mod links;
+pub mod mcp;
+pub mod names;
+pub mod pkgview;
+pub mod proto;
+pub mod query;
+pub mod resolve;
+pub mod runtime;
+pub mod service;
+pub mod service_install;
+pub mod session_start;
+pub mod store;
+pub mod sweep;
+pub mod switchover;
+pub mod textedit;
+pub mod tools;
+pub mod watch;
+pub mod words;
+pub mod refresh;
+pub mod retention;
+
+#[global_allocator]
+static ALLOCATOR: alloc::Counting = alloc::Counting;

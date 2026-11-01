@@ -82,7 +82,7 @@ enum MeterFormatter {
         // that the provider, not our arithmetic, closed the account.
         if let rejection, now < rejection.expiry {
             let realUtilization = reading.flatMap { r in
-                r.worstWindow.map { window in
+                r.worstWindow.flatMap { window in
                     HeadroomPolicy.effectiveUtilization(of: window, readAt: r.readAt, now: now)
                 }
             }
@@ -100,7 +100,7 @@ enum MeterFormatter {
 
         let detail: String?
         if let error { detail = error }
-        else if h.state == .unknown { detail = reading == nil ? "no reading" : "reading is stale" }
+        else if h.state == .unknown { detail = reading.map(unknownReadingText) ?? "no reading" }
         else { detail = nil }
         return AccountMeterModel(
             id: "\(pool.id.rawValue)|\(h.account.id?.uuidString ?? "slot")",
@@ -148,6 +148,205 @@ enum MeterFormatter {
     }
 
     private static func severity(_ m: AccountMeterModel) -> Double { (m.state == .overHard ? 2 : 1) + (m.fraction ?? 0) }
+
+    /// Why a reading yields no number: one with no windows at all (claude off a subscription
+    /// reports none) is current but has no limits; otherwise its windows have gone stale with no
+    /// reset to hold until.
+    static func unknownReadingText(_ reading: UsageReading) -> String {
+        reading.windows.isEmpty ? "No limits reported" : "No current reading"
+    }
+}
+
+/// One window of an account's Accounts-pane row.
+struct AccountUsageLine: Equatable {
+    let label: String
+    /// Projected through `HeadroomPolicy`, so a window whose reset passed reads 0.
+    let fraction: Double
+    let state: HeadroomState
+    let percentText: String
+    /// Empty when the window names no reset time.
+    let resetText: String
+}
+
+/// An account's usage as the Accounts pane draws it, decided outside SwiftUI like the meters above.
+struct AccountUsageRowModel: Equatable {
+    enum Body: Equatable { case lines([AccountUsageLine]), message(String) }
+    let body: Body
+    let soft: Double
+    let hard: Double
+    /// Also the accessibility value, so the hover text and VoiceOver say the same thing.
+    let tooltip: String
+}
+
+extension MeterFormatter {
+    /// A short column label. Unknown names fall back to their length or their first characters
+    /// so a new vendor window still reads as something rather than overflowing the column.
+    static func windowLabel(_ name: String) -> String {
+        switch name {
+        case "five_hour": return "5h"
+        case "seven_day": return "wk"
+        case "seven_day_opus": return "Opus wk"
+        case "seven_day_sonnet": return "Sonnet wk"
+        case "credits", "credits_balance": return "credit"
+        case "weekly": return "wk"
+        case "rejected": return "Refused"
+        case "retry-after": return "Retry"
+        default: break
+        }
+        // Gemini names its windows "gemini-5h" and "gemini-weekly"; without the vendor prefix
+        // they would both fall to the same six characters and read as one window.
+        if let dash = name.firstIndex(of: "-"), dash > name.startIndex,
+           name[..<dash].allSatisfy({ $0 >= "a" && $0 <= "z" }) {
+            let rest = String(name[name.index(after: dash)...])
+            if !rest.isEmpty { return windowLabel(rest) }
+        }
+        if name.hasSuffix("m"), let minutes = Int(name.dropLast()), minutes > 0 {
+            return minutes % 60 == 0 ? "\(minutes / 60)h" : "\(minutes)m"
+        }
+        // Codex names a window "<limitId>:<base>"; the base is what tells the windows apart.
+        if let colon = name.firstIndex(of: ":") {
+            let base = String(name[name.index(after: colon)...])
+            if !base.isEmpty { return windowLabel(base) }
+        }
+        return String(name.prefix(6))
+    }
+
+    /// The Accounts row's usage cluster: at most two lines (the five-hour-class window and the
+    /// worst of the rest), with every window, usable or not, in the tooltip.
+    static func accountUsage(account id: UUID, ledger: CapacityLedger, now: Date,
+                             timeZone: TimeZone = .current, locale: Locale = .current) -> AccountUsageRowModel {
+        // The strictest threshold anyone set, as `rowMeter` does.
+        let pools = ledger.allPools.filter { $0.kind == .hosted && $0.accounts.contains(id) }
+        let soft = pools.map(\.softThreshold).min() ?? CapacityPool.defaultSoftThreshold
+        let hard = pools.map(\.hardThreshold).min() ?? CapacityPool.defaultHardThreshold
+        func state(_ fraction: Double) -> HeadroomState {
+            fraction >= hard ? .overHard : fraction >= soft ? .overSoft : .underSoft
+        }
+        func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }
+        func clock(_ date: Date, _ format: String) -> String {
+            let f = DateFormatter()
+            f.locale = locale
+            f.timeZone = timeZone
+            f.dateFormat = format
+            return f.string(from: date)
+        }
+        func resetColumn(_ date: Date) -> String {
+            clock(date, date.timeIntervalSince(now) < 86_400 ? "h:mm a" : "EEE h a")
+        }
+
+        let reading = ledger.latestReading(account: id)
+        let rejection = ledger.rejection(account: id).flatMap { now < $0.expiry ? $0 : nil }
+        func sourceLine(_ source: String, readAt: Date, fresh: Bool) -> String {
+            let line = "\(source) · \(age(now.timeIntervalSince(readAt)))"
+            return fresh ? line : line + " · held from last reading"
+        }
+
+        struct Projected {
+            let window: UsageWindow
+            let fraction: Double?
+            /// "reset" only when the reset is what zeroed the number: a fresh window whose reset
+            /// predates its reading keeps its value, and routing counts it, so row and tooltip must too.
+            func zeroedByReset(now: Date) -> Bool {
+                guard let resetsAt = window.resetsAt, let fraction else { return false }
+                return resetsAt <= now && fraction == 0 && window.utilization != 0
+            }
+        }
+        let projected = (reading?.windows ?? []).map { w in
+            Projected(window: w, fraction: reading.flatMap { HeadroomPolicy.effectiveUtilization(of: w, readAt: $0.readAt, now: now) })
+        }
+
+        var tooltipLines: [String] = projected.map { p -> String in
+            let label = windowLabel(p.window.name)
+            guard let fraction = p.fraction else { return "\(label) \(percent(p.window.utilization)) · no reset time" }
+            guard let resetsAt = p.window.resetsAt else { return "\(label) \(percent(fraction)) · no reset time" }
+            if p.zeroedByReset(now: now) { return "\(label) 0% · reset" }
+            if resetsAt <= now { return "\(label) \(percent(fraction))" }
+            return "\(label) \(percent(fraction)) · resets \(clock(resetsAt, "EEE MMM d, h:mm a"))"
+        }
+        if let rejection {
+            tooltipLines.insert("\(refusedDetail) · \(rejection.source) · until \(clock(rejection.expiry, "EEE MMM d, h:mm a"))", at: 0)
+        }
+        if let reading {
+            tooltipLines.append(sourceLine(reading.source, readAt: reading.readAt, fresh: HeadroomPolicy.isFresh(reading, now: now)))
+        } else if let rejection {
+            tooltipLines.append(sourceLine(rejection.source, readAt: rejection.at, fresh: true))
+        }
+
+        // Spec §3: a rejection outranks any meter, so the row says refused rather than a number.
+        if let rejection {
+            let worst = reading?.worstWindow.map { windowLabel($0.name) } ?? "5h"
+            let line = AccountUsageLine(label: worst, fraction: 1, state: .overHard, percentText: "Refused",
+                                        resetText: resetColumn(rejection.expiry))
+            return AccountUsageRowModel(body: .lines([line]), soft: soft, hard: hard, tooltip: tooltipLines.joined(separator: "\n"))
+        }
+        guard reading != nil else {
+            return AccountUsageRowModel(body: .message("No usage yet"), soft: soft, hard: hard, tooltip: "No usage yet")
+        }
+
+        // The held numbers stay in the tooltip when none of them can be trusted as a number.
+        let usable = projected.compactMap { p in p.fraction.map { (projected: p, window: p.window, fraction: $0) } }
+        guard !usable.isEmpty else {
+            return AccountUsageRowModel(body: .message(reading.map(unknownReadingText) ?? "No current reading"),
+                                        soft: soft, hard: hard, tooltip: tooltipLines.joined(separator: "\n"))
+        }
+
+        let first = usable.first { $0.window.name == "five_hour" } ?? usable.sorted { $0.window.name < $1.window.name }[0]
+        let second = usable.filter { $0.window.name != first.window.name }.max { $0.fraction < $1.fraction }
+        let rows = [first, second].compactMap { $0 }.map { u -> AccountUsageLine in
+            let resetText: String
+            if let resetsAt = u.window.resetsAt, resetsAt > now { resetText = resetColumn(resetsAt) }
+            else if u.projected.zeroedByReset(now: now) { resetText = "reset" }
+            else { resetText = "" }
+            return AccountUsageLine(label: windowLabel(u.window.name), fraction: u.fraction, state: state(u.fraction),
+                                    percentText: percent(u.fraction), resetText: resetText)
+        }
+        return AccountUsageRowModel(body: .lines(rows), soft: soft, hard: hard, tooltip: tooltipLines.joined(separator: "\n"))
+    }
+}
+
+/// An account's usage windows in its Accounts row. Fixed width and at most two caption lines, so
+/// the row keeps its height and the pane its width.
+struct AccountUsageCluster: View {
+    let model: AccountUsageRowModel
+    let accountName: String
+
+    static let width: CGFloat = 202
+
+    var body: some View {
+        VStack(spacing: 0) {
+            switch model.body {
+            case .lines(let lines):
+                VStack(spacing: 2) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        HStack(spacing: 4) {
+                            Text(line.label).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(width: 52, alignment: .trailing)
+                            MeterTrack(fraction: line.fraction, soft: model.soft, hard: model.hard, state: line.state)
+                                .frame(width: 40, height: 4)
+                            Text(line.percentText).monospacedDigit().lineLimit(1)
+                                .frame(width: 44, alignment: .trailing)
+                            Text(line.resetText).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(width: 54, alignment: .leading)
+                        }
+                    }
+                }
+            case .message(let message):
+                Text(message).foregroundStyle(.secondary).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .font(.caption)
+        // 52 + 40 + 44 + 54 of columns plus 3 x 4 of spacing: the fixed copy ("Sonnet wk", "Refused",
+        // "Wed 12 PM") measures wider at .caption than a guessed width would hold. The percent
+        // column is 44, not the 40 "Refused" measures (39.5), so a font change cannot truncate it.
+        .frame(width: Self.width)
+        .help(model.tooltip)
+        // As `AccountMeterBar`: an AXGroup carries no AXValue, a Text carries its string as `value`,
+        // so the name and the reading travel as one Text, which VoiceOver also speaks.
+        .accessibilityRepresentation {
+            Text("\(accountName) usage: \(model.tooltip)").accessibilityIdentifier("account-usage-\(accountName)")
+        }
+    }
 }
 
 /// The bar itself: fill by state, ticks at soft and hard.

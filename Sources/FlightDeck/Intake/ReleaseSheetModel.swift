@@ -12,8 +12,16 @@ struct ReleaseSheetModel {
     /// Titles of the existing tasks the change set names, by id, from the live graph
     /// (`ReleaseReview.titles`).
     let titles: [String: String]
+    /// The repo files release will write and the commit it will make; nil when the plan has no
+    /// export to show (`ReleaseReview.export`).
+    let export: PlanExportPreview?
+    /// Why release would refuse to export the plan (`ReleaseReview.exportRefusal`).
+    let exportRefusal: String?
 
-    init(ops: [ChangeOp], drift: [OpDrift], dropped: Set<Int>, titles: [String: String]) {
+    init(ops: [ChangeOp], drift: [OpDrift], dropped: Set<Int>, titles: [String: String],
+         export: PlanExportPreview? = nil, exportRefusal: String? = nil) {
+        self.export = export
+        self.exportRefusal = exportRefusal
         self.ops = ops
         self.skipped = ReleaseSummary.skipped(drift: drift, dropped: dropped).filter { $0 < ops.count }
         self.titles = titles
@@ -24,8 +32,24 @@ struct ReleaseSheetModel {
 
     var releaseButton: String { UIText.releaseButton(counts) }
 
+    /// An export release would refuse blocks the button: pressing it could only fail.
+    var exportBlocksRelease: Bool { exportRefusal != nil }
+    /// The button's help when it is blocked by the export, naming why; nil otherwise.
+    var releaseHelp: String? { exportRefusal.map { "Release is blocked: \($0)" } }
+
     /// Nil while nothing is left out: there is no selection to report, only drops.
     var header: String? { skipped.isEmpty ? nil : UIText.droppedCount(skipped.count) }
+
+    /// Words for the export section: what lands in the repo, then the commit. Empty when there
+    /// is no export, so the sheet shows nothing rather than an empty heading.
+    var exportLines: [String] {
+        guard let export, !export.paths.isEmpty else { return [] }
+        return ["Writes \(export.paths.count) \(export.paths.count == 1 ? "file" : "files") to the repo"]
+            + export.paths
+            // A re-release replaces the folder whole; what it drops is deleted in the same commit.
+            + export.removed.map { "Removes \($0)" }
+            + ["Commits only those paths: \(export.commitMessage)"]
+    }
 
     /// A row's words, and the ids behind them for its help tag.
     struct Line: Equatable {

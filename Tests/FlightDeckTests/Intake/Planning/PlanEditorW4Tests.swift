@@ -155,6 +155,35 @@ final class PlanEditorW4Tests: XCTestCase {
         coordinator.timer?.invalidate()
     }
 
+    /// N4: an accepted thread edit arriving in a focused, clean editor is applied in place, as
+    /// an edit to the text — the caret follows the text around it and the undo stack is kept —
+    /// rather than reloaded, which put the caret at the end and emptied the stack.
+    @MainActor
+    func testAnAcceptAppliesInPlaceKeepingTheCaretAndUndo() throws {
+        let base = "# Plan\n\nWe ship on Friday.\n\nNotes here.\n"
+        let (coordinator, container, window) = editor(base, generated: base)
+        defer { coordinator.timer?.invalidate(); window.close() }
+        let notes = (base as NSString).range(of: "Notes").location
+        type("X", at: notes, in: container.textView)
+        _ = coordinator.session.flush()
+        let caret = container.textView.selectedRange().location
+        XCTAssertTrue(coordinator.undo.canUndo)
+
+        let typed = container.textView.string
+        let accepted = typed.replacingOccurrences(of: "We ship on Friday.", with: "We ship on Monday the 3rd.")
+        coordinator.receive(accepted, navigation: false, accept: true)
+        XCTAssertEqual(container.textView.string, accepted, "applied at once, no reload")
+        XCTAssertEqual(container.textView.selectedRange().location, caret + ("Monday the 3rd" as NSString).length - ("Friday" as NSString).length,
+                       "the caret moved with its text")
+        XCTAssertTrue(coordinator.undo.canUndo, "the typing is still undoable")
+        XCTAssertFalse(coordinator.session.dirty)
+    }
+
+    func testTheBannerNamesAnAcceptedEdit() {
+        XCTAssertEqual(IncomingBanner.title(accept: true), "Accepted edit applied")
+        XCTAssertEqual(IncomingBanner.title(accept: false), "A new round landed")
+    }
+
     // MARK: 3 · Stale head
 
     private func tape(heads: [Int], conflictAt head: Int? = nil, for edits: Int? = nil) -> Tape {

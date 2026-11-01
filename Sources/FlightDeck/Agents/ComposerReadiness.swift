@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Whether an agent's own input box is there to be typed into, derived from the agent's
@@ -21,7 +22,7 @@ enum ComposerReadiness: Equatable, Sendable {
     case absent
 }
 
-/// One line of the hook event log, reduced to the two fields that matter.
+/// One line of the hook event log (`HookEventLine`), reduced to the fields Flight Deck reads.
 struct HookEventRecord: Equatable {
     let sessionID: UUID
     let event: String
@@ -30,8 +31,8 @@ struct HookEventRecord: Equatable {
     var agentID: String? = nil
     var toolUseID: String? = nil
     var toolName: String? = nil
-    /// Canonical JSON (keys sorted), so a PermissionRequest's input compares equal to the
-    /// PreToolUse's for the same call.
+    /// The input's digest (`HookEventLine.toolInputDigest`), never the input itself: it is
+    /// only compared, so a PermissionRequest matches the PreToolUse for the same call.
     var toolInput: String? = nil
 
     /// Fails closed: anything unrecognised yields nil and the caller keeps its last state.
@@ -42,13 +43,11 @@ struct HookEventRecord: Equatable {
               let sessionID = UUID(uuidString: rawID),
               let event = obj["hook_event_name"] as? String
         else { return nil }
-        let input = obj["tool_input"].flatMap {
-            try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed])
-        }.flatMap { String(data: $0, encoding: .utf8) }
         return HookEventRecord(sessionID: sessionID, event: event,
                                agentID: (obj["agent_id"] as? String).flatMap { SubagentID.isValid($0) ? $0 : nil },
                                toolUseID: obj["tool_use_id"] as? String,
-                               toolName: obj["tool_name"] as? String, toolInput: input)
+                               toolName: obj["tool_name"] as? String,
+                               toolInput: HookEventLine.toolInputDigest(in: obj))
     }
 }
 

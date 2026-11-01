@@ -15,7 +15,7 @@ final class DelegationCLIRunnerTests: XCTestCase {
 
     private func runner(_ args: String..., transport: FakeTransport, env: [String: String] = [:],
                         isTTY: Bool = true) -> CLIRunner {
-        let invocation = (try? CLIArguments.parse(args)) ?? CLIInvocation(command: .help)
+        let invocation = (try? CLIArguments.parse(args)) ?? CLIInvocation(command: .help())
         let r = CLIRunner(invocation: invocation, transport: transport,
                           context: CLIContext(selfID: nil, cwd: "/w/a", json: false, isTTY: isTTY, environment: env),
                           out: { self.out.append($0) }, err: { self.err.append($0) },

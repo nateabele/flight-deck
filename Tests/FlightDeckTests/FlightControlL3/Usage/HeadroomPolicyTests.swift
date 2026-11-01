@@ -28,7 +28,8 @@ final class HeadroomPolicyTests: XCTestCase {
         XCTAssertNil(h.worstUtilization)
     }
 
-    func testAReadingOlderThanThirtyMinutesIsUnknown() {
+    /// No reset time means nothing says when the number stops being true, so past freshness it is dropped.
+    func testAStaleReadingWithoutAResetTimeIsUnknown() {
         let at = usageISO("2026-10-04T18:00:00Z")
         let r = UsageRefs.reading(UsageRefs.work, 0.5, at: at)
         XCTAssertEqual(evaluate(r, at: at.addingTimeInterval(30 * 60)).state, .underSoft, "exactly 30 minutes is still fresh")
@@ -47,15 +48,41 @@ final class HeadroomPolicyTests: XCTestCase {
         XCTAssertEqual(later.resetsAt, usageISO("2026-10-18T22:00:00Z"))
         let soft = UsageRefs.reading(UsageRefs.work, 0.85, at: at, resetsAt: usageISO("2026-10-18T22:00:00Z"))
         XCTAssertEqual(evaluate(soft, at: usageISO("2026-10-15T21:00:00Z")).state, .overSoft)
-        XCTAssertEqual(evaluate(r, at: usageISO("2026-10-18T22:00:01Z")).state, .unknown, "reset: nothing known now")
+        let reset = evaluate(r, at: usageISO("2026-10-18T22:00:01Z"))
+        XCTAssertEqual(reset.state, .underSoft, "reset: reads zero")
+        XCTAssertEqual(reset.worstUtilization, 0, "reset: reads zero")
     }
 
-    /// The other half: a stale LOW number is no evidence of headroom — usage may have risen
-    /// since — so it stays unknown rather than under soft.
-    func testAStaleReadingUnderSoftStaysUnknown() {
+    /// The other half: a stale LOW number is no proof of headroom — usage may have risen since —
+    /// but decision 2026-10-25 (the maintainer) is to hold the last value until the window resets.
+    func testAStaleReadingUnderSoftHoldsUntilItsReset() {
         let at = usageISO("2026-10-13T12:00:00Z")
         let r = UsageRefs.reading(UsageRefs.work, 0.30, at: at, resetsAt: usageISO("2026-10-18T22:00:00Z"))
-        XCTAssertEqual(evaluate(r, at: usageISO("2026-10-15T21:00:00Z")).state, .unknown)
+        let h = evaluate(r, at: usageISO("2026-10-15T21:00:00Z"))
+        XCTAssertEqual(h.state, .underSoft)
+        XCTAssertEqual(h.worstUtilization, 0.30)
+    }
+
+    func testAStaleReplayedWindowPastItsResetReadsZero() {
+        // status line replays old limits with a new readAt (CapacityLedger.merged)
+        let readAt = usageISO("2026-10-04T23:00:30Z")
+        let r = UsageRefs.reading(UsageRefs.work, 0.97, at: readAt, resetsAt: usageISO("2026-10-04T23:00:00Z"))
+        let h = evaluate(r, at: readAt.addingTimeInterval(30 * 60 + 1))
+        XCTAssertEqual(h.state, .underSoft)
+        XCTAssertEqual(h.worstUtilization, 0)
+        XCTAssertNil(h.resetsAt)
+    }
+
+    func testAStaleReadingKeepsOnlyWindowsWithAResetTime() {
+        let at = usageISO("2026-10-13T12:00:00Z")
+        let r = UsageReading(account: UsageRefs.work, windows: [
+            UsageWindow(name: "five_hour", utilization: 0.4, resetsAt: usageISO("2026-10-13T15:00:00Z")),
+            UsageWindow(name: "credits", utilization: 0.99, resetsAt: nil)],
+            readAt: at, source: "test", hardRejection: false)
+        XCTAssertEqual(evaluate(r, at: at.addingTimeInterval(60)).state, .overHard, "fresh: the no-reset window counts")
+        let stale = evaluate(r, at: usageISO("2026-10-13T14:00:00Z"))
+        XCTAssertEqual(stale.state, .underSoft)
+        XCTAssertEqual(stale.worstUtilization, 0.4)
     }
 
     func testAReadingWithNoWindowsIsUnknown() {

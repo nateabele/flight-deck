@@ -3,6 +3,8 @@ locals {
   # GPU families like g6 or p5 start with their letter and so do not match. a1, the first
   # Graviton, predates the suffix and is named outright, or it would get an amd64 AMI that
   # RunInstances refuses.
+  # See instance_initiated_shutdown_behavior below.
+  shutdown_behavior = var.spot ? null : "terminate"
   arch = coalesce(var.arch, can(regex("^(a1|[a-z]+[0-9]+[a-z]*g[a-z]*)\\.", var.instance_type)) ? "arm64" : "x86_64")
 }
 
@@ -121,7 +123,10 @@ resource "aws_instance" "this" {
 
   # The machine half of "nothing outlives its TTL" (spec §7.2): cloud-init's TTL poweroff
   # timer becomes a termination, so a lost Mac cannot leave a stopped instance and its disk billing.
-  instance_initiated_shutdown_behavior = "terminate"
+  # Left unset for spot: the provider applies it with ModifyInstanceAttribute after launch, which
+  # AWS refuses for spot instances (UnsupportedOperation), and a one-time spot instance cannot be
+  # stopped, so its shutdown already terminates it.
+  instance_initiated_shutdown_behavior = local.shutdown_behavior
 
   root_block_device {
     volume_size           = var.disk_gb

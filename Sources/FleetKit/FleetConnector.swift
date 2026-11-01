@@ -143,6 +143,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// The intake tables: one per answer shape, in the shared `cid` space like the rest.
     private var pendingIntakeDetail: [Int: (Result<WireIntakeDetail?, FleetRequestError>) -> Void] = [:]
     private var pendingIntakePlan: [Int: (Result<WireIntakePlan, FleetRequestError>) -> Void] = [:]
+    private var pendingIntakeThread: [Int: (Result<WireThreadPage, FleetRequestError>) -> Void] = [:]
+    /// File reads for the phone's file viewer, one table per answer shape like the rest.
+    private var pendingFile: [Int: (Result<WireFileChunk, FleetRequestError>) -> Void] = [:]
     /// A fourth answer type, on the same reasoning `pendingAcks` and `pendingOptions` give:
     /// one table per answer shape, all four sharing the single `cid` space `FleetClient.send`
     /// mints from, so a number is filed in at most one and `apply` tries each in turn.
@@ -158,6 +161,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// all sharing the single `cid` space `FleetClient.send` mints from, so a number is filed
     /// in at most one and `apply` tries each in turn.
     private var pendingClosed: [Int: (Result<[WireClosedSession], FleetRequestError>) -> Void] = [:]
+    /// A tab's account choices, usage and context (`account.list`), for the session sheet.
+    /// Same reasoning as the tables above.
+    private var pendingAccounts: [Int: (Result<WireAccountChoices, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     /// The epoch of the snapshot `fleet` descends from, handed back in every `hello` beside
@@ -341,6 +347,63 @@ public final class FleetConnector: @unchecked Sendable {
         pendingIntakePlan[cid] = completion
     }
 
+    /// Ask for one ask thread's conversation after turn `since` (all of it when nil). Same
+    /// contract as `requestIntakeDetail`. Only for a Mac whose detail says `threads == true`.
+    public func requestIntakeThread(
+        id: UUID, threadID: UUID, since: Int?,
+        then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.intakeThreadGet(id: id, threadID: threadID, since: since))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingIntakeThread[cid] = completion
+    }
+
+    /// Ask for a byte range of a file a transcript links. Same contract as
+    /// `requestIntakeDetail`; a Mac too old to know `file.read` answers `unsupported`.
+    public func requestFile(
+        session: UUID, path: String, offset: Int64, limit: Int, maxPixel: Int?,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.fileRead(
+            session: session, path: path, offset: offset, limit: limit, maxPixel: maxPixel))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingFile[cid] = completion
+    }
+
+    /// Ask for a byte range of one visual revision (`intake.visual.fetch`). The reply is a
+    /// `WireFileChunk` on the same table `requestFile` uses, so the err routing and the
+    /// disconnect drain are already right. Only for a Mac whose detail says `visuals == true`;
+    /// an older one answers `unsupported`.
+    ///
+    /// The result takes the request back: a caller that gives up (its deadline passed) calls it, and
+    /// the handler leaves the table without being called (on the connector's queue, like every request), so a Mac that never answers leaves
+    /// nothing registered, and a reply that does come late is dropped. Harmless to call twice, or
+    /// after the reply.
+    @discardableResult
+    public func requestVisual(
+        id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) -> () -> Void {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { completion(.failure(.disconnected)); return {} }
+        let cid = winner.send(FleetRequest.intakeVisualFetch(
+            id: id, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit))
+        guard cid != 0 else { completion(.failure(.disconnected)); return {} }
+        pendingFile[cid] = completion
+        return { [weak self] in
+            guard let self else { return }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            self.pendingFile.removeValue(forKey: cid)
+        }
+    }
+
+    /// File and visual requests still waiting for their reply (a test's way to see a cancel land).
+    public var outstandingFileRequests: Int { pendingFile.count }
+
     /// Ask the Mac which addresses it can currently be reached on. Same contract as
     /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is
     /// nothing to ask.
@@ -419,6 +482,20 @@ public final class FleetConnector: @unchecked Sendable {
         pendingClosed[cid] = completion
     }
 
+    /// Ask for tab `session`'s account choices, with each account's usage and the tab's
+    /// context fill. Same contract as `request(_:then:)`. A Mac built before the phone could ask
+    /// answers `out_of_scope`.
+    public func requestAccountChoices(
+        session: UUID,
+        then completion: @escaping (Result<WireAccountChoices, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.accountList(session: session))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingAccounts[cid] = completion
+    }
+
     /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
     /// front when the Mac still claims it.
     private func adoptEndpoints(_ list: [String]) {
@@ -475,6 +552,22 @@ public final class FleetConnector: @unchecked Sendable {
         completion(result)
     }
 
+    private func resolveIntakeThread(
+        _ cid: Int, with result: Result<WireThreadPage, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingIntakeThread.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveFile(
+        _ cid: Int, with result: Result<WireFileChunk, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingFile.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
     private func resolveConversations(
         _ cid: Int, with result: Result<WireConversationCatalogue, FleetRequestError>
     ) {
@@ -504,6 +597,14 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingClosed.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveAccounts(
+        _ cid: Int, with result: Result<WireAccountChoices, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingAccounts.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -670,6 +771,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// that assumes a frame always follows `hello`: against an older Mac, none does.
     private func apply(_ frame: ServerFrame) {
         switch frame {
+        case .peer:
+            // Peer replies are local-CLI-only, never a phone's fleet state or resume cursor.
+            return
         case .snapshot(let seq, let snapshot, let reason, let epoch):
             fleet = snapshot
             // Unconditionally, nil included: a Mac that stopped sending one (a downgrade) must
@@ -712,6 +816,10 @@ public final class FleetConnector: @unchecked Sendable {
             adoptEndpoints(list)
             resolveEndpoints(cid, with: .success(list))
             return
+        case .accountChoices(let cid, let choices):
+            // Unsequenced, same reason as `newSessionOptions`.
+            resolveAccounts(cid, with: .success(choices))
+            return
         case .recentlyClosed(let cid, let closed):
             // Unsequenced, exactly like `page` and `newSessionOptions` and for the same
             // reason — a reopen list is not fleet state and must not move the resume point.
@@ -723,6 +831,12 @@ public final class FleetConnector: @unchecked Sendable {
             return
         case .intakePlan(let cid, let plan):
             resolveIntakePlan(cid, with: .success(plan))
+            return
+        case .intakeThread(let cid, let page):
+            resolveIntakeThread(cid, with: .success(page))
+            return
+        case .fileChunk(let cid, let file):
+            resolveFile(cid, with: .success(file))
             return
         case .err(let cid, let code, _):
             // Commands first, then requests. The tables share one `cid` space
@@ -746,6 +860,14 @@ public final class FleetConnector: @unchecked Sendable {
                 resolveIntakePlan(cid, with: .failure(.server(code: code)))
                 return
             }
+            if pendingIntakeThread[cid] != nil {
+                resolveIntakeThread(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingFile[cid] != nil {
+                resolveFile(cid, with: .failure(.server(code: code)))
+                return
+            }
             if pendingEndpoints[cid] != nil {
                 resolveEndpoints(cid, with: .failure(.server(code: code)))
                 return
@@ -764,6 +886,10 @@ public final class FleetConnector: @unchecked Sendable {
             }
             if pendingClosed[cid] != nil {
                 resolveClosed(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingAccounts[cid] != nil {
+                resolveAccounts(cid, with: .failure(.server(code: code)))
                 return
             }
             resolve(cid, with: .failure(.server(code: code)))
@@ -809,15 +935,15 @@ public final class FleetConnector: @unchecked Sendable {
             return
         case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
              .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,
-             .accountChoices, .accountSwitched:
-            // Delegated execution's and `account.*` replies, which answer only requests the
-            // phone never sends (`delegate.*`, `recipe.*`, `account.*`), and go only to the
+             .accountSwitched:
+            // Delegated execution's and `account.switch` replies, which answer only requests the
+            // phone never sends (`delegate.*`, `recipe.*`, `account.switch`), and go only to the
             // connection that asked. A
             // stray is dropped like the host replies above: never folded, never moving the
             // resume point. (An installed phone from before these tags cannot decode them at
             // all; it is safe because the Mac never sends it one, not because of this arm.)
             return
-        case .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone:
+        case .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone, .infraBudget:
             // Cloud infra's replies, which answer only `infra.*` requests the phone never
             // sends: dropped as strays for the same reasons as the delegation replies above.
             return
@@ -1013,6 +1139,12 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingIntakePlan = pendingIntakePlan
         pendingIntakePlan.removeAll()
         for completion in outstandingIntakePlan.values { completion(.failure(.disconnected)) }
+        let outstandingIntakeThread = pendingIntakeThread
+        pendingIntakeThread.removeAll()
+        for completion in outstandingIntakeThread.values { completion(.failure(.disconnected)) }
+        let outstandingFile = pendingFile
+        pendingFile.removeAll()
+        for completion in outstandingFile.values { completion(.failure(.disconnected)) }
         // And the endpoint refresh. Added the moment the table was, per the rule in
         // docs/NETWORKING.md: a client whose socket dies with a request outstanding waits
         // forever otherwise.
@@ -1036,6 +1168,9 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingClosed = pendingClosed
         pendingClosed.removeAll()
         for completion in outstandingClosed.values { completion(.failure(.disconnected)) }
+        let outstandingAccounts = pendingAccounts
+        pendingAccounts.removeAll()
+        for completion in outstandingAccounts.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }

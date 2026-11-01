@@ -243,36 +243,16 @@ enum EditLayer {
 
     // MARK: - Re-targeting a stale edit
 
-    /// What to send for an edit committed after its checkpoint stopped being the plan head.
-    struct Retarget: Equatable, Sendable {
-        var command: TapeCommand
-        /// Set when the edit could not be carried: it stays on its checkpoint, and the banner
-        /// points the human at it.
-        var conflict: EditConflict?
-    }
+    /// What to send for an edit committed after its checkpoint stopped being the plan head —
+    /// `PlanRebase`'s, since the rule moved to IntakeKit (R4).
+    typealias Retarget = PlanRebase.Retarget
 
-    /// The runner's own carry rule (`PlanLayers.carryForward`), for the one case it can't see:
-    /// an edit committed after the new head already exists. Kept on the old checkpoint it
-    /// would feed nothing (`TapeStore.headPlanCheckpoint`), so it is three-way merged onto the
-    /// head — ours = the head's plan, base = the text the edit was typed on, theirs = the edit —
-    /// and sent for the head. A conflict keeps it where it was typed, as before.
-    ///
-    /// Nonisolated and async, so `git` runs off the main actor. The app's own environment is
-    /// enough: `git` is `/usr/bin/git`, on every PATH, and a login-shell lookup here would
-    /// block for seconds.
+    /// `PlanRebase.retarget`, which ThreadRunner shares: one carry rule for a stale edit and a
+    /// stale thread diff. Kept under this name so the editor's callers didn't move with it.
     static func retarget(markdown: String, typedOn: Int, base: String, head: Int, headPlan: String,
                          runner: CommandRunner) async -> Retarget {
-        let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("flightdeck-carry-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: scratch) }
-        switch await PlanLayers.carryForward(ours: headPlan, base: base, theirs: markdown, runner: runner,
-                                             environment: ProcessInfo.processInfo.environment, scratch: scratch) {
-        case .merged(let plan):
-            return Retarget(command: .editPlan(checkpoint: head, markdown: plan), conflict: nil)
-        case .conflicted:
-            return Retarget(command: .editPlan(checkpoint: typedOn, markdown: markdown),
-                            conflict: EditConflict(edits: typedOn, landedIn: head))
-        }
+        await PlanRebase.retarget(markdown: markdown, typedOn: typedOn, base: base, head: head, headPlan: headPlan,
+                                  runner: runner)
     }
 
     // MARK: - Attributes
@@ -330,7 +310,7 @@ enum EditLayer {
                 }
             case .deleted:
                 // A grid's removed words and rows are laid and drawn by the grid, in its cells and rows.
-                if !PlanTableMarks.owns(mark, in: storage) { addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme) }
+                if !PlanTableMarks.owns(mark, in: storage), !VisualEdit.owns(mark, in: storage) { addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme) }
             }
         }
     }
@@ -521,6 +501,12 @@ final class EditLayerFragment: NSTextLayoutFragment {
         return text.attribute(.planTableRow, at: 0, effectiveRange: nil) as? PlanTableRowRef
     }
 
+    /// This line's place in a proposed edit drawn in place of its block (`MarkdownStyler.styleProposal`).
+    private var proposal: PlanProposalRef? {
+        guard let text = paragraphText, text.length > 0 else { return nil }
+        return text.attribute(.planProposal, at: 0, effectiveRange: nil) as? PlanProposalRef
+    }
+
     /// Where a grid row's top-left corner is, in this fragment's coordinates: the text
     /// container's leading edge, inside its line padding, and the row's line — below the space
     /// the first row keeps above the grid.
@@ -536,6 +522,17 @@ final class EditLayerFragment: NSTextLayoutFragment {
         guard codeBox != nil else { return nil }
         let width = textLayoutManager?.textContainer?.size.width ?? layoutFragmentFrame.width
         return CGRect(x: -layoutFragmentFrame.minX, y: 0, width: width, height: layoutFragmentFrame.height)
+    }
+
+    /// The bar for a hidden visual block, on its first line; nil for any other paragraph.
+    private var visualBar: VisualEditBar? {
+        guard let text = paragraphText, text.length > 0 else { return nil }
+        return text.attribute(.planVisualEdit, at: 0, effectiveRange: nil) as? VisualEditBar
+    }
+
+    private var isVisualLine: Bool {
+        guard let text = paragraphText, text.length > 0 else { return false }
+        return text.attribute(.planVisual, at: 0, effectiveRange: nil) != nil
     }
 
     private var ghosts: [(index: Int, ghost: EditGhost)] {
@@ -557,8 +554,16 @@ final class EditLayerFragment: NSTextLayoutFragment {
         if let ref = tableRow {
             bounds = bounds.union(CGRect(x: tableOrigin.x - 1, y: tableOrigin.y, width: ref.layout.width + 2, height: ref.layout.rows[ref.row].height))
         }
+        // The proposal's words are drawn across the text's width, where its (hidden) source has none.
+        if let ref = proposal, ref.lead {
+            bounds = bounds.union(CGRect(x: tableOrigin.x - 1, y: tableOrigin.y, width: ref.layout.width + 2, height: ref.layout.height(hovered: ref.hovered)))
+        }
         let gutterX = PlanGutter.offset(.edit) - layoutFragmentFrame.minX - 1
         bounds = bounds.union(CGRect(x: gutterX, y: bounds.minY, width: 1, height: bounds.height))
+        // The block's bar runs the block's whole height from its first line, past this fragment's own.
+        if let bar = visualBar, let top = textLineFragments.first?.typographicBounds.minY {
+            bounds = bounds.union(CGRect(x: gutterX, y: top, width: PlanGutter.editWidth + 2, height: bar.height))
+        }
         for (_, ghost) in ghosts where ghost.placement == .above || ghost.placement == .below {
             let width = ghost.lines.map { ceil(ghost.attributed($0).size().width) }.max() ?? 0
             let top = ghost.placement == .above ? (textLineFragments.first?.typographicBounds.minY ?? 0) - ghost.height : bounds.maxY
@@ -569,12 +574,29 @@ final class EditLayerFragment: NSTextLayoutFragment {
 
     override func draw(at point: CGPoint, in context: CGContext) {
         drawBlockDecoration(at: point, in: context)
+        if let ref = proposal {
+            if ref.lead { drawProposal(ref, at: point, in: context) }
+            return
+        }
         if let ref = tableRow {
             drawTableRow(ref, at: point, in: context)
             drawTableBars(ref, at: point, in: context)
             return
         }
         super.draw(at: point, in: context)
+        // A hidden visual block: one bar for the whole block, on its first line, whatever its lines hold.
+        // Its own lines draw nothing of the layer (the view covers them), but a line removed just
+        // above or below the block is a ghost in the gap beside it, struck and with its red bar.
+        if isVisualLine {
+            if let bar = visualBar { drawVisualBar(bar, at: point, in: context) }
+            let edges = ghosts.filter { $0.ghost.placement == .above || $0.ghost.placement == .below }.map(\.ghost)
+            guard !edges.isEmpty, !textLineFragments.isEmpty else { return }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            edges.forEach { drawEdgeGhost($0, at: point) }
+            return
+        }
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
         let ghosts = ghosts
         var inserted = Set<Int>()
@@ -617,16 +639,7 @@ final class EditLayerFragment: NSTextLayoutFragment {
                 ghost.attributed(ghost.text).draw(at: CGPoint(x: point.x + origin.x + gapStart + 3,
                                                               y: point.y + baseline - ghost.font.ascender))
             case .above, .below:
-                let top = ghost.placement == .above
-                    ? textLineFragments[0].typographicBounds.minY - ghost.height
-                    : textLineFragments[textLineFragments.count - 1].typographicBounds.maxY
-                // One unwrapped line each, at full length: fitted to the paragraph's own width
-                // a removed line longer than the line below it lost its end
-                // (`renderingSurfaceBounds` makes the room).
-                for (k, line) in ghost.lines.enumerated() {
-                    ghost.attributed(line).draw(at: CGPoint(x: point.x, y: point.y + top + 1 + CGFloat(k) * ghost.lineHeight))
-                }
-                bar(top + 1, top + ghost.height - 1, EditLayer.deletedColor)
+                drawEdgeGhost(ghost, at: point)
             }
         }
         for (i, line) in textLineFragments.enumerated() where inserted.contains(i) || removedIn.contains(i) {
@@ -639,6 +652,55 @@ final class EditLayerFragment: NSTextLayoutFragment {
             case (true, false): bar(b.minY, b.maxY, EditLayer.barColor)
             default: bar(b.minY, b.maxY, EditLayer.deletedColor)
             }
+        }
+    }
+
+    /// A whole removed line above or below this paragraph: struck, with the red bar beside it.
+    /// Draws into the current (flipped) graphics context.
+    private func drawEdgeGhost(_ ghost: EditGhost, at point: CGPoint) {
+        let top = ghost.placement == .above
+            ? textLineFragments[0].typographicBounds.minY - ghost.height
+            : textLineFragments[textLineFragments.count - 1].typographicBounds.maxY
+        // One unwrapped line each, at full length: fitted to the paragraph's own width
+        // a removed line longer than the line below it lost its end
+        // (`renderingSurfaceBounds` makes the room).
+        for (k, line) in ghost.lines.enumerated() {
+            ghost.attributed(line).draw(at: CGPoint(x: point.x, y: point.y + top + 1 + CGFloat(k) * ghost.lineHeight))
+        }
+        drawBar(top + 1, top + ghost.height - 1, EditLayer.deletedColor, at: point)
+    }
+
+    /// The proposed text in the plan's typography, the green bar in the edit lane beside it and a
+    /// ✦ after its last word. Under the pointer the old text is struck through above it.
+    private func drawProposal(_ ref: PlanProposalRef, at point: CGPoint, in context: CGContext) {
+        let appearance = textLayoutManager?.textContainer?.textView?.effectiveAppearance ?? NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            let drawn = ref.layout.draw(at: CGPoint(x: point.x + tableOrigin.x, y: point.y + tableOrigin.y), hovered: ref.hovered,
+                                        context: context)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            drawBar(drawn.bar.lowerBound - point.y, drawn.bar.upperBound - point.y, DiffGutterStyle.green, at: point)
+            (DiffGutterStyle.spark as NSString).draw(at: drawn.spark, withAttributes: [
+                .font: NSFont.systemFont(ofSize: 10), .foregroundColor: DiffGutterStyle.sparkColor,
+            ])
+        }
+    }
+
+    /// The block's bar: green if the human added to it, red if they removed from it, green over red
+    /// if both, as a changed line of text gets.
+    private func drawVisualBar(_ bar: VisualEditBar, at point: CGPoint, in context: CGContext) {
+        guard let top = textLineFragments.first?.typographicBounds.minY else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let bottom = top + bar.height
+        switch (bar.edit.contains(.inserted), bar.edit.contains(.removed)) {
+        case (true, true):
+            drawBar(top, top + bar.height / 2, EditLayer.barColor, at: point)
+            drawBar(top + bar.height / 2, bottom, EditLayer.deletedColor, at: point)
+        case (true, false): drawBar(top, bottom, EditLayer.barColor, at: point)
+        default: drawBar(top, bottom, EditLayer.deletedColor, at: point)
         }
     }
 
@@ -862,6 +924,17 @@ struct PlanEditHooks {
     /// The intake's project directory, which the plan's relative file links resolve against
     /// (`PlanLinks`); nil resolves only absolute and `~` paths.
     var projectPath: String?
+    /// The newest plan queued for a checkpoint and not yet folded (`IntakeService.queuedPlan`):
+    /// what the editor loads, and what a hand edit is composed on. Nil keeps the router's own sends.
+    var queuedPlan: ((Int) -> String?)?
+    /// The newest thread accept queued and not yet folded (`IntakeService.threadEditStamp`), so the
+    /// editor reloads on an accept, which changes the plan without a new checkpoint.
+    var acceptedStamp: Int?
+    /// N1: typing won a same-line conflict on a checkpoint (`IntakeService.typingWon`).
+    var typingWon: (_ checkpoint: Int, _ plan: String) -> Void = { _, _ in }
+    /// The intake's visuals on disk (`IntakeService.visualReader`), for the blocks that draw them;
+    /// nil when it has none, and a block then shows its quiet "missing visual" placeholder.
+    var visuals: (any VisualStoreReading)?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

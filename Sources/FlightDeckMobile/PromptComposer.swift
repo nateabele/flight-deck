@@ -259,25 +259,59 @@ struct PromptComposer: View {
     /// disabled Send button is the only pre-delivery cue — and `.delivered` is the inline
     /// transcript ghost (see `SessionTimelineScreen.ghostRow`), so this draws a failure
     /// outright rather than switching on a state most of which can no longer arrive.
+    ///
+    /// **A retryable failure gets Retry and Dismiss on a row of their own, at opposite ends.**
+    /// Retry sits under the message it resends, at the leading edge; Dismiss at the trailing
+    /// edge, where it always was. The row's full width lies between them (at least 44 points
+    /// even on the narrowest phone), so a thumb aimed at one cannot land on the other. Side
+    /// by side they would sit a few points apart,
+    /// and the wrong one is not undoable: Dismiss throws the message away, Retry sends it.
     private func outboxRow(_ entry: PromptOutboxEntry) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.text)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if case .failed(let message) = entry.state {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.text)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if case .failed(let message) = entry.state {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                if !entry.canRetry { dismissButton(entry.id) }
+            }
+            if entry.canRetry {
+                HStack(spacing: 0) {
+                    retryButton(entry.id)
+                    Spacer(minLength: 44)
+                    dismissButton(entry.id)
                 }
             }
-            .accessibilityElement(children: .combine)
-            dismissButton(entry.id)
         }
+    }
+
+    /// The one control here that sends: bordered, so it reads as the action and not as
+    /// another caption-sized aside like Dismiss.
+    private func retryButton(_ id: UUID) -> some View {
+        Button {
+            model.retry(id)
+        } label: {
+            Label("Retry", systemImage: "arrow.clockwise")
+                .font(.footnote.weight(.semibold))
+                .labelStyle(.titleAndIcon)
+        }
+        // The standard bordered size, not a forced 44-point frame: the bordered style draws its
+        // capsule around whatever frame the label has, and a 44-point label made a fat pill.
+        // The style's own hit area is the platform's, and Dismiss is the row's width away.
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("outbox-retry")
+        .accessibilityHint("Sends this message to your Mac again.")
     }
 
     /// Built exactly as `TimelineBodyBlock`'s Copy button is — same font, same label style,
@@ -294,8 +328,11 @@ struct PromptComposer: View {
             Label("Dismiss", systemImage: "xmark")
                 .font(.caption2)
                 .labelStyle(.titleAndIcon)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
+        .accessibilityIdentifier("outbox-dismiss")
         .accessibilityHint("Removes this message from the outbox. It is not sent again.")
     }
 }

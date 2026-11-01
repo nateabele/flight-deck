@@ -16,17 +16,44 @@ enum TapeOverlay {
     /// The commands whose effect on the tape is decided by `TapePlanner.apply` alone, so folding
     /// them here can't disagree with the runner. `.stop` is the runner's own (it also ends the
     /// round, and its "Stopping…" is `HaltRequest`'s); notes have the notes rail's own
-    /// optimistic copy; a plan edit is a file, not tape state.
+    /// optimistic copy; a plan edit, a thread's accepted diff included, is a file, not tape state.
     static func folds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview, .pause, .extend, .trim: true
-        case .stop, .note, .removeNote, .setNoteKind, .editPlan: false
+        case .stop, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: false
         }
     }
 
     /// `pending` less the commands `tape` has already folded in.
     static func unconsumed(_ pending: [CommandEnvelope], by tape: Tape) -> [CommandEnvelope] {
         pending.filter { $0.seq > tape.ackedCommandSeq }
+    }
+
+    /// A plan edit queued and not yet folded: what IntakeRunner will write as the checkpoint's
+    /// `plan.user.md`. A thread's accepted diff counts as one exactly like a hand edit (ruling,
+    /// A-I3/B-C1): it IS the plan the editor shows from the moment it is queued, and a later
+    /// hand edit must be composed on it.
+    struct QueuedPlan: Equatable {
+        var seq: Int
+        var markdown: String
+        /// An `applyThreadDiff`, not the human's own `editPlan`.
+        var thread: Bool
+    }
+
+    /// The newest queued plan per checkpoint in `pending` (commands after the tape's ack), in seq
+    /// order — the last one wins, as it will when IntakeRunner folds them.
+    static func queuedPlans(_ pending: [CommandEnvelope]) -> [Int: QueuedPlan] {
+        var plans: [Int: QueuedPlan] = [:]
+        for envelope in pending {
+            switch envelope.command {
+            case .editPlan(let checkpoint, let markdown):
+                plans[checkpoint] = QueuedPlan(seq: envelope.seq, markdown: markdown, thread: false)
+            case .applyThreadDiff(_, _, let checkpoint, let markdown):
+                plans[checkpoint] = QueuedPlan(seq: envelope.seq, markdown: markdown, thread: true)
+            default: continue
+            }
+        }
+        return plans
     }
 
     /// `tape` with `pending` applied in order, as the runner will apply them. `ackedCommandSeq` is

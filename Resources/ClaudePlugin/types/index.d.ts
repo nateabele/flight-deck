@@ -9,6 +9,8 @@ export type SwitchAccountChoice = {
   /** "underSoft" | "overSoft" | "overHard" | "unknown" */
   state: string
   isCurrent: boolean
+  /** The account's newest rate-limit windows; `utilization` is 0...1. */
+  windows?: { name: string; utilization: number; resetsAt?: number }[]
 }
 
 export type SwitchAccountPool = {
@@ -21,9 +23,12 @@ export type SwitchAccountPool = {
 export type SwitchAccountChoices = {
   agent: string
   current?: string
+  /** When set, `pools` is that pool alone and `accounts` is empty: the project moves only within it. */
   assignedPool?: string
   pools: SwitchAccountPool[]
   accounts: SwitchAccountChoice[]
+  currentAccount?: SwitchAccountChoice
+  context?: { usedPercent: number; windowSize?: number }
 }
 
 declare module 'claude-code' {

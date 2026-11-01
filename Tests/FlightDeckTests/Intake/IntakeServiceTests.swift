@@ -276,7 +276,7 @@ final class IntakeServiceTests: XCTestCase {
         let id = await capture(svc)
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .needsAnswers)
-        XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"])])
+        XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"], structured: [.text(id: "q1", "Which README?")])])
         XCTAssertEqual(i.triage, HeadlessSession(agent: .codex, sessionID: "S1", model: "m1", effort: "high"))
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
         // Inputs the agent was pointed at exist beside intake.json.
@@ -337,22 +337,27 @@ final class IntakeServiceTests: XCTestCase {
     }
 
     /// Unsent answers survive a relaunch (a release swap mid-answer) by coming back through a
-    /// fresh service on the same root — and only against the exact questions they were typed for.
-    func testAnswerDraftsSurviveAFreshServiceOnlyForTheSameQuestions() throws {
+    /// fresh service on the same root — and only for the round they were typed in.
+    func testAnswerDraftsSurviveAFreshServiceOnlyForTheSameRound() throws {
         let questions = ["Which README?", "Keep the badge?"]
         var seeded = Intake(projectPath: "/p", intent: "Add a note")
         seeded.state = .needsAnswers
         seeded.exchanges = [TriageExchange(questions: questions)]
         try IntakeStore(root: root).save(seeded)
+        let drafts = [StructuredAnswer(questionID: "q1", other: "The root one"),
+                      StructuredAnswer(questionID: "q2", other: "Ye")]
 
         let first = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
-        first.saveAnswerDrafts(seeded.id, questions: questions, answers: ["The root one", "Ye"])
+        first.saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
 
         let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
-        XCTAssertEqual(relaunched.answerDrafts(seeded.id, questions: questions), ["The root one", "Ye"])
-        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: ["Which README?", "Something else?"]))
-        // A mismatch deletes the stale file, so the original questions no longer match either.
-        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: questions))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
+        // A newer round replaced these questions; the stale file is deleted, not matched later.
+        var next = try IntakeStore(root: root).load(id: seeded.id)
+        next.exchanges = [TriageExchange(questions: ["Which README?", "Something else?"])]
+        try IntakeStore(root: root).save(next)
+        let after = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(after.answerDrafts(seeded.id, round: 0))
     }
 
     /// Sending the round deletes its drafts, and a debounced save arriving after Send is refused
@@ -361,14 +366,175 @@ final class IntakeServiceTests: XCTestCase {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
                               br: MutableRunner(Self.brReplies(Self.openGraph)))
         let id = await capture(svc)
-        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["The root one"])
-        XCTAssertEqual(svc.answerDrafts(id, questions: ["Which README?"]), ["The root one"])
-        svc.answer(id, answers: ["The root one"])
-        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["late"])
+        let draft = [StructuredAnswer(questionID: "q1", other: "The root one")]
+        svc.saveAnswerDrafts(id, round: 0, answers: draft)
+        XCTAssertEqual(svc.answerDrafts(id, round: 0), draft)
+        svc.answer(id, structured: draft)
+        svc.saveAnswerDrafts(id, round: 0, answers: [StructuredAnswer(questionID: "q1", other: "late")])
         await svc.task(for: id)?.value
-        XCTAssertNil(svc.answerDrafts(id, questions: ["Which README?"]))
+        XCTAssertNil(svc.answerDrafts(id, round: 0))
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: IntakeStore(root: root).directory(for: id).appendingPathComponent("answer-drafts.json").path))
+    }
+
+    private static let choiceQuestions: [StructuredQuestion] = [
+        StructuredQuestion(id: "scope", text: "Which machines?", kind: .single,
+                           options: [.init(id: "mac", label: "Only this Mac"), .init(id: "any", label: "Any machine")]),
+        .text(id: "when", "When?"),
+    ]
+
+    private func seedStructuredRound(_ extra: (inout Intake) -> Void = { _ in }) throws -> Intake {
+        var seeded = Intake(projectPath: "/p", intent: "Add a note")
+        seeded.state = .needsAnswers
+        seeded.exchanges = [TriageExchange(questions: Self.choiceQuestions.map(\.text), structured: Self.choiceQuestions)]
+        extra(&seeded)
+        try IntakeStore(root: root).save(seeded)
+        return seeded
+    }
+
+    /// Rounds still read plain strings, so a choice must reach them as its label.
+    func testStructuredAnswerRendersIntoPlainAnswersForRounds() async throws {
+        let seeded = try seedStructuredRound()
+        let headless = FakeHeadlessRunner([Self.codex(Self.sketch)])
+        let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))
+        let given = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                     StructuredAnswer(questionID: "when", selected: [], other: "soon")]
+        XCTAssertNil(svc.answer(seeded.id, structured: given))
+        await svc.task(for: seeded.id)?.value
+        let last = try XCTUnwrap(intake(svc, seeded.id).exchanges.first)
+        XCTAssertEqual(last.answers, ["Only this Mac", "soon"])
+        XCTAssertEqual(last.structuredAnswers, given)
+        let sent = headless.commands.flatMap(\.arguments).joined(separator: "\n")
+        XCTAssertTrue(sent.contains("Only this Mac"), sent)
+        XCTAssertTrue(sent.contains("soon"), sent)
+    }
+
+    func testIncompleteOrUnknownAnswersAreRefused() throws {
+        let seeded = try seedStructuredRound()
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        let blank = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                     StructuredAnswer(questionID: "when", selected: [], other: "  ")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: blank), .incomplete)
+        let unknown = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                       StructuredAnswer(questionID: "q9", selected: [], other: "x")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: unknown), .unknownQuestion)
+        let dup = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                   StructuredAnswer(questionID: "scope", selected: ["any"])]
+        XCTAssertEqual(svc.answer(seeded.id, structured: dup), .unknownQuestion)
+        let stored = intake(svc, seeded.id)
+        XCTAssertNil(stored.exchanges.last?.answers)
+        XCTAssertNil(stored.exchanges.last?.structuredAnswers)
+        XCTAssertEqual(stored.state, .needsAnswers)
+        XCTAssertEqual(svc.answer(UUID(), structured: []), .notAwaitingAnswers)
+    }
+
+    /// An option id the question does not have (stale, invented), the same id twice, or a
+    /// selection on a text question is refused whole, not stored and rendered as a raw id.
+    func testAnswersNamingOptionsTheQuestionLacksAreRefused() throws {
+        let seeded = try seedStructuredRound()
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        let when = StructuredAnswer(questionID: "when", selected: [], other: "soon")
+        let unknown = [StructuredAnswer(questionID: "scope", selected: ["ghost"]), when]
+        XCTAssertEqual(svc.answer(seeded.id, structured: unknown), .incomplete)
+        let duplicate = [StructuredAnswer(questionID: "scope", selected: ["mac", "mac"]), when]
+        XCTAssertEqual(svc.answer(seeded.id, structured: duplicate), .incomplete)
+        let onText = [StructuredAnswer(questionID: "scope", selected: ["mac"]),
+                      StructuredAnswer(questionID: "when", selected: ["mac"], other: "soon")]
+        XCTAssertEqual(svc.answer(seeded.id, structured: onText), .incomplete)
+        let stored = intake(svc, seeded.id)
+        XCTAssertNil(stored.exchanges.last?.answers)
+        XCTAssertNil(stored.exchanges.last?.structuredAnswers)
+        XCTAssertEqual(stored.state, .needsAnswers)
+    }
+
+    func testLegacyStringAnswerStillWorks() async throws {
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
+                              br: MutableRunner(Self.brReplies(Self.openGraph)))
+        let id = await capture(svc)
+        svc.answer(id, answers: ["The root one"])
+        await svc.task(for: id)?.value
+        let ex = try XCTUnwrap(intake(svc, id).exchanges.first)
+        XCTAssertEqual(ex.answers, ["The root one"])
+        XCTAssertEqual(ex.structuredAnswers, [StructuredAnswer(questionID: "q1", selected: [], other: "The root one")])
+    }
+
+    func testStructuredDraftsSurviveAFreshService() throws {
+        let seeded = try seedStructuredRound()
+        let drafts = [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                      StructuredAnswer(questionID: "when", selected: [], other: "so")]
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, round: 1))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0), drafts)
+    }
+
+    /// A drafts file is the app's own, but it is read back from disk: a selection naming an option
+    /// the question does not offer (a hand-edited file, or one written by a build whose options
+    /// differed under the same digest) is dropped on load, so the form never sends an id the
+    /// round would refuse as incomplete. The rest of the answer is kept.
+    func testLoadedDraftsKeepOnlyTheQuestionsOwnOptionIDs() throws {
+        let seeded = try seedStructuredRound()
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                                                              StructuredAnswer(questionID: "when", selected: [], other: "so")])
+        let url = IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json")
+        var file = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        file["structured"] = [["questionID": "scope", "selected": ["any", "gone"]],
+                              ["questionID": "when", "selected": ["stray"], "other": "so"]]
+        try JSONSerialization.data(withJSONObject: file).write(to: url)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, round: 0),
+                       [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                        StructuredAnswer(questionID: "when", selected: [], other: "so")])
+    }
+
+    /// `retry` clears the exchanges, so a fresh triage's first round is index 0 again — here with
+    /// the same question texts but different option ids. Drafts from the old round must not come
+    /// back: their ids name options the new round does not have.
+    func testDraftsFromAReplacedRoundWithTheSameTextsDoNotComeBack() throws {
+        let seeded = try seedStructuredRound()
+        let drafts = [StructuredAnswer(questionID: "scope", selected: ["any"]),
+                      StructuredAnswer(questionID: "when", selected: [], other: "so")]
+        makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+            .saveAnswerDrafts(seeded.id, round: 0, answers: drafts)
+        var retried = try IntakeStore(root: root).load(id: seeded.id)
+        var questions = Self.choiceQuestions
+        questions[0].options = [.init(id: "here", label: "Only this Mac"), .init(id: "all", label: "Any machine")]
+        retried.exchanges = [TriageExchange(questions: questions.map(\.text), structured: questions)]
+        try IntakeStore(root: root).save(retried)
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, round: 0))
+    }
+
+    /// A drafts file written before the digest existed (round and structured, no digest) still
+    /// loads while its round and question texts match: storage is additive.
+    func testADraftsFileWithoutADigestStillLoads() throws {
+        let seeded = try seedStructuredRound()
+        let old = #"{"questions":["Which machines?","When?"],"answers":["Any machine","so"],"round":0,"#
+            + #""structured":[{"questionID":"scope","selected":["any"]},{"questionID":"when","selected":[],"other":"so"}]}"#
+        try Data(old.utf8).write(to: IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json"))
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(svc.answerDrafts(seeded.id, round: 0), [
+            StructuredAnswer(questionID: "scope", selected: ["any"]),
+            StructuredAnswer(questionID: "when", selected: [], other: "so"),
+        ])
+    }
+
+    /// A drafts file from before structured answers has strings only; it must still come back.
+    func testOldStringDraftsFileStillLoads() throws {
+        let questions = ["Which README?", "Keep the badge?"]
+        var seeded = Intake(projectPath: "/p", intent: "Add a note")
+        seeded.state = .needsAnswers
+        seeded.exchanges = [TriageExchange(questions: questions)]
+        try IntakeStore(root: root).save(seeded)
+        let old = #"{"questions":["Which README?","Keep the badge?"],"answers":["root","yes"]}"#
+        try Data(old.utf8).write(to: IntakeStore(root: root).directory(for: seeded.id).appendingPathComponent("answer-drafts.json"))
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(svc.answerDrafts(seeded.id, round: 0), [
+            StructuredAnswer(questionID: "q1", selected: [], other: "root"),
+            StructuredAnswer(questionID: "q2", selected: [], other: "yes"),
+        ])
     }
 
     func testAnswerResumesSameSessionWithModelPinned() async {
@@ -473,6 +639,180 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(i.release?.idMap, ["n1": "b9"])
         let create = br.calls.first { $0.prefix(2) == ["br", "create"] }!
         XCTAssertEqual(create[create.firstIndex(of: "--actor")! + 1], "flightdeck-intake:\(id.uuidString)")
+    }
+
+    // MARK: - Release export (P2a V4)
+
+    @discardableResult
+    private func git(_ repo: URL, _ args: String...) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["-C", repo.path] + args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try p.run()
+        p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    /// A real repo with one commit and a file the user is still editing.
+    private func repo() throws -> URL {
+        let r = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        try git(r, "init", "-q")
+        try git(r, "config", "user.email", "t@example.com")
+        try git(r, "config", "user.name", "T")
+        try git(r, "config", "commit.gpgsign", "false")
+        try "hello\n".write(to: r.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try git(r, "add", "-A")
+        try git(r, "commit", "-q", "-m", "init")
+        try "hello, still editing\n".write(to: r.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        return r
+    }
+
+    private static let visualPlan = "# Pair the phone\n\n## Pairing\n\n```fd-visual id=pairing\nPairing handshake\n```\n"
+
+    /// An intake in review whose encode carried a plan with one visual, and one new task that
+    /// cites `cites` — what a shaped intake looks like when it reaches the release sheet.
+    private func reviewIntake(project: URL, cites: String?, plan: String = visualPlan, installVisual: Bool = true) throws -> UUID {
+        var i = Intake(projectPath: project.path, intent: "Pair the phone")
+        i.state = .review
+        i.recommended = .fullPlan
+        i.changeSet = ChangeSet(graphObservedAt: Date(timeIntervalSince1970: 1_800_000_000), ops: [
+            .createBead(NewBead(tempId: "n1", title: "Note", description: "d",
+                                visualRefs: cites.map { [VisualRef(visualID: $0, states: ["default"])] })),
+        ])
+        let intakes = IntakeStore(root: root)
+        try intakes.save(i)
+        let triage = intakes.directory(for: i.id).appendingPathComponent("triage", isDirectory: true)
+        try FileManager.default.createDirectory(at: triage, withIntermediateDirectories: true)
+        let graph = GraphSnapshot(beads: ["b1": BeadSnapshot(id: "b1", title: "T b1", status: "open"),
+                                          "b2": BeadSnapshot(id: "b2", title: "T b2", status: "open")])
+        try IntakeJSON.encoder.encode(graph).write(to: triage.appendingPathComponent("graph.json"))
+        let tapes = TapeStore(intakeDirectory: intakes.directory(for: i.id))
+        var tape = tapes.loadTape()
+        try tapes.writeCheckpoint(Checkpoint(id: 1, stage: .encode, round: 0, major: true, createdAt: Date()),
+                                  files: ["plan.md": Data(plan.utf8)], into: &tape)
+        if installVisual { try VisualDiskFixture.install(tapes, id: "pairing") }
+        return i.id
+    }
+
+    private var releaseBr: MutableRunner {
+        MutableRunner(Self.brReplies(Self.openGraph).merging(["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+    }
+
+    /// Release exports the plan and its visual into `docs/plans/<slug>/`, commits only that folder
+    /// (the user's own edit stays uncommitted), and the task cites the exported folder.
+    func testReleaseExportsThePlanCommitsOnlyItsFolderAndCitesTheVisual() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "pairing")
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+
+        let review = await svc.reviewModel(id)
+        XCTAssertEqual(review?.export?.paths.contains("docs/plans/pair-the-phone/plan.md"), true, "\(String(describing: review?.export))")
+        XCTAssertEqual(review?.export?.commitMessage, "docs: plan pair-the-phone for release")
+
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .released, i.failure ?? i.release?.error ?? "")
+        XCTAssertEqual(try git(repo, "log", "-1", "--format=%s").trimmingCharacters(in: .whitespacesAndNewlines),
+                       "docs: plan pair-the-phone for release")
+        let committed = try git(repo, "show", "--name-only", "--format=", "HEAD").split(separator: "\n").map(String.init)
+        XCTAssertTrue(committed.allSatisfy { $0.hasPrefix("docs/plans/pair-the-phone/") }, "\(committed)")
+        XCTAssertTrue(committed.contains("docs/plans/pair-the-phone/visuals/pairing/diagram.mmd"), "\(committed)")
+        XCTAssertEqual(try git(repo, "status", "--porcelain", "--", "README.md"), " M README.md\n", "the user's edit is untouched")
+        let plan = try String(contentsOf: repo.appendingPathComponent("docs/plans/pair-the-phone/plan.md"), encoding: .utf8)
+        XCTAssertTrue(plan.contains("visuals/pairing/snapshot@default-wide.png"), plan)
+
+        let create = try XCTUnwrap(br.calls.first { $0.prefix(2) == ["br", "create"] })
+        let description = create[try XCTUnwrap(create.firstIndex(of: "--description")) + 1]
+        XCTAssertTrue(description.contains("Fidelity references"), description)
+        XCTAssertTrue(description.contains("docs/plans/pair-the-phone/visuals/pairing/"), description)
+    }
+
+    /// Uncommitted changes under the plan's own folder refuse the release with the folder named,
+    /// and nothing is written: no task, no export (Review Focus 4). (A folder with no marker is
+    /// someone else's, and the export takes `-2` instead: `PlanExporterTests`.)
+    func testReleaseRefusesWhenThePlanFolderHasUncommittedChanges() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "pairing")
+        // The folder an earlier release of this intake committed, with an edit since.
+        let folder = repo.appendingPathComponent("docs/plans/pair-the-phone", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "\(id.uuidString)\n".write(to: folder.appendingPathComponent(".flightdeck-intake"), atomically: true, encoding: .utf8)
+        try git(repo, "add", "--", "docs")
+        try git(repo, "commit", "-q", "-m", "earlier release")
+        try "mine\n".write(to: folder.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .review)
+        XCTAssertTrue(i.failure?.contains("docs/plans/pair-the-phone") == true, i.failure ?? "nil")
+        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] }, "no task is written")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("plan.md").path))
+        XCTAssertEqual(try git(repo, "log", "--format=%s"), "earlier release\ninit\n")
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("notes.md"), encoding: .utf8), "mine\n")
+    }
+
+    /// A block removed after encode (ruling A-I2): its citation is dropped with a warning that
+    /// the release review shows, and release goes ahead without it, never a hard failure.
+    func testACitationOfARemovedVisualIsDroppedWithAWarningAndReleaseGoesAhead() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "ghost")
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        let loaded = await svc.reviewModel(id)
+        let review = try XCTUnwrap(loaded, "the review loads")
+        XCTAssertEqual(review.visualWarnings, ["Task \u{201C}Note\u{201D} no longer cites ghost: the visual was removed"])
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .released, i.failure ?? "")
+        XCTAssertTrue(i.release?.warnings.contains { $0.contains("no longer cites ghost") } == true, "\(i.release?.warnings ?? [])")
+        let create = try XCTUnwrap(br.calls.first { $0.prefix(2) == ["br", "create"] })
+        XCTAssertFalse(create[try XCTUnwrap(create.firstIndex(of: "--description")) + 1].contains("ghost"))
+    }
+
+    /// A-M4: the sheet learns of an export refusal while you review, before you press Release.
+    func testTheReviewShowsAnExportRefusalBeforeRelease() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\n```fd-visual id=gone\nGone\n```\n",
+                                  installVisual: false)
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: releaseBr)
+        let loaded = await svc.reviewModel(id)
+        let review = try XCTUnwrap(loaded)
+        XCTAssertTrue(review.exportRefusal?.contains("gone") == true, review.exportRefusal ?? "nil")
+        XCTAssertNil(review.export)
+    }
+
+    /// Every plan is exported at release (D14, §12), visuals or not.
+    func testReleaseExportsAPlanWithNoVisualsToo() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\nJust words.\n", installVisual: false)
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: releaseBr)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released, intake(svc, id).failure ?? "")
+        XCTAssertEqual(try git(repo, "log", "-1", "--format=%s").trimmingCharacters(in: .whitespacesAndNewlines),
+                       "docs: plan pair-the-phone for release")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("docs/plans/pair-the-phone/plan.md").path))
+    }
+
+    /// A block whose visual the export would mark missing refuses the release, naming the id:
+    /// no task is written beside a plan that says the visual is not there.
+    func testReleaseRefusesAPlanWithAMissingVisual() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\n```fd-visual id=gone\nGone\n```\n",
+                                  installVisual: false)
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .review)
+        XCTAssertTrue(i.failure?.contains("gone") == true, i.failure ?? "nil")
+        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] })
+        XCTAssertEqual(try git(repo, "log", "--format=%s"), "init\n")
     }
 
     func testConfirmedDriftReleasesAgainstTheCurrentHolder() async {

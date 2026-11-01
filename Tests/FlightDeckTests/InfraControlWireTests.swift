@@ -239,7 +239,9 @@ final class InfraControlWireTests: XCTestCase {
         let frames = await frames(.up(name: "gpu", cwd: h.repo.path))
         guard let (code, message) = error(frames) else { return }
         XCTAssertEqual(code, "infra_failed")
-        XCTAssertEqual(message, h.registry.machine(named: "gpu")?.failure)
+        // The text `up` recorded when it failed, though the rollback has since removed the record.
+        XCTAssertEqual(message, InfraService.failureText(TofuError.failed(step: "apply", message: "InsufficientInstanceCapacity")))
+        XCTAssertNil(h.registry.machine(named: "gpu"))
     }
 
     func testDownStreamsAndEndsDone() async throws {
@@ -254,6 +256,7 @@ final class InfraControlWireTests: XCTestCase {
     func testDownOrphanDeletesIt() async throws {
         let orphan = OwnedResource(cloud: "aws", kind: .instance, id: "i-0dead", region: "us-east-1", name: "old")
         h.account.owned = [orphan]
+        try h.recordCreated("aws_instance", "i-0dead")
         let frames = await frames(.down(name: "", orphanID: "instance:i-0dead"))
         XCTAssertEqual(frames, [.infraDone(cid: 7)])
         XCTAssertEqual(h.account.deleted, [orphan])

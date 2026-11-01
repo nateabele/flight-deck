@@ -1,0 +1,79 @@
+import Foundation
+import FleetKit
+import IntakeKit
+
+/// `intake.visual.fetch`'s worker (planning v2 §10, V-R6).
+///
+/// **Why a `nonisolated` enum and not a method on `IntakeService`.** `IntakeService` is
+/// `@MainActor`, so an `async` method on it still runs on the main actor, and reading and
+/// hashing up to `VisualLimits.maxBytes` there would hitch the UI. `FleetService` grabs the
+/// reader on the main actor (`IntakeService.visualReader`, cheap) and awaits this, which runs
+/// on the global executor.
+enum VisualFetch {
+    /// **The gate, open since P2a V4.** The detail's `visuals` flag follows it
+    /// (`IntakeService.visualsAvailable`), so shutting it again hides every visual op from the
+    /// phone and refuses one sent anyway. `serve` takes it as a parameter so a test can shut it.
+    nonisolated static let gateOpen = true
+
+    /// A slice of one revision's snapshot (`part` `snapshot…`) or listed file (`file:<path>`) as a
+    /// `WireFileChunk` whose `path` is the relative path and whose `size` is the whole file's.
+    ///
+    /// Refuses `visuals_unavailable` (gate shut, or no reader), `unknown_visual`,
+    /// `unknown_revision`, `bad_part`, `bad_range`, `unknown_file` (not in the manifest's `files`),
+    /// `too_large` (the revision's files add up to more than `VisualLimits.maxBytes`, §10, or overflow),
+    /// `bad_manifest` (a negative size) and
+    /// `unreadable` (the store would not hand the bytes over: gone, a symlink, a hard link).
+    ///
+    /// **Everything is read through `VisualStoreReading.read`**, which returns bytes: this file
+    /// never learns a path, so there is nothing here to reopen or escape the folder with.
+    ///
+    /// `probe` is a test seam, called inside the worker; a test asserts it ran off the main thread.
+    nonisolated static func serve(
+        _ reader: (any VisualStoreReading)?, visualID: String, revision: Int, part: String, offset: Int64,
+        limit: Int, gateOpen: Bool = VisualFetch.gateOpen, probe: @Sendable () -> Void = {}
+    ) async -> Result<WireFileChunk, VisualRefusal> {
+        probe()
+        guard gateOpen, let reader else { return .failure(.unavailable) }
+        guard let id = VisualID(rawValue: visualID), !reader.revisions(id).isEmpty else {
+            return .failure(VisualRefusal(code: "unknown_visual"))
+        }
+        guard let rev = reader.revision(id, r: revision) else { return .failure(VisualRefusal(code: "unknown_revision")) }
+        guard let name = fileName(for: part, in: rev.manifest) else { return .failure(VisualRefusal(code: "bad_part")) }
+        guard offset >= 0, limit > 0 else { return .failure(VisualRefusal(code: "bad_range")) }
+        // The manifest is the allow-list. Membership is the whole check: `..`, an absolute path
+        // or `manifest.json` match no entry, so none needs its own rule.
+        guard let entry = rev.manifest.files.first(where: { $0.path == name }) else {
+            return .failure(VisualRefusal(code: "unknown_file"))
+        }
+        // Checked addition: a hostile manifest's sizes must refuse, not trap the Mac. A negative
+        // size is a manifest no writer makes.
+        var total: Int64 = 0
+        for file in rev.manifest.files {
+            guard file.size >= 0 else { return .failure(VisualRefusal(code: "bad_manifest")) }
+            let (sum, overflow) = total.addingReportingOverflow(file.size)
+            guard !overflow, sum <= Int64(VisualLimits.maxBytes) else { return .failure(VisualRefusal(code: "too_large")) }
+            total = sum
+        }
+        guard offset <= entry.size else { return .failure(VisualRefusal(code: "bad_range")) }
+        guard let slice = reader.read(id, r: revision, name: name, offset: offset, limit: min(limit, FileLimits.maxChunk)) else {
+            return .failure(VisualRefusal(code: "unreadable"))
+        }
+        return .success(WireFileChunk(path: name, size: slice.size, offset: offset, data: slice.data))
+    }
+
+    /// The revision-relative file a `part` names, or nil for a part this Mac does not know. A
+    /// snapshot's name is its state and size (`snapshot@<state>-<size>.png`); plain `snapshot` is
+    /// the first of each, or `snapshot.png` for a revision that declares neither.
+    nonisolated static func fileName(for part: String, in manifest: VisualManifest) -> String? {
+        if let path = WireVisualPart.filePath(in: part) { return path }
+        if part == WireVisualPart.snapshot {
+            guard let state = manifest.states.first, let size = manifest.sizes.first else { return "snapshot.png" }
+            return "snapshot@\(state)-\(size).png"
+        }
+        let prefix = "snapshot@"
+        guard part.hasPrefix(prefix) else { return nil }
+        let rest = part.dropFirst(prefix.count)
+        guard let dash = rest.lastIndex(of: "-"), dash != rest.startIndex, rest.index(after: dash) != rest.endIndex else { return nil }
+        return part + ".png"
+    }
+}

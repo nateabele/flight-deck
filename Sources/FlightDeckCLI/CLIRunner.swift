@@ -321,8 +321,11 @@ final class CLIRunner {
                                         out: out, err: err, finish: { self.finish($0) }))
             infraRunner = runner
             runner.start()
-        case .intakeRun:
-            // main.swift intercepts `intake run` right after the usage check, before a
+        case .providerCheck, .index:
+            // Local, like `intakeRun`: main.swift runs them before a transport exists.
+            break
+        case .intakeRun, .intakeThreads:
+            // main.swift intercepts `intake run` and `intake threads` right after the usage check, before a
             // transport or this runner exists at all — the detached process has no fleet to
             // reach and no reply to wait on. `dispatch()` is only reached once `run()` has
             // already connected, so this arm is unreachable in practice and exists only to
@@ -526,8 +529,11 @@ final class CLIRunner {
         schedule(Self.launchTimeout) { self.fail("launch_unconfirmed") }
     }
 
-    /// Fetches the latest page and derives the open prompt from it exactly as the phone does —
-    /// the prompt is never on the wire, so this is the only way to know what is being asked.
+    /// Fetches the latest page and derives the open prompt from it exactly as the phone does
+    /// (`SessionTimelineModel.blocked`): the transcript first, then the Mac's own words
+    /// (`WireSession.openPrompt`) for a dialog no transcript records — codex's native
+    /// approvals, gemini's — and those words first when the Mac read the dialog off its screen.
+    /// Either way only while `openPromptCall` names that very call.
     private func derivePrompt(_ token: String, then: @escaping (WireSession, OpenPrompt) -> Void) {
         guard let resolved = session(token) else { return }
         let cid = transport.send(.timeline(session: resolved.id, anchor: .latest,
@@ -539,9 +545,15 @@ final class CLIRunner {
             }
             // The fleet as of the page, not the request: the session may have left `waiting`.
             let current = self.session(resolved.id) ?? resolved
-            guard let prompt = OpenPrompt.find(in: page.items, agent: current.agent,
-                                               activity: current.activity)
-            else { return self.fail("no_prompt") }
+            var offered: OpenPrompt?
+            if current.activity == "waiting", let open = current.openPrompt?.prompt,
+               case .call(let id) = current.openPromptCall, open.callID == id {
+                offered = open
+            }
+            let derived = offered.map { ScreenPromptID.isScreenDerived($0.callID) } == true
+                ? offered
+                : OpenPrompt.find(in: page.items, agent: current.agent, activity: current.activity) ?? offered
+            guard let prompt = derived else { return self.fail("no_prompt") }
             then(current, prompt)
         }
     }
@@ -623,11 +635,14 @@ final class CLIRunner {
         replies[cid] = { frame in
             // No `default`: a new reply case must be given an output before this compiles.
             switch frame {
+            case .peer(_, let json): self.out(json)
             case .err(_, let code, let message): return self.fail(code, message)
             case .page(_, let page): self.out(CLIOutput.json(page))
             case .newSessionOptions(_, let options): self.out(CLIOutput.json(options))
             case .intakeDetail(_, let detail): self.out(CLIOutput.json(detail))
             case .intakePlan(_, let plan): self.out(CLIOutput.json(plan))
+            case .intakeThread(_, let page): self.out(CLIOutput.json(page))
+            case .fileChunk(_, let file): self.out(CLIOutput.json(file))
             case .macEndpoints(_, let endpoints): self.out(CLIOutput.json(endpoints))
             case .recentlyClosed(_, let closed): self.out(CLIOutput.json(closed))
             case .conversations(_, let catalogue): self.out(CLIOutput.json(catalogue))
@@ -646,7 +661,7 @@ final class CLIRunner {
             case .ack, .snapshot, .event, .caughtUp, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
                  .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,
-                 .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone:
+                 .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone, .infraBudget:
                 // Delegation and infra verbs never come through here — their own runners send
                 // and read them, streams included — so no request here draws one; printed raw
                 // like the arm above rather than dropped.

@@ -273,6 +273,19 @@ enum PromptLifecycleLog {
         write(record, to: fileURL)
     }
 
+    /// One formatter for every line: building an `ISO8601DateFormatter` is expensive and this
+    /// runs per record. Formatting with it is thread-safe.
+    ///
+    /// Local time with its offset, because the other half of this record is in the unified
+    /// log — which Console shows in local time — and correlating the two should not need
+    /// arithmetic. The zone is fixed at first use, which is acceptable for a log line.
+    private static let stamp: ISO8601DateFormatter = {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        stamp.timeZone = .current
+        return stamp
+    }()
+
     /// Appends one line: a timestamp, the summary, and the detail when there is one.
     ///
     /// **Every failure is swallowed and the file is only ever appended to**, exactly as
@@ -281,12 +294,6 @@ enum PromptLifecycleLog {
     /// differently from one that can — and an unopenable file is left alone rather than
     /// replaced, because the history already in it is worth more than this one record.
     static func write(_ record: PromptLifecycleRecord, to url: URL) {
-        let stamp = ISO8601DateFormatter()
-        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        // Local time with its offset, because the other half of this record is in the unified
-        // log — which Console shows in local time — and correlating the two should not need
-        // arithmetic.
-        stamp.timeZone = .current
         var line = "\(stamp.string(from: Date())) \(record.summary)"
         // One line per record, always. The detail is the user's own text and can carry a
         // newline of its own, so it is folded onto the same line rather than given its own

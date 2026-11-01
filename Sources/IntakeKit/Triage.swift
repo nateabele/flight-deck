@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TriageResult: Equatable, Sendable {
-    case questions([String])
+    case questions([StructuredQuestion])
     case recommendation(preset: Preset, reason: String, changeSet: ChangeSet?)
 }
 
@@ -18,10 +18,14 @@ public enum Triage {
     /// schema stays byte-stable for `triage-schema.json`; an unknown dimension is dropped when
     /// the proposal is registered instead of rejected by the CLI.
     private static let kindProposal = #"{"type":["object","null"],"additionalProperties":false,"required":["name","description","dimensions"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"dimensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["dimension","weight"],"properties":{"dimension":{"type":"string"},"weight":{"type":"number"}}}}}}"#
+    /// `visualRefs` (planning v2 §12, V-R3): the visuals a new task is built to match. Every op
+    /// carries it (strict mode lists every property); only a `createTask`, in a round given a
+    /// visuals catalogue, sets it.
+    private static let visualRefs = #"{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"required":["visualID","states"],"properties":{"visualID":{"type":"string"},"states":{"type":"array","items":{"type":"string"}}}}}"#
     /// One op's schema — also every op inside a polish-family patch (`RoundSchemas.patch`).
     static let op = """
     {"type":"object","additionalProperties":false,
-     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
+     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal","visualRefs"],
      "properties":{
       "op":{"type":"string","enum":["createTask","addEdge","editTask","reopen","followUp"]},
       "tempId":\(nullableString),"title":\(nullableString),"type":\(nullableString),
@@ -36,7 +40,7 @@ public enum Triage {
       "delivery":{"type":["object","null"],"additionalProperties":false,"required":["rating","reason"],
                   "properties":{"rating":{"type":"string","enum":["clarifying","scopeChange","invalidating"]},"reason":{"type":"string"}}},
       "reason":\(nullableString),"of":\(nullableString),
-      "taskKind":\(nullableString),"kindProposal":\(kindProposal)}}
+      "taskKind":\(nullableString),"kindProposal":\(kindProposal),"visualRefs":\(visualRefs)}}
     """
 
     /// The `changeSet` object on its own — a nullable `{graphObservedAt, ops}` shape, `ops`
@@ -47,6 +51,12 @@ public enum Triage {
                    "properties":{"graphObservedAt":{"type":"string"},"ops":{"type":"array","items":\(op)}}}
     """
 
+    /// One clarifying question. `cost` is left out in P0: nothing reads it yet, and every field
+    /// here must be in `required` for strict mode, so an unused one is a field the agent must
+    /// invent a value for. Internal, not private: `ThreadActions.schemaJSON` embeds this exact
+    /// fragment, so a thread's question and a triage question can't drift apart.
+    static let questionItem = #"{"type":"object","additionalProperties":false,"required":["id","text","kind","options","recommended","allowOther"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"kind":{"type":"string","enum":["single","multi","toggle","text"]},"options":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","label","detail"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"detail":{"type":["string","null"]}}}},"recommended":{"type":"array","items":{"type":"string"}},"allowOther":{"type":"boolean"}}}"#
+
     /// Strict-mode schema for both `codex exec --output-schema` and `claude --json-schema`:
     /// every object declares `additionalProperties: false` and lists every property in
     /// `required`, with optional values typed `[<type>, "null"]` instead of simply omitted —
@@ -56,15 +66,63 @@ public enum Triage {
      "required":["kind","questions","preset","reason","changeSet"],
      "properties":{
       "kind":{"type":"string","enum":["questions","recommendation"]},
-      "questions":{"type":["array","null"],"items":{"type":"string"}},
+      "questions":{"type":["array","null"],"items":\(questionItem)},
       "preset":{"type":["string","null"],"enum":["singleTask","sketch","featurePlan","fullPlan",null]},
       "reason":\(nullableString),
       "changeSet":\(changeSetSchemaFragment)}}
     """
 
+    /// A question item as the agent sends it: an object, or a bare string from an older prompt
+    /// or a stored fixture. Ids of a bare string are assigned by `normalize`, by position.
+    /// The object path is lenient on purpose: strict decoding would turn one off-schema field
+    /// (an invented kind, a missing list) into `Malformed` and stall triage, when the person
+    /// could still have answered the question as text. Only an item with no text is dropped,
+    /// since there is nothing to ask.
+    private struct WireQuestion: Decodable {
+        let question: StructuredQuestion?
+
+        private enum Keys: String, CodingKey { case id, text, kind, options, recommended, allowOther }
+        private struct Opt: Decodable {
+            let id: String?
+            let label: String?
+            let detail: String?
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: Keys2.self)
+                id = try? c.decodeIfPresent(String.self, forKey: .id)
+                label = try? c.decodeIfPresent(String.self, forKey: .label)
+                detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+            }
+            enum Keys2: String, CodingKey { case id, label, detail }
+        }
+
+        init(from decoder: Decoder) throws {
+            let single = try decoder.singleValueContainer()
+            if let s = try? single.decode(String.self) {
+                question = s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(id: "", s)
+                return
+            }
+            let c = try decoder.container(keyedBy: Keys.self)
+            let text = ((try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil) ?? ""
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { question = nil; return }
+            let kindRaw = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil) ?? ""
+            let opts = ((try? c.decodeIfPresent([Opt].self, forKey: .options)) ?? nil) ?? []
+            question = StructuredQuestion(
+                id: ((try? c.decodeIfPresent(String.self, forKey: .id)) ?? nil) ?? "",
+                text: text,
+                kind: StructuredQuestion.Kind(rawValue: kindRaw) ?? .text,
+                // An option with no label has nothing to show, so it is dropped, not shown blank.
+                options: opts.compactMap { o in
+                    guard let label = o.label, !label.isEmpty else { return nil }
+                    return .init(id: o.id ?? "", label: label, detail: o.detail)
+                },
+                recommended: ((try? c.decodeIfPresent([String].self, forKey: .recommended)) ?? nil) ?? [],
+                allowOther: ((try? c.decodeIfPresent(Bool.self, forKey: .allowOther)) ?? nil) ?? false)
+        }
+    }
+
     private struct Wire: Decodable {
         let kind: String
-        let questions: [String]?
+        let questions: [WireQuestion]?
         let preset: Preset?
         let reason: String?
         let changeSet: ChangeSet?
@@ -77,12 +135,63 @@ public enum Triage {
         switch w.kind {
         case "questions":
             guard let q = w.questions, !q.isEmpty else { throw Malformed(why: "questions kind with no questions") }
-            return .questions(q)
+            let kept = q.compactMap(\.question)
+            guard !kept.isEmpty else { throw Malformed(why: "questions kind with no usable questions") }
+            return .questions(normalize(kept))
         case "recommendation":
             guard let p = w.preset, let r = w.reason else { throw Malformed(why: "recommendation without preset/reason") }
             return .recommendation(preset: p, reason: r, changeSet: w.changeSet)
         default:
             throw Malformed(why: "unknown kind \(w.kind)")
+        }
+    }
+
+    /// Makes an agent's questions safe to render and answer. Duplicate ids would make two
+    /// questions share one answer; a choice question with no real choice would show an
+    /// unanswerable picker, so it degrades to free text and keeps its options as hints.
+    public static func normalize(_ raw: [StructuredQuestion]) -> [StructuredQuestion] {
+        // Every member of a duplicate group is renumbered, not just the later ones: which of two
+        // same-id questions the answer belongs to is exactly what a duplicate leaves unknowable.
+        let questionIDs = renumbered(raw.map(\.id), prefix: "q")
+        return raw.enumerated().map { index, original in
+            var q = original
+            q.id = questionIDs[index]
+            let optionIDs = renumbered(q.options.map(\.id), prefix: "o")
+            q.options = zip(q.options, optionIDs).map { option, id in
+                var o = option
+                o.id = id
+                return o
+            }
+            let valid = Set(q.options.map(\.id))
+            q.recommended = q.recommended.filter { valid.contains($0) }
+            let malformed: Bool
+            switch q.kind {
+            case .single, .multi: malformed = q.options.count < 2
+            case .toggle: malformed = q.options.count != 1
+            case .text: malformed = false
+            }
+            if malformed {
+                if !q.options.isEmpty { q.text += " (e.g. \(q.options.map(\.label).joined(separator: ", ")))" }
+                q.kind = .text
+            }
+            if q.kind == .text { q.options = []; q.recommended = [] }
+            if q.kind == .single || q.kind == .multi { q.allowOther = true }
+            return q
+        }
+    }
+
+    /// Ids with any empty or repeated one replaced by `<prefix><position>`. A positional id that
+    /// lands on a kept id is bumped, so the result is always unique.
+    private static func renumbered(_ ids: [String], prefix: String) -> [String] {
+        var counts: [String: Int] = [:]
+        for id in ids { counts[id, default: 0] += 1 }
+        var used = Set(ids.filter { !$0.isEmpty && counts[$0] == 1 })
+        return ids.enumerated().map { index, id in
+            if !id.isEmpty, counts[id] == 1 { return id }
+            var n = index + 1
+            while used.contains("\(prefix)\(n)") { n += 1 }
+            used.insert("\(prefix)\(n)")
+            return "\(prefix)\(n)"
         }
     }
 
@@ -138,6 +247,8 @@ public enum Triage {
           `pre`; also `delivery` when the task you are editing is `in_progress`.
         - `reopen`: `id`, `reason`, and `pre`.
         - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
+        - `visualRefs`: null keeps a task's references as they are (a new task then has none);
+          `[]` drops them. Set them only as a visuals list below says.
         """ + kindsRulesText(kinds)
     }
 
@@ -208,6 +319,11 @@ public enum Triage {
           constraints, and every ambiguity you would otherwise settle by guessing. Ask
           rather than assume. Leave out only a question the intent or the files above
           already answer.
+        - Ask each question as a choice when you can. Prefer kind `single` or `multi` with 2 to 5
+          short options, and name your pick in `recommended` (option ids) when there is a sensible
+          default. Use `toggle`, with exactly one option, for a yes or no about one thing. Use
+          `text` only for an answer no list could cover. Number question ids `q1`, `q2` and so on,
+          and give options short slug ids. Leave `recommended` empty when you have no pick.
 
         Choose one of four fidelity presets:
         - Single task: no drafting or refinement — you encode the change set yourself in one pass.

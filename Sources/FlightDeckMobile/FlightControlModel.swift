@@ -24,13 +24,19 @@ final class FlightControlModel {
     @ObservationIgnored private weak var fetcher: IntakeFetching?
     @ObservationIgnored private weak var commander: IntakeCommanding?
     @ObservationIgnored private var commandModels: [UUID: IntakeCommandModel] = [:]
+    @ObservationIgnored private var answerForms: [UUID: AnswerFormModel] = [:]
+    @ObservationIgnored private var threadOutboxes: [UUID: ThreadOutboxModel] = [:]
+    @ObservationIgnored private let answerDrafts: AnswerDraftStore?
     @ObservationIgnored private let receivedAt: () -> Date
 
     /// `commander` defaults to nil so callers that never send (tests, the render harness) still
-    /// compile; with none, every send completes `.disconnected`.
-    init(fetcher: IntakeFetching, commander: IntakeCommanding? = nil, receivedAt: @escaping () -> Date = Date.init) {
+    /// compile; with none, every send completes `.disconnected`. With no `answerDrafts`, answers
+    /// chosen on the phone are kept only while the app runs.
+    init(fetcher: IntakeFetching, commander: IntakeCommanding? = nil, answerDrafts: AnswerDraftStore? = nil,
+         receivedAt: @escaping () -> Date = Date.init) {
         self.fetcher = fetcher
         self.commander = commander
+        self.answerDrafts = answerDrafts
         self.receivedAt = receivedAt
     }
 
@@ -79,6 +85,9 @@ final class FlightControlModel {
         details = [:]
         for m in commandModels.values { m.cancelAll() }
         commandModels = [:]
+        answerForms = [:]
+        threadOutboxes = [:]
+        purgeAnswerDrafts()
         plans = [:]
         planOrder = []
     }
@@ -101,6 +110,36 @@ final class FlightControlModel {
         let m = IntakeCommandModel(intake: id, commander: commander)
         commandModels[id] = m
         return m
+    }
+
+    /// What was chosen for one pairing's questions is that pairing's: dropped on unpair and on
+    /// adopting a new pairing, with `DraftStore`'s drafts.
+    func purgeAnswerDrafts() { answerDrafts?.purgeAll() }
+
+    /// One answer form per intake, beside its command model, so a sent round still reads
+    /// "Sending…" after its screen is popped and pushed again.
+    func answerForm(for id: UUID) -> AnswerFormModel {
+        if let m = answerForms[id] { return m }
+        let m = AnswerFormModel(intake: id, drafts: answerDrafts)
+        answerForms[id] = m
+        return m
+    }
+
+    /// One thread outbox per intake, shared by the reader (which draws its cards) and the thread
+    /// screen (which draws pending messages), so an ask sent from one is seen by the other.
+    func threadOutbox(for id: UUID) -> ThreadOutboxModel {
+        if let m = threadOutboxes[id] { return m }
+        let m = ThreadOutboxModel()
+        threadOutboxes[id] = m
+        return m
+    }
+
+    /// One thread's page on demand: threads' turns are never pushed. `.disconnected` when the
+    /// fetcher cannot read threads (a test stub).
+    func thread(_ intake: UUID, threadID: UUID, since: Int?,
+                then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void) {
+        guard let reader = fetcher as? ThreadFetching else { return completion(.failure(.disconnected)) }
+        reader.intakeThread(intake, threadID: threadID, since: since, then: completion)
     }
 
     /// Contract: the HEAD is always requested with `checkpoint: nil`, never looked up in the cache,

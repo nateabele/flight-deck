@@ -10,6 +10,7 @@ struct IntakeScreen: View {
     /// The fidelity a tap picked, held until the confirmation answers: it starts paid rounds.
     @State private var confirmingFidelity: FidelityOption?
     private var commands: IntakeCommandModel { fleet.flightControl.commands(for: id) }
+    private var answerForm: AnswerFormModel { fleet.flightControl.answerForm(for: id) }
     private var frozenAt: Date? { if case .lost = fleet.state { return fleet.lastLive }; return nil }
 
     var body: some View {
@@ -24,6 +25,13 @@ struct IntakeScreen: View {
                 VStack(spacing: 12) {
                     Text("Couldn't load this intake.").font(.subheadline).foregroundStyle(.secondary)
                     Button { model.refresh() } label: { Text("Retry").font(.subheadline) }
+                }
+            } else if model.awaitingCreation {
+                // Opened before the Mac has the intake: Triage pushed this screen as it sent the
+                // create. A refusal pops it again, so this only ever waits.
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Sending to your Mac…").font(.subheadline).foregroundStyle(.secondary)
                 }
             } else {
                 ProgressView()
@@ -43,6 +51,11 @@ struct IntakeScreen: View {
             }
         }
         .intakePresence(id: id, model: model, flightControl: fleet.flightControl)
+        .onChange(of: model.detail) { _, detail in answerForm.observe(detail) }
+        // The form model outlives the screen (one per intake), and `onChange` never fires for the
+        // value a pushed screen first shows: a round that moved on while the screen was popped
+        // left "Sending…" up for good. Settle the marker against the detail on every appearance.
+        .onAppear { answerForm.observe(model.detail) }
     }
 
     @ViewBuilder private func content(_ d: WireIntakeDetail) -> some View {
@@ -60,6 +73,10 @@ struct IntakeScreen: View {
                                   onAck: { model.refresh() })
                 })
             .padding(.bottom, 4)
+            if let halt = HaltPanelModel.make(detail: d, inFlight: commands.inFlight, live: frozenAt == nil, drafts: model.roundDrafts) {
+                HaltPanel(model: halt, offset: model.macClockOffset, frozenAt: frozenAt) { haltAction($0, detail: d) }
+                    .padding(.bottom, 6)
+            }
             if let message = commands.message {
                 HStack(alignment: .firstTextBaseline) {
                     Text(message).font(.caption).foregroundStyle(.orange)
@@ -144,6 +161,17 @@ struct IntakeScreen: View {
         .buttonStyle(.borderless)
     }
 
+    private func haltAction(_ action: HaltAction, detail d: WireIntakeDetail) {
+        switch action {
+        case .retry: commands.retry { model.refresh() }
+        case .toReview: tape("toReview")
+        case .resume: tape(HaltPanelModel.resumeKey(d))
+        case .retryOther:
+            model.retryAfterSave = true
+            fleet.path.append(IntakeRoute.rounds(intake: id, preset: nil))
+        }
+    }
+
     private func tape(_ command: String, stage: String? = nil) {
         commands.send(.tape(command), command: { .intakeTape(id: id, token: $0, command: command, stage: stage) },
                       onAck: { model.refresh() })
@@ -173,7 +201,15 @@ struct IntakeScreen: View {
     }
 
     @ViewBuilder private func sections(for d: WireIntakeDetail, now: Date) -> some View {
-        if let open = d.questions?.open {
+        if let open = AnswerFormModel.openRound(d) {
+            let form = answerForm
+            StructuredQuestionForm(
+                title: open.title, questions: open.questions, initial: form.initialAnswers(open),
+                sending: form.sending(open, inFlight: commands.inFlight), enabled: frozenAt == nil,
+                onChange: { form.keep($0, for: open) }
+            ) { answers in form.send(answers, for: open, via: commands, refresh: { model.refresh() }) }
+            .id(form.identity(open))
+        } else if let open = d.questions?.open {
             Section("Round \(d.questions!.answered.count + 1) · \(open.count) question\(open.count == 1 ? "" : "s")") {
                 ForEach(Array(open.enumerated()), id: \.offset) { i, q in
                     Text("\(i + 1). \(q)").font(.subheadline)

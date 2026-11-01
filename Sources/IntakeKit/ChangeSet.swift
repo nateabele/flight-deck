@@ -89,12 +89,16 @@ public struct NewBead: Codable, Equatable, Sendable {
     public var taskKind: KindID?
     /// Planning's new kind, when no listed one fits. Wins over `taskKind` when both are set.
     public var kindProposal: KindProposal?
+    /// The visuals this task must match. The agent chooses them (they will be in its schema);
+    /// code writes only the "Fidelity references" text from them, so the section's wording and
+    /// links are deterministic (V-R3). nil on every change set written before visuals existed.
+    public var visualRefs: [VisualRef]?
     public init(tempId: String, title: String, type: String = "task", priority: Int = 2,
                 description: String, acceptance: String? = nil, labels: [String] = [],
-                taskKind: KindID? = nil, kindProposal: KindProposal? = nil) {
+                taskKind: KindID? = nil, kindProposal: KindProposal? = nil, visualRefs: [VisualRef]? = nil) {
         self.tempId = tempId; self.title = title; self.type = type; self.priority = priority
         self.description = description; self.acceptance = acceptance; self.labels = labels
-        self.taskKind = taskKind; self.kindProposal = kindProposal
+        self.taskKind = taskKind; self.kindProposal = kindProposal; self.visualRefs = visualRefs
     }
 }
 
@@ -118,7 +122,7 @@ public enum ChangeOp: Equatable, Sendable {
 
 extension ChangeOp: Codable {
     private enum Key: String, CodingKey {
-        case op, tempId, title, type, priority, description, acceptance, labels, taskKind, kindProposal
+        case op, tempId, title, type, priority, description, acceptance, labels, taskKind, kindProposal, visualRefs
         case from, to, kind, id, set, pre, delivery, reason, of
     }
     public struct UnknownOp: Error, Equatable { public let op: String }
@@ -141,7 +145,8 @@ extension ChangeOp: Codable {
                 // `""` is no kind: a model that cannot classify sometimes answers an empty string
                 // rather than null, and an empty id would route as an unknown kind.
                 taskKind: try c.decodeIfPresent(KindID.self, forKey: .taskKind).flatMap { $0.rawValue.isEmpty ? nil : $0 },
-                kindProposal: try c.decodeIfPresent(KindProposal.self, forKey: .kindProposal)))
+                kindProposal: try c.decodeIfPresent(KindProposal.self, forKey: .kindProposal),
+                visualRefs: try c.decodeIfPresent([VisualRef].self, forKey: .visualRefs)))
         case "addEdge":
             self = .addEdge(from: try c.decode(BeadRef.self, forKey: .from),
                             to: try c.decode(BeadRef.self, forKey: .to),
@@ -177,6 +182,8 @@ extension ChangeOp: Codable {
             try c.encodeIfPresent(b.acceptance, forKey: .acceptance); try c.encode(b.labels, forKey: .labels)
             try c.encodeIfPresent(b.taskKind, forKey: .taskKind)
             try c.encodeIfPresent(b.kindProposal, forKey: .kindProposal)
+            // Absent when nil, so a change set with no visuals keeps the exact bytes it had.
+            try c.encodeIfPresent(b.visualRefs, forKey: .visualRefs)
         case .addEdge(let from, let to, let kind):
             try c.encode("addEdge", forKey: .op)
             try c.encode(from, forKey: .from); try c.encode(to, forKey: .to); try c.encode(kind, forKey: .kind)

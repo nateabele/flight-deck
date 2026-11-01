@@ -557,10 +557,10 @@ struct SessionSidebar: View {
             setSelectedProjectCollapsed: { store.setSelectedProjectCollapsed($0) },
             // How the monitor proves the row it decides about is the row that was pressed. A
             // session closing in another project removes a row, and every index below it shifts;
-            // `SidebarRow.id` does not move.
+            // `SidebarRow.identityString` does not move.
             rowIdentity: { index in
                 guard index >= 0, index < store.sidebarRows.count else { return nil }
-                return store.sidebarRows[index].id
+                return store.sidebarRows[index].identityString
             }
         )
         .dropDestination(for: URL.self) { urls, _ in

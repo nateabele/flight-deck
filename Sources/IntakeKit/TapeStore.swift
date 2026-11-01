@@ -9,6 +9,30 @@ import Foundation
 /// `SeatActivity`, replaced atomically by `ActivityPublisher` — see `activities(forRound:)`) and
 /// `result.json` (the seat's `SeatResult`, once its output parses — see `seatResult(run:)`).
 /// Not a single index file — the directory is the unit, same rationale as `IntakeStore`.
+/// The rule for every runner and store write under an intake (A-I1): it may make a folder
+/// inside the intake's directory, never the intake's directory itself. Trash and Discard move or
+/// delete that directory while a runner may still be writing; recreating it would spend the
+/// runner's next write on a ghost intake at the old path, and Finder's Put Back would then fail
+/// because the name is taken. Only `IntakeStore` creates an intake's directory.
+public enum IntakeDirectory {
+    public struct Gone: Error, Equatable {
+        public let path: String
+    }
+
+    /// Throws `Gone` unless `intake` exists.
+    public static func require(_ intake: URL) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: intake.path, isDirectory: &isDirectory), isDirectory.boolValue
+        else { throw Gone(path: intake.path) }
+    }
+
+    /// Creates `directory`, a folder inside `intake`, while `intake` exists.
+    public static func create(_ directory: URL, in intake: URL) throws {
+        try require(intake)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+}
+
 public struct TapeStore: Sendable {
     public let intakeDirectory: URL
     public init(intakeDirectory: URL) {
@@ -53,7 +77,7 @@ public struct TapeStore: Sendable {
     /// Replaced atomically, like `activity.json`: the app's poller may read it at any moment.
     func writeSeatResult(_ result: SeatResult, run: String) throws {
         let dir = runDirectory(run)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeDirectory.create(dir, in: intakeDirectory)
         try IntakeJSON.encoder.encode(result).write(to: dir.appendingPathComponent("result.json"), options: .atomic)
     }
 
@@ -79,7 +103,7 @@ public struct TapeStore: Sendable {
     }
 
     public func saveTape(_ t: Tape) throws {
-        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
+        try IntakeDirectory.require(intakeDirectory)
         try IntakeJSON.encoder.encode(t).write(to: tapeURL, options: .atomic)
     }
 
@@ -88,29 +112,53 @@ public struct TapeStore: Sendable {
     /// `commands(after:)`'s torn-line tolerance exists specifically to cover a reader catching
     /// this write mid-flight.
     public func appendCommand(_ c: TapeCommand) throws -> Int {
-        try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
-        let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
-        var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
-        line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.
+        try IntakeDirectory.require(intakeDirectory)
+        // The seq is the highest on file plus one, so reading it and writing the line must be one
+        // step across processes: the app, the phone path and the runner all append here.
+        return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) { try appendUnlocked(c) }
+    }
 
-        if !FileManager.default.fileExists(atPath: commandsURL.path) {
-            FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
+    /// Reads, composes and appends in ONE critical section, under the same lock as
+    /// `appendCommand`: `compose` gets every command on file and returns the one to append, or
+    /// nil to append nothing. For a command built from what is already queued — an
+    /// auto-accepted thread diff carries the whole plan, so it must be composed on the newest
+    /// queued edit, and no edit may land between that read and this append, or it is lost.
+    /// `compose` runs holding the lock: it must not append itself, or it waits on itself.
+    @discardableResult
+    public func appendCommand(composing compose: (_ current: [CommandEnvelope]) throws -> TapeCommand?) throws -> Int? {
+        try IntakeDirectory.require(intakeDirectory)
+        return try LockedAppend.withLock(on: LockedAppend.lockURL(for: commandsURL)) {
+            guard let command = try compose(readCommandLines()) else { return nil }
+            return try appendUnlocked(command)
         }
-        let handle = try FileHandle(forWritingTo: commandsURL)
-        defer { try? handle.close() }
-        // A prior append that crashed mid-write leaves a torn final line with no trailing
-        // newline. Appending straight onto that would glue this command onto the garbage,
-        // corrupting both — and since a torn line is silently dropped by `commands(after:)`,
-        // the command riding in on it (a pause/stop the user just asked for) would vanish
-        // with no error anywhere. Closing that line out with its own newline first keeps this
-        // append self-contained regardless of what the file already ends with.
-        if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+    }
+
+    /// The append itself; the caller holds the commands lock.
+    private func appendUnlocked(_ c: TapeCommand) throws -> Int {
+        do {
+            let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
+            var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
+            line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.
+
+            if !FileManager.default.fileExists(atPath: commandsURL.path) {
+                FileManager.default.createFile(atPath: commandsURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: commandsURL)
+            defer { try? handle.close() }
+            // A prior append that crashed mid-write leaves a torn final line with no trailing
+            // newline. Appending straight onto that would glue this command onto the garbage,
+            // corrupting both — and since a torn line is silently dropped by `commands(after:)`,
+            // the command riding in on it (a pause/stop the user just asked for) would vanish
+            // with no error anywhere. Closing that line out with its own newline first keeps this
+            // append self-contained regardless of what the file already ends with.
+            if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+                handle.seekToEndOfFile()
+                handle.write(Data([0x0A]))
+            }
             handle.seekToEndOfFile()
-            handle.write(Data([0x0A]))
+            handle.write(line)
+            return seq
         }
-        handle.seekToEndOfFile()
-        handle.write(line)
-        return seq
     }
 
     /// Commands with `seq > seq`, in file order. Skips a torn last line (no trailing newline,
@@ -127,10 +175,8 @@ public struct TapeStore: Sendable {
     }
 
     private func commandLines() -> [Data] {
-        guard let data = try? Data(contentsOf: commandsURL), let text = String(data: data, encoding: .utf8) else {
-            return []
-        }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { $0.data(using: .utf8) }
+        guard let data = try? Data(contentsOf: commandsURL) else { return [] }
+        return LockedAppend.lines(of: data)
     }
 
     /// Just a line's `seq`, so a command `readCommandLines` can't decode still counts toward the
@@ -157,7 +203,7 @@ public struct TapeStore: Sendable {
         if fm.fileExists(atPath: dir.path) {
             try fm.removeItem(at: dir)
         }
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeDirectory.create(dir, in: intakeDirectory)
         for (name, data) in files {
             // Names are relative paths (a draft round writes `drafts/<i>.md`), so each file's
             // own parent may not exist yet.
@@ -216,9 +262,63 @@ public struct TapeStore: Sendable {
         let markdown = MarkdownUnwrap.unwrap(markdown)
         if markdown == PlanLayers.generatedPlan(checkpointDirectory(checkpoint)) {
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            // No layer, nothing for a thread to have contributed to.
+            try? FileManager.default.removeItem(at: threadEditSourcesURL(checkpoint: checkpoint))
             return
         }
         try Data(markdown.utf8).write(to: url, options: .atomic)
+    }
+
+    /// `checkpoints/<id>/plan.user.threads.json`: which ask threads' accepted diffs are in the
+    /// checkpoint's `plan.user.md` (spec §5, "records the thread as its source"). The layer itself
+    /// is the whole edited plan, the same bytes a hand edit writes, so without this a round
+    /// could not tell a thread's change from the human's own.
+    public func threadEditSourcesURL(checkpoint: Int) -> URL {
+        checkpointDirectory(checkpoint).appendingPathComponent("plan.user.threads.json")
+    }
+
+    /// The threads whose accepted diffs are in `checkpoint`'s edit layer, oldest first; empty
+    /// with none (or no layer).
+    public func threadEditSources(checkpoint: Int) -> [ThreadEditSource] {
+        guard userEdits(checkpoint: checkpoint) != nil,
+              let data = try? Data(contentsOf: threadEditSourcesURL(checkpoint: checkpoint)) else { return [] }
+        return (try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data)) ?? []
+    }
+
+    /// Runner-only, beside `writeUserEdits`: records that `source`'s diff is in the layer. Once
+    /// per diff, so a refolded command adds nothing.
+    public func recordThreadEdit(checkpoint: Int, _ source: ThreadEditSource) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        var sources = (try? Data(contentsOf: url)).flatMap { try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: $0) } ?? []
+        guard !sources.contains(source) else { return }
+        sources.append(source)
+        try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
+    }
+
+    /// Runner-only (N1): `source`'s accept was taken back by the human's typing; it no longer
+    /// names a change in `checkpoint`'s layer.
+    public func withdrawThreadEdit(checkpoint: Int, _ source: ThreadEditSource) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        guard let data = try? Data(contentsOf: url),
+              var sources = try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data), sources.contains(source) else { return }
+        sources.removeAll { $0 == source }
+        try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
+    }
+
+    /// Runner-only, after a hand edit lands on `checkpoint` (A-6): drops each thread source whose
+    /// change the edit reverted — its passage reads as the old text again and the new text is
+    /// gone — so the next round is not told "Its change is already in the plan" about a change
+    /// the human took back. A source whose diff can't be read is kept.
+    public func pruneThreadEdits(checkpoint: Int, markdown: String, diff: (ThreadEditSource) -> ThreadDiff?) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        guard let data = try? Data(contentsOf: url),
+              let sources = try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data) else { return }
+        let kept = sources.filter { source in
+            guard let d = diff(source), !d.old.isEmpty else { return true }
+            return !(markdown.contains(d.old) && (d.new.isEmpty || !markdown.contains(d.new)))
+        }
+        guard kept != sources else { return }
+        try IntakeJSON.encoder.encode(kept).write(to: url, options: .atomic)
     }
 
     /// Every note on `tape` for the app to list or highlight: the ones rounds already consumed,

@@ -16,7 +16,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, IntakeCommanding {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading, VisualFetching {
     /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
     /// because the in-app attention banner (app level) and the board strip (deep in the stack)
     /// must push onto the same stack the list owns. Observed: the stack binds to it.
@@ -47,6 +47,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     @ObservationIgnored let cache: PhoneCache?
     /// What is typed in each conversation's composer, kept as it is typed. See `DraftStore`.
     @ObservationIgnored let drafts: DraftStore?
+    /// What is typed in the New Intake sheet, per project. See `NewIntakeModel`.
+    @ObservationIgnored let intakeDrafts: DraftStore?
     /// Where the next connector resumes from: the sequence `fleet` was folded to and the epoch
     /// it was counted in, updated with every `onFleet`. `nil` means resume from nothing.
     ///
@@ -57,6 +59,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// The pending debounced fleet save, if one is scheduled. See `scheduleFleetSave()`.
     @ObservationIgnored private var fleetSave: Task<Void, Never>?
     @ObservationIgnored private var connector: FleetConnector?
+    /// The plan reader's visual fetcher over the shared cache. Lazy because it holds `self`
+    /// (weakly) as its fetcher, and not observed: it is a service, not state a view reads.
+    @ObservationIgnored private(set) lazy var visualLoader = VisualLoader(fetcher: self)
     @ObservationIgnored private var runner: PairingRunner?
     /// One open session's model per tab id, kept so that going back to the list and forward
     /// again shows the conversation the phone already holds instead of re-downloading it.
@@ -106,16 +111,31 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// fetcher, and `lazy` does not compose with `@Observable`); `@ObservationIgnored` because
     /// it is its own observable and never reassigned.
     @ObservationIgnored private(set) var flightControl: FlightControlModel!
+    /// The New Intake sheet's state; built beside `flightControl`, which sends its command.
+    @ObservationIgnored private(set) var newIntake: NewIntakeModel!
 
     init(
         store: any PairedMacStoring = KeychainPairedMacStore(), cache: PhoneCache? = nil,
-        drafts: DraftStore? = nil
+        drafts: DraftStore? = nil, answerDrafts: AnswerDraftStore? = nil, intakeDrafts: DraftStore? = nil
     ) {
         self.store = store
         self.cache = cache
         self.drafts = drafts
+        self.intakeDrafts = intakeDrafts
         self.mac = store.load()
-        self.flightControl = FlightControlModel(fetcher: self, commander: self)
+        self.flightControl = FlightControlModel(fetcher: self, commander: self, answerDrafts: answerDrafts)
+        self.newIntake = NewIntakeModel(
+            flightControl: flightControl, drafts: intakeDrafts,
+            open: { [weak self] id in
+                guard let self else { return 0 }
+                let depth = self.path.count
+                self.path.append(IntakeRoute.intake(id))
+                return depth
+            },
+            close: { [weak self] depth in
+                guard let self, self.path.count > depth else { return }
+                self.path.removeLast(self.path.count - depth)
+            })
         // A cold launch resumes from the fleet cached on disk, or asks for EVERYTHING.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
@@ -333,6 +353,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         path = NavigationPath()
         // Same reasoning: queued banners and cached intake bodies name the revoked pairing's work.
         flightControl.reset()
+        newIntake.reset()
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -539,6 +560,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             model = existing
         } else {
             model = SessionTimelineModel(sessionID: id, fleet: self, cache: cache, drafts: drafts)
+            model.tabTitle = { [weak self] tab in
+                self?.fleet.projects.lazy.flatMap(\.sessions).first { $0.id == tab }?.title
+            }
             timelineModels[id] = model
         }
         evictIdleTimelineModels()
@@ -622,6 +646,36 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     ) {
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.requestIntakePlan(id: id, checkpoint: checkpoint, changes: changes, then: completion)
+    }
+
+    func intakeThread(
+        _ id: UUID, threadID: UUID, since: Int?,
+        then completion: @escaping (Result<WireThreadPage, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestIntakeThread(id: id, threadID: threadID, since: since, then: completion)
+    }
+
+    /// Forwarded exactly as `timelinePage` is; `.disconnected` synchronously with no connector.
+    func readFile(
+        session: UUID, path: String, offset: Int64, limit: Int, maxPixel: Int?,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestFile(session: session, path: path, offset: offset, limit: limit,
+                              maxPixel: maxPixel, then: completion)
+    }
+
+    /// Forwarded exactly as `readFile` is; `.disconnected` synchronously with no connector. Only
+    /// the visual loader calls this, and only for a plan whose detail says `visuals == true`.
+    @discardableResult
+    func fetchVisual(
+        intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
+        then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
+    ) -> () -> Void {
+        guard let connector else { completion(.failure(.disconnected)); return {} }
+        return connector.requestVisual(id: intake, visualID: visualID, revision: revision, part: part,
+                                       offset: offset, limit: limit, then: completion)
     }
 
     /// Ask the Mac to type something into a session's agent.
@@ -799,6 +853,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.requestOpenConversation(
             conversationID: conversationID, projectPath: projectPath, then: completion
         )
+    }
+
+    /// Tab `session`'s account, its choices to move to (already narrowed to the project's pool
+    /// by the Mac), each account's usage and the tab's context fill — the session sheet's data.
+    func accountChoices(session: UUID) async -> Result<WireAccountChoices, FleetRequestError> {
+        guard let connector else { return .failure(.disconnected) }
+        return await withCheckedContinuation { continuation in
+            connector.requestAccountChoices(session: session) { continuation.resume(returning: $0) }
+        }
     }
 
     func reconnect() {
@@ -1070,6 +1133,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         cache?.purgeAll()
         // What was typed for the old pairing's sessions is that pairing's too.
         drafts?.purgeAll()
+        flightControl.purgeAnswerDrafts()
+        intakeDrafts?.purgeAll()
     }
 
     /// One short, structural word per state — never the Mac's name, which is a user-chosen

@@ -1,0 +1,23 @@
+# A Flight Deck visual provider, contract 1. Copy this folder, then edit.
+id = "example.my-provider"        # letters, digits, ".", "_", "-"; unique
+name = "My provider"
+version = "1.0.0"
+contract = 1
+
+[[kind]]
+id = "example.sketch"
+summary = "One line telling the planning agent what this draws and when to pick it"
+output = "html"                   # html | svg | png | mermaid | canvas
+entry = "visual.html"             # the file the agent writes in the draft folder
+pins = "dom"                      # nodes | canvas | dom | xy (optional)
+states = []                       # named states the visual can show
+sizes = ["default"]
+cost = { seconds = 30, tokens = 4000 }
+instructions = "kinds/example.md"
+assets = []                       # provider files copied into every draft
+
+# Optional. Omit for a data-only provider. A repo provider with a generator needs approval.
+# [generator]
+# command = ["./bin/render", "{source}", "{out}"]
+# timeout = "60s"
+# network = false

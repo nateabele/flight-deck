@@ -150,7 +150,7 @@ public enum TapePlanner {
             if let i = tape.pendingNotes.firstIndex(where: { $0.id == id }), tape.pendingNotes[i].accepts(kind: kind) {
                 tape.pendingNotes[i].kind = kind
             }
-        case .editPlan:
+        case .editPlan, .applyThreadDiff, .withdrawThreadEdit:
             // A file, not tape state: the runner writes it (`TapeStore.writeUserEdits`), since
             // this function only folds a command into the tape value.
             break

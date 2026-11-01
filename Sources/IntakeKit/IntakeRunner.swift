@@ -212,6 +212,11 @@ public struct IntakeRunner: Sendable {
         case .merged(let plan):
             guard Data(plan.utf8) != ours else { return }
             files[PlanLayers.userName] = Data(plan.utf8)
+            // The threads whose accepts landed mid-round ride with their edit (A-I2): without them
+            // the next round would see the change as the human's and never name its thread.
+            if !carry.sources.isEmpty, let data = try? IntakeJSON.encoder.encode(carry.sources) {
+                files[keeper.store.threadEditSourcesURL(checkpoint: cp.id).lastPathComponent] = data
+            }
             let n = PlanLayers.userDiff(generated: carry.base, edited: carry.theirs).count
             note = "Carried your \(n) edit\(n == 1 ? "" : "s") forward from checkpoint \(carry.checkpoint)."
         case .conflicted:
@@ -236,7 +241,9 @@ private actor TapeKeeper {
     private(set) var stopRequested = false
     /// The head plan checkpoint the round in flight read, and the effective plan it read there
     /// — the base a mid-round edit is carried forward from (see `carryCandidate`).
-    private var roundInput: (checkpoint: Int, plan: String)?
+    /// The thread sources already in that plan (`plan.user.threads.json`): a source recorded
+    /// after them is an accept that landed mid-round, carried forward with its edit.
+    private var roundInput: (checkpoint: Int, plan: String, sources: [ThreadEditSource])?
 
     init(store: TapeStore, now: @escaping @Sendable () -> Date, hooks: IntakeRunner.Hooks) {
         self.store = store
@@ -302,7 +309,20 @@ private actor TapeKeeper {
             case .pause, .note, .removeNote, .setNoteKind, .extend, .trim:
                 TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
-                applyEdit(checkpoint: checkpoint, markdown: markdown)
+                if applyEdit(checkpoint: checkpoint, markdown: markdown) {
+                    let threads = ThreadStore(intakeDirectory: store.intakeDirectory)
+                    try? store.pruneThreadEdits(checkpoint: checkpoint, markdown: markdown) { threads.diff($0.thread, $0.diff) }
+                }
+            case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
+                // The payload is exactly `editPlan`'s — the whole edited plan for one checkpoint
+                // — and so is the effect: the human accepted the text, so it is their edit. It
+                // also records which thread and diff it came from, so the next round can name
+                // the thread whose decision explains the edit (spec §11).
+                if applyEdit(checkpoint: checkpoint, markdown: markdown) {
+                    try? store.recordThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
+                }
+            case .withdrawThreadEdit(let thread, let diff, let checkpoint):
+                try? store.withdrawThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
             }
             tape.ackedCommandSeq = envelope.seq
         }
@@ -319,13 +339,18 @@ private actor TapeKeeper {
     /// or never written) has nowhere to go and is dropped. Best effort, like `save`: a failed
     /// write can't pause anything from inside the command watcher; the app sees no layer and
     /// the human can save again.
-    private func applyEdit(checkpoint: Int, markdown: String) {
-        guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return }
-        try? store.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
+    /// Returns whether the edit was written.
+    @discardableResult
+    private func applyEdit(checkpoint: Int, markdown: String) -> Bool {
+        guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return false }
+        do { try store.writeUserEdits(checkpoint: checkpoint, markdown: markdown) } catch { return false }
+        return true
     }
 
     func startRound(_ next: PlannedRound) -> Tape {
-        roundInput = store.headPlanCheckpoint(in: tape).flatMap { id in store.effectivePlan(checkpoint: id).map { (id, $0) } }
+        roundInput = store.headPlanCheckpoint(in: tape).flatMap { id in
+            store.effectivePlan(checkpoint: id).map { (id, $0, store.threadEditSources(checkpoint: id)) }
+        }
         tape.status = .running
         tape.pauseDiagnosis = nil
         tape.roundInProgress = next
@@ -341,10 +366,11 @@ private actor TapeKeeper {
     /// ran). nil when nothing changed. `base` is what the round read — for a head with no edits
     /// at round start that is its generated `plan.md`; with edits, the edited plan the round
     /// already built on, so only the NEW edits are merged in.
-    func carryCandidate() -> (checkpoint: Int, base: String, theirs: String)? {
+    func carryCandidate() -> (checkpoint: Int, base: String, theirs: String, sources: [ThreadEditSource])? {
         guard let input = roundInput, let now = store.effectivePlan(checkpoint: input.checkpoint),
               now != input.plan else { return nil }
-        return (input.checkpoint, input.plan, now)
+        let fresh = store.threadEditSources(checkpoint: input.checkpoint).filter { !input.sources.contains($0) }
+        return (input.checkpoint, input.plan, now, fresh)
     }
 
     /// Appends the checkpoint, consumes the notes the round used, clears `roundInProgress`
@@ -369,9 +395,25 @@ private actor TapeKeeper {
         if TapePlanner.satisfies(next.target, after: cp, nextRound: TapePlanner.next(after: after, config: config)) {
             next.target = .none
         }
+        var files = files
+        if let states = Self.blockStates(store) { files[Self.visualsName] = states }
         try store.writeCheckpoint(cp, files: files, into: &next, beforeSave: hooks.beforeCheckpointSave)
         tape = next
         roundInput = nil
+    }
+
+    /// `checkpoints/<n>/visuals.json`, relative to the checkpoint.
+    static let visualsName = "visuals.json"
+
+    /// Every visual's block state as `visuals/` holds it now (ThreadRunner's, read-only here), for
+    /// the checkpoint being written (spec §7: an old plan shows its visuals as they were then).
+    /// nil when the intake has none, so a checkpoint without visuals gets no file.
+    static func blockStates(_ store: TapeStore) -> Data? {
+        let reader = DiskVisualStore(tape: store)
+        var states: [VisualID: BlockState] = [:]
+        for id in reader.visuals() { states[id] = reader.blockState(id) }
+        guard !states.isEmpty else { return nil }
+        return try? IntakeJSON.encoder.encode(CheckpointBlockStates(states: states))
     }
 
     /// The runner's last write: the final status, with `runnerPID` and `heartbeat` cleared so

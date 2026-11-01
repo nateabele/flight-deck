@@ -126,5 +126,30 @@ final class CapacityUITests: XCTestCase {
             XCTAssertTrue(text("New Claude pool", in: prefs).waitForExistence(timeout: 5))
             shoot(prefs, "accounts-pool-added")
         }
+
+        XCTContext.runActivity(named: "Settings → Accounts shows each account's usage in its row") { _ in
+            let prefs = app.windows.containing(.button, identifier: "Agents").firstMatch
+            XCTAssertTrue(prefs.waitForExistence(timeout: 10))
+            prefs.buttons["Accounts"].click()
+            let row = prefs.descendants(matching: .any)["account-row-Work"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            // 31.0 is the row's height before the usage cluster (account-usage-in-accounts-pane plan, Task 3).
+            XCTAssertEqual(row.frame.height, 31.0, accuracy: 0.5, "the usage cluster does not make the row taller")
+            let work = prefs.descendants(matching: .any)["account-usage-Work"]
+            XCTAssertTrue(work.waitForExistence(timeout: 10))
+            XCTAssertTrue((work.value as? String ?? "").contains("82%"), "value=\(String(describing: work.value)) label=\(work.label)")
+            let spare = prefs.descendants(matching: .any)["account-row-Spare"]
+            XCTAssertEqual(row.frame.height, spare.frame.height, accuracy: 0.5, "a row with two usage lines is no taller than one with a message")
+            XCTAssertTrue(row.frame.contains(work.frame), "the cluster sits inside its row")
+            XCTAssertTrue((work.value as? String ?? "").contains("31%"), "value=\(String(describing: work.value))")
+            let spareUsage = prefs.descendants(matching: .any)["account-usage-Spare"]
+            XCTAssertTrue(spareUsage.exists)
+            XCTAssertTrue((spareUsage.value as? String ?? "").contains("No usage yet"), "value=\(String(describing: spareUsage.value))")
+            // The accessibility frame of the cluster's Text stand-in differs by up to ~17 pt between a
+            // two-line and a message row even though the boxes align on screen (accounts-usage shot);
+            // the Default capsule's slot is 54 pt, so this still catches the shift it once caused.
+            XCTAssertEqual(work.frame.minX, spareUsage.frame.minX, accuracy: 20, "usage clusters line up across rows")
+            shoot(prefs, "accounts-usage")
+        }
     }
 }

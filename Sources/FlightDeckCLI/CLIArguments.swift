@@ -22,7 +22,9 @@ public enum CLIAnswerChoice: Equatable {
 /// Every shape a `flightdeck` invocation can take, already validated — a `CLICommand` is
 /// always ready to execute, never a partial parse that still needs checking.
 public enum CLICommand: Equatable {
-    case help
+    /// `--help`, `-h` or `help [VERB]`: the overview when `topic` is nil, else that verb's page
+    /// (`CLIHelp.topic(for:)` has already checked it names one).
+    case help(topic: String? = nil)
     case ls(project: String?)
     case tail(session: String?, since: Int?, noSnapshot: Bool)
     case wait(session: String, condition: String, timeout: TimeInterval?)
@@ -51,6 +53,13 @@ public enum CLICommand: Equatable {
     /// `CLIRunner` never sees one dispatched. Parsed here anyway because argument validation
     /// (a real UUID, `--root` present) belongs with every other verb's, not duplicated in main.
     case intakeRun(id: UUID, root: String)
+    /// `provider check DIR`: validates a visual provider's folder. Local like `intakeRun`:
+    /// `main.swift` runs it before any transport exists, since it reads files and never asks
+    /// Flight Deck anything.
+    case providerCheck(dir: String, runSamples: Bool)
+    /// `intake threads`: the detached ThreadRunner for one intake's ask threads, intercepted in
+    /// `main.swift` exactly as `intakeRun` is.
+    case intakeThreads(id: UUID, root: String)
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
@@ -65,6 +74,9 @@ public enum CLICommand: Equatable {
     case delegate(DelegateCommand)
     /// `infra up|down|ls|doctor|extend`: cloud machines (`InfraCommands.swift`).
     case infra(InfraCommand)
+    /// `index ARGS…`: everything after `index`, for `fdindex` (`IndexCommand`). Local: `main.swift`
+    /// runs it before any transport exists.
+    case index([String])
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -94,7 +106,14 @@ public enum CLIArguments {
 
     /// - Parameter args: argv with argv[0] already stripped.
     public static func parse(_ args: [String]) throws -> CLIInvocation {
-        if args.isEmpty { return CLIInvocation(command: .help) }
+        if args.isEmpty { return CLIInvocation(command: .help()) }
+
+        // `index` hands every argument to `fdindex`, so it is decided before the globals pass
+        // below could take `--json`, `--socket` or `--help` for flightdeck's own. Bare `index`
+        // and `index --help` fall through to the help page.
+        if args[0] == "index", args.count > 1, !["--help", "-h", "help"].contains(args[1]) {
+            return CLIInvocation(command: .index(Array(args.dropFirst())))
+        }
 
         // Globals may appear anywhere, so they're stripped in a first pass rather than
         // threaded through every verb's own cursor — each verb below sees only its operands.
@@ -104,9 +123,11 @@ public enum CLIArguments {
         var socket: String?
         var rest: [String] = []
         var literalFrom: Int?
+        var wantsHelp = false
         var cursor = args.makeIterator()
         while let token = cursor.next() {
             switch token {
+            case "--help", "-h": wantsHelp = true
             case "--":
                 literalFrom = rest.count
                 while let literal = cursor.next() { rest.append(literal) }
@@ -120,8 +141,17 @@ public enum CLIArguments {
             }
         }
 
-        if rest.isEmpty || (literalFrom != 0 && ["help", "-h", "--help"].contains(rest[0])) {
-            return CLIInvocation(command: .help, json: json, socket: socket)
+        // `help VERB`, or `--help` anywhere before `--` (`send S --help`, `plan approve --help`):
+        // the page for the verb the leading words name. Past `--` it is the command's own flag.
+        let helpVerb = rest.first == "help" && literalFrom != 0
+        if rest.isEmpty || helpVerb || wantsHelp {
+            // Only words before `--` name the topic: after it they are a command's argv.
+            let words = Array(rest.prefix(literalFrom ?? rest.count).dropFirst(helpVerb ? 1 : 0))
+            guard let first = words.first else { return CLIInvocation(command: .help(), json: json, socket: socket) }
+            guard let topic = CLIHelp.topic(for: words) else {
+                throw CLIUsageError("help: unknown command \"\(first)\"")
+            }
+            return CLIInvocation(command: .help(topic: topic), json: json, socket: socket)
         }
 
         let verb = rest[0]
@@ -326,11 +356,17 @@ public enum CLIArguments {
         case "intake":
             return try parseIntake(&c)
 
+        case "provider":
+            return try parseProvider(&c)
+
         case "host":
             return try parseHost(&c)
 
         case "infra":
             return try InfraArguments.parse(&c)
+        case "index":
+            // Only the bare word gets here (see `parse`): its page.
+            return .help(topic: "index")
         case "account":
             return try parseAccount(&c)
 
@@ -425,23 +461,43 @@ public enum CLIArguments {
         }
     }
 
+    private static func parseProvider(_ c: inout Cursor) throws -> CLICommand {
+        let sub = try c.requirePositional("provider: missing subcommand")
+        switch sub {
+        case "check":
+            let dir = try c.requirePositional("provider check: missing the provider folder")
+            var runSamples = false
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--run-samples": runSamples = true
+                default: throw Cursor.unknownFlag(flag, in: "provider check")
+                }
+            }
+            try c.end(verb: "provider check")
+            return .providerCheck(dir: dir, runSamples: runSamples)
+        default:
+            throw CLIUsageError("provider: unknown subcommand \"\(sub)\"")
+        }
+    }
+
     private static func parseIntake(_ c: inout Cursor) throws -> CLICommand {
         let sub = try c.requirePositional("intake: missing subcommand")
         switch sub {
-        case "run":
-            let token = try c.requirePositional("intake run: missing id")
+        case "run", "threads":
+            // Both detached runners take the same arguments: the intake's id and its root.
+            let token = try c.requirePositional("intake \(sub): missing id")
             guard let id = UUID(uuidString: token) else {
-                throw CLIUsageError("intake run: requires a full UUID, got \"\(token)\"")
+                throw CLIUsageError("intake \(sub): requires a full UUID, got \"\(token)\"")
             }
             var root: String?
             while let flag = c.nextFlag() {
                 switch flag {
                 case "--root": root = try c.require(after: flag)
-                default: throw Cursor.unknownFlag(flag, in: "intake run")
+                default: throw Cursor.unknownFlag(flag, in: "intake \(sub)")
                 }
             }
-            guard let root else { throw CLIUsageError("intake run: --root DIR is required") }
-            return .intakeRun(id: id, root: root)
+            guard let root else { throw CLIUsageError("intake \(sub): --root DIR is required") }
+            return sub == "run" ? .intakeRun(id: id, root: root) : .intakeThreads(id: id, root: root)
 
         default:
             throw CLIUsageError("intake: unknown subcommand \"\(sub)\"")

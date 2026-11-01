@@ -18,9 +18,33 @@ enum SidebarRow: Identifiable, Hashable {
     /// empty project is indistinguishable from a collapsed one.
     case empty(Repo.ID)
 
-    /// Prefixed rather than bare: a project and its placeholder carry the same `Repo.ID`, and
-    /// two rows with the same identity make `ForEach` drop one of them.
-    var id: String {
+    /// What `ForEach` and `List` key a row by. A (kind, UUID) pair rather than the old
+    /// `"p:<uuid>"` string: `OutlineListCoordinator`'s diff asks for `id` O(n log n) times per
+    /// render, and building a String each time measured ~0.5% CPU. This is two words, hashed
+    /// without allocating.
+    ///
+    /// The kind is still part of it: a project and its placeholder carry the same `Repo.ID`, and
+    /// two rows with the same identity make `ForEach` drop one of them. The enum itself is not
+    /// used as the id because `.session` also carries its project, and a session dragged to
+    /// another project must keep its identity (it is the same row, moved).
+    struct ID: Hashable {
+        fileprivate enum Kind: UInt8 { case project, session, empty }
+        fileprivate let kind: Kind
+        fileprivate let uuid: UUID
+    }
+
+    var id: ID {
+        switch self {
+        case .project(let id): return ID(kind: .project, uuid: id)
+        case .session(let id, _): return ID(kind: .session, uuid: id)
+        case .empty(let id): return ID(kind: .empty, uuid: id)
+        }
+    }
+
+    /// The old string form of `id`, for the one consumer that wants a String
+    /// (`SidebarInputMonitor.rowIdentity`, compared for equality on mouse events only, so the
+    /// allocation is off the render path).
+    var identityString: String {
         switch self {
         case .project(let id): return "p:\(id.uuidString)"
         case .session(let id, _): return "s:\(id.uuidString)"

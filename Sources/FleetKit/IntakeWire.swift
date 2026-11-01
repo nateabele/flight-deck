@@ -35,18 +35,28 @@ public struct WireIntakeSummary: Codable, Equatable, Sendable, Identifiable {
     public var releasedTaskCount: Int?
     /// Orders "newest first" within a group on the phone.
     public var createdAt: Date
+    /// How many of the intake's ask threads wait on the human (`needsYou`): the fleet list's
+    /// badge. nil from a Mac without threads, and from this one until they ship.
+    public var threadsNeedingYou: Int?
+    /// `WireHalt.kind` and `reason` when planning is halted, so the Sessions row can say why.
+    /// nil while nothing is halted and from a Mac that predates halt status.
+    public var haltKind: String?
+    public var haltReason: String?
 
     public init(
         id: UUID, title: String, state: String, needsAttention: Bool, preset: String? = nil,
         now: String? = nil, runStatus: String? = nil, clockSince: Date? = nil,
         agentsDone: Int? = nil, agentsTotal: Int? = nil, questionCount: Int? = nil,
-        releasedTaskCount: Int? = nil, createdAt: Date
+        releasedTaskCount: Int? = nil, createdAt: Date, threadsNeedingYou: Int? = nil,
+        haltKind: String? = nil, haltReason: String? = nil
     ) {
         self.id = id; self.title = title; self.state = state; self.needsAttention = needsAttention
         self.preset = preset; self.now = now; self.runStatus = runStatus; self.clockSince = clockSince
         self.agentsDone = agentsDone; self.agentsTotal = agentsTotal
         self.questionCount = questionCount; self.releasedTaskCount = releasedTaskCount
         self.createdAt = createdAt
+        self.threadsNeedingYou = threadsNeedingYou
+        self.haltKind = haltKind; self.haltReason = haltReason
     }
 }
 
@@ -94,6 +104,25 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     public var roundsMenu: WireRoundsMenu?
     /// What shaping has already run, so the inspector shows those roles locked; shaping only.
     public var roundsLock: WireRoundsLock?
+    /// true from a Mac that accepts `intake.answer` — the phone's licence to answer clarifying
+    /// questions by choosing. Separate from `steer` for the same reason `choose` is: an older Mac
+    /// drops the socket on an op it does not know. nil from such a Mac, and the phone says to
+    /// answer on the Mac.
+    public var structuredQuestions: Bool?
+    /// true from a Mac that accepts the ask-thread ops (`intake.thread.*`, `intake.diff.decide`)
+    /// — the phone's licence to offer Ask. Separate from `steer` for the same reason `choose` is:
+    /// an older Mac drops the socket on an op it does not know. nil from such a Mac.
+    public var threads: Bool?
+    /// true from a Mac that answers `intake.visual.fetch` — the phone's licence to draw a plan's
+    /// visual blocks. Separate for the same reason: an older Mac drops the socket on an op it does
+    /// not know. nil from such a Mac, and from this one until visuals ship.
+    public var visuals: Bool?
+    /// Why planning stopped and what can be done about it; nil while nothing is halted and from
+    /// a Mac that predates halt status. (`halt` above is the unrelated "pausing"/"stopping".)
+    public var halted: WireHalt?
+    /// true from a Mac that answers `intake.retry` — the phone's licence to offer Retry, separate
+    /// from `steer` because an older Mac drops the socket on an op it does not know.
+    public var retry: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -102,7 +131,9 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
         headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil, choose: Bool? = nil, noteKind: Bool? = nil,
         roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
-        roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil
+        roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil,
+        structuredQuestions: Bool? = nil, threads: Bool? = nil,
+        visuals: Bool? = nil, halted: WireHalt? = nil, retry: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -111,6 +142,62 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.servedAt = servedAt; self.steer = steer; self.choose = choose; self.noteKind = noteKind
         self.roundConfig = roundConfig
         self.editRounds = editRounds; self.roundsMenu = roundsMenu; self.roundsLock = roundsLock
+        self.structuredQuestions = structuredQuestions
+        self.threads = threads
+        self.visuals = visuals
+        self.halted = halted
+        self.retry = retry
+    }
+}
+
+/// Why planning stopped and what the person can do about it. Strings, not enums, so a newer Mac's kinds/actions degrade on an older phone.
+public struct WireHalt: Codable, Equatable, Sendable {
+    /// "roundFailed" | "intakeFailed" | "interrupted" | "paused" | "stopped" | "rateLimited"
+    public var kind: String
+    /// e.g. "Polish 5 failed".
+    public var title: String
+    /// e.g. "Harness error: There was a network issue connecting to the server…".
+    public var reason: String
+    /// The runner's `FailureDiagnosis` action, verbatim.
+    public var whatToDo: String?
+    /// failedAt / paused-at, for a "halted for" clock.
+    public var since: Date?
+    /// The seat that failed, when one did.
+    public var slot: WireHaltSlot?
+    /// Tail of the failed agent's stderr+stdout (capped, the end kept).
+    public var output: String?
+    /// Ordered: "retry", "retryOther", "toReview", "resume", "showOutput" … only what the Mac
+    /// would accept right now.
+    public var actions: [String]
+
+    public init(
+        kind: String, title: String, reason: String, whatToDo: String? = nil, since: Date? = nil,
+        slot: WireHaltSlot? = nil, output: String? = nil, actions: [String] = []
+    ) {
+        self.kind = kind; self.title = title; self.reason = reason; self.whatToDo = whatToDo
+        self.since = since; self.slot = slot; self.output = output; self.actions = actions
+    }
+}
+
+public struct WireHaltSlot: Codable, Equatable, Sendable {
+    /// "polisher"
+    public var role: String
+    /// Human label of the harness/model/effort that ran, e.g. "Gemini 3 Pro · high".
+    public var ran: String
+    /// Raw agent id, e.g. "gemini".
+    public var harness: String?
+    public var model: String?
+    /// `Stage` rawValue of the failed round.
+    public var stage: String?
+    /// Index into that stage's slots in `RoundConfig`, so the rounds editor can target it.
+    public var slotIndex: Int?
+
+    public init(
+        role: String, ran: String, harness: String? = nil, model: String? = nil,
+        stage: String? = nil, slotIndex: Int? = nil
+    ) {
+        self.role = role; self.ran = ran; self.harness = harness; self.model = model
+        self.stage = stage; self.slotIndex = slotIndex
     }
 }
 
@@ -342,9 +429,61 @@ public struct WireNote: Codable, Equatable, Sendable, Identifiable {
 public struct WireQuestions: Codable, Equatable, Sendable {
     public var open: [String]?
     public var answered: [WireExchange]
+    /// Index of the open exchange: an answer names it so one typed against an earlier round is
+    /// refused (`stale_questions`) instead of landing on this round's different questions. nil
+    /// from a Mac that predates structured questions.
+    public var round: Int?
+    /// The open round as choices (a legacy string round arrives as text questions), so the phone
+    /// has one shape to render. `open` stays for a phone that predates this field.
+    public var structured: [WireStructuredQuestion]?
+    /// The open round's `questionsDigest`: what it asks, not where it sits. `round` alone is not
+    /// unique — the Mac's retry clears the exchanges, so a fresh round reuses index 0 — and an
+    /// answer or a phone draft keyed by index alone could land on different questions. An
+    /// answer sends it back; the Mac refuses a mismatch (`stale_questions`).
+    public var digest: String?
 
-    public init(open: [String]? = nil, answered: [WireExchange] = []) {
-        self.open = open; self.answered = answered
+    public init(open: [String]? = nil, answered: [WireExchange] = [],
+                round: Int? = nil, structured: [WireStructuredQuestion]? = nil, digest: String? = nil) {
+        self.open = open; self.answered = answered; self.round = round; self.structured = structured
+        self.digest = digest
+    }
+}
+
+/// A clarifying question the person answers by choosing. `kind` stays a string (single, multi,
+/// toggle, text today) so a kind added later never breaks an old phone's decode.
+public struct WireStructuredQuestion: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+    public var kind: String
+    public var options: [WireOption]
+    public var recommended: [String]
+    public var allowOther: Bool
+
+    public init(id: String, text: String, kind: String, options: [WireOption] = [],
+                recommended: [String] = [], allowOther: Bool = false) {
+        self.id = id; self.text = text; self.kind = kind; self.options = options
+        self.recommended = recommended; self.allowOther = allowOther
+    }
+}
+
+public struct WireOption: Codable, Equatable, Sendable {
+    public var id: String
+    public var label: String
+    public var detail: String?
+
+    public init(id: String, label: String, detail: String? = nil) {
+        self.id = id; self.label = label; self.detail = detail
+    }
+}
+
+/// `selected` holds option ids; a text question's typed answer lives in `other`.
+public struct WireStructuredAnswer: Codable, Equatable, Sendable {
+    public var questionID: String
+    public var selected: [String]
+    public var other: String?
+
+    public init(questionID: String, selected: [String] = [], other: String? = nil) {
+        self.questionID = questionID; self.selected = selected; self.other = other
     }
 }
 
@@ -596,15 +735,27 @@ public struct WireIntakePlan: Codable, Equatable, Sendable {
     public var notes: [WireNote]
     public var added: [Int]?
     public var removed: [WireRemovedBlock]?
+    /// The intake's ask threads, for the reader's cards and index; their turns are fetched on
+    /// demand (`intake.thread.get`). nil from a Mac without threads.
+    public var threads: [WireThreadSummary]?
+    /// Every thread's diffs still awaiting the human, in full, for the reader's gutter. nil from
+    /// a Mac without threads.
+    public var pendingDiffs: [WirePendingDiff]?
+    /// The plan's visual blocks, so the reader lays them out before their bytes arrive. nil from
+    /// a Mac without visuals.
+    public var visuals: [WireVisualRef]?
 
     public init(
         checkpoint: Int, roundName: String, editsVersion: String, markdown: String,
         outline: [WireSection] = [], notes: [WireNote] = [], added: [Int]? = nil,
-        removed: [WireRemovedBlock]? = nil
+        removed: [WireRemovedBlock]? = nil, threads: [WireThreadSummary]? = nil,
+        pendingDiffs: [WirePendingDiff]? = nil, visuals: [WireVisualRef]? = nil
     ) {
         self.checkpoint = checkpoint; self.roundName = roundName; self.editsVersion = editsVersion
         self.markdown = markdown; self.outline = outline; self.notes = notes
         self.added = added; self.removed = removed
+        self.threads = threads; self.pendingDiffs = pendingDiffs
+        self.visuals = visuals
     }
 }
 

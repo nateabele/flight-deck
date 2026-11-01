@@ -156,6 +156,27 @@ public struct NoteAnchor: Codable, Equatable, Sendable {
     }
 }
 
+/// Where a note came from, when not from the human's own hand. Codes as `{"thread": "<uuid>"}`,
+/// one key per kind, so a later kind is a new key an older build fails to decode — and
+/// `PlanNote` reads that failure as no source.
+public enum NoteSource: Codable, Equatable, Sendable {
+    case thread(ThreadID)
+
+    private enum CodingKeys: String, CodingKey { case thread }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self = .thread(try c.decode(ThreadID.self, forKey: .thread))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .thread(let id): try c.encode(id, forKey: .thread)
+        }
+    }
+}
+
 /// A note the human attaches to the plan for the next round — anchored to a highlighted quote,
 /// or (with `anchor` nil) about the plan as a whole, which is all the old free-text ✎
 /// annotation could say.
@@ -164,12 +185,32 @@ public struct PlanNote: Codable, Equatable, Sendable, Identifiable {
     public var kind: NoteKind
     public var note: String
     public var anchor: NoteAnchor?
+    /// Who left the note when it wasn't the human typing it: an ask thread (`.thread`), whose
+    /// card the rail labels. nil for the human's own notes and every note written before threads.
+    public var source: NoteSource?
 
-    public init(id: UUID = UUID(), kind: NoteKind = .comment, note: String, anchor: NoteAnchor? = nil) {
+    public init(id: UUID = UUID(), kind: NoteKind = .comment, note: String, anchor: NoteAnchor? = nil,
+                source: NoteSource? = nil) {
         self.id = id
         self.kind = kind
         self.note = note
         self.anchor = anchor
+        self.source = source
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, kind, note, anchor, source }
+
+    /// Synthesized but for `source`, which decodes as nil when it isn't one this build knows: a
+    /// note rides in `tape.json`, and a source kind from a later build (a visual) must cost the
+    /// note its label, not fail the whole tape. Encoding stays synthesized, so a note with no
+    /// source keeps exactly the bytes it had before the field existed.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(NoteKind.self, forKey: .kind)
+        note = try c.decode(String.self, forKey: .note)
+        anchor = try c.decodeIfPresent(NoteAnchor.self, forKey: .anchor)
+        source = (try? c.decodeIfPresent(NoteSource.self, forKey: .source)) ?? nil
     }
 
     /// Whether this note can be `kind` and still say something: every kind needs words except

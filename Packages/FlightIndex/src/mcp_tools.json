@@ -1,0 +1,1355 @@
+[
+ {
+  "name": "qartez_map",
+  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. With boost_files, or uncommitted changes, ranks by what those files reach. A known name: qartez_find; boost_terms ranks around words.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "all_files": {
+     "default": null,
+     "description": "Rank every file, tests and files without symbols included (ignores top_n).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "boost_files": {
+     "default": null,
+     "description": "Files you work on: what they reach ranks first. personalize=false: x10 boost instead.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "boost_terms": {
+     "default": null,
+     "description": "Words; files whose path or symbol names contain one rank higher (x5).",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "by": {
+     "description": "files (default) or symbols.",
+     "enum": [
+      "files",
+      "symbols"
+     ],
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: file rows only. detailed (default): plus up to 6 exported signatures per file."
+    },
+    "personalize": {
+     "default": null,
+     "description": "Seed the rank from boost_files or changed files (default true). False: plain PageRank.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "top_n": {
+     "default": null,
+     "description": "Files to show (default 20; 0 = all).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "with_health": {
+     "default": null,
+     "description": "Accepted and ignored.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Project Map",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_find",
+  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private, and an id (path:Type.name) other tools accept. Takes qualified names (Type.method, stem::fn). No exact match lists the closest by words. Part of a name: qartez_grep; its uses: qartez_refs.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: name and file. detailed (default): plus signature."
+    },
+    "kind": {
+     "description": "Only this kind: function, method, struct, class, extension, …",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Max matches (default 50).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "name": {
+     "description": "Exact or qualified name, a regex with regex=true, or an id path:Type.name. Aliases: symbol, symbol_name.",
+     "type": "string"
+    },
+    "near": {
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose commit messages match (BM25). Default: on for several words or no name hit.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "regex": {
+     "default": null,
+     "description": "Treat name as an unanchored, case-insensitive regex.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "detail": {
+     "default": null,
+     "description": "full: a block per match with its id. rows: one line each. Default: full up to 10 hits, rows past that.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Find Symbol",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_grep",
+  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Several words, or rank=true, rank by words (BM25). For a partial or unsure name; an exact name: qartez_find. search_bodies=true finds text in function bodies instead.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: names only. detailed (default): kind, file and lines."
+    },
+    "kind": {
+     "description": "Only this kind: function, method, struct, …",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Max rows (default 50; 20 ranked), most important files first.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "query": {
+     "description": "Name prefix (Foo = Foo*); words to rank by (a space); regex with regex=true; body text with search_bodies=true. Alias: pattern.",
+     "type": "string"
+    },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose commit messages match (BM25). Default: on for several words or no name hit.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "rank": {
+     "default": null,
+     "description": "Rank by the query's words (BM25 over names, parents, paths), even one word. Several words are ranked anyway.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "regex": {
+     "default": null,
+     "description": "Treat query as an unanchored, case-insensitive regex.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "search_bodies": {
+     "default": null,
+     "description": "Search the text of function bodies, not names: rows are path:line in function: text.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "detail": {
+     "default": null,
+     "description": "full: adds each signature under its row. rows: rows only. Default: full up to 5 hits, rows past that.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "worktrees": {
+     "default": null,
+     "description": "With search_bodies: search many worktrees of this repo at once: `all` or a list of paths.",
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "refresh": {
+     "default": null,
+     "description": "With worktrees: re-read each worktree's state from git, not the recorded one (~1.5 s for 85).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Search Symbols",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_read",
+  "description": "Source of one or more symbols (names or ids path:Type.name), or a file's line range, with line numbers. A long file alone gives its outline and first 100 lines. Use after qartez_find or qartez_grep, not whole files. A file's symbol list: qartez_outline.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "context_lines": {
+     "default": null,
+     "description": "Extra lines around the symbol (default 0).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "end_line": {
+     "default": null,
+     "description": "Last line of the range (inclusive).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "Alone: the file (long source: outline + first 100 lines; more: start_line, limit, max_bytes). With a symbol: its file. Aliases: file, path.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Lines to read from start_line.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "max_bytes": {
+     "default": null,
+     "description": "Output cap in bytes (default 25000); a cut says where to read on. Alone with file_path: reads the whole file.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "start_line": {
+     "default": null,
+     "description": "First line of the range (1-based). Alias: offset.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "symbol_name": {
+     "description": "One symbol to read: a name, or an id path:Type.name as find prints. Aliases: symbol, name.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbols": {
+     "default": null,
+     "description": "Several symbols (names or ids) to read in one call.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "with": {
+     "default": null,
+     "description": "[\"callers\"] adds up to 5 callers with signature and call-site line, saving a calls + read round trip.",
+     "items": {
+      "enum": [
+       "callers"
+      ],
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Read Symbol",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_outline",
+  "description": "Every symbol in one file, grouped by kind, with line ranges and signatures. To see a file's structure before reading it; a symbol's code: qartez_read.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "The file. Aliases: file, path.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: names and lines. detailed (default): plus signatures."
+    },
+    "offset": {
+     "default": null,
+     "description": "Skip this many symbols (pages of 100; the output gives next_offset).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "file_path"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "File Outline",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_deps",
+  "description": "A file's direct imports and direct importers. For everything a change could break (transitive, co-change): qartez_impact.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "The file. Aliases: file, path.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: paths. detailed (default): with specifiers. mermaid: a diagram, only if asked."
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "file_path"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "File Dependencies",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_stats",
+  "description": "Counts: files, LOC, symbols, edges by language, and the most imported files. With file_path: that file's LOC, symbols, imports, importers, PageRank.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "Optional file for per-file numbers. Aliases: file, path.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Codebase Stats",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_impact",
+  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), linked tests, transitive dependents. Call before editing a widely imported file. pending=true: call sites the diff still owes an edit. One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "file_path": {
+     "description": "The file. Aliases: file, path, name.",
+     "type": "string"
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: counts. detailed (default): lists."
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Count tests in the ranked list and blast radius (default false); the Tests group lists linked tests anyway.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "seed_diff": {
+     "default": null,
+     "description": "Also rank co-change partners of files the worktree changed, not just file_path (default true).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "pending": {
+     "default": null,
+     "description": "Follow up the worktree diff: changed call shapes and call sites not yet edited. file_path optional; tests included.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Impact Analysis",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_refs",
+  "description": "Every reference to a symbol (calls, type uses, imports), grouped by file with line and enclosing function. Use before renaming or deleting. Calls only, or chains past one hop: qartez_calls. A whole file: qartez_impact.",
+  "inputSchema": {
+   "$defs": {
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: files only. detailed (default): each reference."
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Include references from test files (default true).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name; Type.member narrows; or an id path:Type.name. Aliases: name, symbol_name.",
+     "type": "string"
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "transitive": {
+     "default": null,
+     "description": "Also list the files that depend on the referencing files.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Symbol References",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_calls",
+  "description": "Callers and callees of a function, up to 10 hops. For every kind of use (types, imports): qartez_refs. A name with several definitions needs file_path or kind.",
+  "inputSchema": {
+   "$defs": {
+    "CallDirection": {
+     "description": "Which edges to walk.",
+     "enum": [
+      "callers",
+      "callees",
+      "both"
+     ],
+     "type": "string"
+    },
+    "Format": {
+     "description": "Output detail.",
+     "enum": [
+      "detailed",
+      "concise",
+      "mermaid"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "depth": {
+     "default": null,
+     "description": "Hops to follow (default 1, max 10; 0 = target only). 2 or more returns a signature-only call tree.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "direction": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/CallDirection"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "callers, callees or both (default)."
+    },
+    "file_path": {
+     "description": "File that defines the function, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "format": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Format"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "concise: names. detailed (default): with paths and lines. mermaid: a diagram, only if asked."
+    },
+    "include_tests": {
+     "default": null,
+     "description": "Include callers in test files (default false).",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Kind of the definition (function, method, …), if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "limit": {
+     "default": null,
+     "description": "Max rows per section (default 50), nearest first; a cut names how to narrow.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "name": {
+     "description": "Function or method name, or an id path:Type.name. Aliases: symbol, symbol_name.",
+     "type": "string"
+    },
+    "near": {
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "token_budget": {
+     "default": null,
+     "description": "Output cap in tokens (default 4000).",
+     "format": "uint32",
+     "minimum": 0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Call Hierarchy",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_replace_symbol",
+  "description": "Replace a symbol's whole definition, signature included, with new_code. To add code beside it: qartez_insert_before_symbol or qartez_insert_after_symbol. Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "The full new definition, starting with its signature.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Symbol name. Aliases: name, symbol_name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Replace Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_insert_before_symbol",
+  "description": "Insert new_code on the line above a symbol's definition. Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "Code to insert; a trailing newline is added if missing.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Anchor symbol. Aliases: name, symbol_name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Insert Before Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_insert_after_symbol",
+  "description": "Insert new_code on the line below a symbol's definition. Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_code": {
+     "description": "Code to insert; a trailing newline is added if missing.",
+     "type": "string"
+    },
+    "symbol": {
+     "description": "Anchor symbol. Aliases: name, symbol_name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "new_code"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Insert After Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_rename",
+  "description": "Rename a symbol everywhere: definition, resolved references, import and exposing lists; strings and comments are left alone. A file: qartez_rename_file. Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "allow_collision": {
+     "default": null,
+     "description": "Rename even if new_name is already defined in a file it rewrites.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "new_name": {
+     "description": "The new name.",
+     "type": "string"
+    },
+    "old_name": {
+     "description": "The current name; Type::name narrows.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "old_name",
+    "new_name"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Rename Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_move",
+  "description": "Move a top-level symbol to another file, repointing importers (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name. Aliases: name, symbol_name.",
+     "type": "string"
+    },
+    "to_file": {
+     "description": "Destination file; created if missing.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol",
+    "to_file"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Move Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_safe_delete",
+  "description": "Delete a symbol, listing every reference that would break; refuses while any remain unless force=true. Preview by default.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "file_path": {
+     "description": "File that defines the symbol, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "force": {
+     "default": null,
+     "description": "Delete even with references left; you fix them.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "kind": {
+     "description": "Symbol kind, if the name is ambiguous.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "symbol": {
+     "description": "Symbol name. Aliases: name, symbol_name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Safe Delete Symbol",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_rename_file",
+  "description": "Rename or move a file and rewrite the imports that name it (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "apply": {
+     "default": null,
+     "description": "true writes; false (default) previews.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "from": {
+     "description": "Current path.",
+     "type": "string"
+    },
+    "to": {
+     "description": "New path.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "from",
+    "to"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Rename File",
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "qartez_add_root",
+  "description": "Start indexing a directory now so later queries need not wait. Optional: a path is indexed when first asked about.",
+  "inputSchema": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "alias": {
+     "description": "Ignored.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "path": {
+     "description": "Directory (default: the launch directory).",
+     "type": "string"
+    },
+    "persist": {
+     "default": null,
+     "description": "Ignored.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "watch": {
+     "default": null,
+     "description": "Ignored.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Add Project Root",
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": true
+  }
+ },
+ {
+  "name": "qartez_workspace",
+  "description": "As qartez_add_root: action=add starts indexing path now; action=remove does nothing.",
+  "inputSchema": {
+   "$defs": {
+    "WorkspaceAction": {
+     "enum": [
+      "add",
+      "remove"
+     ],
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
+    "action": {
+     "$ref": "#/$defs/WorkspaceAction",
+     "description": "add or remove."
+    },
+    "alias": {
+     "description": "Ignored.",
+     "type": "string"
+    },
+    "path": {
+     "description": "Directory (default: the launch directory).",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "action"
+   ],
+   "type": "object"
+  },
+  "annotations": {
+   "title": "Workspace Management",
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": true
+  }
+ }
+]

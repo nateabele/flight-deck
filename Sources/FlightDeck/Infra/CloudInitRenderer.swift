@@ -33,6 +33,8 @@ enum CloudInitError: Error, Equatable {
 /// of `x; rm -rf /` must be refused here, not escaped and hoped for.
 enum CloudInitRenderer {
     static let enrollPath = "/run/flightdeck/enroll.json"
+    /// Left by the install or enroll step when it fails, in the directory `flightdeck` owns.
+    static let failedMark = "/run/flightdeck/failed"
 
     static func render(_ p: EnrollmentPayload, _ o: CloudInitOptions) throws -> String {
         let base = o.installerBaseURL.hasSuffix("/") ? String(o.installerBaseURL.dropLast()) : o.installerBaseURL
@@ -127,11 +129,21 @@ enum CloudInitRenderer {
             // enable-linger returns before `user@UID` is up; `start` waits for it (Type=notify),
             // so the installer's `systemctl --user` never races the manager's startup.
             #"  - [ sh, -c, "systemctl start user@$(id -u flightdeck).service" ]"#,
-            #"  - [ su, "-", flightdeck, "-c", "\#(asUser)curl -fsSL \#(base)/hostd-install.sh | sh -s -- --sha256 \#(o.installerSHA256) --no-pair" ]"#,
+            // Downloaded to a file, never piped: `curl … | sh` exits 0 when the download fails,
+            // because sh just reads an empty script. Retried, since the network can come up late.
+            // A failure leaves `failedMark` for the check below.
+            #"  - [ su, "-", flightdeck, "-c", "\#(asUser)curl -fsSL --retry 5 --retry-all-errors -o ~/hostd-install.sh \#(base)/hostd-install.sh && sh ~/hostd-install.sh --sha256 \#(o.installerSHA256) --no-pair || touch \#(failedMark)" ]"#,
             // Its own entry, never chained: runcmd carries on past a failing step, and the TTL
             // (AWS's timer, GCP's `max_run_duration`) covers a machine that never enrolls.
-            #"  - [ su, "-", flightdeck, "-c", "\#(asUser)\#(hostd) enroll --file \#(enrollPath)" ]"#,
+            #"  - [ su, "-", flightdeck, "-c", "\#(asUser)\#(hostd) enroll --file \#(enrollPath) || touch \#(failedMark)" ]"#,
         ]
+        if ttlTimer {
+            // A machine that cannot enroll only bills, so on AWS it powers off at once, which the
+            // preset turns into a termination; the controller sees the instance end and fails
+            // the `up` then, not at its enroll timeout. Never on GCP, where a poweroff only stops
+            // the VM and its disk keeps billing: there the controller's destroy is what ends it.
+            lines.append(#"  - [ sh, -c, "if [ -e \#(failedMark) ]; then echo 'flightdeck: hostd did not install or enroll; powering off' >&2; systemctl poweroff; fi" ]"#)
+        }
         if let tailnet {
             lines += [
                 #"  - [ sh, -c, "curl -fsSL https://tailscale.com/install.sh | sh" ]"#,

@@ -12,9 +12,20 @@ protocol IntakeCommanding: AnyObject {
     )
 }
 
-/// One thing a person can ask of an intake; identifies a send for the in-flight set.
+/// One thing a person can ask of an intake; identifies a send for the in-flight set and for the
+/// kept retry token. `answer` carries the round's digest: one shared action let the next round's
+/// answer reuse a token kept from a timed-out send of the last, which the Mac acks as a
+/// duplicate and drops without a word.
 enum IntakeAction: Hashable {
-    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
+    case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds, create
+    case answer(String)
+    /// Planning's Retry (`intake.retry`): re-run what halted.
+    case retry
+    /// Ask threads: a draft's send (by its id), a thread's resolve (by thread id). Answers are keyed
+    /// on the turn they answer and a diff's decision on which decision it is (C-I1): a token kept
+    /// from a lost ✓ reused for a ✗ was acked as a duplicate while the plan took the edit, and one
+    /// kept from turn N's answers reused for turn N+1's dropped them without a word.
+    case threadSend(UUID), threadResolve(UUID), threadAnswer(UUID, turn: Int), diffDecide(UUID, accept: Bool)
 }
 
 enum CommandCopy {
@@ -29,12 +40,29 @@ enum CommandCopy {
                              : "Not connected to your Mac, so this wasn't sent."
         case .server(let code)?:
             switch code {
+            // Not "here are the new ones": the round may have been answered on the Mac, with triage
+            // going straight to a fidelity and no new questions after it.
+            case "stale_questions": return "These questions were answered or replaced."
+            case "unknown_question": return "Your Mac couldn't match these answers to its questions."
+            case "invalid_answer": return "Your Mac couldn't use one of these answers."
             case "intake_moved_on": return "This intake has moved on."
             case "not_allowed": return "That isn't possible right now."
             case "note_consumed": return "A round has already read that note."
             case "empty_note": return "Write something first."
+            case "diff_stale": return "That change no longer fits the plan. Ask the agent to propose it again."
+            case "diff_decided": return "That change was already decided."
+            case "already_accepted": return "You already accepted that change."
+            case "unknown_diff", "unknown_thread": return "That thread is no longer on your Mac."
+            case "thread_resolved": return "This thread is resolved."
+            case "empty_message": return "Write something first."
+            case "threads_unavailable": return "Your Mac isn't running ask threads."
+            case "no_agent": return "No agent is set up on your Mac to answer."
+            case "write_failed": return "Your Mac couldn't save that. Try again."
             case "no_agents": return "No agent is available on your Mac to run planning rounds."
             case "unknown_intake": return "This intake is no longer on your Mac."
+            case "unknown_project": return "That project is no longer on your Mac."
+            case "no_flight_control": return "Flight Control isn't turned on for that project on your Mac."
+            case "empty_intent": return "Describe the outcome first."
             case "unknown_checkpoint", "unknown_block", "rounds_changed":
                 return "The plan changed — reopen it and try again."
             case "invalid_config": return "Your Mac couldn't use those settings."
@@ -76,6 +104,13 @@ final class IntakeCommandModel {
     }
 
     func clearMessage() { message = nil }
+
+    /// Re-runs what planning halted on. Its own action, so the panel's button reads "Retrying…"
+    /// and a lost ack is retried under the same token, which the Mac dedupes.
+    func retry(onAck: @escaping () -> Void) {
+        let id = intake
+        send(.retry, command: { .intakeRetry(id: id, token: $0) }, onAck: onAck)
+    }
 
     /// Forget everything in flight (unpair): a late ack or deadline must not touch state that
     /// now belongs to nobody.

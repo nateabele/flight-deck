@@ -29,15 +29,23 @@ final class ToolOverlayModel: ObservableObject {
     }
 
     private func refresh() {
-        isVisible = state.isVisible(at: .now)
+        publishVisibility()
 
         idleTask?.cancel()
         guard let deadline = state.idleDeadline() else { return }
         idleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(until: deadline, clock: .continuous)
             guard !Task.isCancelled, let self else { return }
-            self.isVisible = self.state.isVisible(at: .now)
+            self.publishVisibility()
         }
+    }
+
+    /// `@Published` announces on every write, equal value or not, and `refresh()` runs on every
+    /// mouse move and key press: a bare assignment re-rendered the overlay's observers for each
+    /// one. Only a real flip is written.
+    private func publishVisibility() {
+        let visible = state.isVisible(at: .now)
+        if isVisible != visible { isVisible = visible }
     }
 
     deinit { idleTask?.cancel() }

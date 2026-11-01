@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Codex's composer, typed into and submitted at the pty.
 ///
@@ -166,6 +167,99 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// paste input could in principle still be assembling the paste when the keypress lands");
     /// codex is where it turned out to be real.
     func submit(
+        _ text: String,
+        into injector: TextInjecting,
+        settle: @escaping (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        if let (adapter, thread) = daemon(injector) {
+            return submitThroughDaemon(text, adapter: adapter, thread: thread,
+                                       into: injector, settle: settle, stillWanted: stillWanted,
+                                       onFinished: onFinished)
+        }
+        return typeIntoComposer(text, into: injector, settle: settle, stillWanted: stillWanted,
+                                onFinished: onFinished)
+    }
+
+    func deliversOffScreen(_ injector: TextInjecting) -> Bool { daemon(injector) != nil }
+
+    /// The account's shared daemon and this tab's thread, when the tab's TUI is attached to one.
+    @MainActor
+    private func daemon(_ injector: TextInjecting) -> (CodexAdapter, UUID)? {
+        guard let target = (injector as? TargetedInjector)?.target,
+              let adapter = target.adapter as? CodexAdapter, adapter.sharedSocketPath != nil else { return nil }
+        return (adapter, target.location.binding.conversationID)
+    }
+
+    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "codex")
+
+    /// **A tab attached to codex's shared daemon is sent its turn as a request, not keystrokes.**
+    ///
+    /// The keystroke path below can only type when it reads a one-row composer with its footer
+    /// directly beneath. On 2026-10-24 two long-running codex tabs (subagents, background
+    /// terminals) sat for up to two hours with a screen that path could not read: every queued
+    /// `flightdeck send` was refused on each tick and then expired, while the CLI had already
+    /// exited 0. The daemon has no such dependency. Probed against codex-cli 0.164.0 with a
+    /// `--remote` TUI attached: `turn/start` on an idle thread runs a turn the TUI renders, and on
+    /// a busy one it answers with the ACTIVE turn's id and folds the input into that turn — the
+    /// same thing a Return typed mid-turn does — so one request covers both states and no
+    /// turn id has to be tracked. An approval that turn raises still appears in the TUI.
+    ///
+    /// `notLoaded` means the daemon does not hold this thread: the TUI is not attached to it
+    /// (an older launch, or `codex` typed by hand at the tab's shell), so a turn started here
+    /// would run a second writer behind the user's back. That case keeps the keystroke path.
+    ///
+    /// **Nothing here reads the screen**, and that is the point. The first version still required
+    /// codex's `›` marker on screen as a liveness check; on 2026-10-25 Execute 4 sat idle from
+    /// 14:48 to 20:50 with a screen Flight Deck's copy of could not read, and every send was
+    /// refused at that check or the gate's, until a resize made codex repaint. Liveness is the
+    /// daemon's to say: a thread whose TUI has gone is not loaded there, which the `notLoaded`
+    /// branch already handles.
+    private func submitThroughDaemon(
+        _ text: String,
+        adapter: CodexAdapter,
+        thread: UUID,
+        into injector: TextInjecting,
+        settle: @escaping (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        let rpc = adapter.rpc
+        let threadID = thread.uuidString.lowercased()
+        settle {
+            guard stillWanted() else { return onFinished(false) }
+            Task { @MainActor in
+                do {
+                    let read = try await rpc.request("thread/read", ["threadId": threadID], timeoutSeconds: 5)
+                    let status = (read["thread"] as? [String: Any])?["status"] as? [String: Any]
+                    if status?["type"] as? String == "notLoaded" {
+                        if !self.typeIntoComposer(text, into: injector, settle: settle,
+                                                  stillWanted: stillWanted, onFinished: onFinished) {
+                            onFinished(false)
+                        }
+                        return
+                    }
+                    guard stillWanted() else { return onFinished(false) }
+                    _ = try await rpc.request("turn/start", [
+                        "threadId": threadID,
+                        "clientUserMessageId": UUID().uuidString.lowercased(),
+                        "input": [["type": "text", "text": text, "text_elements": [] as [Any]]],
+                    ], timeoutSeconds: 10)
+                    onFinished(true)
+                } catch {
+                    Self.logger.error(
+                        "turn/start failed for \(threadID, privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                    onFinished(false)
+                }
+            }
+        }
+        return true
+    }
+
+    /// The keystroke path, for a tab whose TUI is not attached to the shared daemon.
+    private func typeIntoComposer(
         _ text: String,
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,

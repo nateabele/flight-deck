@@ -41,5 +41,6 @@ runcmd:
   - [ chown, "flightdeck:flightdeck", /run/flightdeck, /run/flightdeck/enroll.json ]
   - [ loginctl, enable-linger, flightdeck ]
   - [ sh, -c, "systemctl start user@$(id -u flightdeck).service" ]
-  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); curl -fsSL https://example.invalid/hostd/hostd-install.sh | sh -s -- --sha256 0000000000000000000000000000000000000000000000000000000000000000 --no-pair" ]
-  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); ~/.local/bin/flightdeck-hostd enroll --file /run/flightdeck/enroll.json" ]
+  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); curl -fsSL --retry 5 --retry-all-errors -o ~/hostd-install.sh https://example.invalid/hostd/hostd-install.sh && sh ~/hostd-install.sh --sha256 0000000000000000000000000000000000000000000000000000000000000000 --no-pair || touch /run/flightdeck/failed" ]
+  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); ~/.local/bin/flightdeck-hostd enroll --file /run/flightdeck/enroll.json || touch /run/flightdeck/failed" ]
+  - [ sh, -c, "if [ -e /run/flightdeck/failed ]; then echo 'flightdeck: hostd did not install or enroll; powering off' >&2; systemctl poweroff; fi" ]

@@ -1,4 +1,5 @@
 import AppKit
+import FleetKit
 
 /// An inline run inside a block: `range` is the content only (`bold`, not `**bold**`); its
 /// delimiters are in the block's `syntaxRanges`.
@@ -19,7 +20,14 @@ struct MarkdownSpan: Hashable {
 /// attributes can't draw a bullet in place of a hidden `- `, so hiding it would leave a list
 /// that reads as prose, and a hidden `1.` would lose the number.
 struct MarkdownBlock: Hashable {
-    enum Kind: Hashable { case heading(Int), paragraph, listItem, code, table, quote, blank }
+    enum Kind: Hashable {
+        case heading(Int), paragraph, listItem, code, table, quote, blank
+        /// A fenced block whose info string is `fd-visual id=<id> [pending]` (planning v2 §7).
+        /// Parsed like `.code` — same range, same hidden fences — so the plan is still plain
+        /// text; only the kind differs, for the overlay that draws it. `pending` is a
+        /// placeholder for a visual that has been asked for and not yet made.
+        case visual(id: String, pending: Bool)
+    }
     let kind: Kind
     let range: NSRange
     let syntaxRanges: [NSRange]
@@ -119,6 +127,14 @@ struct PlanTheme {
     var tableHeaderRule = PlanTheme.wash(dark: 0.3, light: 0.3)
     var tableHeaderBackground = PlanTheme.wash(dark: 0.07, light: 0.06)
 
+    // MARK: Visual blocks
+
+    /// The height of a visual block's view, by its id and `pending` (`VisualBlockLayout`): the
+    /// block's hidden source is held to it, so the view laid over it fits exactly. The editor
+    /// supplies it from the intake's visuals (`VisualBlockOverlay.height`); with none, every block
+    /// is the missing-visual placeholder's height.
+    var visualHeight: (String, Bool) -> CGFloat = { _, _ in VisualBlockLayout.placeholder }
+
     /// White on the dark window, black on the light one, at the given opacities.
     static func wash(dark: CGFloat, light: CGFloat) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -170,7 +186,7 @@ struct PlanTheme {
     func font(for kind: MarkdownBlock.Kind) -> NSFont {
         switch kind {
         case .heading(let level): heading(level)
-        case .code: mono
+        case .code, .visual: mono
         case .blank: gap
         case .paragraph, .listItem, .quote, .table: body
         }
@@ -198,7 +214,7 @@ struct PlanTheme {
             para.paragraphSpacing = paragraphSpacing
             para.firstLineHeadIndent = quoteIndent
             para.headIndent = quoteIndent
-        case .code:
+        case .code, .visual:
             para.lineSpacing = 3
             para.firstLineHeadIndent = codePadding
             para.headIndent = codePadding
@@ -286,18 +302,27 @@ enum MarkdownStyler {
             let (s, e) = lines[li]
             if !out.isEmpty || s != start, stop(s) { return (out, s) }
             switch kinds[li] {
-            case .fence:
+            case .fence(let char, let length, let info):
                 // An unclosed fence runs to the end: un-fencing the rest would style code as
                 // headings the moment the human types the opening ```.
+                //
+                // Only a fence of the same character and at least the same length closes it
+                // and carrying no info string (CommonMark): a plan that shows a ```markdown
+                // example inside a ````-fence would otherwise end its outer block at the
+                // example's first fence line, and "```swift" inside a block is code.
                 var close: Int?
                 var j = li + 1
-                while has(j) { if kinds[j] == .fence { close = j; break }; j += 1 }
+                while has(j) {
+                    if case .fence(let c2, let l2, let info2) = kinds[j], c2 == char, l2 >= length, info2.isEmpty { close = j; break }
+                    j += 1
+                }
                 let last = close ?? lines.count - 1
                 // The opening fence's newline is syntax too, so a hidden fence collapses to a
                 // hairline instead of leaving an empty code line.
                 var syntax = [NSRange(location: s, length: min(e + 1, lines[last].end) - s)]
                 if let close { syntax.append(NSRange(location: lines[close].start, length: lines[close].end - lines[close].start)) }
-                out.append(MarkdownBlock(kind: .code, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: syntax))
+                let kind: MarkdownBlock.Kind = VisualFenceInfo.parse(info).map { .visual(id: $0.id, pending: $0.pending) } ?? .code
+                out.append(MarkdownBlock(kind: kind, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: syntax))
                 li = last + 1
             case .blank:
                 out.append(MarkdownBlock(kind: .blank, range: NSRange(location: s, length: e - s), syntaxRanges: []))
@@ -354,7 +379,9 @@ enum MarkdownStyler {
                       spans: spans.sorted { $0.range.location < $1.range.location })
     }
 
-    private enum LineKind: Equatable { case blank, fence, heading(Int, contentStart: Int), table, listItem(contentStart: Int), quote(contentStart: Int), plain }
+    /// `fence` carries what the closing rule and the visual block need: the fence character
+    /// (backtick or tilde), its run length, and the info string after it, trimmed.
+    private enum LineKind: Equatable { case blank, fence(char: UInt16, length: Int, info: String), heading(Int, contentStart: Int), table, listItem(contentStart: Int), quote(contentStart: Int), plain }
 
     private static func lineKind(_ u: [UInt16], _ s: Int, _ e: Int) -> LineKind {
         var i = s
@@ -363,7 +390,18 @@ enum MarkdownStyler {
         let indent = i - s
         let c = u[i]
         // ``` or ~~~, at most three spaces in (four is an indented code line in CommonMark).
-        if indent <= 3, c == 96 || c == 126, i + 2 < e, u[i + 1] == c, u[i + 2] == c { return .fence }
+        if indent <= 3, c == 96 || c == 126, i + 2 < e, u[i + 1] == c, u[i + 2] == c {
+            var run = i + 3
+            while run < e, u[run] == c { run += 1 }
+            var a = run, b = e
+            while a < b, u[a] == 32 || u[a] == 9 { a += 1 }
+            while b > a, u[b - 1] == 32 || u[b - 1] == 9 { b -= 1 }
+            // A backtick fence's info has no backtick (CommonMark): "```code``` and more" is inline
+            // code in a paragraph, which is how the phone's reader reads it. Tildes may carry one.
+            var tick = false
+            if c == 96 { for k in a..<b where u[k] == 96 { tick = true; break } }
+            if !tick { return .fence(char: c, length: run - i, info: String(utf16CodeUnits: Array(u[a..<b]), count: b - a)) }
+        }
         if indent <= 3, c == 35 {
             var j = i
             while j < e, u[j] == 35 { j += 1 }
@@ -579,22 +617,23 @@ enum MarkdownStyler {
     ///
     /// `edits` are the edit layer's marks: a table's grid takes room for the words and rows they
     /// removed (`PlanTableMarks`).
-    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, edits: [EditMark] = [], theme: PlanTheme) {
+    static func apply(to storage: NSTextStorage, blocks: [MarkdownBlock], revealBlock: Int?, edits: [EditMark] = [],
+                      proposals: [PlanProposal] = [], theme: PlanTheme) {
         storage.beginEditing()
         storage.setAttributes(baseAttributes(theme.body, theme), range: NSRange(location: 0, length: storage.length))
-        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, edits: edits, theme) }
+        for (i, block) in blocks.enumerated() { style(storage, block, revealed: i == revealBlock, edits: edits, proposals: proposals, theme) }
         storage.endEditing()
     }
 
     /// Restyles only `indices` — a caret move touches the block it left and the one it
     /// entered, never the rest of the plan.
     static func restyle(_ storage: NSTextStorage, blocks: [MarkdownBlock], indices: [Int], revealBlock: Int?, edits: [EditMark] = [],
-                        theme: PlanTheme) {
+                        proposals: [PlanProposal] = [], theme: PlanTheme) {
         storage.beginEditing()
         for i in Set(indices) where blocks.indices.contains(i) {
             let block = blocks[i]
             storage.setAttributes(baseAttributes(theme.font(for: block.kind), theme), range: paragraphRange(block, storage))
-            style(storage, block, revealed: i == revealBlock, edits: edits, theme)
+            style(storage, block, revealed: i == revealBlock, edits: edits, proposals: proposals, theme)
         }
         storage.endEditing()
     }
@@ -611,7 +650,8 @@ enum MarkdownStyler {
         [.font: font, .foregroundColor: theme.text]
     }
 
-    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark], _ theme: PlanTheme) {
+    private static func style(_ storage: NSTextStorage, _ block: MarkdownBlock, revealed: Bool, edits: [EditMark],
+                              proposals: [PlanProposal] = [], _ theme: PlanTheme) {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
@@ -637,6 +677,16 @@ enum MarkdownStyler {
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
         case .code:
             styleCode(storage, block, whole: whole, para: para, theme)
+        case .visual(let id, let pending):
+            // Drawn only when closed and the caret is not in it. With the caret in it the source
+            // shows as code, so the human can edit the caption or delete the fence; an unclosed
+            // fence (one being typed) runs to the end of the plan, and hiding that would hide
+            // the rest of the plan.
+            if !revealed, block.syntaxRanges.count > 1 {
+                styleVisual(storage, block, id: id, pending: pending, whole: whole, edits: edits, theme)
+            } else {
+                styleCode(storage, block, whole: whole, para: para, theme)
+            }
         }
         for span in block.spans {
             switch span.kind {
@@ -662,6 +712,15 @@ enum MarkdownStyler {
             } else {
                 storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear], range: range)
             }
+        }
+        // A proposed edit stands in for a paragraph or item, except while the caret is in it: then
+        // the source shows, as a table's does.
+        switch block.kind {
+        case .paragraph, .listItem:
+            if !revealed, let proposal = proposals.first(where: { $0.block == block.range }) {
+                styleProposal(storage, block, whole: whole, proposal: proposal, theme)
+            }
+        default: break
         }
     }
 
@@ -694,6 +753,39 @@ enum MarkdownStyler {
                 if closed, lines.count > 1 { style.paragraphSpacingBefore = theme.codeVerticalPadding }
             }
             storage.addAttributes([.paragraphStyle: style, .planCodeBox: place.rawValue], range: line)
+        }
+    }
+
+    /// A visual block (V-R1, the table pattern): every line of its source hidden and held to an
+    /// equal share of the view's height, so the lines together are exactly as tall as the view
+    /// `VisualBlockOverlay` lays over them, with the block's room above and below as paragraph
+    /// spacing. The plan's bytes are as typed; the block is drawing.
+    private static func styleVisual(_ storage: NSTextStorage, _ block: MarkdownBlock, id: String, pending: Bool, whole: NSRange,
+                                    edits: [EditMark], _ theme: PlanTheme) {
+        let ns = storage.mutableString
+        var lines: [NSRange] = []
+        var at = whole.location
+        while at < NSMaxRange(whole) {
+            let line = ns.lineRange(for: NSRange(location: at, length: 0))
+            lines.append(NSIntersectionRange(line, whole))
+            at = NSMaxRange(line)
+        }
+        guard !lines.isEmpty else { return }
+        // The caption is the body between the fences (spec §7).
+        let inner = lines.count > 2 ? NSRange(location: lines[1].location, length: NSMaxRange(lines[lines.count - 2]) - lines[1].location) : nil
+        let caption = inner.map { ns.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let height = theme.visualHeight(id, pending)
+        let ref = PlanVisualRef(id: id, pending: pending, caption: caption, height: height,
+                                edit: VisualEdit.of(edits, in: block.range, whole: whole))
+        let share = height / CGFloat(lines.count)
+        for (i, line) in lines.enumerated() {
+            let style = NSMutableParagraphStyle()
+            style.minimumLineHeight = share
+            style.maximumLineHeight = share
+            if i == 0 { style.paragraphSpacingBefore = VisualBlockLayout.spaceBefore }
+            if i == lines.count - 1 { style.paragraphSpacing = VisualBlockLayout.spaceAfter }
+            storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear, .paragraphStyle: style, .planVisual: ref], range: line)
+            if i == 0, !ref.edit.isEmpty { storage.addAttribute(.planVisualEdit, value: VisualEditBar(edit: ref.edit, height: height), range: line) }
         }
     }
 

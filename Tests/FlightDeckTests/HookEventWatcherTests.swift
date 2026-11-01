@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 @MainActor
@@ -141,6 +142,100 @@ final class HookEventWatcherTests: XCTestCase {
         watcher.drain()
         XCTAssertEqual(seen[b], .live, "an event appended after construction is still read")
     }
+
+    // MARK: - Compaction
+
+    private var log: URL { dir.appendingPathComponent("events.ndjson") }
+    private var aside: URL { dir.appendingPathComponent("events.ndjson.rotated") }
+
+    /// **A caught-up drain past the threshold sets the file aside, and the next drain
+    /// deletes it** — and nothing in between is lost: the fresh file a writer creates after
+    /// the rename is read from its first byte.
+    func testACaughtUpLogPastTheThresholdIsRotatedAwayAndTheFreshFileReadFromZero() throws {
+        var seen: [UUID: ComposerReadiness] = [:]
+        // A line here is ~85 bytes: two cross 128, the one fresh line after rotation does not.
+        let watcher = HookEventWatcher(directory: dir, clock: nil, rotationThreshold: 128) {
+            seen.merge($0) { _, new in new }
+        }
+        try append("SessionStart", a)
+        try append("PostToolUse", a)
+        watcher.drain()
+        XCTAssertEqual(seen[a], .live)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path), "set aside once caught up")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: aside.path))
+
+        try append("SessionStart", b)   // the next writer creates a fresh file
+        watcher.drain()
+        XCTAssertEqual(seen[b], .live, "the fresh file is all news, read from byte 0")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path), "and the old one is gone")
+    }
+
+    /// **A line a writer lands in the old file just after the rename still arrives.** A hook
+    /// that opened the file before the rename writes into the renamed inode; the next drain
+    /// reads the rotated file's tail before deleting it.
+    func testALineWrittenIntoTheFileJustAfterItsRotationIsStillRead() throws {
+        var seen: [UUID: ComposerReadiness] = [:]
+        let watcher = HookEventWatcher(directory: dir, clock: nil, rotationThreshold: 64) {
+            seen.merge($0) { _, new in new }
+        }
+        try append("SessionStart", a)
+        try append("PostToolUse", a)
+        watcher.drain()
+
+        let late = #"{"hook_event_name":"SessionEnd","session_id":"\#(a.uuidString.lowercased())"}"# + "\n"
+        let handle = try FileHandle(forWritingTo: aside)
+        handle.seekToEndOfFile()
+        handle.write(Data(late.utf8))
+        try handle.close()
+        watcher.drain()
+
+        XCTAssertEqual(seen[a], .absent, "the late line in the rotated file was read")
+    }
+
+    /// Below the threshold the file is left alone, and so is a log the watcher has not read to
+    /// its end — rotating then would throw away lines nobody has seen.
+    func testASmallLogIsLeftWhereItIs() throws {
+        let watcher = HookEventWatcher(directory: dir, clock: nil) { _ in }
+        try append("SessionStart", a)
+        watcher.drain()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path))
+    }
+
+    /// **The 3.5 GB case: a huge log already on disk at launch.** It is history, so the first
+    /// look skips it — and the first drain, caught up by definition, sets it aside; the second
+    /// deletes it. A rotated file a previous run left behind is deleted at construction.
+    func testAHugeLogFromBeforeLaunchIsRotatedAwayWithoutBeingRead() throws {
+        for _ in 0..<10 { try append("SessionStart", a) }
+        try Data("stale\n".utf8).write(to: aside)
+        var seen: [UUID: ComposerReadiness] = [:]
+        let watcher = HookEventWatcher(directory: dir, clock: nil, rotationThreshold: 64) {
+            seen.merge($0) { _, new in new }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path), "a leftover is history")
+
+        watcher.drain()
+        watcher.drain()
+        XCTAssertNil(seen[a], "history is never replayed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path))
+    }
+
+    /// **A different file at the path is read from zero, not skipped.** Another instance
+    /// sharing the directory may rotate the log; the fresh file it leaves is smaller than this
+    /// watcher's offset, which a size check alone reads as a shrink and jumps to the end of —
+    /// losing every event in it.
+    func testALogReplacedByAnotherRotatorIsReadFromItsStart() throws {
+        var seen: [UUID: ComposerReadiness] = [:]
+        let watcher = HookEventWatcher(directory: dir, clock: nil) { seen.merge($0) { _, new in new } }
+        for _ in 0..<5 { try append("PostToolUse", a) }
+        watcher.drain()
+
+        try FileManager.default.moveItem(at: log, to: dir.appendingPathComponent("elsewhere"))
+        try append("SessionStart", b)
+        watcher.drain()
+        XCTAssertEqual(seen[b], .live)
+    }
 }
 
 @MainActor
@@ -162,5 +257,26 @@ final class HookEventWatcherDialogTests: XCTestCase {
         try Data(lines.utf8).write(to: dir.appendingPathComponent("events.ndjson"))
         watcher.drain()
         XCTAssertEqual(got, [.raised(sid, PendingDialog(agentID: "a28ad87b", callID: "toolu_X"))])
+    }
+
+    /// **Pared lines attribute exactly as raw ones did.** The writer now sends the tool input
+    /// only as a digest; a `PreToolUse` written that way and a `PermissionRequest` still raw
+    /// (a hook that ran under an older plugin, mid-upgrade) must still match.
+    func testAParedPreToolUseMatchesALegacyRawPermissionRequest() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fd-hook-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sid = UUID()
+        var got: [DialogAttribution.Change] = []
+        let watcher = HookEventWatcher(directory: dir, clock: nil, onChange: { _ in },
+                                       onDialog: { got += $0 })
+        let pre = try XCTUnwrap(HookEventLine.pare(Data(
+            #"{"hook_event_name":"PreToolUse","session_id":"\#(sid.uuidString.lowercased())","tool_name":"Bash","tool_input":{"description":"d","command":"rm -rf x"},"tool_use_id":"toolu_Y","cwd":"/w"}"#.utf8)))
+        XCTAssertFalse(String(decoding: pre, as: UTF8.self).contains("rm -rf"), "the premise: pared")
+        let request = #"{"hook_event_name":"PermissionRequest","session_id":"\#(sid.uuidString.lowercased())","tool_name":"Bash","tool_input":{"command":"rm -rf x","description":"d"}}"# + "\n"
+        try (pre + Data(request.utf8)).write(to: dir.appendingPathComponent("events.ndjson"))
+        watcher.drain()
+        XCTAssertEqual(got, [.raised(sid, PendingDialog(agentID: nil, callID: "toolu_Y"))])
     }
 }

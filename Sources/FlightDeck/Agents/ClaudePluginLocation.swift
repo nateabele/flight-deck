@@ -167,7 +167,8 @@ enum ClaudePluginLocation {
     /// (padding and the like) over; the user's command itself reaches the wrapper through the
     /// tab's environment.
     static func applying(to options: AgentOptions, bundle: Bundle, pluginDestination: URL = materializedDirectory,
-                         userStatusLine: ClaudeStatusLine.User? = nil, projectDirectory: URL? = nil) -> AgentOptions {
+                         userStatusLine: ClaudeStatusLine.User? = nil, theme: String? = nil,
+                         projectDirectory: URL? = nil) -> AgentOptions {
         guard case .claude(let flags) = options, let plugin = directory(bundle: bundle) else {
             return options
         }
@@ -184,6 +185,6 @@ enum ClaudePluginLocation {
         return .claude(ClaudeStatusLine.injecting(
             into: injecting(into: flags, pluginDirectory: runnable),
             wrapper: runnable.appendingPathComponent(ClaudeStatusLine.scriptPath),
-            user: userStatusLine, projectDirectory: projectDirectory))
+            user: userStatusLine, theme: theme, projectDirectory: projectDirectory))
     }
 }

@@ -69,9 +69,9 @@ struct ControlBar: View {
             if let preview, !actions.enabled.contains(button(for: preview)) { self.preview = nil }
         }
         .background(
-            LinearGradient(colors: [Color(white: 0.184), Color(white: 0.165)], startPoint: .top, endPoint: .bottom)
-                .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1) }
-                .overlay(alignment: .bottom) { Rectangle().fill(Color.black.opacity(0.5)).frame(height: 1) }
+            LinearGradient(colors: [Instrument.barTop, Instrument.barBottom], startPoint: .top, endPoint: .bottom)
+                .overlay(alignment: .top) { Rectangle().fill(Instrument.barHighlight).frame(height: 1) }
+                .overlay(alignment: .bottom) { Rectangle().fill(Instrument.barEdge).frame(height: 1) }
         )
     }
 
@@ -218,13 +218,13 @@ private enum ClusterStyle {
     static let separatorWidth: CGFloat = 9
 
     static var separator: some View {
-        Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 22).padding(.horizontal, 4)
+        Rectangle().fill(Instrument.lift.opacity(0.1)).frame(width: 1, height: 22).padding(.horizontal, 4)
     }
 
     static var background: some View {
         RoundedRectangle(cornerRadius: 11)
-            .fill(Color.black.opacity(0.24))
-            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+            .fill(Instrument.well)
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Instrument.lift.opacity(0.08), lineWidth: 0.5))
     }
 }
 
@@ -278,8 +278,8 @@ private struct TransportKey: View {
     }
 
     private var fill: Color {
-        if on { return Color.white.opacity(0.15) }
-        return hovering && enabled ? Color.white.opacity(0.09) : .clear
+        if on { return Instrument.lift.opacity(0.15) }
+        return hovering && enabled ? Instrument.lift.opacity(0.09) : .clear
     }
 
     @ViewBuilder
@@ -384,14 +384,14 @@ enum LCDMetrics {
     static func color(_ tone: LCDCell.Tone) -> Color {
         switch tone {
         case .normal: phosphor
-        case .accent: Color(red: 124 / 255, green: 188 / 255, blue: 1)
-        case .amber: Color(red: 1, green: 179 / 255, blue: 64 / 255)
-        case .red: Color(red: 1, green: 123 / 255, blue: 114 / 255)
+        case .accent: Instrument.blue
+        case .amber: Instrument.amber
+        case .red: Instrument.lcdRed
         }
     }
 }
 
-/// The dark-glass instrument: phosphor values over small-caps captions, cells divided by
+/// The glass instrument: phosphor values over small-caps captions, cells divided by
 /// hairlines, packed from the leading edge.
 private struct LCDView: View {
     let cells: [LCDCell]
@@ -409,7 +409,7 @@ private struct LCDView: View {
                             coverage: cell.kind == .coverage ? coverage : nil, stopMode: stopMode, policy: policy,
                             heatmap: heatmap)
                 if index < cells.count - 1 {
-                    Rectangle().fill(Color.white.opacity(0.05)).frame(width: 1)
+                    Rectangle().fill(Instrument.lift.opacity(0.05)).frame(width: 1)
                 }
             }
             Spacer(minLength: 0)
@@ -417,14 +417,12 @@ private struct LCDView: View {
         .frame(maxWidth: .infinity, minHeight: LCDMetrics.lcdHeight, maxHeight: LCDMetrics.lcdHeight)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(LinearGradient(colors: [Color(red: 0.071, green: 0.078, blue: 0.094),
-                                              Color(red: 0.051, green: 0.059, blue: 0.071)],
+                .fill(LinearGradient(colors: [Instrument.lcdTop, Instrument.lcdBottom],
                                      startPoint: .top, endPoint: .bottom))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.6), radius: 1.5, y: 1)
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Instrument.lift.opacity(0.07), lineWidth: 0.5))
+                .shadow(color: Instrument.lcdShadow, radius: 1.5, y: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10))
-        .environment(\.colorScheme, .dark)
     }
 }
 

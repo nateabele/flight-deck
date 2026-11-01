@@ -285,6 +285,42 @@ final class IntakeDetailProjectionTests: XCTestCase {
         XCTAssertEqual(d.questions?.answered, [WireExchange(questions: ["Both?"], answers: ["Both"])])
     }
 
+    func testNeedsAnswersCarriesStructuredOpenRound() async throws {
+        var i = try seed(.needsAnswers)
+        let structured = [
+            StructuredQuestion(id: "q1", text: "Which?", kind: .single,
+                               options: [.init(id: "a", label: "A", detail: "first"), .init(id: "b", label: "B")],
+                               recommended: ["a"], allowOther: true),
+            StructuredQuestion(id: "q2", text: "Why?", kind: .text)]
+        i.exchanges = [TriageExchange(questions: ["Both?"], answers: ["Both"]),
+                       TriageExchange(questions: ["Which?", "Why?"], structured: structured)]
+        try IntakeStore(root: root).save(i)
+        let svc = await makeService()
+        let d = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertEqual(d.structuredQuestions, true)
+        XCTAssertEqual(d.questions?.round, 1)
+        XCTAssertEqual(d.questions?.digest, i.exchanges[1].questionsDigest, "the open round's, not the answered one's")
+        let wire = try XCTUnwrap(d.questions?.structured)
+        XCTAssertEqual(wire.map(\.id), ["q1", "q2"])
+        XCTAssertEqual(wire[0].kind, "single")
+        XCTAssertEqual(wire[0].options, [WireOption(id: "a", label: "A", detail: "first"), WireOption(id: "b", label: "B")])
+        XCTAssertEqual(wire[0].recommended, ["a"])
+        XCTAssertTrue(wire[0].allowOther)
+        XCTAssertEqual(wire[1].kind, "text")
+    }
+
+    func testLegacyOpenRoundProjectsAsTextQuestions() async throws {
+        let i = try seed(.needsAnswers)
+        let svc = await makeService()
+        let d = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertEqual(d.questions?.round, 0)
+        XCTAssertEqual(d.questions?.digest, i.exchanges[0].questionsDigest)
+        let wire = try XCTUnwrap(d.questions?.structured)
+        XCTAssertEqual(wire.map(\.id), ["q1"])
+        XCTAssertEqual(wire.map(\.text), ["Which README?"])
+        XCTAssertEqual(wire.map(\.kind), ["text"])
+    }
+
     func testAFailureTailIsCappedAtFourKilobytes() async throws {
         var i = try seed(.failed)
         i.failure = "codex exited 1"

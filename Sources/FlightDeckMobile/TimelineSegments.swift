@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// One run of a prose body, split by what can and cannot be an `NSAttributedString`.
@@ -17,6 +18,11 @@ enum TimelineSegment: Equatable {
     /// attributed string has no run for. Carries its raw markdown, because MarkdownUI is what
     /// renders it.
     case richBlock(String)
+    /// A plan's `fd-visual` block (planning v2 §7): the visual's id and its caption, the fence's
+    /// body. **Only made when the caller opens the gate** (`TimelineSegmenter.clamp`'s `visuals`):
+    /// a Mac that does not say it serves visuals gets the fence as `.code`, the way plans looked
+    /// before.
+    case visual(id: String, caption: String)
 
     /// The text this segment shows. For `.code` that is the contents; for the other two it is
     /// the markdown source, which is also what they render from.
@@ -24,6 +30,7 @@ enum TimelineSegment: Equatable {
         switch self {
         case .prose(let text), .richBlock(let text): return text
         case .code(_, let text): return text
+        case .visual(_, let caption): return caption
         }
     }
 
@@ -77,8 +84,8 @@ enum TimelineSegmenter {
     }
 
     /// Split `text` whole, spending no budget. What an expanded row draws.
-    static func segments(of text: String) -> [TimelineSegment] {
-        clamp(text, budget: nil).segments
+    static func segments(of text: String, visuals: Bool = false) -> [TimelineSegment] {
+        clamp(text, budget: nil, visuals: visuals).segments
     }
 
     /// Split `text`, stopping once `budget` lines are spent.
@@ -93,7 +100,13 @@ enum TimelineSegmenter {
     /// collapsed row no more than a short answer does — with the one exception the overshoot
     /// buys, a single block read to its end. `budget: nil` means draw everything and is the
     /// expanded row, which has asked for exactly that.
-    static func clamp(_ text: String, budget: Int?, columns: Int = TimelineStyle.proseColumns) -> Clamped {
+    ///
+    /// **`visuals` is the gate.** Off, an `fd-visual` fence is the code block it always was. On,
+    /// one whose info string `VisualFenceInfo.parse` accepts (the same parser the Mac's editor
+    /// uses, so the two cannot disagree about which blocks are visuals) becomes `.visual`. Only the
+    /// plan reader turns it on; a transcript never has visual blocks.
+    static func clamp(_ text: String, budget: Int?, columns: Int = TimelineStyle.proseColumns,
+                      visuals: Bool = false) -> Clamped {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         var segments: [TimelineSegment] = []
         var remaining = budget
@@ -106,7 +119,9 @@ enum TimelineSegmenter {
             if let fence = Fence(lines[index]) {
                 let (block, next) = fence.consume(lines, from: index)
                 index = next
-                if !block.contents.isEmpty || block.language != nil {
+                if visuals, let visual = VisualFenceInfo.parse(fence.info) {
+                    segments.append(.visual(id: visual.id, caption: block.contents))
+                } else if !block.contents.isEmpty || block.language != nil {
                     segments.append(.code(language: block.language, block.contents))
                 }
                 remaining = spend(block.rawLineCount(columns: columns, cap: remaining), from: remaining)
@@ -155,6 +170,8 @@ enum TimelineSegmenter {
         let marker: Character
         let length: Int
         let language: String?
+        /// The whole info string, for `VisualFenceInfo.parse`, which reads words past the first.
+        let info: String
 
         init?(_ line: Substring) {
             let body = line.drop { $0 == " " }
@@ -168,6 +185,7 @@ enum TimelineSegmenter {
             if first == "`" && info.contains("`") { return nil }
             marker = first
             length = run.count
+            self.info = info
             language = info.isEmpty ? nil : String(info.split(separator: " ").first ?? "")
         }
 

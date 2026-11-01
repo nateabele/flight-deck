@@ -1,0 +1,200 @@
+<h2>Design §2: Thread UX</h2>
+<p class="subtitle">These are full-window renders at real scale. <b>State 1</b> is reading the plan: an Ask card sits in the rail, and a proposed diff is shown inline. <b>State 2</b> is the same window with that thread opened into the wide panel and its index. Each numbered marker ① ② … matches a numbered note below the renders.</p>
+
+<style>
+  .win { border:1px solid #8886; border-radius:12px; overflow:hidden; margin:18px 0 30px; font: 14px/1.55 -apple-system, system-ui; box-shadow: 0 8px 30px #0002 }
+  .bar { height:38px; display:flex; align-items:center; gap:8px; padding:0 14px; border-bottom:1px solid #8884; background:#8881; font-size:13px }
+  .dots i { width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px; background:#ff5f57 } .dots i:nth-child(2){background:#febc2e} .dots i:nth-child(3){background:#28c840}
+  .crumbs { opacity:.7 } .crumbs b { opacity:1 }
+  .seg { margin-left:auto; display:flex; gap:4px } .seg span { padding:2px 10px; border-radius:6px; border:1px solid #8885; font-size:12px } .seg .on { background:#4a7dff22; border-color:#4a7dff; color:#4a7dff }
+  .body { display:grid; height:760px }
+  .s1 { grid-template-columns: 1fr 330px }
+  .s2 { grid-template-columns: 1fr 560px }
+  .plan { padding:26px 46px; overflow:hidden; position:relative }
+  .plan h3 { font-size:21px; margin:0 0 10px } .plan h4 { font-size:16px; margin:20px 0 6px }
+  .plan p { margin:8px 0; opacity:.88 }
+  .q { background:#4a7dff26; border-bottom:2px solid #4a7dff; padding:0 1px }
+  .qdim { background:#8882; border-bottom:2px dotted #8888 }
+  .diff { border:1px solid #2da44e88; border-radius:10px; margin:12px 0; overflow:hidden }
+  .diff .dh { display:flex; align-items:center; gap:10px; padding:7px 12px; font-size:12.5px; background:#2da44e14; border-bottom:1px solid #2da44e44 }
+  .diff .dh .from { opacity:.75 } .sp { flex:1 }
+  .btn { border:1px solid #8886; border-radius:6px; padding:2px 10px; font-size:12.5px; background:#fff1 }
+  .btn.ok { border-color:#2da44e; color:#2da44e; font-weight:600 } .btn.no { border-color:#d9534f; color:#d9534f } .btn.pri { background:#4a7dff; border-color:#4a7dff; color:#fff }
+  .del { background:#d9534f1f; text-decoration: line-through; text-decoration-color:#d9534f99; display:block; padding:3px 12px }
+  .ins { background:#2da44e1f; display:block; padding:3px 12px }
+  .rail { border-left:1px solid #8884; padding:14px 12px; background:#8880; position:relative; overflow:hidden }
+  .rail .rh { display:flex; justify-content:space-between; font-size:12px; opacity:.7; margin-bottom:10px }
+  .card { border:1px solid #8885; border-radius:10px; padding:10px 12px; margin-bottom:10px; font-size:13px; background: var(--bg-secondary, #fff0) }
+  .card .k { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; opacity:.65; display:flex; gap:6px; align-items:center }
+  .card.ask { border-color:#4a7dff; box-shadow:0 0 0 3px #4a7dff1c }
+  .card.ask .k { color:#4a7dff; opacity:1 }
+  .card .meta { font-size:11.5px; opacity:.65; margin-top:6px; display:flex; gap:8px }
+  .pill { font-size:11px; border-radius:10px; padding:1px 7px; border:1px solid #8886 }
+  .pill.live { border-color:#2da44e; color:#2da44e } .pill.diff { border-color:#2da44e; background:#2da44e18; color:#2da44e } .pill.stale { border-color:#c99600; color:#c99600; background:#e0a80015 } .pill.q { border-color:#4a7dff; color:#4a7dff; background:none }
+  .from-thread { font-size:11px; color:#4a7dff; margin-top:4px }
+  .num { display:inline-flex; width:20px; height:20px; border-radius:50%; background:#e0a800; color:#000; font: 700 11.5px system-ui; align-items:center; justify-content:center; margin-right:4px; vertical-align:middle; flex:none }
+  .abs { position:absolute }
+  /* panel */
+  .panel { border-left:1px solid #8884; display:grid; grid-template-columns: 180px 1fr; overflow:hidden }
+  .idx { border-right:1px solid #8884; padding:12px 8px; font-size:12.5px; background:#8881; overflow:hidden }
+  .idx .grp { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; opacity:.55; margin:12px 6px 4px }
+  .idx .it { padding:6px 8px; border-radius:7px; margin:2px 0; display:block }
+  .idx .it.on { background:#4a7dff22 }
+  .idx .it small { display:block; opacity:.6; font-size:11px }
+  .idx .search { border:1px solid #8885; border-radius:7px; padding:4px 8px; opacity:.6; font-size:12px }
+  .convo { display:flex; flex-direction:column; overflow:hidden }
+  .ch { padding:10px 14px; border-bottom:1px solid #8884; font-size:12.5px }
+  .ch .t { font-weight:600; font-size:14.5px; display:flex; align-items:center; gap:8px }
+  .ch .row { display:flex; gap:10px; margin-top:6px; align-items:center; opacity:.85; flex-wrap: wrap }
+  .anchor { margin-top:8px; border-left:3px solid #4a7dff; padding:2px 8px; font-size:12.5px; opacity:.85 }
+  .msgs { padding:12px 14px; overflow:hidden; flex:1; font-size:13px }
+  .m { margin-bottom:12px } .m .who { font-size:11.5px; font-weight:600; opacity:.6; margin-bottom:2px }
+  .m.me .bub { background:#4a7dff1a; border-radius:10px; padding:7px 10px; display:inline-block }
+  .cite { font-size:11.5px; border:1px solid #8885; border-radius:6px; padding:0 6px; color:#4a7dff; white-space:nowrap }
+  .act { border:1px solid #8885; border-radius:9px; margin:8px 0; font-size:12.5px; overflow:hidden }
+  .act .ah { padding:5px 10px; background:#8881; display:flex; gap:8px; align-items:center }
+  .act .ab { padding:6px 10px }
+  .sq label { display:flex; gap:8px; align-items:flex-start; padding:3px 0 }
+  .sq .rec { font-size:11px; color:#4a7dff; margin-left:4px }
+  .composer { border-top:1px solid #8884; padding:10px 14px; font-size:13px }
+  .composer .box { border:1px solid #8886; border-radius:9px; padding:8px 10px; opacity:.6 }
+  .tog { display:inline-flex; align-items:center; gap:6px } .tog i { width:28px; height:16px; border-radius:9px; background:#8886; display:inline-block; position:relative } .tog i::after { content:''; position:absolute; width:12px; height:12px; border-radius:50%; background:#fff; left:2px; top:2px }
+  .tbar { position:absolute; display:flex; gap:2px; padding:4px; border-radius:9px; background:#2b2d31; color:#eee; font-size:12px; box-shadow:0 4px 14px #0004 }
+  .tbar span { padding:3px 8px; border-radius:6px } .tbar .ask { background:#4a7dff; color:#fff; font-weight:600 }
+  .notes { font-size:14px; line-height:1.6 } .notes li { margin:6px 0 }
+</style>
+
+<!-- ===================== STATE 1 ===================== -->
+<h3 style="margin:10px 0 4px">State 1: reading. Ask from the selection toolbar, an Ask card in the rail, a diff inline</h3>
+<div class="win">
+  <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="crumbs">Flight Deck › field-connect › Intake › <b>Phone pairing v2</b></span>
+    <span class="seg"><span>Draft · R0</span><span>Synthesis</span><span class="on">Refine 2</span></span></div>
+  <div class="body s1">
+    <div class="plan">
+      <h3>Phone pairing v2</h3>
+      <h4>2. Session lifetime</h4>
+      <p>Paired phones keep a session token in the Keychain. <span class="q">Tokens never expire; the Mac revokes them explicitly from Settings → Phones.</span> This keeps the phone usable after weeks offline.</p>
+
+      <!-- toolbar floating over a second selection -->
+      <p style="position:relative">Reconnects are ranked by <span class="qdim">Tailscale CGNAT first, then Bonjour</span>, so an off-LAN phone still finds the Mac.
+        <span class="tbar" style="left:120px; top:-38px"><span>Comment</span><span>Question</span><span>Must change</span><span>Replace</span><span>Delete</span><span>Highlight</span><span class="ask">✦ Ask</span></span>
+        <span class="num abs" style="left:520px; top:-36px">①</span>
+      </p>
+
+      <h4>3. Revocation</h4>
+      <div class="diff">
+        <div class="dh"><span class="num">②</span><b>Proposed edit</b><span class="from">from thread “Why do tokens never expire?” · on Refine 2</span><span class="sp"></span><span class="btn">Edit…</span><span class="btn no">✗ Reject</span><span class="btn ok">✓ Accept</span></div>
+        <span class="del">Tokens never expire; the Mac revokes them explicitly from Settings → Phones.</span>
+        <span class="ins">Tokens expire after 30 days without a connection, and the phone re-pairs with a 6-digit code. The Mac can also revoke a phone at any time from Settings → Phones.</span>
+      </div>
+      <p>Revoking a phone removes its key from <code>controllers.json</code> and closes any live socket within one second.</p>
+
+      <h4>4. Failure modes</h4>
+      <p>If the exchange fails, for example from a mistyped code, the phone shows the code entry again and the pairing window stays open until it times out.</p>
+    </div>
+
+    <div class="rail">
+      <div class="rh"><span>Notes · Refine 2</span><span><span class="num" style="width:16px;height:16px;font-size:10px">③</span> Threads (4) ⤢</span></div>
+      <div class="card ask" style="margin-top:58px">
+        <div class="k">✦ Ask <span class="pill live">● answering</span></div>
+        <div style="margin-top:4px"><b>Why do tokens never expire?</b></div>
+        <div style="opacity:.8; margin-top:4px">“Because of the offline-for-weeks requirement in the intake. The synthesis round chose that over…”</div>
+        <div class="meta"><span class="pill diff">1 diff</span><span class="pill">1 note</span><span>3 messages</span><span class="sp"></span><span>Open ⤢</span></div>
+      </div>
+      <div class="card">
+        <div class="k">Must change</div>
+        <div style="margin-top:4px">Log every revocation so support can see it.</div>
+        <div class="from-thread">✦ from thread “Why do tokens never expire?”</div>
+        <div class="meta"><span>pending · next round</span><span class="sp"></span><span>Withdraw</span></div>
+      </div>
+      <div class="card" style="margin-top:22px">
+        <div class="k">✦ Ask <span class="pill stale">stale</span><span class="num" style="width:16px;height:16px;font-size:10px">④</span></div>
+        <div style="margin-top:4px"><b>Is CGNAT-first right for a home LAN?</b></div>
+        <div style="opacity:.8; margin-top:4px">Its diff no longer applies: Refine 2 rewrote this paragraph.</div>
+        <div class="meta"><span class="btn" style="font-size:11.5px">Re-propose</span><span class="sp"></span><span>Open ⤢</span></div>
+      </div>
+      <div class="card" style="opacity:.6; margin-top:22px">
+        <div class="k">▸ 2 notes on another version</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== STATE 2 ===================== -->
+<h3 style="margin:10px 0 4px">State 2: the same thread opened. The wide panel replaces the rail, with the thread index on its left</h3>
+<div class="win">
+  <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="crumbs">Flight Deck › field-connect › Intake › <b>Phone pairing v2</b></span>
+    <span class="seg"><span>Draft · R0</span><span>Synthesis</span><span class="on">Refine 2</span></span></div>
+  <div class="body s2">
+    <div class="plan">
+      <h3>Phone pairing v2</h3>
+      <h4>2. Session lifetime</h4>
+      <p>Paired phones keep a session token in the Keychain. <span class="q">Tokens never expire; the Mac revokes them explicitly from Settings → Phones.</span> This keeps the phone usable after weeks offline.</p>
+      <p>Reconnects are ranked by Tailscale CGNAT first, then Bonjour, so an off-LAN phone still finds the Mac.</p>
+      <h4>3. Revocation</h4>
+      <div class="diff">
+        <div class="dh"><b>Proposed edit</b><span class="from">from this thread</span><span class="sp"></span><span class="btn no">✗</span><span class="btn ok">✓</span></div>
+        <span class="del">Tokens never expire; the Mac revokes them…</span>
+        <span class="ins">Tokens expire after 30 days without a connection…</span>
+      </div>
+      <p>Revoking a phone removes its key from <code>controllers.json</code>…</p>
+    </div>
+
+    <div class="panel">
+      <div class="idx">
+        <div class="search">⌕ Filter threads</div>
+        <div class="grp">Open · by section <span class="num" style="width:16px;height:16px;font-size:10px">⑤</span></div>
+        <span class="it on">✦ Why do tokens never expire?<small>§2 Session lifetime · 1 diff</small></span>
+        <span class="it">✦ Is CGNAT-first right…<small>§2 · stale</small></span>
+        <span class="it">✦ Settings screen comp<small>§5 Settings UI · visual</small></span>
+        <div class="grp">Needs you</div>
+        <span class="it">✦ Pairing failure copy<small>§4 · asked you 1 question</small></span>
+        <div class="grp">Resolved</div>
+        <span class="it" style="opacity:.6">✦ Why SPAKE2 not QR-only?<small>§1 · answered, no change</small></span>
+        <div style="margin-top:14px; padding:0 6px; opacity:.7; font-size:12px">＋ New thread on whole plan</div>
+      </div>
+
+      <div class="convo">
+        <div class="ch">
+          <div class="t">✦ Why do tokens never expire? <span class="sp"></span><span class="btn" style="font-size:11.5px">Resolve</span></div>
+          <div class="row">
+            <span>claude · opus · high ▾</span>
+            <span class="tog"><i></i> Auto-accept diffs</span> <span class="num" style="width:16px;height:16px;font-size:10px">⑥</span>
+            <span style="opacity:.7">on Refine 2</span>
+          </div>
+          <div class="anchor">“Tokens never expire; the Mac revokes them explicitly from Settings → Phones.” <span style="opacity:.6">· §2</span></div>
+        </div>
+        <div class="msgs">
+          <div class="m me"><div class="who">You</div><div class="bub">Why do tokens never expire? That feels risky for a lost phone.</div></div>
+          <div class="m"><div class="who">Agent</div>
+            Because the intake requires the phone to "keep working after weeks offline" <span class="cite">intake ↗</span>. The Draft · R0 codex agent proposed a 7-day expiry <span class="cite">Draft · R0 ↗</span>. The cross-check flagged it as breaking that requirement <span class="cite">Refine 1 · issue 4 ↗</span>, and Synthesis dropped expiry entirely. Revocation already exists: <code>ControllerStore.revoke</code> <span class="cite">HostKit/ControllerStore.swift:88 ↗</span>.
+            <div class="act sq"><div class="ah"><span class="num" style="width:16px;height:16px;font-size:10px">⑦</span><b>Question for you</b> · pick one</div>
+              <div class="ab">
+                <label><input type="radio" checked> Expire after N days <i>without a connection</i>, then re-pair <span class="rec">recommended</span></label>
+                <label><input type="radio"> Keep no expiry, but require Face ID to open the app</label>
+                <label><input type="radio"> Keep as is</label>
+                <label><input type="radio"> Other… <span style="opacity:.5">______</span></label>
+              </div></div>
+          </div>
+          <div class="m me"><div class="who">You</div><div class="bub">First option, 30 days. Also log revocations.</div></div>
+          <div class="m"><div class="who">Agent</div>
+            Done. I've proposed one edit and left one note for the next round.
+            <div class="act"><div class="ah"><span class="pill diff">diff</span> §3 Revocation · shown inline in the plan <span class="sp"></span><span class="btn no">✗</span><span class="btn ok">✓</span></div></div>
+            <div class="act"><div class="ah"><span class="pill">Must change</span> “Log every revocation…” · pending for next round <span class="sp"></span><span>Withdraw</span></div></div>
+          </div>
+        </div>
+        <div class="composer"><div class="box">Reply… (⌘↩ to send · ⌘⇧↩ to send and resolve)</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<ol class="notes">
+  <li><b>✦ Ask</b> is a new button at the end of the selection toolbar. It opens the thread panel on a new thread anchored to the selection, with the composer focused. Pressing ✦ Ask with nothing selected starts a thread on the whole plan.</li>
+  <li><b>Diffs render inline in the plan</b> at their target, showing what's removed and what's added. You can accept, reject, or <b>Edit…</b>, which opens the new text for you to adjust before accepting. Accepting sends <code>applyThreadDiff</code>, which becomes a new user-edited version, the same as a hand edit. Diffs also appear inside the thread, linked to the inline copy.</li>
+  <li><b>Threads (4) ⤢</b> in the rail header opens the wide panel. Opening a card opens the panel on that thread.</li>
+  <li><b>Stale:</b> the round rewrote the target, and the diff could not be rebased with <code>EditLayer.retarget</code>. It is never applied as a guess. <b>Re-propose</b> runs one turn against the current version.</li>
+  <li><b>The index</b> has three groups: Open (by section, in plan order), Needs you (threads where the agent asked you something, or has a diff waiting), and Resolved. Selecting a thread scrolls the plan to its anchor.</li>
+  <li><b>The thread header</b> has the agent/model menu (defaulting to the integrator's), the auto-accept toggle, and the version the thread is reading. A thread follows the newest version automatically when a round lands, and a divider in the thread marks the point where it moved.</li>
+  <li><b>Structured questions</b> appear inside the thread. They use the same component as triage, and the phone uses it too.</li>
+</ol>

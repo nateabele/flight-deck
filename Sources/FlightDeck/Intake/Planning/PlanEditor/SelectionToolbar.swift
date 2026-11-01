@@ -2,26 +2,31 @@ import AppKit
 import IntakeKit
 import SwiftUI
 
-/// The floating toolbar over a plan selection (spec §7.3): Comment · Question · Must change ·
-/// Replace · Delete · Highlight. A kind opens a draft in the notes rail; Highlight (nil) sends
-/// an empty comment at once.
+/// The floating toolbar over a plan selection (spec §7.3): Comment · Must change · Replace ·
+/// Delete · Highlight · ✦ Ask. A kind opens a draft in the notes rail; Highlight (nil) sends
+/// an empty comment at once; Ask opens the thread panel on a new thread about the selection.
 struct SelectionToolbar: View {
     let onChoose: (NoteKind?) -> Void
+    /// nil leaves ✦ Ask off: the standalone editor has no threads to ask in.
+    var onAsk: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 1) {
             ForEach(NoteStyle.kinds, id: \.self) { kind in
                 Item(title: NoteStyle.label(kind), symbol: NoteStyle.symbol(kind)) { onChoose(kind) }
             }
-            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1, height: 16).padding(.horizontal, 2)
+            Rectangle().fill(Instrument.lift.opacity(0.12)).frame(width: 1, height: 16).padding(.horizontal, 2)
             Item(title: "Highlight", symbol: "highlighter") { onChoose(nil) }
+            if let onAsk {
+                Rectangle().fill(Instrument.lift.opacity(0.12)).frame(width: 1, height: 16).padding(.horizontal, 2)
+                // Last, and accented: the one button that answers rather than annotates.
+                Item(title: "Ask", symbol: "sparkle", accent: true, action: onAsk)
+            }
         }
         .padding(3)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(white: 0.17).opacity(0.97)))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.09)))
-        .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
-        // The same dark chrome in either appearance, like the board's glass it floats beside.
-        .environment(\.colorScheme, .dark)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Instrument.toolbar))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Instrument.lift.opacity(0.09)))
+        .shadow(color: Instrument.toolbarShadow, radius: 8, y: 3)
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Annotate the selection")
@@ -30,6 +35,7 @@ struct SelectionToolbar: View {
     private struct Item: View {
         let title: String
         let symbol: String
+        var accent = false
         let action: () -> Void
         @State private var hovering = false
 
@@ -40,12 +46,13 @@ struct SelectionToolbar: View {
                     .font(.system(size: 12))
                     .padding(.horizontal, 8)
                     .frame(height: 24)
-                    .background(hovering ? Color.white.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    .background(hovering ? Instrument.lift.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.primary)
+            .foregroundStyle(accent ? Color.accentColor : Color.primary)
             .onHover { hovering = $0 }
+            .accessibilityIdentifier(accent ? "selection-toolbar-ask" : "selection-toolbar-\(title)")
         }
     }
 }
@@ -66,14 +73,15 @@ final class SelectionToolbarPresenter {
     private var shownFor: NSRange?
 
     /// Shows the toolbar over `rect` (text-view coordinates) for `range`, or hides it for nil.
-    func update(in textView: NSTextView, range: NSRange?, rect: CGRect?, onChoose: @escaping (NoteKind?) -> Void) {
+    func update(in textView: NSTextView, range: NSRange?, rect: CGRect?, onChoose: @escaping (NoteKind?) -> Void,
+                onAsk: (() -> Void)? = nil) {
         guard let range, let rect else { return hide() }
         if anchor.superview !== textView { textView.addSubview(anchor) }
         anchor.frame = rect
         if range != shownFor { anchor.present(nil) }
         if range != shownFor { PlanNotesController.logger.debug("toolbar shown for \(range.location),\(range.length)") }
         shownFor = range
-        anchor.present(AnyView(SelectionToolbar(onChoose: onChoose)))
+        anchor.present(AnyView(SelectionToolbar(onChoose: onChoose, onAsk: onAsk)))
     }
 
     func hide() {
@@ -112,6 +120,8 @@ final class PlanNotesBridge {
     private var scrollObservers: [NSObjectProtocol] = []
 
     private lazy var bands = NoteBandView()
+    /// The proposed edits' bars and hover cards (D17).
+    private lazy var diffGutter = DiffGutterController()
     /// Each mark's quote in the editor's text, nil when it can't be found; valid for `marks`.
     private var located: [UUID: NSRange?] = [:]
     private var marks: [NoteMark] = []
@@ -145,6 +155,9 @@ final class PlanNotesBridge {
         controller.lineTop = { [weak self] in self?.lineTop($0) }
         controller.onMarksChanged = { [weak self] in self?.marksChanged() }
         controller.revealPending = { [weak self] in self?.revealNow() }
+        controller.onThreadsChanged = { [weak self] in self?.refreshDiffs() }
+        controller.onThreadSwitched = { [weak self] in self?.diffGutter.panelSwitchedThread() }
+        wireDiffGutter(controller, textView)
         controller.undoManager = textView.undoManager
         let center = NotificationCenter.default
         observeScrolls()
@@ -158,7 +171,10 @@ final class PlanNotesBridge {
             },
         ]
         if let storage = textView.textStorage {
-            observers.append(TextEdit.observe(storage) { [weak self] edit in self?.edits?.append(edit) })
+            observers.append(TextEdit.observe(storage) { [weak self] edit in
+                self?.edits?.append(edit)
+                self?.diffGutter.textEdited(edit)
+            })
         }
         edits = nil
         textChanged()
@@ -173,6 +189,9 @@ final class PlanNotesBridge {
         controller?.lineTop = nil
         controller?.onMarksChanged = nil
         controller?.revealPending = {}
+        controller?.onThreadsChanged = nil
+        controller?.onThreadSwitched = nil
+        diffGutter.detach()
         controller = nil
         bands.removeFromSuperview()
         bands.marks = []
@@ -224,6 +243,54 @@ final class PlanNotesBridge {
         DispatchQueue.main.async { [weak self] in
             guard let self, let controller = self.controller, let textView = self.textView else { return }
             controller.editorChanged(textView.string, located: self.located.compactMapValues { $0 })
+            self.refreshDiffs()
+        }
+    }
+
+    private var coordinator: PlanTextView.Coordinator? { textView?.delegate as? PlanTextView.Coordinator }
+
+    /// The pending diffs of the open threads that target the version on screen, found afresh in
+    /// the text. A diff for another version is the thread's card's business, not the plan's. Each one
+    /// the editor can draw in place of its paragraph is handed to it (`layProposals`); the rest keep
+    /// the gutter's bar and card.
+    private func refreshDiffs() {
+        guard let textView, let controller else { return }
+        let pending = controller.threadPanel?.pendingDiffsInPlan.filter { $0.checkpoint == controller.checkpoint } ?? []
+        diffGutter.update(pending, in: textView.string, checkpoint: controller.checkpoint)
+        coordinator?.layProposals(diffGutter.locatedDiffs.map {
+            PlanTextView.Coordinator.ProposalRequest(id: $0.diff.id, range: $0.range, replacement: $0.diff.new)
+        })
+        diffGutter.redraw()
+    }
+
+    private func wireDiffGutter(_ controller: PlanNotesController, _ textView: PlanNSTextView) {
+        diffGutter.attach(textView)
+        diffGutter.segments = { [weak self] in self?.segmentRects($0, ensuringLayout: false) ?? [] }
+        diffGutter.viewport = { [weak self] in self?.viewportRange() }
+        diffGutter.currentText = { [weak self] in self?.textView?.string ?? "" }
+        diffGutter.inlineBlock = { [weak self] in self?.coordinator?.proposalBlock($0) }
+        diffGutter.onHoverProposal = { [weak self] in self?.coordinator?.hoverProposal($0) }
+        diffGutter.onDecide = { [weak controller] diff, accept, edited in
+            controller?.threadPanel?.decide(diff, accept: accept, editedMarkdown: edited)
+        }
+        diffGutter.onOpenThread = { [weak controller] thread in
+            controller?.threadPanel?.open(thread)
+            controller?.showRail()
+        }
+        diffGutter.onEdit = { [weak self] diff, range in
+            guard let textView = self?.textView else { return }
+            // The proposed words go into the plan as the human's own edit, selected so they can be
+            // changed at once. The strip over them then asks: Accept edited records the plan as it
+            // reads, Cancel undoes this insert.
+            textView.insertText(diff.new, replacementRange: range)
+            textView.setSelectedRange(NSRange(location: range.location, length: (diff.new as NSString).length))
+            textView.window?.makeFirstResponder(textView)
+        }
+        diffGutter.onRestore = { [weak self] range, original in
+            guard let textView = self?.textView else { return }
+            // One replacement, so one undo step if the person wants the proposal back.
+            textView.insertText(original, replacementRange: range)
+            textView.setSelectedRange(NSRange(location: range.location, length: (original as NSString).length))
         }
     }
 
@@ -256,6 +323,7 @@ final class PlanNotesBridge {
         relocate(in: textView.string)
         tint()
         controller.editorChanged(textView.string, located: located.compactMapValues { $0 })
+        refreshDiffs()
     }
 
     /// Brings `located` up to `text`: moved past the edits since, or found afresh.
@@ -305,14 +373,19 @@ final class PlanNotesBridge {
         guard textView.isFocused, range.length > 0, !textView.hasMarkedText(), let rect = firstLineRect(range) else {
             return toolbar.hide()
         }
-        toolbar.update(in: textView, range: range, rect: rect) { [weak self, weak controller] kind in
+        toolbar.update(in: textView, range: range, rect: rect, onChoose: { [weak self, weak controller] kind in
             PlanNotesController.logger.debug("toolbar button pressed: \(kind.map { NoteStyle.label($0) } ?? "Highlight", privacy: .public), alive \(self != nil && controller != nil && self?.textView != nil)")
             guard let self, let controller, let textView = self.textView else { return }
             self.toolbar.hide()
             controller.choose(kind, range: range, in: textView.string)
             // Collapse the selection so the new tint shows instead of the selection colour.
             textView.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
-        }
+        }, onAsk: controller.threadPanel == nil ? nil : { [weak self, weak controller] in
+            guard let self, let controller, let textView = self.textView else { return }
+            self.toolbar.hide()
+            controller.ask(range: range, in: textView.string)
+            textView.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
+        })
     }
 
     func focusChanged() {
@@ -324,6 +397,7 @@ final class PlanNotesBridge {
     /// itself says it.
     func hover(at point: NSPoint?) {
         guard let textView else { return }
+        diffGutter.hover(at: point)
         let text = point.flatMap(hoverText(at:))
         if textView.toolTip != text { textView.toolTip = text }
     }
@@ -413,7 +487,10 @@ final class PlanNotesBridge {
 
     /// Layout moved under the bands (a scroll, a re-wrap, a restyle): redraw them in place —
     /// only what is on screen; the rest draws when it scrolls in.
-    private func redrawBands() { bands.setNeedsDisplay(bands.visibleRect) }
+    private func redrawBands() {
+        bands.setNeedsDisplay(bands.visibleRect)
+        diffGutter.redraw()
+    }
 }
 
 /// Draws the notes' washes under the text view's own drawing, taking no clicks. A subview of

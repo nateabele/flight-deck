@@ -1,0 +1,62 @@
+[package]
+name = "flightindex"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Flight Deck's machine-wide code index: git identity, blob-keyed fact store, tree-sitter parsing, in-memory graph."
+
+[lib]
+name = "flightindex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fdindex"
+path = "src/main.rs"
+
+[features]
+# The relevance evaluation harness (`src/eval.rs`, `examples/eval.rs`); off in the shipped binary.
+eval = []
+
+[[example]]
+name = "eval"
+required-features = ["eval"]
+
+[[example]]
+name = "eval_impact"
+required-features = ["eval"]
+
+[[example]]
+name = "eval_near"
+required-features = ["eval"]
+
+[[example]]
+name = "eval_history"
+required-features = ["eval"]
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
+tree-sitter-elm = "5.9"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-elixir = "0.3"
+tree-sitter-swift = "0.7"
+tree-sitter-python = "0.25"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rayon = "1"
+ignore = "0.4"
+sha1 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+thiserror = "2"
+libc = "0.2"
+zstd = { version = "0.13", default-features = false }
+hashbrown = { version = "0.15", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"

@@ -27,7 +27,7 @@ final class InfraServiceTests: XCTestCase {
         XCTAssertTrue((vars["fd_user_data"] as? String)?.contains("enroll --file") == true)
         XCTAssertEqual((vars["fd_labels"] as? [String: String])?["flightdeck-name"], "gpu")
         XCTAssertTrue(h.events.contains { if case .cost = $0 { return true }; return false })
-        XCTAssertEqual(h.tofu.calls, ["init", "apply", "output"])
+        XCTAssertEqual(h.tofu.calls, ["init", "plan", "apply", "output"])
         XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
         XCTAssertEqual(m.hourlyUSD, 0.5)
     }
@@ -52,14 +52,13 @@ final class InfraServiceTests: XCTestCase {
         XCTAssertEqual(h.tofu.calls, [])
     }
 
-    /// Review Focus 2.
-    func testFailedApplyIsStillDestroyable() async throws {
+    /// Review Focus 2: a failed apply can still have created a running instance (a spot launch
+    /// that failed on a later step did), so `up` destroys what it made before it reports.
+    func testFailedApplyIsDestroyedAtOnce() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "InsufficientInstanceCapacity")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
-        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .failed)
-        XCTAssertTrue(h.registry.machine(named: "gpu")?.failure?.contains("InsufficientInstanceCapacity") == true)
-        XCTAssertTrue(h.events.contains { if case .failed = $0 { return true }; return false })
-        try await h.service.down(name: "gpu") { _ in }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        catch { XCTAssertEqual(error as? TofuError, .failed(step: "apply", message: "InsufficientInstanceCapacity"), "the apply's failure is the one reported") }
+        XCTAssertTrue(h.events.contains { if case .failed(let why) = $0 { return why.contains("InsufficientInstanceCapacity") }; return false })
         XCTAssertEqual(h.tofu.calls.last, "destroy")
         XCTAssertNil(h.registry.machine(named: "gpu")); XCTAssertTrue(h.hosts.registry.hosts.isEmpty)
         // Billing began with the apply; down ends it even though the machine never came up.
@@ -85,7 +84,51 @@ final class InfraServiceTests: XCTestCase {
         h.enrollTimeout = 0.05
         do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
         catch InfraError.enrollTimeout(let console) { XCTAssertTrue(console?.contains("Could not resolve") == true) }
-        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .failed)
+        XCTAssertNil(h.registry.machine(named: "gpu"), "destroyed: a machine that never enrolled only bills")
+        XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// A boot that cannot install hostd powers the instance off; `up` sees it end at the next
+    /// poll and fails then, rather than billing out the enroll timeout.
+    func testAMachineThatEndsBeforeEnrollingFailsAtOnceAndIsDestroyed() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.consoleOutput = "flightdeck: hostd did not install or enroll; powering off"
+        h.account.ended = true
+        h.instancePoll = 0.01
+        let started = Date()
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        catch InfraError.enrollFailed(let console) { XCTAssertTrue(console?.contains("powering off") == true) }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "not the 600 s enroll timeout")
+        XCTAssertNil(h.registry.machine(named: "gpu"))
+        XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// A rollback whose destroy fails leaves the machine for the Reaper, counted as a failed
+    /// destroy, and still reports the `up`'s own failure.
+    func testAFailedRollbackIsLeftForTheReaper() async throws {
+        h.tofu.failApply = TofuError.failed(step: "apply", message: "UnsupportedOperation")
+        h.tofu.failDestroy = TofuError.failed(step: "destroy", message: "throttled")
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        catch { XCTAssertEqual(error as? TofuError, .failed(step: "apply", message: "UnsupportedOperation")) }
+        let m = try XCTUnwrap(h.registry.machine(named: "gpu"))
+        XCTAssertEqual(m.state, .failed); XCTAssertEqual(m.destroyAttempts, 1)
+        XCTAssertFalse(h.events.contains { if case .failed(let why) = $0 { return why.contains("throttled") }; return false },
+                       "the destroy's failure is progress, not the up's failure")
+    }
+
+    /// Nothing was applied, so nothing is destroyed and nothing is left behind: no record to
+    /// project into the session budget or list in `infra doctor`, no host, no work directory.
+    func testAFailureBeforeTheApplyDestroysNothingAndLeavesNoRecord() async throws {
+        h.tofu.failInit = TofuError.failed(step: "init", message: "registry unreachable")
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
+        XCTAssertNil(h.registry.machine(named: "gpu"))
+        XCTAssertTrue(h.registry.machines.isEmpty)
+        if case .success = h.hosts.registry.resolve(name: "gpu") { XCTFail("the enrolled host is forgotten") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: h.registry.workdir(for: "gpu").path))
+        XCTAssertEqual(h.ledger.spent(name: "gpu", now: h.now.addingTimeInterval(3600)), 0)
+        XCTAssertTrue(h.events.contains { if case .failed(let why) = $0 { return why.contains("registry unreachable") }; return false },
+                      "the failure is still reported")
+        XCTAssertFalse(h.tofu.calls.contains("destroy"))
     }
 
     func testTailnetModeUsesTailnetAddressAndNoInboundRule() async throws {
@@ -170,10 +213,14 @@ final class InfraServiceTests: XCTestCase {
     /// Carry 12: an apply refused for missing permissions names the IAM actions the preset needs.
     func testUnauthorizedApplyNamesTheIAMActions() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "api error UnauthorizedOperation: You are not authorized")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() } catch {}
-        let failure = try XCTUnwrap(h.registry.machine(named: "gpu")?.failure)
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
+        let failure = try XCTUnwrap(h.events.lazy.compactMap { if case .failed(let why) = $0 { return why }; return nil }.first)
         XCTAssertTrue(failure.contains("ec2:RunInstances"), failure)
         XCTAssertTrue(failure.contains("servicequotas:GetServiceQuota"), failure)
+        // A record with that failure (one whose rollback could not finish) says the same in doctor.
+        var kept = InfraMachine.fixture(name: "gpu", state: .failed)
+        kept.failure = failure
+        try h.registry.upsert(kept)
         let checks = await h.service.doctor()
         let row = try XCTUnwrap(checks.first { $0.name == "machine gpu" })
         XCTAssertFalse(row.ok)
@@ -409,6 +456,7 @@ extension InfraServiceTests {
     /// Spec §7.3: doctor runs the orphan scan too, listing each orphan with how to delete it,
     /// and each account it could not read — never a passing "orphans" check when one was.
     func testDoctorListsOrphansAndUnreadableAccounts() async throws {
+        try h.recordCreated("aws_instance", "i-9")
         h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost")]
         h.gcpAccount.listError = CloudAccountError.failed("gcloud: not signed in")
         let checks = await h.service.doctor()
@@ -459,8 +507,8 @@ extension InfraServiceTests {
             let refusal = InfraService.refusal(for: error, recorded: nil)
             XCTAssertFalse(refusal.message.contains(secret), refusal.message)
         }
-        let failure = try XCTUnwrap(h.registry.machine(named: "gpu")?.failure)
-        XCTAssertFalse(failure.contains(secret) || failure.contains("tskey-"), failure)
+        XCTAssertNil(h.registry.machine(named: "gpu"), "rolled back")
+        XCTAssertTrue(h.events.contains { if case .failed = $0 { return true }; return false })
         for case .failed(let message) in h.events {
             XCTAssertFalse(message.contains(secret) || message.contains("tskey-"), message)
         }
@@ -472,7 +520,7 @@ extension InfraServiceTests {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
         var notices: [String] = []
-        try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo) { notices.append($0) }
+        try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: nil) { notices.append($0) }
         XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
         XCTAssertTrue(notices.contains("tofu init"), "\(notices)")
         XCTAssertTrue(h.service.costLine(host: "gpu")?.hasPrefix("gpu · t3.small") == true)
@@ -481,7 +529,7 @@ extension InfraServiceTests {
 
     func testEnsureUpFailureCarriesTheInfraCode() async throws {
         h.budget.allowedTypes["aws"] = []
-        do { try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: nil) { _ in }; XCTFail() }
         catch let error as DelegationError {
             XCTAssertEqual(error.code, "infra_preflight")
             XCTAssertTrue(error.message.contains("budget: "), error.message)
@@ -537,8 +585,22 @@ extension InfraServiceTests {
         h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: "gpu"), lost]
         do { try await h.service.downOrphan(id: "instance:i-1"); XCTFail("a known machine is never an orphan") }
         catch InfraError.notFound(let id) { XCTAssertEqual(id, "instance:i-1") }
+        try h.recordCreated("aws_instance", "i-9")
         try await h.service.downOrphan(id: "instance:i-9")
         XCTAssertEqual(h.account.deleted, [lost])
+    }
+
+    /// The owner tag is any string anyone can set: an orphan Flight Deck has no record of
+    /// creating is reported, and never deleted.
+    func testAnOrphanFlightDeckDidNotCreateIsNeverDeleted() async throws {
+        let stranger = OwnedResource(cloud: "aws", kind: .instance, id: "i-5", region: "us-east-1", name: "theirs")
+        h.account.owned = [stranger]
+        do { try await h.service.downOrphan(id: "instance:i-5"); XCTFail("no record of creating it") }
+        catch InfraError.refused(let why) { XCTAssertTrue(why.contains("no record of creating instance:i-5"), why) }
+        XCTAssertEqual(h.account.deleted, [])
+        let checks = await h.service.doctor()
+        let row = try XCTUnwrap(checks.first { $0.name == "orphan instance:i-5" })
+        XCTAssertFalse(row.fix?.contains("infra down") ?? true, row.fix ?? "")
     }
 
     /// GCE names an instance and its firewall rule alike; the kind says which one goes.
@@ -549,6 +611,7 @@ extension InfraServiceTests {
         XCTAssertEqual(instance.ref, "instance:fd-x-gpu")
         do { try await h.service.downOrphan(id: "fd-x-gpu"); XCTFail("an unqualified id is ambiguous") }
         catch InfraError.notFound {}
+        try h.recordCreated("google_compute_firewall", "projects/p/global/firewalls/fd-x-gpu", cloud: "gcp")
         try await h.service.downOrphan(id: "firewall:fd-x-gpu")
         XCTAssertEqual(h.gcpAccount.deleted, [firewall])
     }

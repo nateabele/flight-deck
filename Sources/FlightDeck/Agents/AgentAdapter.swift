@@ -627,6 +627,16 @@ protocol AgentTextChannel {
         stillWanted: @escaping @MainActor () -> Bool,
         onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool
+
+    /// Whether `submit` reaches this agent through its own server rather than through the
+    /// terminal, for this addressed injector. When it does, `SessionStore.injectionGate` asks
+    /// the screen nothing: no keystroke is sent, so a composer the screen grammar cannot read
+    /// is no reason to refuse, and refusing on it is how a codex tab went deaf for hours.
+    func deliversOffScreen(_ injector: TextInjecting) -> Bool
+}
+
+extension AgentTextChannel {
+    func deliversOffScreen(_ injector: TextInjecting) -> Bool { false }
 }
 
 /// **The second stage of a rename that cannot be said in one shot.**

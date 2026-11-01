@@ -12,9 +12,12 @@ for terminal rendering and runs many coding agents across repos in a `session �
 Four things trip up every agent on this repo. The detail is in
 **[docs/AGENT-OPERATIONS.md](docs/AGENT-OPERATIONS.md)**.
 
-1. **You are probably running inside the app you are editing.** The process tree is
-   `Flight Deck.app → login → fish → claude`. Quitting or killing Flight Deck kills your own
-   session. Detach anything that must outlive the app (`nohup … &`).
+1. **You are probably running in a session of the app you are editing — but not inside its
+   process.** Each tab is a detached `fd-abduco` daemon parented to launchd:
+   `launchd → fd-abduco → shell → claude`. Quitting, killing or release-swapping Flight Deck
+   does **not** kill your session; it keeps running and the relaunched app reattaches to it.
+   What does kill it: `pkill`-style cleanup of `claude`/`fd-abduco` processes that matches
+   your own.
 2. **Never launch a bundle from `DerivedData/`.** Flight Deck has no argv parsing — even
    `--help` boots a *second full app instance*, spawning duplicate `claude --resume` processes
    that collide in Claude's pid-keyed name registry. Run only `/Applications/Flight Deck.app`.
@@ -49,7 +52,13 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build-libghostty.sh   # once, ~10 min — builds GhosttyKit.xcframework
 ./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
-./scripts/test-unit.sh          # unit suite, run on the UI-test Mac (opens windows; FD_TEST_LOCAL=1 for this Mac) — your normal TDD loop
+./scripts/test-unit.sh          # the full gate: runs test-logic.sh here FIRST (fails if it fails), then the app-hosted
+                                # suite on the UI-test Mac (opens windows; FD_TEST_LOCAL=1 for this Mac). With
+                                # FD_TEST_FILTER it is your TDD loop and skips the logic lane (FD_SKIP_LOGIC=1 skips it too)
+./scripts/test-logic.sh        # pure IntakeKit/FleetKit tests on THIS Mac: no app, no window, no remote lock
+                                # (Tests/IntakeKitTests, Tests/FleetKitTests); exits non-zero on failure
+                                # FD_TEST_FILTER=ClassA,ClassB/testX; use it first for model/wire/store logic
+                                # a shared helper from Tests/FlightDeckTests must be listed in project.yml first
 ./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full` — and its baseline note before assuming a red run is your bug)
 ./scripts/smoke.sh              # GUI UITest on the UI-test Mac, ends "SMOKE PASS" (see rule 4);
                                 # result bundle + log copied back to DerivedData/smoke-remote/
@@ -79,6 +88,7 @@ FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp   # ends INFRA LIVE PASS
 
 ./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
 ./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes
+FD_IOS_ONLY=ClassA,ClassB ./scripts/test-ios.sh   # only those FlightDeckMobileTests classes (RED/GREEN runs)
 ./scripts/deploy-phone.sh       # builds, installs and RELAUNCHES on a real device; --release for an optimised build, --no-build to install what is already there. The ONLY way to put a build on the phone: it repairs Wi-Fi discovery first (scripts/phone-proxy.sh) and fails loudly
 
 # NOT hermetic — spawns real `codex` processes against your live ~/.codex, and one test
@@ -135,6 +145,7 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Packages/HostKit/Sources/HostKit/Delegation/` | Delegated execution, the shared and host half: the 1.1 wire (`DelegationWire.swift`, which tables every op and error code), `ChannelMux`, sync (`Snapshotter`, `BundleMaker`, `Workspace`, `ResultApplier`, and `Submodules`, which pins and places submodules), `Runner` and `OutputSpool`, `ScreenLease`, `PortCheck`, `Preflight`, and the `delegate.toml` parser, writer and route matcher. Foundation-only like the rest of HostKit; the IOKit/CoreGraphics half is the `HostKitDarwin` target. |
 | `Packages/HostKit/Sources/HostKit/Infra/` | Cloud infra hosts, the shared half: `InfraConfig` (`[infra.<name>]`), HostKit's own `Duration` (it shadows `Swift.Duration` — write `Swift.Duration` at a clash), `CostModel`/`BudgetSettings`, `EnrollmentPayload`, `IdleTracker`. |
 | `Sources/FlightDeck/Infra/` | Cloud infra hosts, the app half: `InfraService` (the per-machine state machine, `infra.json`), `Reaper` (TTL, idle, budget, drift, failed-destroy retries), `ToolResolver`/`ToolPins` (tofu, aws, gcloud: `PATH` or a SHA-256-pinned managed copy), `TofuRunner`, `CloudInitRenderer`, `AWSAccount`/`GCPAccount` (incl. the orphan scan), `PriceCatalog`, `CostLedger`, `TailnetIntegration`. No test creates a cloud resource. See ARCHITECTURE.md, "Cloud infra hosts". |
+| `Packages/FlightIndex/` | The machine-wide code index, a Rust crate (`fdindex`: daemon, MCP shim `fdindex mcp`, query CLI, `service` install). **Never in the Xcode project**; the app build runs `scripts/build-fdindex.sh` and embeds `Contents/MacOS/fdindex`. `flightdeck index …` (`Sources/FlightDeckCLI/IndexCommand.swift`) execs it. Tested by `cargo test` in the package. See ARCHITECTURE.md, "Index Service". |
 | `Resources/Infra/presets/` | The bundled OpenTofu presets `aws-linux` and `gcp-linux`, with lock files and `tofu test` suites. A folder reference: never run `tofu` in place (a `.terraform/` would ship in the app) — `test-infra-presets.sh` tests copies. |
 | `Resources/RouteShim/` | `flightdeck-route-shim.sh`, the one script every per-tab routing shim symlinks to. Bundled at `Contents/Resources/RouteShim/`; it finds this build's CLI through `FLIGHTDECK_CLI` or its own bundle before trusting `PATH`. |
 | `Sources/FlightDeckMobile/` | The iOS companion app: pairing screen (QR scan or typed code), fleet list. **Keep it flat** — `build-ios.sh`'s type-check fallback globs `*.swift` only, so a subdirectory goes silently unchecked on a machine with no iOS platform. See `docs/MOBILE.md`. |

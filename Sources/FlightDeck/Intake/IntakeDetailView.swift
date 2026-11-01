@@ -38,13 +38,16 @@ struct IntakeDetailView: View {
     /// column since it was held (`presentColumn`).
     @State private var columnGeneration = 0
 
-    /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
-    /// questions. Reloaded via `.task(id:)` below whenever the question set changes — the
+    /// Answer drafts for `.needsAnswers`, one per presented question and in the same order. Reloaded via `.task(id:)` below whenever the question set changes — the
     /// same `IntakeDetailView` instance lives across a `needsAnswers` → `triaging` →
     /// `needsAnswers` round trip (selection doesn't change), so a plain `@State` seeded
     /// once at init would still hold the previous round's drafts. Mirrored to
     /// `answer-drafts.json` through the service so a relaunch (a release swap) keeps them.
-    @State private var answers: [String] = []
+    @State private var structuredAnswers: [StructuredAnswer] = []
+    /// Why the last Send took nothing (`IntakeService.AnswerRefusal`), in words, under the form;
+    /// cleared by the next edit. Dropped silently, a refused Send looked like a Send that did
+    /// nothing.
+    @State private var answerRefusal: String?
     @State private var selectedPreset: Preset = .bead
     /// Indices into `intake.exchanges` whose Clarifications section is open. Collapsed by
     /// default: answered rounds are there to look back at, not to push the live work down.
@@ -363,7 +366,8 @@ struct IntakeDetailView: View {
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
-                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) })
+                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) },
+                                 halt: haltStatus(tape: tape, activities: seats.activities).map { AnyView(haltPanel($0, tape: tape)) })
             }
         default:
             EmptyView()
@@ -560,6 +564,7 @@ struct IntakeDetailView: View {
         dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
+        notes.threads = service.threadBinding(for: intake.id)
         notes.projectPath = intake.projectPath
         notes.intakeID = intake.id
         notes.versionOf = { [service, id = intake.id] entry in
@@ -595,6 +600,7 @@ struct IntakeDetailView: View {
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
                             focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
                             noteShown: service.editNoteShown.contains(intake.id), notes: final ? nil : notes,
+                            acceptedStamp: final ? nil : service.threadEditStamp(intake.id),
                             onOpenNotes: { showInspector(.notes) })
             .equatable()
             .environment(\.pageObscuredTop, pinnedHeight)
@@ -618,15 +624,23 @@ struct IntakeDetailView: View {
         }
     }
 
-    private var openQuestions: [String] {
+    private var openQuestions: [StructuredQuestion] {
         guard let open = intake.exchanges.last, open.answers == nil else { return [] }
-        return open.questions
+        return open.presentedQuestions
     }
 
-    /// The open round as a grouped form: numbered, fully wrapped questions, each over a
-    /// multi-line answer field. Sent rounds leave this form and reappear under Clarifications.
+    /// What the drafts task re-runs on: the intake and the open round's questions, options
+    /// included, so a follow-up round never inherits the previous round's choices.
+    private struct OpenRound: Equatable {
+        var intakeID: UUID
+        var questions: [StructuredQuestion]
+    }
+
+    /// The open round as a grouped form: numbered, fully wrapped questions, each over the
+    /// controls its kind calls for. Sent rounds leave this form and reappear under Clarifications.
     private var needsAnswersBody: some View {
         let questions = openQuestions
+        let round = intake.exchanges.count - 1
         return VStack(alignment: .leading, spacing: 6) {
             Text(questions.count == 1 ? "Question" : "Questions").font(.headline)
             GroupedRows(count: questions.count) { i in
@@ -635,16 +649,19 @@ struct IntakeDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(questions[i])
+                        Text(questions[i].text)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
-                        TextField("Answer \(i + 1)", text: answerBinding(i), prompt: Text("Your answer"), axis: .vertical)
-                            .labelsHidden()
-                            .lineLimit(2...6)
-                            .textFieldStyle(.roundedBorder)
-                            .dropsFilePaths(into: answerBinding(i), projectPath: intake.projectPath)
+                        StructuredQuestionView(question: questions[i], answer: answerBinding(questions[i]),
+                                               projectPath: intake.projectPath)
                     }
                 }
+            }
+            if let answerRefusal {
+                Text(answerRefusal)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("intake.answer.refusal")
             }
             Text("Triage continues once every question has an answer. Press ⌘↩ to send.")
                 .font(.caption)
@@ -653,36 +670,44 @@ struct IntakeDetailView: View {
         // Keyed on the questions' CONTENTS (and the intake): a follow-up round with the same
         // number of questions used to keep the previous round's answers typed into the new
         // questions' fields, ready to send against questions they never answered.
-        .task(id: [intake.id.uuidString] + questions) {
-            answers = service.answerDrafts(intake.id, questions: questions)
-                ?? Array(repeating: "", count: questions.count)
+        .task(id: OpenRound(intakeID: intake.id, questions: questions)) {
+            let saved = service.answerDrafts(intake.id, round: round) ?? []
+            structuredAnswers = questions.map { q in saved.first { $0.questionID == q.id } ?? q.initialAnswer }
         }
         // Debounced write-through: every keystroke restarts this task, so the file is written
         // once typing pauses. `saveAnswerDrafts` refuses a round already sent, so a write
         // racing Send can't resurrect it.
-        .task(id: answers) { [answers, id = intake.id] in
+        .onChange(of: structuredAnswers) { answerRefusal = nil }
+        .task(id: structuredAnswers) { [structuredAnswers, id = intake.id] in
             try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled else { return }
-            service.saveAnswerDrafts(id, questions: questions, answers: answers)
+            guard !Task.isCancelled, !structuredAnswers.isEmpty else { return }
+            service.saveAnswerDrafts(id, round: round, answers: structuredAnswers)
         }
     }
 
-    private func answerBinding(_ index: Int) -> Binding<String> {
+    /// Until the drafts task lands the list is empty (or last round's), so a question without
+    /// an answer shows its recommendation rather than nothing, and writes extend the list.
+    private func answerBinding(_ question: StructuredQuestion) -> Binding<StructuredAnswer> {
         Binding(
-            get: { index < answers.count ? answers[index] : "" },
+            get: { structuredAnswers.first { $0.questionID == question.id } ?? question.initialAnswer },
             set: { newValue in
-                guard index < answers.count else { return }
-                answers[index] = newValue
+                if let i = structuredAnswers.firstIndex(where: { $0.questionID == question.id }) {
+                    structuredAnswers[i] = newValue
+                } else {
+                    structuredAnswers.append(newValue)
+                }
             }
         )
     }
 
-    /// At least one answer, and none of them blank once whitespace/newlines are trimmed —
-    /// otherwise "Send answers" would ship empty strings straight to `IntakeService.answer`,
-    /// which has no guard of its own against that (it only checks `state == .needsAnswers`
-    /// and a non-empty exchange).
-    static func canSendAnswers(_ answers: [String]) -> Bool {
-        !answers.isEmpty && !answers.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Every question complete, and at least one question — otherwise "Send answers" would ship
+    /// blank text answers straight to `IntakeService.answer`, which has no guard of its own
+    /// against that (it only checks `state == .needsAnswers` and a non-empty exchange). A
+    /// question with no answer yet is incomplete, never vacuously complete.
+    static func canSendAnswers(_ questions: [StructuredQuestion], _ answers: [StructuredAnswer]) -> Bool {
+        !questions.isEmpty && questions.allSatisfy { q in
+            answers.first { $0.questionID == q.id }.map(q.isComplete) ?? false
+        }
     }
 
     /// Spec §9: the recommendation, the fidelity as a segmented choice, and the rounds it will
@@ -827,22 +852,61 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// An intake that failed or was interrupted: the halt panel, whose Retry is the primary
+    /// button's own (`performPrimary`).
+    @ViewBuilder
     private var failedBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let failure = intake.failure {
-                Text(failure).foregroundStyle(.red)
+        if let status = haltStatus(tape: nil) {
+            haltPanel(status)
+        }
+    }
+
+    // MARK: - Halt panel
+
+    /// What stopped planning, if anything: the model's one reading (`HaltStatus`), here with the
+    /// failed seat's output read only while a round is failed. `activities` carries the seats'
+    /// rate-limit marks, so a seat waiting on one still shows when the tape runs.
+    private func haltStatus(tape: Tape?, activities: [String: SeatActivity] = [:]) -> HaltStatus? {
+        let failedSeat = tape?.status == .failed ? service.failedSeat(intake.id) : nil
+        return HaltStatus.make(intake: intake, tape: tape, config: intake.roundConfig, failedSeatOutput: failedSeat?.output,
+                               rateLimitedAt: activities.values.compactMap(\.rateLimitedAt).max(),
+                               available: service.availableModels(project: intake.projectPath), failedRole: failedSeat?.role)
+    }
+
+    private func haltPanel(_ status: HaltStatus, tape: Tape? = nil) -> some View {
+        // The round the editor opens on: the one that failed, which the tape has not recorded.
+        let failed = tape.flatMap { t in intake.roundConfig.flatMap { TapePlanner.upcoming(after: t, config: $0).first } }
+        let available = service.availableModels(project: intake.projectPath)
+        let slot = status.slot
+        return HaltPanel(
+            status: status,
+            reseat: slot.flatMap { s in intake.roundConfig.map { HaltReseat.options(for: s, config: $0, available: available) } } ?? [],
+            perform: { performHalt($0) },
+            choose: { choice in
+                guard let slot, let config = intake.roundConfig.flatMap({ HaltReseat.applying(choice, to: slot, in: $0) })
+                else { return }
+                // A refused save (the runner is live, say) leaves the seat as it was: retrying
+                // would run the very agent the human just chose against.
+                guard service.saveRoundConfig(intake.id, config) == nil else { return }
+                service.send(intake.id, .step)
+            },
+            openRounds: failed.map { round in { showRoundConfig(RoundKey(stage: round.stage, round: round.round)) } },
+            naming: { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) })
+    }
+
+    /// The controls' presses, on the paths the transport keys and the primary button take.
+    private func performHalt(_ action: HaltStatus.Action) {
+        switch action {
+        case .retry:
+            if intake.state == .shaping { service.send(intake.id, .step) } else { service.retry(intake.id) }
+        case .toReview: service.send(intake.id, .toReview)
+        case .resume:
+            switch intake.roundConfig?.defaultPlay ?? .step {
+            case .step: service.send(intake.id, .step)
+            case .nextMajor: service.send(intake.id, .nextMajor)
+            case .toReview: service.send(intake.id, .toReview)
             }
-            if let raw = intake.rawFailureOutput {
-                DisclosureGroup("Raw output") {
-                    ScrollView {
-                        Text(raw)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 200)
-                }
-            }
+        case .retryOther, .showOutput: break
         }
     }
 
@@ -1108,17 +1172,26 @@ struct IntakeDetailView: View {
         case .commandReturn:
             button
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!Self.canSendAnswers(answers))
+                .disabled(!Self.canSendAnswers(openQuestions, structuredAnswers))
         case .defaultAction: button.keyboardShortcut(.defaultAction)
         case .none: button
+        }
+    }
+
+    /// A refused Send in plain words: the raw value is the phone's wire code, not something to read.
+    static func words(_ refusal: IntakeService.AnswerRefusal) -> String {
+        switch refusal {
+        case .notAwaitingAnswers: "These questions were already answered or replaced. Nothing was sent."
+        case .unknownQuestion: "These answers are for questions this round no longer asks. Check them and send again."
+        case .incomplete: "Some answers are incomplete. Finish each one, then send again."
         }
     }
 
     private func performPrimary() {
         switch intake.state {
         case .needsAnswers:
-            guard Self.canSendAnswers(answers) else { return }
-            service.answer(intake.id, answers: answers)
+            guard Self.canSendAnswers(openQuestions, structuredAnswers) else { return }
+            answerRefusal = service.answer(intake.id, structured: structuredAnswers).map(Self.words)
         case .awaitingChoice, .parked:
             if selectedPreset == .bead { service.choose(intake.id, preset: .bead) } else { startShaping() }
         case .review: onOpenReview()
@@ -1412,12 +1485,14 @@ private struct DocumentPlan: View, Equatable {
     let churn: ChurnLaneInput?
     let noteShown: Bool
     let notes: PlanNotesController?
+    /// `IntakeService.threadEditStamp`: an accept queued changes the plan with the tape unchanged.
+    let acceptedStamp: Int?
     let onOpenNotes: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
         a.intakeID == b.intakeID && a.projectPath == b.projectPath && a.title == b.title && a.tape == b.tape && a.final == b.final
             && a.selection == b.selection && a.focus == b.focus && a.churn?.cycle == b.churn?.cycle
-            && a.noteShown == b.noteShown && a.notes === b.notes
+            && a.noteShown == b.noteShown && a.notes === b.notes && a.acceptedStamp == b.acceptedStamp
     }
 
     var body: some View {
@@ -1441,7 +1516,11 @@ private struct DocumentPlan: View, Equatable {
                                          router: final ? nil : service.editRouter(intakeID),
                                          folds: service.planFolds(intakeID),
                                          scroll: service.planScroll(intakeID),
-                                         projectPath: projectPath))
+                                         projectPath: projectPath,
+                                         queuedPlan: final ? nil : { [service, intakeID] in service.queuedPlan(intakeID, checkpoint: $0) },
+                                         acceptedStamp: acceptedStamp,
+                                         typingWon: { [service, intakeID] in service.typingWon(intakeID, checkpoint: $0, plan: $1) },
+                                         visuals: service.visualReader(intakeID)))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)

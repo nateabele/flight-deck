@@ -17,6 +17,12 @@ import OSLog
 ///    at a cap, destroy after 5 minutes unless the cap was raised meanwhile. `extend` cannot
 ///    override it.
 ///
+/// Before the TTL, a machine a session created answers to that session's budget: once the
+/// session's spend (its own machines' ledger segments, nothing else) reaches the cap, every one
+/// of its machines is destroyed on that pass, with no grace; 10 minutes before the instant the
+/// ledger says it will, a warning. `up` already set each such machine's deadline, and its own
+/// timer, no later than that instant, so the budget holds with this Mac asleep too.
+///
 /// A machine a `down` left `failed` is destroyed again, backing off 1, 5, 15, then every 30
 /// minutes. And it follows a moving Mac (§6.2): a public-mode machine whose link stays down has
 /// its firewall re-pointed at this Mac's current public IP, 30 s after the drop, every 3 minutes
@@ -59,6 +65,9 @@ final class Reaper {
     /// `machine:<name>` and `month`: the thresholds already warned about.
     private var budgetWarned: Set<String> = []
     private var budgetDestroyAt: [String: Date] = [:]
+    /// The session budget each machine was warned about, so a raised or renewed one earns a
+    /// fresh warning.
+    private var sessionWarned: [String: SessionBudget] = [:]
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
 
@@ -123,6 +132,7 @@ final class Reaper {
         ttlWarned = ttlWarned.filter { names.contains($0.key) }
         idleSeen = idleSeen.filter { names.contains($0.key) }
         budgetDestroyAt = budgetDestroyAt.filter { names.contains($0.key) }
+        sessionWarned = sessionWarned.filter { names.contains($0.key) }
         for m in service.registry.machines {
             if Self.isRunning(m) {
                 await check(m.name)
@@ -147,6 +157,7 @@ final class Reaper {
 
         // Re-read after every suspension: an `extend`, `down` or another pass may have moved it.
         guard let m = running(name) else { return }
+        if await checkSessionBudget(m) { return }
         let left = m.deadline.timeIntervalSince(clock.now)
         if left <= 0 {
             await destroy(name, title: "\(name) destroyed", body: "\(name) reached the end of its TTL.")
@@ -167,6 +178,30 @@ final class Reaper {
 
         guard let m = running(name), m.hourlyUSD != nil else { return }
         await checkBudget(m)
+    }
+
+    /// True when it destroyed the machine: its session's budget is used up. The decision is the
+    /// ledger's alone, so it is the same however often or late the pass runs.
+    private func checkSessionBudget(_ m: InfraMachine) async -> Bool {
+        guard let session = m.session else { return false }
+        let status = service.sessionStatus(session, now: clock.now)
+        guard let budget = status.budget else { return false }
+        let usd = InfraPreflight.usd
+        if status.exhausted {
+            await destroy(m.name, title: "\(m.name) destroyed",
+                          body: "Its session's \(usd(budget.capUSD)) cloud budget is used up (~\(usd(status.spent)) spent); `/budget renew` in that session starts a fresh one.")
+            return true
+        }
+        if let end = status.exhaustsAt, end.timeIntervalSince(clock.now) <= Self.ttlWarning, sessionWarned[m.name] != budget {
+            sessionWarned[m.name] = budget
+            // A deadline `up` set to this same instant would warn next in the TTL's words,
+            // pointing at an `extend` the budget refuses.
+            if m.deadline <= end.addingTimeInterval(60) { ttlWarned[m.name] = m.deadline }
+            let minutes = Int((end.timeIntervalSince(clock.now) / 60).rounded(.up))
+            notifier.notify(id: Self.notificationID(m.name), title: "\(m.name) will be destroyed soon",
+                            body: "Its session's \(usd(budget.capUSD)) cloud budget runs out in \(minutes) \(minutes == 1 ? "minute" : "minutes"); `/budget <usd>` in that session raises it.")
+        }
+        return false
     }
 
     /// True once this Mac has seen the same `idleSince` for the machine's whole idle limit. The
@@ -271,6 +306,7 @@ final class Reaper {
         ttlWarned[name] = nil
         idleSeen[name] = nil
         budgetDestroyAt[name] = nil
+        sessionWarned[name] = nil
         budgetWarned.remove("machine:\(name)")
     }
 

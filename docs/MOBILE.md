@@ -4,7 +4,7 @@
 "Fleet replication" section of [ARCHITECTURE.md](ARCHITECTURE.md)). This doc is what only a
 device on a network can prove, plus how to get a build onto one.
 
-Flight Control (planning intakes) is not on the phone yet; its design handoff is [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
+Flight Control (planning intakes) is on the phone: watch, steer, answer, choose a fidelity, edit rounds and start a new intake from a project header's +. The design handoff is [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 
 **Some of it now runs.** `FlightDeckMobileTests` is an app-hosted unit suite on the simulator —
 `./scripts/test-ios.sh` — and it covers the phone's decision-making: the typed-code field, the
@@ -359,11 +359,11 @@ page.
     it — deleting that modifier fails no test.
 45. **An `AskUserQuestion`, answered from the phone.** Ask claude to ask you something with
     three options. The card must show the question, its header, and each option with its
-    description. Tap the **third**. The terminal's selection must move down twice and submit,
-    and the transcript must record the third option's own label — not the first, and not a row
-    the Mac has no label for.
+    description. Tap the **third**: it ticks, and nothing is sent. Tap **Send answer**. The
+    terminal's selection must move down twice and submit, and the transcript must record the
+    third option's own label — not the first, and not a row the Mac has no label for.
 46. **The simple race.** Get a dialog up, let the phone draw it, answer it *in the terminal*,
-    then tap on the phone before it refreshes. The phone must say **"Your Mac has moved on from
+    then pick and send on the phone before it refreshes. The phone must say **"Your Mac has moved on from
     this."** and the terminal must not move a row.
 47. **The hard race, and it is the most important item on this list.** Answer a permission
     prompt at the Mac's keyboard and let claude raise the next one **immediately**, so the
@@ -494,7 +494,23 @@ page.
     "You", never "Cross session message"), with a speech-bubble glyph, its numbered lists and
     code spans rendered as markdown, and no `<cross-session-message>` tag anywhere. The idle
     one is the regression: before, the phone dropped it entirely and showed the agent
-    answering nobody.
+    answering nobody. Then send one with `flightdeck peer send` to a Claude tab that has a
+    relay, and one to a codex tab. The relayed one is headed by its WRITER, not by the
+    receiving tab's own name. The codex one is a message row, not a `ReceiveMessages` tool
+    card. Neither shows a socket path, a `<\cross-session-message` tag, a `[Peer transport: …]`
+    note or a `[Relayed by Flight Deck: …]` note.
+67a′. **Reply from the receiving session** with `SendMessage` and with
+    `flightdeck peer send "<name>" '…'`, once to the name and once to the `uds:` address the
+    message came from. Each reply is a prose row headed "To <name>" with an up-right arrow
+    glyph, not a JSON tree or a terminal card; a received message is headed "From <name>" with
+    a down-left arrow. The reply to the socket is named too, after the message that came from
+    it; so is a send to a tab id, after the fleet's tab. Only an address nothing names reads
+    "To another session". A send to a name nobody has carries the Error chip.
+67a″. **Peer messages arrive collapsed.** A message, received or sent, longer than three lines
+    shows its first three, slightly dimmed, with a chevron at the left of its header and no More
+    link. Tapping the chevron or anywhere on the header line opens it in place at full
+    opacity, and the chevron turns down; tapping again closes it. A message of three lines or
+    fewer is drawn whole, undimmed, with no chevron. The agent's own prose is never collapsed.
 67b. **Paste text into a prompt on the Mac** (enough that Claude Code wraps it as a paste) and
     check the phone's "You" row: the pasted text reads inline with what you typed around it,
     and no `<pasted_content id="…">` or `</pasted_content …>` tag shows. Paste one that itself
@@ -520,7 +536,7 @@ page.
     Then do it as the FIRST of two questions: that row reads "Next" there and "Submit" when the
     question is alone, and pressing the wrong one either commits early or fails to commit.
     **Then answer in your own words.** Every question card has a "Type something" field under
-    its options. On a lone single-select question, type a word and tap the orange arrow; the
+    its options. On a lone single-select question, type a word and tap **Send answer**; the
     terminal must show your words on its row and then commit them. On a checkbox question,
     tick one box and type in the field; its tick appears. Send, and the Mac must tick the box,
     paste your words (its row ticks with no Return), then press Submit and the review. Check
@@ -792,6 +808,37 @@ page.
     internal word anywhere, or a stale edit overwriting a change made on the Mac meanwhile (change
     the Mac's config after opening the phone's screen, then Save: "The plan changed — reopen it and
     try again.").
+
+104. **File links open in the app.** In a conversation, tap a link to a local file — a relative
+    `[HANDOFF](docs/HANDOFF.md)`, an absolute `/Users/…/plan.md`, a `file://` URL, and a
+    `Foo.swift:42` / `#L42` link — in prose, in a tool result and on an item's detail screen.
+    Each pushes a viewer titled with the file name, its full Mac path and size under the title.
+    Markdown reads like the plan reader (serif prose, code in monospace, tables as grids) with no
+    notes column or passage menu, and front matter shows as a YAML block; a relative link inside
+    it opens the file beside it. A `.txt`/`.log` reads in the body face with open line spacing; a
+    source file in monospace, scrolled to and washing the linked line. A big log draws its first
+    screen at once and buffers on as you scroll, stopping at 16 MB with "Showing the first …". A
+    large photo or screenshot arrives quickly and the caption reads "6000 × 4000, shown at …";
+    pinch and double-tap zoom. A web link, a directory link (`docs/superpowers/specs`) and a `.zip`
+    keep their old behaviour. Against a Mac from before this the viewer says "Update Flight Deck
+    on your Mac to open files from the phone." Wrong: a spinner that never ends, a split character (`�`) mid-file, or the whole file fetched
+    before anything draws.
+
+105. **Start an intake from the phone.** On a project with Flight Control on, press and hold the
+    header's + : "New Intake…" is the first row, a divider, then the session rows. (A plain tap
+    still opens a new session.) The sheet reads Cancel · New Intake · Triage, with the Project row
+    preselected to the header you used and a large "Describe the outcome…" field with the
+    keyboard up; Triage is dimmed until there is text. Type, tap Cancel, reopen: the text is
+    still there, and a different project has its own draft. Tap Triage: the sheet closes onto the
+    new intake's screen ("Sending to your Mac…" for a moment at most), the Mac shows the intake
+    triaging with the same text, and the draft is gone from the sheet. Wrong: the + tap opening the
+    sheet, the intake missing from the Mac, the draft surviving a successful Triage, an error
+    flashing on the new intake's screen. Then Airplane Mode on and Triage: the sheet stays up
+    with "Not connected to your Mac, so this wasn't sent." and the text intact. Last, turn
+    Flight Control off for the project on the Mac and Triage from a sheet that was already open:
+    back on the sheet with "Flight Control isn't turned on for that project on your Mac." and the
+    draft intact. Version skew: this phone against a Mac from before this shows no "New Intake…"
+    row anywhere and stays connected.
 
 ## A second checklist: the iOS plumbing
 

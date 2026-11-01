@@ -11,6 +11,33 @@ import Foundation
 /// `ClaudeTimelineMapper` items and pairs calls with results the same way — last unanswered
 /// `ExitPlanMode` wins — but never asks what claude's status file says.
 enum ClaudeOpenPlanGate {
+    /// What changes when a transcript could hold a new answer: size and mtime, one `stat`.
+    /// `PlanGateService` keys its memo of `find` on it.
+    struct Stamp: Equatable {
+        let size: UInt64
+        let modified: Date
+
+        init?(of url: URL) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let size = (attrs[.size] as? NSNumber)?.uint64Value,
+                  let modified = attrs[.modificationDate] as? Date
+            else { return nil }
+            self.size = size
+            self.modified = modified
+        }
+    }
+
+    /// `find(tail:)` over a transcript file, read and parsed on a background executor — a miss
+    /// climbs to the whole file, which is megabytes of JSON that must not stall the main actor.
+    nonisolated static func find(url: URL) async -> String? {
+        await Task.detached(priority: .utility) {
+            find { limit in
+                let page = TranscriptPager.page(url: url, anchor: .latest, limit: limit)
+                return (page?.lines ?? [], page?.hasMore ?? false)
+            }
+        }.value
+    }
+
     /// `find(in:)` over a tail that widens until it finds the call or runs out of file —
     /// `PromptService.scan`'s loop, with its start, growth and three stops.
     ///

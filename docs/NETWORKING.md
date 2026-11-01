@@ -380,7 +380,7 @@ from `@MainActor` gets real races with zero compiler signal.
 ## Testing
 
 ```
-./scripts/test-unit.sh     # macOS: the whole spine, real sockets, in process
+./scripts/test-unit.sh     # macOS: the whole spine — the logic lane's FleetKit wire tests first, then real sockets in process
 ./scripts/test-ios.sh      # the phone's own logic
 ```
 

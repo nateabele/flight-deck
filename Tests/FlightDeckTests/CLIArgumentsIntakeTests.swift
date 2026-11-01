@@ -25,6 +25,21 @@ final class CLIArgumentsIntakeTests: XCTestCase {
         XCTAssertThrowsError(try parse("intake", "run", UUID().uuidString))
     }
 
+    /// `intake threads` is the detached ThreadRunner, spawned the way `intake run` is.
+    func testIntakeThreadsParsesIDAndRoot() throws {
+        let id = UUID()
+        XCTAssertEqual(try parse("intake", "threads", id.uuidString, "--root", "/x").command,
+                       .intakeThreads(id: id, root: "/x"))
+        XCTAssertThrowsError(try parse("intake", "threads", "not-a-uuid", "--root", "/x"))
+        XCTAssertThrowsError(try parse("intake", "threads", id.uuidString))
+        XCTAssertThrowsError(try parse("intake", "threads", id.uuidString, "--root", "/x", "--bogus"))
+    }
+
+    func testIntakeThreadsHasAPage() {
+        XCTAssertEqual(CLIHelp.topic(for: ["intake", "threads"]), "intake threads")
+        XCTAssertTrue(CLIHelp.text(for: "intake threads").hasPrefix("flightdeck intake threads — "))
+    }
+
     func testIntakeUnknownSubcommandIsUsageError() {
         XCTAssertThrowsError(try parse("intake", "frobnicate")) {
             XCTAssertTrue(($0 as? CLIUsageError)?.message.contains("frobnicate") == true)

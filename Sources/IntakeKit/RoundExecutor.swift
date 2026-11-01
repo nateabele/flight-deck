@@ -363,10 +363,14 @@ public struct RoundExecutor: Sendable {
     private func encode(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         let plan = try currentPlan(inputs)
         let (graph, graphFile, observedAt) = try await readGraph(inputs)
-        let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        var ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        // The visuals catalogue (spec §12): the plan's visuals a task may cite, with their files.
+        ctx.visuals = visualCatalogue(inputs, plan: plan)
+        var readable = [plan.deletingLastPathComponent(), inputs.store.workDirectory()]
+        if !ctx.visuals.isEmpty { readable.append(inputs.store.visualsRoot) }
         let (cs, run) = try await changeSetSeat(planned, "encoder", inputs.config.encoder,
                                          prompt: RoundPrompts.encode(ctx, planFile: plan.path),
-                                         readable: [plan.deletingLastPathComponent(), inputs.store.workDirectory()],
+                                         readable: readable,
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = cs.ops.count
         publish(SeatResult(kind: .changeSet, ops: cs.ops.count), run: run, inputs)
@@ -410,7 +414,9 @@ public struct RoundExecutor: Sendable {
         // Numbered: the patch names ops by the `index` this file shows on each one.
         try ChangeSetPatch.numbered(old).write(to: changeSetFile, options: .atomic)
         try graphData.write(to: graphFile, options: .atomic)
-        let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        var ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+        // The same catalogue encode reads, so a polisher keeps (or adds) fidelity references.
+        ctx.visuals = visualCatalogue(inputs, plan: plan)
 
         // A shadow copy of `old` — the change set THIS round starts from, never whatever the
         // polisher goes on to propose — so FD can run `bv`'s robot reports against the graph as
@@ -429,7 +435,8 @@ public struct RoundExecutor: Sendable {
                                          analytics: analytics)
         }
         let (cs, run) = try await patchSeat(planned, "polisher", polisher, prompt: prompt,
-                                            readable: [plan.deletingLastPathComponent(), work], base: old,
+                                            readable: [plan.deletingLastPathComponent(), work]
+                                                + (ctx.visuals.isEmpty ? [] : [inputs.store.visualsRoot]), base: old,
                                             changeSetFile: changeSetFile, graph: graph, observedAt: observedAt,
                                             inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
@@ -505,8 +512,13 @@ public struct RoundExecutor: Sendable {
                                    cwd: inputs.project, readable: readable, inputs: inputs, &record)
         first.changeSet.graphObservedAt = observedAt
         record.note = first.summary
-        guard case .failure(let errors) = ChangeSetValidator.validate(first.changeSet, against: graph) else {
-            return (first.changeSet, run: runName(planned, role))
+        let (known, states) = knownVisuals(inputs)
+        let errors: ValidationErrors
+        switch ChangeSetValidator.validate(first.changeSet, against: graph, knownVisuals: known, visualStates: states) {
+        case .success(let v):
+            note(v.warnings, &record)
+            return (v.changeSet, run: runName(planned, role))
+        case .failure(let found): errors = found
         }
         let slot = record.slots.count - 1
         let correction = RoundPrompts.changeSetCorrection(errors: errors.errors, observedAt: observedAt)
@@ -521,7 +533,8 @@ public struct RoundExecutor: Sendable {
             record.slots[slot].sessionID = session
             second.changeSet.graphObservedAt = observedAt
             record.note = second.summary
-            if case .failure(let again) = ChangeSetValidator.validate(second.changeSet, against: graph) {
+            switch ChangeSetValidator.validate(second.changeSet, against: graph, knownVisuals: known, visualStates: states) {
+            case .failure(let again):
                 let diagnosis = Diagnosis(
                     category: .invalidOutput,
                     detail: "The change set failed validation twice: " + again.errors.map(\.userMessage).joined(separator: "; "),
@@ -529,8 +542,10 @@ public struct RoundExecutor: Sendable {
                 record.slots[slot].status = .failed
                 record.slots[slot].diagnosis = diagnosis
                 throw Pause(diagnosis: diagnosis)
+            case .success(let v):
+                note(v.warnings, &record)
+                return (v.changeSet, run: runName(planned, role) + "-correction")
             }
-            return (second.changeSet, run: runName(planned, role) + "-correction")
         }
     }
 
@@ -543,17 +558,19 @@ public struct RoundExecutor: Sendable {
                            inputs: RoundInputs, _ record: inout RoundRecord) async throws -> (ChangeSet, run: String) {
         /// What the agent (`messages`) and the human (`userMessages`) are told is wrong.
         struct Rejected: Error { var messages: [String]; var userMessages: [String] }
+        let (known, states) = knownVisuals(inputs)
         /// The change set the patch makes, or why it can't be taken.
-        func resolve(_ output: ChangeSetPatchOutput) -> Result<ChangeSet, Rejected> {
+        func resolve(_ output: ChangeSetPatchOutput) -> Result<ValidatedChangeSet, Rejected> {
             switch output.patch.apply(to: base) {
             case .failure(let found):
                 return .failure(Rejected(messages: found.problems.map(\.message), userMessages: found.problems.map(\.userMessage)))
             case .success(var cs):
                 cs.graphObservedAt = observedAt
-                if case .failure(let errors) = ChangeSetValidator.validate(cs, against: graph) {
+                switch ChangeSetValidator.validate(cs, against: graph, knownVisuals: known, visualStates: states) {
+                case .failure(let errors):
                     return .failure(Rejected(messages: errors.errors.map(\.message), userMessages: errors.errors.map(\.userMessage)))
+                case .success(let v): return .success(v)
                 }
-                return .success(cs)
             }
         }
         let first = try await seat(ChangeSetPatchOutput.self, planned, role, choice, prompt: prompt, schema: RoundSchemas.patch,
@@ -561,7 +578,9 @@ public struct RoundExecutor: Sendable {
         record.note = first.summary
         let rejected: Rejected
         switch resolve(first) {
-        case .success(let cs): return (cs, run: runName(planned, role))
+        case .success(let v):
+            note(v.warnings, &record)
+            return (v.changeSet, run: runName(planned, role))
         case .failure(let found): rejected = found
         }
         let slot = record.slots.count - 1
@@ -577,7 +596,9 @@ public struct RoundExecutor: Sendable {
             record.slots[slot].sessionID = session
             record.note = second.summary
             switch resolve(second) {
-            case .success(let cs): return (cs, run: runName(planned, role) + "-correction")
+            case .success(let v):
+                note(v.warnings, &record)
+                return (v.changeSet, run: runName(planned, role) + "-correction")
             case .failure(let again):
                 let diagnosis = Diagnosis(
                     category: .invalidOutput,
@@ -694,7 +715,13 @@ public struct RoundExecutor: Sendable {
                                      action: "Switch this slot to another agent."), sessionID: nil)
         }
         // The project's account for the seat's agent (`billing`): nil is the built-in home.
-        let environment = HeadlessCommand.environment(for: command, base: inputs.environment, home: userHome,
+        // The seat's CLI is no one on the control socket: the runner's environment carries the
+        // runner's own token, and no token at all would read as the unscoped human (a codex
+        // shell can reach the socket). So it carries the value the socket refuses as invalid,
+        // as a thread's agent does (`ThreadTurnExecutor.agentCaller`).
+        var base = inputs.environment
+        base[ThreadTurnExecutor.callerVariable] = ThreadTurnExecutor.agentCaller
+        let environment = HeadlessCommand.environment(for: command, base: base, home: userHome,
                                                      account: request.account)
         let profile = AgentProfiles.profile(for: choice.agent)
         if profile.headlessSignInPreflight, let signedOut = await signedOutDiagnosis(profile, cwd: cwd, environment: environment) {
@@ -837,7 +864,20 @@ public struct RoundExecutor: Sendable {
                             observedAt: observedAt,
                             // Read fresh every round, like AGENTS.md: a kind proposed and released
                             // by another intake is offered to this one's next round.
-                            kinds: KindRegistryStore.promptKinds(project: inputs.project))
+                            kinds: KindRegistryStore.promptKinds(project: inputs.project),
+                            threadDecisions: threadDecisions(inputs))
+    }
+
+    /// The ask threads' decisions since the last round STARTED (spec §11; ruling A-I2), read
+    /// fresh from `threads/` (ThreadRunner's, read-only here), with the head plan's accepted
+    /// diffs. Keyed on the start, not the landing: that round read its plan when it started, so
+    /// a turn that ended while it ran reached no round yet, and this one is the first to hear it.
+    /// A checkpoint from before rounds recorded their start falls back to its landing.
+    private func threadDecisions(_ inputs: RoundInputs) -> [ThreadDecision] {
+        let accepted = inputs.store.headPlanCheckpoint(in: inputs.tape).map { inputs.store.threadEditSources(checkpoint: $0) } ?? []
+        let lastRound = inputs.tape.head.map { $0.startedAt ?? $0.createdAt }
+        return ThreadDecisions.since(lastRound, reader: ThreadStore(intakeDirectory: inputs.store.intakeDirectory),
+                                     accepted: accepted)
     }
 
     /// The version each pending note was written on, for those written on a plan other than the
@@ -903,6 +943,29 @@ public struct RoundExecutor: Sendable {
     /// (Sketch) — the first surviving draft. Only the head counts: an edit to an older
     /// checkpoint is kept on disk but feeds nothing. Encode, polish, fresh-eyes and dedup copy
     /// this file into their own checkpoint's `plan.md`, so the edits carry forward as plan.
+    /// The visual ids a change set may cite: the head plan's stored, non-pending visuals. `Set()`,
+    /// never nil, for a plan with none, so a `visualRefs` entry there is always dropped.
+    private func knownVisuals(_ inputs: RoundInputs) -> (Set<String>, [String: Set<String>]) {
+        let text = (try? currentPlan(inputs)).flatMap { try? Data(contentsOf: $0) }.map { String(decoding: $0, as: UTF8.self) }
+        let states = PlanVisualFence.knownVisualStates(plan: text, store: DiskVisualStore(tape: inputs.store),
+                                                       checkpoint: inputs.store.headPlanCheckpoint(in: inputs.tape))
+        return (Set(states.keys), states)
+    }
+
+    /// Validation's warnings (visual refs it dropped) on the round's note, after the agent's summary.
+    private func note(_ warnings: [String], _ record: inout RoundRecord) {
+        guard !warnings.isEmpty else { return }
+        record.note = ([record.note].compactMap { $0 }.filter { !$0.isEmpty } + warnings).joined(separator: "\n")
+    }
+
+    /// The visuals catalogue (spec §12) for the plan at `plan`, as the head plan checkpoint
+    /// recorded its block states: the same rule as `knownVisuals` and release.
+    private func visualCatalogue(_ inputs: RoundInputs, plan: URL) -> [VisualCatalogueEntry] {
+        let text = (try? Data(contentsOf: plan)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return VisualCatalogue.entries(plan: text, store: DiskVisualStore(tape: inputs.store), tape: inputs.store,
+                                       checkpoint: inputs.store.headPlanCheckpoint(in: inputs.tape))
+    }
+
     private func currentPlan(_ inputs: RoundInputs) throws -> URL {
         guard let head = inputs.store.headPlanCheckpoint(in: inputs.tape),
               let url = PlanLayers.effectiveURL(inputs.store.checkpointDirectory(head)) else {

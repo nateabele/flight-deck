@@ -607,9 +607,10 @@ struct PromptCard: View {
             let index = min(page, questions.count - 1)
             let question = questions[index]
             let isLast = index == questions.count - 1
-            // A lone single-select question answers on the tap, exactly as it always has: one
-            // question, one decision, and no second gesture to confirm the unambiguous.
-            let immediate = questions.count == 1 && !question.multiSelect
+            // **No card answers on the tap, not even a lone single-select question.** A tap only
+            // picks; the Send button commits. The options sit right under the keyboard, and a
+            // thumb on its way to the "Type something" field kept landing on an option and
+            // sending an answer the reader never meant.
 
             if questions.count > 1 {
                 HStack(spacing: 6) {
@@ -654,16 +655,12 @@ struct PromptCard: View {
 
             ForEach(Array(question.options.enumerated()), id: \.offset) { option, choice in
                 Button {
-                    if immediate {
-                        model.answer(.option(index: option, label: choice.label), to: call)
-                    } else {
-                        choose(question: index, option: option,
-                               multiSelect: question.multiSelect, call: call)
-                        // Single-select advances by itself, the way the dialog does when you
-                        // press Enter on a row. A checkbox question cannot: the reader is not
-                        // finished until they say so.
-                        if !question.multiSelect, !isLast { page = index + 1 }
-                    }
+                    choose(question: index, option: option,
+                           multiSelect: question.multiSelect, call: call)
+                    // Single-select advances by itself, the way the dialog does when you
+                    // press Enter on a row. A checkbox question cannot: the reader is not
+                    // finished until they say so.
+                    if !question.multiSelect, !isLast { page = index + 1 }
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(choice.label)
@@ -691,10 +688,10 @@ struct PromptCard: View {
                 .buttonStyle(.plain)
                 .disabled(!enabled)
                 .opacity(enabled ? 1 : 0.5)
-                // The tick is the only thing saying a tap registered, because on a set the tap
-                // no longer sends anything.
+                // The tick is the only thing saying a tap registered, because the tap no
+                // longer sends anything.
                 .overlay(alignment: .trailing) {
-                    if !immediate, picks[index, default: []].contains(option) {
+                    if picks[index, default: []].contains(option) {
                         Image(systemName: question.multiSelect
                               ? "checkmark.square.fill" : "largecircle.fill.circle")
                             .font(.footnote)
@@ -711,14 +708,11 @@ struct PromptCard: View {
                 // and the Mac would refuse the answer.
                 if acceptsTypedAnswers, !ScreenPromptID.isMenu(call) {
                     if question.allowsOther || question.freeTextOnly {
-                        typedRow(question: question, index: index, call: call,
-                                 immediate: immediate, enabled: enabled)
+                        typedRow(question: question, index: index, call: call, enabled: enabled)
                     }
                 }
-                if !immediate {
-                    navigation(call: call, questions: questions, index: index,
-                               isLast: isLast, enabled: enabled)
-                }
+                navigation(call: call, questions: questions, index: index,
+                           isLast: isLast, enabled: enabled)
             }
             .id(Self.typedRowID)
 
@@ -823,21 +817,13 @@ extension PromptCard {
     /// text field the moment the cursor reaches it, and on a checkbox question the first
     /// character ticks its box. So words in the field pick the row and an emptied field
     /// unpicks it; a single-select option tapped afterwards takes the pick back without
-    /// throwing the words away.
-    ///
-    /// A lone single-select question has no Send button to wait for — its options answer on
-    /// the tap — so this row carries its own.
+    /// throwing the words away. The card's Send button commits, as it does for a tapped option.
     @ViewBuilder
     fileprivate func typedRow(
-        question: PromptQuestion, index: Int, call: String, immediate: Bool, enabled: Bool
+        question: PromptQuestion, index: Int, call: String, enabled: Bool
     ) -> some View {
         let row = question.options.count
         let text = picksFor == call ? typed[index] ?? "" : ""
-        let words = Self.typedAnswer(text)
-        let send = {
-            guard let words else { return }
-            model.answerSet([[.typed(words, optionCount: row)]], to: call)
-        }
         HStack(spacing: 8) {
             let input = Binding(
                 get: { text },
@@ -861,17 +847,8 @@ extension PromptCard {
             .font(.footnote)
             .focused($typingFocused)
             .accessibilityIdentifier("prompt-typed-field")
-            .submitLabel(immediate ? .send : .done)
-            .onSubmit { if immediate { send() } }
-            if immediate {
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill").font(.title3)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(words == nil ? Color.secondary : Color.orange)
-                .disabled(words == nil)
-                .accessibilityLabel("Send answer")
-            } else if picks[index, default: []].contains(row) {
+            .submitLabel(.done)
+            if picks[index, default: []].contains(row) {
                 Image(systemName: question.multiSelect
                       ? "checkmark.square.fill" : "largecircle.fill.circle")
                     .font(.footnote)

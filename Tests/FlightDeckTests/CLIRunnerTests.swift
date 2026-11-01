@@ -43,7 +43,7 @@ final class CLIRunnerTests: XCTestCase {
         let invocation: CLIInvocation
         do { invocation = try CLIArguments.parse(args) } catch {
             XCTFail("parse \(args): \(error)")
-            invocation = CLIInvocation(command: .help)
+            invocation = CLIInvocation(command: .help())
         }
         let r = CLIRunner(invocation: invocation, transport: transport,
                           context: CLIContext(selfID: selfID, cwd: "/w/a", json: json, isTTY: isTTY),
@@ -204,6 +204,38 @@ final class CLIRunnerTests: XCTestCase {
         t.push(.page(cid: cid, questionPage()))
         guard case .cmd(_, .answerPrompt(a, _, "toolu_q", let answer, _)) = t.sent.last else { return XCTFail("\(t.sent)") }
         XCTAssertEqual(answer, .answers([[AnswerSelection(index: 1, label: "Blue")]]))
+    }
+
+    /// A codex native approval is never a transcript record; the Mac sends its words on the
+    /// session (`WireSession.openPrompt`), and the CLI has to read them there, as the phone does.
+    private func codexFleet(call: String) -> FleetSnapshot {
+        let open = WireOpenPrompt(callID: "codex-native:s:t:NTE=", kind: "permission",
+                                  tool: "Bash", summary: "git rebase master")
+        return FleetSnapshot(projects: [
+            WireProject(id: project, name: "a", path: "/w/a", sessions: [
+                WireSession(id: a, title: "alpha", agent: "codex", activity: "waiting",
+                            openPromptCall: .call(call), openPrompt: open),
+            ]),
+        ])
+    }
+
+    func testPromptReadsTheOfferedDialogANativeCodexApprovalArrivesAs() {
+        let t = FakeTransport()
+        _ = runner("prompt", "alpha", transport: t)
+        t.push(.snapshot(seq: 1, fleet: codexFleet(call: "codex-native:s:t:NTE="), reason: .initial))
+        guard case .req(let cid, _) = t.sent.last else { return XCTFail() }
+        t.push(.page(cid: cid, TimelinePage(session: a, items: [], start: 0, end: 0, hasMore: false, reset: false)))
+        XCTAssertTrue(out.joined().contains("codex-native:s:t:NTE="), "\(out) \(err)")
+        XCTAssertTrue(out.joined().contains("git rebase master"), "\(out)")
+    }
+
+    func testPromptIgnoresAnOfferTheMacNoLongerNames() {
+        let t = FakeTransport()
+        _ = runner("prompt", "alpha", transport: t)
+        t.push(.snapshot(seq: 1, fleet: codexFleet(call: "codex-native:s:t:other"), reason: .initial))
+        guard case .req(let cid, _) = t.sent.last else { return XCTFail() }
+        t.push(.page(cid: cid, TimelinePage(session: a, items: [], start: 0, end: 0, hasMore: false, reset: false)))
+        XCTAssertTrue(err.joined().contains("no_prompt"), "\(err)")
     }
 
     func testAnswerOutOfRangeIsExitTwoAndSendsNothing() {

@@ -215,9 +215,14 @@ public struct RoundContext: Sendable {
     public var observedAt: Date
     /// The project's task kinds, offered to every round that creates tasks (spec L3-R §4).
     public var kinds: [TaskKind]
+    /// What the human decided in ask threads since the last round (spec §11).
+    public var threadDecisions: [ThreadDecision]
+    /// The plan's visuals a task may cite (spec §12), for encode. Empty for a plan with none.
+    public var visuals: [VisualCatalogueEntry]
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
                 readmeFile: String?, notes: [PlanNote] = [], noteVersions: [UUID: String] = [:], humanEdits: String? = nil,
-                observedAt: Date, kinds: [TaskKind] = []) {
+                observedAt: Date, kinds: [TaskKind] = [], threadDecisions: [ThreadDecision] = [],
+                visuals: [VisualCatalogueEntry] = []) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
@@ -228,6 +233,8 @@ public struct RoundContext: Sendable {
         self.humanEdits = humanEdits
         self.observedAt = observedAt
         self.kinds = kinds
+        self.threadDecisions = threadDecisions
+        self.visuals = visuals
     }
 }
 
@@ -278,6 +285,9 @@ public enum RoundPrompts {
     /// Empty when there is nothing to say, so no stage gets a bare header.
     private static func steering(_ c: RoundContext) -> String {
         var s = humanEditsBlock(c.humanEdits)
+        if !c.threadDecisions.isEmpty {
+            s += "\n\n" + threadDecisionsHeader + "\n" + c.threadDecisions.map(threadDecision).joined(separator: "\n")
+        }
         let general = c.notes.filter { $0.anchor == nil }
         if !general.isEmpty {
             let lines = general.map { note in
@@ -290,6 +300,21 @@ public enum RoundPrompts {
             let items = anchored.enumerated().map { i, pair in anchoredNote(i + 1, pair.0, pair.1, version: c.noteVersions[pair.0.id]) }
             s += "\n\nThe human's notes on specific passages of the plan:\n" + items.joined(separator: "\n\n")
         }
+        return s
+    }
+
+    /// The thread-decisions block's first line (spec §11).
+    public static let threadDecisionsHeader = "What the human decided in ask threads since the last round. Each decision is the human's: keep it, and keep the change it made:"
+
+    /// `- "Title", on "quote" (Section): decision`, the decision's further lines and the edit
+    /// note indented under it.
+    private static func threadDecision(_ d: ThreadDecision) -> String {
+        let anchor = d.quote.map { "on \"\($0)\"" + (d.section.map { " (\($0))" } ?? "") } ?? "on the whole plan"
+        var lines = d.decision.map { planLines($0) } ?? []
+        let first = lines.isEmpty ? "" : " " + lines.removeFirst()
+        var s = "- \"\(d.title)\", \(anchor):\(first)"
+        s += lines.map { "\n  \($0)" }.joined()
+        if d.acceptedEdit { s += "\n  Its change is already in the plan, among the human's edits." }
         return s
     }
 
@@ -536,10 +561,40 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """)
+    }
+
+    /// The visuals catalogue encode reads (spec §12): each visual a task may cite, with the files
+    /// to open, and the rule for `visualRefs`. Empty for a plan with no visuals, so such a plan's
+    /// prompt is what it always was.
+    public static func visualsCatalogue(_ visuals: [VisualCatalogueEntry], patch: Bool = false) -> String {
+        guard !visuals.isEmpty else { return "" }
+        let keep = " In a `replace`, null keeps the task's current `visualRefs`; send `[]` only to drop them."
+        let list = visuals.map { v in
+            var line = "- `\(v.id)` — \(v.kind)"
+            let name = v.caption ?? (v.title.isEmpty ? nil : v.title)
+            if let name { line += ": \(name)" }
+            if let section = v.section { line += " (under \"\(section)\")" }
+            line += "\n  States: " + v.states.joined(separator: ", ")
+            line += "\n  Source: \(v.sourcePath)"
+            if let snap = v.snapshotPath { line += "\n  Snapshot: \(snap) (an image: open it with your file-reading tool if it reads images)" }
+            return line
+        }.joined(separator: "\n")
+        return """
+
+
+        Visuals in this plan (diagrams the work must match):
+        \(list)
+
+        For each `createTask` that implements one of these visuals, set `visualRefs` to the \
+        visuals it implements, each as `{"visualID": "<id>", "states": [...]}` with the states \
+        that task must match (an empty list means every state). Cite only ids listed above. \
+        FD adds the "Fidelity references" section to the task's description itself, so do not \
+        write one. Every other op, and a task that implements no visual, sets `visualRefs` to null.\(patch ? keep : "")
+        """
     }
 
     public static func polish(_ c: RoundContext, planFile: String, changeSetFile: String, round: Int,
@@ -555,7 +610,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)
@@ -575,7 +630,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)
@@ -591,7 +646,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(visualsCatalogue(c.visuals, patch: true))\(steering(c))
 
         \(patchReturn)
         """)

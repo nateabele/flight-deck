@@ -82,6 +82,7 @@ final class FleetService: ObservableObject {
     /// store, and because there is exactly one of it — a request carries its own session id,
     /// so nothing about it is per-connection.
     private let timeline: TimelineService
+    private let files: FileReadService
     /// Carries out a phone's answer to a blocked dialog. Held here rather than built per
     /// command for the reason `timeline` is: it holds the store, and there is exactly one of
     /// it — a command carries its own session id, so nothing about it is per-connection.
@@ -106,6 +107,8 @@ final class FleetService: ObservableObject {
     /// Answers `infra.*` (cloud infra hosts). Set by the app once it builds the service
     /// (Task 18); nil answers `infra_unavailable`, for `delegation`'s reason.
     var infra: InfraService?
+    /// Injectable for hermetic loopback tests; the production instance is built in startLocal.
+    var peerMessaging: PeerMessagingService?
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -172,15 +175,19 @@ final class FleetService: ObservableObject {
                 else { return nil }
                 // Widened, the way `PromptService.openPrompt` widens: a fixed window lost a
                 // live gate to bookkeeping and queued-message lines — see
-                // `ClaudeOpenPlanGate.find(tail:)`.
-                return ClaudeOpenPlanGate.find { limit in
-                    let page = TranscriptPager.page(url: url, anchor: .latest, limit: limit)
-                    return (page?.lines ?? [], page?.hasMore ?? false)
-                }
+                // `ClaudeOpenPlanGate.find(tail:)`. Off the main actor, and memoized by
+                // `PlanGateService` against `transcriptStamp`.
+                return await ClaudeOpenPlanGate.find(url: url)
             },
             pid: { [weak store] session in store?.claudePID(of: session) },
             sessions: { [weak store] in store?.allSessionIDs() ?? [] }
         )
+        planGates.transcriptStamp = { [weak store] session in
+            guard let store,
+                  case .file(.claude, let url) = store.timelineSource(of: session)
+            else { return nil }
+            return ClaudeOpenPlanGate.Stamp(of: url)
+        }
         self.planGates = planGates
         self.replicator = FleetReplicator { [weak store] in
             guard let store else { return .empty }
@@ -188,6 +195,7 @@ final class FleetService: ObservableObject {
         }
         self.socketLog = SocketLog(replicator.log)
         self.timeline = TimelineService(store: store)
+        self.files = FileReadService(store: store)
         let prompts = PromptService(store: store)
         self.prompts = prompts
         // Built on the same `PromptService`, deliberately: what the log says is open has to be
@@ -427,6 +435,9 @@ final class FleetService: ObservableObject {
         let queue = Self.socketQueue
         replicator.onEvents = { [weak self] batch in
             guard let self else { return }
+            // A delivery can synchronously emit promptTyped. Defer it until this batch has
+            // been queued to the sockets or a nested newer sequence overtakes its parent.
+            DispatchQueue.main.async { [weak self] in self?.peerMessaging?.observe(batch) }
             // A closed tab takes its services down with it (§6.2): nothing should keep a port
             // forwarded for a session that no longer exists.
             for entry in batch {
@@ -588,6 +599,24 @@ final class FleetService: ObservableObject {
         }
     }
 
+    /// Who a local client is, from its `hello`'s caller. A command a codex thread ran is
+    /// attributed to that thread's tab — see `ControlCallerHello` for why a shared codex daemon
+    /// makes every codex tab present the same token, or a closed tab's — and
+    /// `SessionStore.codexTab(sharingDaemonWith:thread:)` for which callers may be narrowed.
+    private func controlCaller(_ client: FleetAttachment) -> ControlCaller {
+        let hello = ControlCallerHello.split(client.caller)
+        let caller = ControlScope.caller(token: hello.token, secret: controlSecret)
+        guard let thread = hello.codexThread else { return caller }
+        let presenter: UUID?
+        switch caller {
+        case .session(let tab): presenter = tab
+        case .human: presenter = nil
+        case .invalid, .intakeRunner: return caller
+        }
+        guard let owner = store.codexTab(sharingDaemonWith: presenter, thread: thread) else { return caller }
+        return .session(owner)
+    }
+
     private func handleCommand(
         _ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
         _ reply: @escaping (ServerFrame) -> Void
@@ -596,7 +625,7 @@ final class FleetService: ObservableObject {
         // agent proves only which tab it runs in. No token is `.human`, never scoped; a forged
         // or stale one is `.invalid` and fails closed — see `ControlScope.caller`.
         if client.isLocal {
-            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            let caller = controlCaller(client)
             guard ControlScope.permits(command, level: scopeLevel(), caller: caller) else {
                 return reply(.err(cid: cid, code: "out_of_scope"))
             }
@@ -618,12 +647,23 @@ final class FleetService: ObservableObject {
     ) {
         // The same guard `handleCommand` opens with, for the same reason.
         if client.isLocal {
-            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            let caller = controlCaller(client)
             guard ControlScope.permits(request, level: scopeLevel(), caller: caller) else {
                 return reply(.err(cid: cid, code: "out_of_scope"))
             }
         }
         switch request {
+        case .peer(let request):
+            guard client.isLocal, let service = peerMessaging else {
+                return reply(.err(cid: cid, code: "peer_unavailable", message: "Peer messaging requires the local Flight Deck control socket."))
+            }
+            let caller = controlCaller(client)
+            Task { @MainActor in
+                do {
+                    let json = try await service.request(request, caller: caller)
+                    reply(.peer(cid: cid, json: json))
+                } catch { reply(.err(cid: cid, code: "peer_failed", message: String(describing: error))) }
+            }
         case .timeline(let session, let anchor, let limit, let agent):
             // A `Task` rather than a synchronous answer, because reading a page is file
             // I/O: `TimelineService` hands the parse to a detached task and resumes here
@@ -684,6 +724,43 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "unknown_checkpoint"))
             }
             reply(.intakePlan(cid: cid, plan))
+        case .intakeThreadGet(let id, let threadID, let since):
+            // Read from `threads/`, which only ThreadRunner writes; nothing here writes and
+            // nothing enters `FleetSnapshot`, as for `intakePlan`.
+            switch store.intakeService.phoneThreadGet(id, threadID: threadID, since: since) {
+            case .success(let page): reply(.intakeThread(cid: cid, page))
+            case .failure(let refusal): reply(.err(cid: cid, code: refusal.code))
+            }
+        case .intakeVisualFetch(let id, let visualID, let revision, let part, let offset, let limit):
+            // Bytes from `visuals/`, which only ThreadRunner writes; nothing here writes and
+            // nothing enters `FleetSnapshot`. Replies `fileChunk`, as `fileRead` does. A `Task`
+            // for `fileRead`'s reason: reading and hashing up to `VisualLimits.maxBytes` must
+            // not block the main actor, and `reply` lands back here on `queue`.
+            let reader = store.intakeService.visualReader(id)
+            Task { @MainActor in
+                switch await VisualFetch.serve(
+                    reader, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit
+                ) {
+                case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
+                case .failure(let refusal):
+                    Self.logger.info("check=visual_fetch code=\(refusal.code, privacy: .public)")
+                    reply(.err(cid: cid, code: refusal.code))
+                }
+            }
+        case .fileRead(let session, let path, let offset, let limit, let maxPixel):
+            // A `Task` for `timeline`'s reason: the read and any image decode run detached,
+            // and `reply` lands back here on `queue`. Nothing is written and nothing enters
+            // `FleetSnapshot`.
+            Task { @MainActor in
+                switch await self.files.read(
+                    session: session, path: path, offset: offset, limit: limit, maxPixel: maxPixel
+                ) {
+                case .success(let chunk): reply(.fileChunk(cid: cid, chunk))
+                case .failure(let code):
+                    Self.logger.info("check=file_read code=\(code.code, privacy: .public)")
+                    reply(.err(cid: cid, code: code.code))
+                }
+            }
         case .recentlyClosed:
             // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
             // the stack is in memory on this actor, so there is nothing to hop a `Task`
@@ -798,8 +875,8 @@ final class FleetService: ObservableObject {
                 }
             }
         case .accountList(let session):
-            // Local callers only, like `delegate`: a phone has no tab to move.
-            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            // A read, so a phone may ask too: its session sheet shows the tab's account, usage
+            // and context, and moves the tab by typing `/switch-account <id>` into it.
             guard let choices = store.accountChoices(for: session) else {
                 return reply(.err(cid: cid, code: "unknown_session"))
             }
@@ -822,7 +899,7 @@ final class FleetService: ObservableObject {
             }
             // Taken on the socket queue, inside `onRequest` where it is valid (see
             // `wireHandlers()`): it stops the request's producers once its reader is gone.
-            delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
+            delegation.handle(delegate, caller: controlCaller(client),
                               cid: cid, cancellation: cancellation,
                               reply: reply)
         case .infra(let request):
@@ -835,7 +912,9 @@ final class FleetService: ObservableObject {
             }
             // No cancellation: a CLI that goes away mid-`up` must not abandon a machine that
             // is half created. The app finishes it, and `infra down` cancels it.
-            infra.handle(request, cid: cid, reply: reply)
+            // The session is the token's, so a tab spends against, and sets, only its own budget.
+            let session: UUID? = if case .session(let id) = controlCaller(client) { id } else { nil }
+            infra.handle(request, session: session, cid: cid, reply: reply)
         }
     }
 
@@ -898,7 +977,16 @@ final class FleetService: ObservableObject {
 
     /// The local control socket (`flightdeck`). Independent of pairing: a Mac nobody has paired
     /// with still has a CLI. See `FleetSocketServer.startLocal` for why it is its own instance.
-    func startLocal(at url: URL) async throws { try await localServer.startLocal(path: url.path) }
+    func startLocal(at url: URL) async throws {
+        try await localServer.startLocal(path: url.path)
+        // A real app bundle only. Tests' xctest bundle has no helper and cannot accidentally
+        // publish fake sessions into the user's native Claude registries.
+        if peerMessaging == nil, let executable = PeerMessagingService.bundledHelper() {
+            peerMessaging = PeerMessagingService(store: store, preferences: preferences,
+                executable: executable, stateDirectory: url.deletingLastPathComponent().appendingPathComponent("peers"))
+            peerMessaging?.synchronize()
+        }
+    }
 
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
     /// rather than polling for it — the polling version blocked its caller for up to five
@@ -1355,6 +1443,10 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneTape(id, token: token, command: command, stage: stage) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeRetry(let id, let token):
+            if let code = store.intakeService.phoneRetry(id, token: token) {
+                return .err(cid: cid, code: code)
+            }
         case .intakeDefaultPlay(let id, let token, let mode):
             if let code = store.intakeService.phoneDefaultPlay(id, token: token, mode: mode) {
                 return .err(cid: cid, code: code)
@@ -1378,12 +1470,46 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneChoose(id, token: token, preset: preset) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeAnswer(let id, let token, let round, let digest, let answers):
+            if let code = store.intakeService.phoneAnswer(id, round: round, digest: digest, answers: answers, token: token) {
+                return .err(cid: cid, code: code)
+            }
         case .intakeStart(let id, let token, let preset, let config, let base):
             if let code = store.intakeService.phoneStart(id, token: token, preset: preset, config: config, base: base) {
                 return .err(cid: cid, code: code)
             }
         case .intakeRounds(let id, let token, let config, let base):
             if let code = store.intakeService.phoneRounds(id, token: token, config: config, base: base) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadSend(let id, let token, let threadID, let anchor, let text):
+            // Every thread refusal is `IntakeService`'s (`IntakeService+PhoneThreads`), as for
+            // the sibling intake ops.
+            if let code = store.intakeService.phoneThreadSend(id, token: token, threadID: threadID, anchor: anchor, text: text) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadAnswer(let id, let token, let threadID, let answers, let turn):
+            if let code = store.intakeService.phoneThreadAnswer(id, token: token, threadID: threadID, answers: answers,
+                                                                turn: turn) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeThreadResolve(let id, let token, let threadID):
+            if let code = store.intakeService.phoneThreadResolve(id, token: token, threadID: threadID) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeDiffDecide(let id, let token, let threadID, let diffID, let accept):
+            if let code = store.intakeService.phoneDiffDecide(id, token: token, threadID: threadID, diffID: diffID,
+                                                               accept: accept) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeCreate(let id, let token, let project, let intent):
+            // The two refusals that need what only the store knows — which project this id is,
+            // and whether Flight Control is on for it — are made here; the rest is the service's.
+            guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
+            guard store.preferences?.projectSettings(path).flywheelEnabled == true else {
+                return .err(cid: cid, code: "no_flight_control")
+            }
+            if let code = store.intakeService.phoneCreate(id, token: token, project: path, intent: intent) {
                 return .err(cid: cid, code: code)
             }
         case .swarmPause(let project):

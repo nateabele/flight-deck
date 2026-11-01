@@ -190,6 +190,13 @@ struct ReleaseReview {
     /// Every task the graph holds, id → title, as of this read — so the sheet names the tasks
     /// an edit, reopen, follow-up or dependency touches by title instead of by raw id.
     var titles: [String: String] = [:]
+    /// What release will write to the repo and commit (spec §12, "Confirmation"), for every plan;
+    /// nil for an intake with no plan (Single task) or when the export would refuse.
+    var export: PlanExportPreview?
+    /// Why release would refuse to export the plan, shown before Release is pressed (A-M4).
+    var exportRefusal: String?
+    /// What validation dropped from the change set (a citation of a removed visual or state).
+    var visualWarnings: [String] = []
 
     /// What release will treat as op `i`'s precondition: the live state for a drifted op,
     /// the triage-time `pre` otherwise.
@@ -344,6 +351,19 @@ final class IntakeService: ObservableObject {
     /// liveness, resumption and announcements are about what it has done, not what was asked.
     private var overlays: [UUID: [CommandEnvelope]] = [:]
 
+    /// The newest thread accept each shaping intake has queued that no tape read has acked, by
+    /// seq (`threadEditStamp`). Published, and only this, so the plan editor reloads the moment an
+    /// accept is queued — from this Mac at once, from the phone or auto-accept on the next tick —
+    /// while a hand edit's own send republishes nothing.
+    @Published var threadEditStamps: [UUID: Int] = [:]
+    /// `queuedPlans`' memory, per intake: `commands.jsonl`'s stat and the ack it was read past.
+    var queuedPlansMemo: [UUID: QueuedPlansMemo] = [:]
+    struct QueuedPlansMemo {
+        let stamp: TranscriptStamp?
+        let acked: Int
+        let plans: [Int: TapeOverlay.QueuedPlan]
+    }
+
     /// `hasPendingCommands`'s memory, per intake. Dropped with the intake's other shaping
     /// state in `pollTapes` when it stops shaping.
     private var pendingCommandsMemo: [UUID: PendingCommandsMemo] = [:]
@@ -356,7 +376,7 @@ final class IntakeService: ObservableObject {
     /// Kept apart from `tapes` because a running tape's heartbeat changes every second, and
     /// republishing for that alone re-rendered every view observing this service each second
     /// of a run for nothing it draws.
-    private var latestTapes: [UUID: Tape] = [:]
+    private(set) var latestTapes: [UUID: Tape] = [:]
 
     private let store: IntakeStore
     private let headless: HeadlessRunner
@@ -367,7 +387,7 @@ final class IntakeService: ObservableObject {
     private var triageSettings: TriageSettings?
     private let inject: (_ project: String, _ agent: String, _ text: String, _ token: UUID) -> Bool
     private let hasSession: (_ project: String, _ agent: String) -> Bool
-    private let now: () -> Date
+    let now: () -> Date
     private let defaults: UserDefaults
     /// `UserDefaults` key for `selectedIntake`, persisted as `[path: uuidString]` since
     /// `UserDefaults` plists can't hold `UUID` values directly.
@@ -385,6 +405,18 @@ final class IntakeService: ObservableObject {
     /// Moves an intake's directory to the Trash — `FileManager.trashItem` in the app, a recorder
     /// in tests, so no test run ever fills the human's Trash.
     private let trashItem: (URL) throws -> Void
+    /// SIGTERM to a ThreadRunner that outlived its `stop` (`threadStops`); a recorder in tests.
+    let terminateThreadRunner: (Int32) -> Void
+    /// Trash's and Discard's ThreadRunner stops in flight (A-I1): the runner's pid, when the
+    /// current grace runs out, and whether SIGTERM was sent at the first one.
+    var threadStops: [UUID: ThreadStop] = [:]
+    struct ThreadStop {
+        var pid: Int32
+        var deadline: Date
+        var signalled = false
+    }
+    /// How long a ThreadRunner gets to fold its `stop`, and again after SIGTERM.
+    static let threadStopGrace: TimeInterval = 5
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     ///
@@ -419,6 +451,15 @@ final class IntakeService: ObservableObject {
     /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
     /// with that reason instead of leaving it shaping with nothing behind it.
     private let runner: IntakeRunnerControlling?
+    /// Each shaping intake's ThreadRunner (`flightdeck intake threads`, spec §5): started when a
+    /// thread command is appended and brought back by `pollThreads` when one dies with work
+    /// left. nil in a host that cannot run threads: the commands then wait on disk.
+    let threadRunner: IntakeRunnerControlling?
+    /// `IntakeService+Threads`' state: one `ThreadStore` per intake (its read cache must outlive
+    /// a poll), the thread-work memo, and the intakes whose thread daemon may need collecting.
+    var threadStores: [UUID: ThreadStore] = [:]
+    var threadWorkMemo: [UUID: (stamp: ThreadWorkStamp, pending: Bool)] = [:]
+    var threadSockets: Set<UUID> = []
     /// `tape.json`'s modification date at the last read, per intake, so an idle tick costs one
     /// stat per shaping intake rather than a decode.
     private var tapeDates: [UUID: Date] = [:]
@@ -537,6 +578,7 @@ final class IntakeService: ObservableObject {
         availableModels: AvailableModels? = nil,
         clock: WatchClock? = nil,
         runner: IntakeRunnerControlling? = nil,
+        threadRunner: IntakeRunnerControlling? = nil,
         inject: @escaping (String, String, String, UUID) -> Bool,
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
@@ -544,10 +586,12 @@ final class IntakeService: ObservableObject {
         readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
         announce: @escaping (String) -> Void = IntakeService.postAnnouncement,
         detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() },
-        trashItem: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+        trashItem: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
+        terminateThreadRunner: @escaping (Int32) -> Void = { pid in if pid > 1 { kill(pid, SIGTERM) } }
     ) {
         self.detectAgents = detectAgents
         self.trashItem = trashItem
+        self.terminateThreadRunner = terminateThreadRunner
         self.store = store
         self.headless = headless
         self.processRunner = processRunner
@@ -555,6 +599,7 @@ final class IntakeService: ObservableObject {
         self.triageSettings = triageSettings
         self.availableModelsCache = availableModels
         self.runner = runner
+        self.threadRunner = threadRunner
         self.inject = inject
         self.hasSession = hasSession
         self.now = now
@@ -602,6 +647,12 @@ final class IntakeService: ObservableObject {
                 for i in self.intakes where i.state != .shaping
                     && FileManager.default.fileExists(atPath: runner.socketPath(for: i.id)) {
                     self.pendingReaps.insert(i.id)
+                }
+            }
+            // A thread daemon a previous launch left: `pollThreads` collects it once it is idle.
+            if let threads = self.threadRunner {
+                for i in self.intakes where FileManager.default.fileExists(atPath: threads.socketPath(for: i.id)) {
+                    self.threadSockets.insert(i.id)
                 }
             }
             self.pollTapes()
@@ -918,9 +969,12 @@ final class IntakeService: ObservableObject {
         let listed = listedIntakes(forProject: project)
         tasks.removeValue(forKey: id)?.task.cancel()
         let live = i.state == .shaping && runner?.isRunning(id, tape: latestTapes[id]) == true
-        if live {
+        // A ThreadRunner beating is stopped too, and the folder waits for it (A-I1): trashed
+        // under it, it would run every queued turn and recreate `threads/` at the old path.
+        let threadsLive = stopThreads(id)
+        if live || threadsLive {
             try? store.setArchived(true, id: id)
-            _ = try? tapeStore(id).appendCommand(.stop)
+            if live { _ = try? tapeStore(id).appendCommand(.stop) }
             pendingTrash.insert(id)
         } else {
             do { try trashItem(store.directory(for: id)) } catch { return false }
@@ -946,7 +1000,7 @@ final class IntakeService: ObservableObject {
 
     /// Trashes each `pendingTrash` directory whose runner has exited; collects its daemon first.
     private func collectPendingTrash() {
-        for id in pendingTrash where runner?.isRunning(id, tape: nil) != true {
+        for id in pendingTrash where runner?.isRunning(id, tape: nil) != true && threadStops[id] == nil {
             runner?.reap(id)
             pendingTrash.remove(id)
             try? trashItem(store.directory(for: id))
@@ -955,9 +1009,11 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Pipeline
 
-    func capture(intent: String, project: String) {
+    /// `id` is the phone's own when the intake starts there (`phoneCreate`); the Mac's button
+    /// leaves it to mint one.
+    func capture(intent: String, project: String, id: UUID = UUID()) {
         guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now())
+        let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now(), id: id)
         save(intake)
         // The start of an intake is when the model menus are refreshed (and what they list is
         // re-read from each CLI); off the main actor, so triage never waits on it.
@@ -965,53 +1021,118 @@ final class IntakeService: ObservableObject {
         start(intake.id) { await $0.runTriage(intake.id, turn: .initial) }
     }
 
-    func answer(_ id: UUID, answers: [String]) {
-        guard var i = intake(id), i.state == .needsAnswers, !i.exchanges.isEmpty else { return }
-        i.exchanges[i.exchanges.count - 1].answers = answers
+    /// Why `answer(_:structured:)` took nothing. The raw values are the wire codes the phone gets.
+    enum AnswerRefusal: String, CaseIterable {
+        case notAwaitingAnswers = "not_awaiting_answers"
+        case unknownQuestion = "unknown_question"
+        case incomplete = "invalid_answer"
+    }
+
+    /// Takes the open round's answers. Each presented question needs exactly one answer with its
+    /// id, and each must be complete; otherwise nothing is saved, so a half-valid submit can
+    /// never leave a round answered with a hole in it. The rounds themselves still get the plain
+    /// rendered strings, so nothing downstream of triage changes.
+    @discardableResult
+    func answer(_ id: UUID, structured: [StructuredAnswer]) -> AnswerRefusal? {
+        guard var i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last, open.answers == nil
+        else { return .notAwaitingAnswers }
+        let presented = open.presentedQuestions
+        let ids = Set(presented.map(\.id))
+        let given = Set(structured.map(\.questionID))
+        guard given.count == structured.count, given.isSubset(of: ids), given == ids else { return .unknownQuestion }
+        let byID = Dictionary(uniqueKeysWithValues: structured.map { ($0.questionID, $0) })
+        let ordered = presented.map { byID[$0.id]! }
+        // `accepts` before anything is saved: an option id the round does not have would be
+        // stored as the answer and reach the agent as a raw id.
+        guard zip(presented, ordered).allSatisfy({ $0.accepts($1) && $0.isComplete($1) }) else { return .incomplete }
+        let rendered = zip(presented, ordered).map { $0.render($1) }
+        i.exchanges[i.exchanges.count - 1].structuredAnswers = ordered
+        i.exchanges[i.exchanges.count - 1].answers = rendered
         save(i)
         pending[id] = PendingStart(kind: .triage, since: now())
         clearAnswerDrafts(id)
-        let questions = i.exchanges[i.exchanges.count - 1].questions
-        start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: answers)) }
+        let questions = open.questions
+        start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: rendered)) }
+        return nil
+    }
+
+    /// The plain-string path, for callers that only have typed text.
+    func answer(_ id: UUID, answers: [String]) {
+        guard let open = intake(id)?.exchanges.last, answers.count == open.presentedQuestions.count else { return }
+        let mapped = zip(open.presentedQuestions, answers).map {
+            StructuredAnswer(questionID: $0.id, selected: [], other: $1)
+        }
+        answer(id, structured: mapped)
     }
 
     // MARK: - Answer drafts
 
     /// What `answer-drafts.json` holds: the unsent answers, and the exact questions they were
     /// typed against — so a follow-up round with the same number of questions can never pick
-    /// up drafts written for different ones.
+    /// up drafts written for different ones. `answers` stays the rendered strings so a file
+    /// from before structured answers still reads; `round`, `structured` and `digest` are
+    /// optional so a file written before they existed still decodes. `digest` is the round's
+    /// `questionsDigest`: after `retry` a fresh round can have the same index and the same texts
+    /// with different option ids, and only the digest tells those drafts are not this round's.
     private struct AnswerDrafts: Codable {
         var questions: [String]
         var answers: [String]
+        var round: Int?
+        var structured: [StructuredAnswer]?
+        var digest: String?
     }
 
     private func answerDraftsURL(_ id: UUID) -> URL {
         store.directory(for: id).appendingPathComponent("answer-drafts.json")
     }
 
-    /// Persists the open round's unsent answers. `intake.json` already survives a relaunch in
-    /// every state; the drafts were `@State` alone, so a release swap mid-answer threw away
-    /// whatever had been typed. Refused unless `questions` is still the open round: a debounced
-    /// write landing after Send would otherwise resurrect drafts for a round already answered.
-    func saveAnswerDrafts(_ id: UUID, questions: [String], answers: [String]) {
+    /// Persists the open round's unsent answers, keyed by the round's index. `intake.json`
+    /// already survives a relaunch in every state; the drafts were `@State` alone, so a release
+    /// swap mid-answer threw away whatever had been typed. Refused for any round but the open
+    /// one: a debounced write landing after Send would otherwise resurrect drafts for a round
+    /// already answered.
+    func saveAnswerDrafts(_ id: UUID, round: Int, answers: [StructuredAnswer]) {
         guard let i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last,
-              open.answers == nil, open.questions == questions, answers.count == questions.count
-        else { return }
-        guard let data = try? JSONEncoder().encode(AnswerDrafts(questions: questions, answers: answers)) else { return }
+              open.answers == nil, round == i.exchanges.count - 1 else { return }
+        let presented = open.presentedQuestions
+        guard Set(answers.map(\.questionID)).isSubset(of: Set(presented.map(\.id))) else { return }
+        let byID = Dictionary(answers.map { ($0.questionID, $0) }, uniquingKeysWith: { _, last in last })
+        let strings = presented.map { q in byID[q.id].map { q.render($0) } ?? "" }
+        let drafts = AnswerDrafts(questions: open.questions, answers: strings, round: round, structured: answers,
+                                  digest: open.questionsDigest)
+        guard let data = try? JSONEncoder().encode(drafts) else { return }
         try? data.write(to: answerDraftsURL(id), options: .atomic)
     }
 
-    /// The drafts saved against exactly `questions`, or nil. Drafts for any other question set
-    /// are stale — a newer round replaced them — so they're deleted rather than left to match
-    /// by accident later.
-    func answerDrafts(_ id: UUID, questions: [String]) -> [String]? {
+    /// The drafts for the open round, or nil. Drafts for any other question set are stale (a newer
+    /// round replaced them), so they are deleted rather than left to match by accident later. A file with strings only (written before
+    /// structured answers) loads as text answers while its questions still equal the round's.
+    func answerDrafts(_ id: UUID, round: Int) -> [StructuredAnswer]? {
         guard let data = try? Data(contentsOf: answerDraftsURL(id)),
               let drafts = try? JSONDecoder().decode(AnswerDrafts.self, from: data) else { return nil }
-        guard drafts.questions == questions, drafts.answers.count == questions.count else {
+        // Asking for a round that isn't open says nothing about the file, so it is left alone.
+        guard let i = intake(id), round == i.exchanges.count - 1, let open = i.exchanges.last else { return nil }
+        guard drafts.questions == open.questions, drafts.round ?? round == round,
+              drafts.digest ?? open.questionsDigest == open.questionsDigest else {
             clearAnswerDrafts(id)
             return nil
         }
-        return drafts.answers
+        let presented = open.presentedQuestions
+        if let structured = drafts.structured {
+            // Read back from disk, so not trusted to name only this round's options: an id the
+            // question does not offer would make the round refuse the whole send as incomplete.
+            let options = Dictionary(presented.map { ($0.id, Set($0.options.map(\.id))) }, uniquingKeysWith: { a, _ in a })
+            return structured.map { answer in
+                var kept = answer
+                kept.selected = answer.selected.filter { options[answer.questionID]?.contains($0) == true }
+                return kept
+            }
+        }
+        guard drafts.answers.count == presented.count else {
+            clearAnswerDrafts(id)
+            return nil
+        }
+        return zip(presented, drafts.answers).map { StructuredAnswer(questionID: $0.id, selected: [], other: $1) }
     }
 
     private func clearAnswerDrafts(_ id: UUID) {
@@ -1109,7 +1230,7 @@ final class IntakeService: ObservableObject {
             publishTape(id, read: latestTapes[id] ?? tapeStore(id).loadTape())
         }
         switch command {
-        case .note, .removeNote, .setNoteKind, .editPlan: return
+        case .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: return
         // A pause or stop withdraws the play that was starting: left pending, a runner that
         // reads the stop first and exits without a beat would leave "starting" up for good.
         case .pause:
@@ -1142,7 +1263,7 @@ final class IntakeService: ObservableObject {
     private static func startsRounds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview: true
-        case .pause, .stop, .extend, .trim, .note, .removeNote, .setNoteKind, .editPlan: false
+        case .pause, .stop, .extend, .trim, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: false
         }
     }
 
@@ -1211,33 +1332,35 @@ final class IntakeService: ObservableObject {
 
     /// Phone command tokens already accepted, per intake — a repeat is acked without being
     /// applied twice (a retry after a lost ack must not queue a second Step). Last 16 kept.
-    private var phoneTokens: [UUID: [UUID]] = [:]
+    /// This and the helpers below are internal, not private, so the phone's thread ops
+    /// (`IntakeService+PhoneThreads`) share one token memory and one refusal log with these.
+    var phoneTokens: [UUID: [UUID]] = [:]
     static let maxRememberedPhoneTokens = 16
 
     /// Whether `token` was already accepted for `id`. Checked BEFORE validating: a retry after
     /// a lost ack meets the state its first delivery changed — the note it removed is gone, the
     /// tape it paused is paused — and validating that would refuse a command that in fact landed.
-    private func alreadyAccepted(_ token: UUID, for id: UUID) -> Bool {
+    func alreadyAccepted(_ token: UUID, for id: UUID) -> Bool {
         phoneTokens[id]?.contains(token) == true
     }
 
     /// Remembers `token` as accepted — only once the command passed validation, so a refusal
     /// does not burn the token and a corrected retry with the same one still applies.
-    private func accept(_ token: UUID, for id: UUID) {
+    func accept(_ token: UUID, for id: UUID) {
         var seen = phoneTokens[id, default: []]
         seen.append(token)
         if seen.count > Self.maxRememberedPhoneTokens { seen.removeFirst(seen.count - Self.maxRememberedPhoneTokens) }
         phoneTokens[id] = seen
     }
 
-    private func refuse(_ code: String, _ id: UUID) -> String {
+    func refuse(_ code: String, _ id: UUID) -> String {
         Self.logger.info("check=\(code, privacy: .public) intake=\(id, privacy: .public)")
         return code
     }
 
     /// The intake a phone command may act on, or the refusal code: `send` silently drops a
     /// command for an intake that has left shaping, so the phone is told instead.
-    private func notShaping(_ id: UUID) -> String? {
+    func notShaping(_ id: UUID) -> String? {
         guard let i = intake(id) else { return refuse("unknown_intake", id) }
         return i.state == .shaping ? nil : refuse("intake_moved_on", id)
     }
@@ -1272,6 +1395,82 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone's Retry (`intakeRetry`): re-runs whatever halted planning, by the same paths the
+    /// desktop's buttons take — ⏯ for a failed tape (validated by `TransportRules`, like
+    /// `phoneTape`'s "step"), `retry(_:)` for an intake that failed or was interrupted.
+    func phoneRetry(_ id: UUID, token: UUID) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        switch i.state {
+        case .failed, .interrupted:
+            accept(token, for: id)
+            retry(id)
+        case .shaping:
+            let tape = storedTape(id)
+            guard tape.status == .failed,
+                  TransportRules.make(tape: tape, config: i.roundConfig).enabled.contains(.step) else {
+                return refuse("not_allowed", id)
+            }
+            accept(token, for: id)
+            send(id, .step)
+        default:
+            return refuse("intake_moved_on", id)
+        }
+        return nil
+    }
+
+    /// The failed round's seat files, read straight from `runs/`. `seats.files(id)` can't serve
+    /// here: `pollSeats` only reads while the tape has a `roundInProgress`, and the runner clears
+    /// that when a round fails — so on a real failed tape the feed is empty, and the halt panel
+    /// lost the seat's output and its "Retry with another model" (seen on a failed polish round).
+    /// Runs older than this attempt's `roundStartedAt` are an earlier attempt's, as in `pollSeats`.
+    private func failedRoundSeats(_ id: UUID, round: PlannedRound) -> SeatFiles {
+        let live = seats.files(id)
+        if !live.activities.isEmpty || !live.records.isEmpty { return live }
+        let store = tapeStore(id)
+        let floor = storedTape(id).roundStartedAt?.addingTimeInterval(-1)
+        func load<T: Decodable>(_ dir: URL, _ name: String) -> T? {
+            readFile(dir.appendingPathComponent(name)).flatMap { try? IntakeJSON.decoder.decode(T.self, from: $0) }
+        }
+        var files = SeatFiles()
+        for run in store.runNames(forRound: round) {
+            let dir = store.runDirectory(run)
+            if let a: SeatActivity = load(dir, "activity.json"), floor.map({ a.startedAt >= $0 }) ?? true { files.activities[run] = a }
+            if let r: RunRecord = load(dir, "run.json"), floor.map({ r.started >= $0 }) ?? true { files.records[run] = r }
+            if files.activities[run] != nil || files.records[run] != nil, let s: SeatResult = load(dir, "result.json") {
+                files.results[run] = s
+            }
+        }
+        return files
+    }
+
+    /// The failed round's seat and the end of what it printed — `stderr` then `stdout` from its
+    /// `runs/<run>/`, each read from its own tail so a long transcript costs a seek, not a load.
+    /// Empty for a tape that has not failed, or a round whose seat left no failed run.
+    func failedSeat(_ id: UUID) -> (role: String, output: String?)? {
+        guard let i = intake(id), let config = i.roundConfig else { return nil }
+        let tape = storedTape(id)
+        guard tape.status == .failed, let round = TapePlanner.upcoming(after: tape, config: config).first,
+              let seat = HaltStatus.failedSeat(round: round, config: config, seats: failedRoundSeats(id, round: round))
+        else { return nil }
+        let dir = runDirectory(id, run: seat.run)
+        let streams = ["stderr", "stdout"].compactMap { name -> String? in
+            Self.tailOfFile(dir.appendingPathComponent(name), bytes: HaltStatus.outputLimit * 2)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        return (seat.role, streams.isEmpty ? nil : streams.joined(separator: "\n\n"))
+    }
+
+    /// The last `bytes` of a file as text (the cut moved to a character boundary), nil when unreadable.
+    private static func tailOfFile(_ url: URL, bytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        try? handle.seek(toOffset: size > UInt64(bytes) ? size - UInt64(bytes) : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        return IntakeDetailProjection.tail(String(decoding: data, as: UTF8.self), limit: bytes)
+    }
+
     /// The phone's choice of default play (spec §6.5 `intakeDefaultPlay`).
     func phoneDefaultPlay(_ id: UUID, token: UUID, mode: String) -> String? {
         if alreadyAccepted(token, for: id) { return nil }
@@ -1279,6 +1478,21 @@ final class IntakeService: ObservableObject {
         guard let play = PlayMode(rawValue: mode) else { return refuse("unknown_mode", id) }
         accept(token, for: id)
         setDefaultPlay(id, play)
+        return nil
+    }
+
+    /// The phone starting an intake (`intakeCreate`): the same `capture` the Mac's Triage button
+    /// runs, under the id the phone minted. `project` is the path `FleetService` resolved from the
+    /// phone's project id, after checking Flight Control is on for it — this service knows
+    /// neither project ids nor their settings. An id that already exists is a retry of a create
+    /// whose ack was lost (the phone reuses the id for the same press) and is acked whatever its
+    /// token, since a phone that restarted between the two sends a new one; it never overwrites
+    /// the intake already there.
+    func phoneCreate(_ id: UUID, token: UUID, project: String, intent: String) -> String? {
+        if alreadyAccepted(token, for: id) || intake(id) != nil { return nil }
+        guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return refuse("empty_intent", id) }
+        accept(token, for: id)
+        capture(intent: intent, project: project, id: id)
         return nil
     }
 
@@ -1420,6 +1634,22 @@ final class IntakeService: ObservableObject {
         guard note.accepts(kind: noteKind) else { return refuse("empty_note", id) }
         accept(token, for: id)
         if note.kind != noteKind { send(id, .setNoteKind(noteID, noteKind)) }
+        return nil
+    }
+
+    /// The phone answering the open clarifying round (`intake.answer`). `stale_questions` is the one
+    /// code for "the round you answered is gone": the Mac moved past it, answered it itself, a
+    /// retry replaced it at the same index (the digest no longer matches), or the intake no
+    /// longer waits. Every other refusal is `answer(_:structured:)`'s own code.
+    func phoneAnswer(_ id: UUID, round: Int, digest: String, answers: [WireStructuredAnswer], token: UUID) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        guard i.state == .needsAnswers, round == i.exchanges.count - 1, let open = i.exchanges.last,
+              open.answers == nil, open.questionsDigest == digest
+        else { return refuse("stale_questions", id) }
+        let mapped = answers.map { StructuredAnswer(questionID: $0.questionID, selected: $0.selected, other: $0.other) }
+        if let refusal = answer(id, structured: mapped) { return refuse(refusal.rawValue, id) }
+        accept(token, for: id)
         return nil
     }
 
@@ -1611,11 +1841,13 @@ final class IntakeService: ObservableObject {
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
             .union(convergenceKeys.keys).union(coverage.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
-            .union(overlays.keys).union(pendingCommandsMemo.keys)
+            .union(overlays.keys).union(pendingCommandsMemo.keys).union(queuedPlansMemo.keys).union(threadEditStamps.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             overlays[gone] = nil
             pendingCommandsMemo[gone] = nil
+            queuedPlansMemo[gone] = nil
+            threadEditStamps[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
             forgetSeats(gone)
@@ -1640,13 +1872,16 @@ final class IntakeService: ObservableObject {
             }
             // Already seeded (a view asked first) is skipped: the values since then were observed.
             if !flapSeeded.contains(id) { _ = flapPolicy(for: id) }
+            refreshThreadEditStamp(id)
             refreshConvergence(id)
             pollSeats(id)
             if let halt = halts[id], let acked = latestTapes[id]?.ackedCommandSeq, acked >= halt.seq { halts[id] = nil }
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
+        pollThreads(shaping)
         pollTriageActivity()
         settlePending()
+        collectThreadStops()
         collectPendingTrash()
         if let runner {
             for id in pendingReaps where !runner.isRunning(id, tape: nil) {
@@ -1952,6 +2187,7 @@ final class IntakeService: ObservableObject {
             // on for an intake nobody can see; the tick collects its daemon once it has.
             _ = try? tapeStore(id).appendCommand(.stop)
             pendingReaps.insert(id)
+            _ = stopThreads(id)
         }
         i.state = .discarded
         save(i)
@@ -1977,7 +2213,7 @@ final class IntakeService: ObservableObject {
     func reviewModel(_ id: UUID) async -> ReleaseReview? {
         guard let i = intake(id), let cs = i.changeSet,
               let triaged = triageGraph(id),
-              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged),
+              case .success(let v) = validate(cs, against: triaged, visuals: await knownVisuals(id)),
               let current = try? await graphReader.read(project: i.projectPath)
         else { return nil }
         let drift = DriftClassifier.classify(v, current: current)
@@ -1992,6 +2228,12 @@ final class IntakeService: ObservableObject {
         // The triage-time graph first, the live one over it: a task retitled since triage reads
         // as it is now, and one deleted since still has a name on its (impossible) row.
         review.titles = triaged.beads.mapValues(\.title).merging(current.beads.mapValues(\.title)) { _, now in now }
+        review.visualWarnings = v.warnings
+        switch await releasePreview(latest) {
+        case .success(let preview)?: review.export = preview
+        case .failure(let refusal)?: review.exportRefusal = refusal.message
+        case nil: break
+        }
         return review
     }
 
@@ -2032,8 +2274,16 @@ final class IntakeService: ObservableObject {
         let current: GraphSnapshot
         do { current = try await graphReader.read(project: i.projectPath) }
         catch { return fail(id, backTo: .review, "Could not read the task graph before release: \(error)") }
-        guard let triaged = triageGraph(id), case .success(let v) = ChangeSetValidator.validate(cs, against: triaged) else {
+        let known = await knownVisuals(id)
+        guard let triaged = triageGraph(id) else {
             return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
+        }
+        let v: ValidatedChangeSet
+        switch validate(cs, against: triaged, visuals: known) {
+        case .success(let good): v = good
+        case .failure(let errs):
+            return fail(id, backTo: .review, "The change set no longer validates: "
+                        + errs.errors.map(\.userMessage).joined(separator: "; "))
         }
         let drift = DriftClassifier.classify(v, current: current)
         guard Self.review(i, drift: drift).canRelease else {
@@ -2058,7 +2308,7 @@ final class IntakeService: ObservableObject {
         var validated: ValidatedChangeSet?, kept: [Int] = []
         for _ in 0...ops.count {
             let (sub, map) = Self.releasable(ops, skipping: skip)
-            switch ChangeSetValidator.validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current) {
+            switch validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current, visuals: known) {
             case .success(let good):
                 validated = good; kept = map
             case .failure(let errs):
@@ -2076,6 +2326,28 @@ final class IntakeService: ObservableObject {
         guard let validated else { return fail(id, backTo: .review, "The change set could not be reconciled with the live graph.") }
         guard !Task.isCancelled else { return }
 
+        // The plan and its visuals go into the repo first (spec §12, V-R4), committed by path, so
+        // every "Fidelity references" path a task cites already exists when `br create` runs. A
+        // refusal (uncommitted changes in the folder, …) writes nothing, tasks included.
+        var planSlug: String?
+        var exportWarnings: [String] = []
+        switch await releaseExport(i) {
+        case nil: break
+        case .failure(let refusal)?: return fail(id, backTo: .review, refusal.message)
+        case .success(let export)?:
+            guard !Task.isCancelled else { return }
+            do {
+                _ = try await RepoCommitter().commit(export, repo: URL(fileURLWithPath: i.projectPath, isDirectory: true))
+            } catch {
+                return fail(id, backTo: .review, Self.exportMessage(error))
+            }
+            planSlug = export.slug
+            exportWarnings = export.warnings
+        }
+        // A cancel here leaves the plan committed with no tasks written. Nothing cancels a release
+        // today (`discard` refuses one in flight); see FOLLOWUPS if that changes.
+        guard !Task.isCancelled else { return }
+
         let actor = "flightdeck-intake:\(id.uuidString)"
         let steps = ApplyPlanner.plan(validated, skipping: [])
         // Routed before the first write, so a create lands with its block in one `br create`
@@ -2084,7 +2356,7 @@ final class IntakeService: ObservableObject {
         // Routing suspends, and the guard above ran before it: a release discarded or retried
         // while the router was working would otherwise still write its tasks.
         guard !Task.isCancelled else { return }
-        let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor)
+        let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor, planSlug: planSlug)
             .apply(steps, project: i.projectPath, agentContexts: contexts)
 
         // The plan is ordered and BeadWriter stops at the first failure, so exactly
@@ -2098,7 +2370,7 @@ final class IntakeService: ObservableObject {
         let project = i.projectPath
         let planned = DeliveryPlanner.plan(validated.changeSet, ratings: ratings,
                                            hasSession: { [hasSession] in hasSession(project, $0) })
-        var warnings: [String] = []
+        var warnings: [String] = validated.warnings + exportWarnings
         var unnotified = Set<String>()
         for action in planned {
             guard case .mail(let to, let bead, _, _) = action, !landed.contains(bead) else { continue }
@@ -2298,7 +2570,8 @@ final class IntakeService: ObservableObject {
 
         if case .recommendation(let preset, let reason, var cs?) = result.triage {
             cs.graphObservedAt = observedAt  // FD owns this timestamp — see `Triage.initialPrompt`.
-            if case .failure(let errs) = ChangeSetValidator.validate(cs, against: graph) {
+            // No plan exists at triage, so no visual can be cited: `Set()`, not nil.
+            if case .failure(let errs) = ChangeSetValidator.validate(cs, against: graph, knownVisuals: []) {
                 // One automatic retry in the same session, errors listed (spec §11).
                 guard !Task.isCancelled else { return }
                 save(i)
@@ -2313,7 +2586,7 @@ final class IntakeService: ObservableObject {
                         return fail(id, "The corrected reply carried no change set.", raw: second.raw)
                     }
                     cs2.graphObservedAt = observedAt
-                    if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph) {
+                    if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph, knownVisuals: []) {
                         return fail(id, "The change set failed validation twice: "
                                     + errs2.errors.map(\.userMessage).joined(separator: "; "), raw: second.raw)
                     }
@@ -2326,7 +2599,7 @@ final class IntakeService: ObservableObject {
 
         switch result.triage {
         case .questions(let q):
-            i.exchanges.append(TriageExchange(questions: q))
+            i.exchanges.append(TriageExchange(questions: q.map(\.text), answers: nil, structured: q))
             i.state = .needsAnswers
         case .recommendation(let preset, let reason, let cs):
             if case .encodeNow = turn, cs == nil {
@@ -2450,11 +2723,15 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Plumbing
 
-    private func tapeStore(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: store.directory(for: id)) }
+    func tapeStore(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: store.directory(for: id)) }
+
+    /// `<intake>/threads/`, ThreadRunner's alone to write (R5, R8); the app reads it and appends
+    /// only to its `commands.jsonl` (`ThreadCommandStore`).
+    func threadsDirectory(_ id: UUID) -> URL { ThreadCommandStore(intakeDirectory: store.directory(for: id)).threadsDirectory }
 
     private var graphReader: IntakeGraphReader { IntakeGraphReader(runner: processRunner, brPath: brPath) }
 
-    private func intake(_ id: UUID) -> Intake? { intakes.first { $0.id == id } }
+    func intake(_ id: UUID) -> Intake? { intakes.first { $0.id == id } }
 
     private func start(_ id: UUID, _ body: @escaping (IntakeService) async -> Void) {
         tasks[id]?.task.cancel()

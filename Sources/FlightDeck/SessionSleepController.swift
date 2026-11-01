@@ -145,9 +145,12 @@ final class SessionSleepController {
 
     private nonisolated static func probe(
         _ ids: [UUID], daemonPID: (UUID) -> pid_t?,
-        resolver: AgentGroupResolving, inspector: ProcessInspecting
+        resolver: AgentGroupResolving, inspector live: ProcessInspecting
     ) -> [Probe] {
-        ids.map { id in
+        // One process-table read for the whole round; every tab's group lookup and subtree walk
+        // answers from it. Sleeping then signals through `daemonControl`, which resolves live.
+        let inspector = live.snapshot()
+        return ids.map { id in
             let daemon = daemonPID(id)
             return Probe(id: id, daemon: daemon, hasLiveDescendants: daemon.map {
                 hasLiveDescendants(daemon: $0, resolver: resolver, inspector: inspector)
@@ -180,7 +183,7 @@ final class SessionSleepController {
     private nonisolated static func hasLiveDescendants(
         daemon: pid_t, resolver: AgentGroupResolving, inspector: ProcessInspecting
     ) -> Bool {
-        guard let pgid = resolver.agentProcessGroup(daemonPID: daemon) else { return false }
+        guard let pgid = resolver.agentProcessGroup(daemonPID: daemon, inspector: inspector) else { return false }
         return !inspector.descendants(of: pgid).isEmpty
     }
 

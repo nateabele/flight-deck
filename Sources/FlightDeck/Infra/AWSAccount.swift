@@ -56,6 +56,15 @@ struct AWSAccount: CloudAccount {
         return text.isEmpty || text == "None" ? nil : text
     }
 
+    func instanceEnded(instanceID: String, region: String) async -> Bool {
+        guard let result = try? await cli.run(["ec2", "describe-instances", "--instance-ids", instanceID,
+                                               "--query", "Reservations[].Instances[].State.Name",
+                                               "--output", "text", "--region", region] + profileArgs) else { return false }
+        if result.exitCode != 0 { return result.stderr.contains("InvalidInstanceID.NotFound") }
+        let state = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["shutting-down", "terminated", "stopping", "stopped"].contains(state)
+    }
+
     func moduleVars() -> [String: String] { [:] }
 
     // MARK: - Orphan scan (spec §7.3)

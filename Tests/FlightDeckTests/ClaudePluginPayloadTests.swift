@@ -1,3 +1,4 @@
+import HostKit
 import XCTest
 @testable import FlightDeck
 
@@ -7,6 +8,18 @@ final class ClaudePluginPayloadTests: XCTestCase {
     private func pluginRoot() throws -> URL {
         let url = Bundle(for: Self.self).url(forResource: "ClaudePlugin", withExtension: nil)
         return try XCTUnwrap(url, "ClaudePlugin must be bundled as a folder reference")
+    }
+
+    /// The `flightdeck` CLI built beside this bundle: the bundle is
+    /// `Flight Deck.app/Contents/PlugIns/FlightDeckTests.xctest`, and the app embeds the CLI in
+    /// `Contents/MacOS`. `record.sh` hands every payload to its `hook-record`.
+    private func cli() throws -> URL {
+        let url = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MacOS/flightdeck")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: url.path),
+                      "the app must embed the flightdeck CLI at \(url.path)")
+        return url
     }
 
     func testHooksManifestNamesExactlyTheSevenWiredEvents() throws {
@@ -50,16 +63,15 @@ final class ClaudePluginPayloadTests: XCTestCase {
 
     // MARK: - The chain from a hook payload to a decoded record
 
-    /// **The happy path, end to end, which nothing exercised before: a realistic
-    /// pretty-printed payload in, one `HookEventRecord` out.**
+    /// **The happy path, end to end: a realistic pretty-printed payload in, one pared line
+    /// out, and that line decodes.** Claude Code pretty-prints its hook payloads, so one
+    /// payload must still land as exactly one line.
     ///
-    /// The script's whole body is `cat | tr -d '\n'` composed with `printf '%s\n'`, and that
-    /// composition is the only link in the chain between claude and `ComposerReadiness` that
-    /// no test covered — the recorder was run only with the variable *unset*, which exits
-    /// before reaching any of it. Claude Code pretty-prints its hook payloads, so the newline
-    /// strip is load-bearing: one unstripped payload writes six lines, five of which decode to
-    /// nothing and one of which corrupts the line after it.
-    func testARealisticPayloadRoundTripsIntoADecodableRecord() throws {
+    /// **And the line keeps only what Flight Deck reads.** The payload's `cwd`,
+    /// `transcript_path`, `tool_input` and `tool_response` are gone; the input survives only as
+    /// the digest `DialogAttribution` compares, and it is the same digest a legacy raw line
+    /// would have produced.
+    func testARealisticPayloadIsParedToOneDecodableLine() throws {
         let session = UUID()
         let payload = """
             {
@@ -68,24 +80,76 @@ final class ClaudePluginPayloadTests: XCTestCase {
               "cwd": "/Users/x/repo",
               "hook_event_name": "PostToolUse",
               "tool_name": "Bash",
+              "tool_use_id": "toolu_01",
               "tool_input": {
                 "command": "echo hi",
                 "description": "Say hi"
-              }
+              },
+              "tool_response": {"stdout": "secret output"}
             }
             """
 
         let directory = try run(record: payload, pluginRoot: try pluginRoot())
 
-        let lines = try String(contentsOf: directory.appendingPathComponent("events.ndjson"),
-                               encoding: .utf8)
-            .split(separator: "\n", omittingEmptySubsequences: true)
+        let text = try String(contentsOf: directory.appendingPathComponent("events.ndjson"), encoding: .utf8)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
         XCTAssertEqual(lines.count, 1, "a pretty-printed payload must land as exactly one line")
+        let obj = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any])
+        XCTAssertEqual(Set(obj.keys),
+                       ["session_id", "hook_event_name", "tool_name", "tool_use_id", "tool_input_digest"],
+                       "only the fields Flight Deck reads")
+        XCTAssertFalse(text.contains("secret output"), "tool output never reaches the log")
+        XCTAssertFalse(text.contains("echo hi"), "tool input travels as a digest, not as text")
+
         let record = try XCTUnwrap(HookEventRecord.decode(String(lines[0])),
-                                   "the decoder must accept what the script actually writes")
+                                   "the decoder must accept what the recorder actually writes")
         XCTAssertEqual(record.sessionID, session)
         XCTAssertEqual(record.event, "PostToolUse")
+        XCTAssertEqual(record.toolUseID, "toolu_01")
         XCTAssertEqual(ComposerReadiness.applying(record.event, to: .unknown), .live)
+        let legacy = try XCTUnwrap(HookEventRecord.decode(
+            #"{"session_id":"\#(session.uuidString)","hook_event_name":"PreToolUse","#
+                + #""tool_input":{"description":"Say hi","command":"echo hi"}}"#))
+        XCTAssertEqual(record.toolInput, legacy.toolInput,
+                       "a pared line and a legacy raw line for the same input compare equal")
+    }
+
+    /// A prompt is the most personal thing a hook carries, and nothing reads it.
+    func testAPromptsTextNeverReachesTheLog() throws {
+        let session = UUID()
+        let directory = try run(
+            record: #"{"session_id":"\#(session.uuidString)","hook_event_name":"UserPromptSubmit","prompt":"my password is hunter2"}"#,
+            pluginRoot: try pluginRoot())
+        let text = try String(contentsOf: directory.appendingPathComponent("events.ndjson"), encoding: .utf8)
+        XCTAssertFalse(text.contains("hunter2"))
+        XCTAssertEqual(HookEventRecord.decode(text.trimmingCharacters(in: .newlines))?.event, "UserPromptSubmit")
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: directory.appendingPathComponent("events.ndjson").path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600, "the log is the owner's alone")
+    }
+
+    /// **A missing or older CLI must cost a hook nothing.** An older `flightdeck` has no
+    /// `hook-record` and exits 2 on an unknown command — and exit 2 from a `PreToolUse` hook
+    /// REFUSES the tool call. The recorder swallows it; the event is simply not recorded.
+    func testAnOlderOrMissingCLINeverFailsTheHook() throws {
+        let stubDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("old-cli-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stubDir, withIntermediateDirectories: true)
+        staged.append(stubDir)
+        let old = stubDir.appendingPathComponent("flightdeck")
+        try "#!/bin/bash\necho 'flightdeck: unknown command' >&2\nexit 2\n".write(to: old, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: old.path)
+
+        let payload = #"{"session_id":"\#(UUID().uuidString)","hook_event_name":"PreToolUse"}"#
+        for cliPath in [old.path, stubDir.appendingPathComponent("missing").path] {
+            let directory = try run(
+                shell: "\"\(try pluginRoot().path)/scripts/record.sh\"", payload: payload,
+                pluginRoot: try pluginRoot(), cliPath: cliPath)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: directory.appendingPathComponent("events.ndjson").path),
+                "nothing recorded, and above all nothing raw")
+        }
     }
 
     /// **Every hook command in the shipped manifest, run from a plugin root with a space in
@@ -159,7 +223,8 @@ final class ClaudePluginPayloadTests: XCTestCase {
     /// Runs `command` through `bash -c` with the hook environment claude sets, feeding
     /// `payload` on stdin. Returns the `FLIGHT_DECK_EVENT_DIR` it created for the run.
     @discardableResult
-    private func run(shell command: String, payload: String, pluginRoot: URL) throws -> URL {
+    private func run(shell command: String, payload: String, pluginRoot: URL,
+                     cliPath: String? = nil) throws -> URL {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("events-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -172,6 +237,7 @@ final class ClaudePluginPayloadTests: XCTestCase {
             "PATH": "/usr/bin:/bin",
             "CLAUDE_PLUGIN_ROOT": pluginRoot.path,
             "FLIGHT_DECK_EVENT_DIR": directory.path,
+            "FLIGHTDECK_CLI": try cliPath ?? cli().path,
         ]
         let input = Pipe()
         process.standardInput = input
@@ -190,15 +256,36 @@ final class ClaudePluginPayloadTests: XCTestCase {
     /// manifest names is `/switch-account`'s, and it must be a file that ships: a stale `modules`
     /// entry would make claude load a file that no longer ships, and a mod the engine switched
     /// off would blank every claude meter with nothing here to notice.
-    func testHooksManifestLoadsOnlyTheSwitchAccountModuleAndTheStatusLineShips() throws {
+    func testHooksManifestLoadsOnlyTheEntryModuleAndTheStatusLineShips() throws {
         let root = try pluginRoot()
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("hooks/hooks.json"))) as? [String: Any])
-        XCTAssertEqual(obj["modules"] as? [String], ["./switch-account.tsx"])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/switch-account.tsx").path))
+        // One module: a module hooks `session.start` once, so flight-deck.tsx registers every command.
+        XCTAssertEqual(obj["modules"] as? [String], ["./flight-deck.tsx"])
+        for module in ["flight-deck.tsx", "switch-account.tsx", "budget.tsx", "cli.ts"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/\(module)").path), module)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/register.ts").path))
         let script = try String(contentsOf: root.appendingPathComponent(ClaudeStatusLine.scriptPath), encoding: .utf8)
         XCTAssertTrue(script.contains("FLIGHT_DECK_USAGE_DIR"))
         XCTAssertTrue(script.contains(ClaudeStatusLine.userCommandVariable))
+    }
+
+    /// The authoring skill ships as a folder (claude reads it through the plugin, codex through
+    /// `CodexBundledSkill`), and its template manifest must be one `provider check` accepts.
+    func testTheVisualProviderSkillShipsWithATemplateThatParses() async throws {
+        let folder = try pluginRoot().appendingPathComponent("skills/visual-provider")
+        let skill = try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8)
+        XCTAssertTrue(skill.hasPrefix("---\nname: visual-provider\ndescription: "))
+        XCTAssertTrue(skill.contains("flightdeck provider check"))
+        let templates = folder.appendingPathComponent("templates")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: templates.appendingPathComponent("kinds/example.md").path))
+        let parsed = try ProviderManifestParser.load(folder: templates)
+        XCTAssertEqual(parsed.manifest.kinds.count, 1)
+        XCTAssertTrue(parsed.issues.isEmpty, "the template must not teach a key the parser warns about")
+        // The real check, as an agent following the skill runs it on a copy of the template.
+        let report = await ProviderCheck.run(folder: templates)
+        XCTAssertEqual(report.exitCode, 0, report.text)
+        XCTAssertFalse(report.text.contains("error"), report.text)
     }
 
     override func tearDownWithError() throws {

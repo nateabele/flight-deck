@@ -97,6 +97,8 @@ final class AccountSwitchTests: XCTestCase {
         let provider: Provider
         let tab: Session
         let project: URL
+        /// A folder that assigns nothing, so nothing restricts a switch made from it.
+        let loose: URL
     }
 
     /// Pool "Team" (First, Second, Third) assigned to the project, an unpooled "Solo", a removed
@@ -141,7 +143,7 @@ final class AccountSwitchTests: XCTestCase {
         store.apply(.activity(.idle), to: tab.id)
         return Rig(store: store, preferences: preferences, ledger: ledger, resolver: resolver, first: first,
                    second: second, third: third, solo: solo, daemons: daemons, notices: notices,
-                   provider: provider, tab: tab, project: project)
+                   provider: provider, tab: tab, project: project, loose: dir("loose"))
     }
 
     private func reading(_ account: AgentAccount, _ utilization: Double) -> UsageReading {
@@ -150,8 +152,10 @@ final class AccountSwitchTests: XCTestCase {
                      readAt: Date(), source: "test", hardRejection: false)
     }
 
-    private func decide(_ rig: Rig, _ target: String, current: AgentAccount? = nil) -> AccountSwitchDecision {
-        rig.resolver.switchDecision(agent: .claude, current: current ?? rig.first, target: target)
+    /// Decided from `rig.loose` unless `pooled`: naming is tested apart from the pool restriction.
+    private func decide(_ rig: Rig, _ target: String, current: AgentAccount? = nil, pooled: Bool = false) -> AccountSwitchDecision {
+        rig.resolver.switchDecision(agent: .claude, project: (pooled ? rig.project : rig.loose).path,
+                                    current: current ?? rig.first, target: target)
     }
 
     private func settle(_ rig: Rig) async {
@@ -239,6 +243,58 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertTrue(message.contains("Choices:"), message)
     }
 
+    // MARK: A pooled project
+
+    func testAPooledProjectRefusesAnAccountOutsideItsPoolAndSaysWhy() {
+        let rig = rig()
+        guard case .refuse(let message) = decide(rig, "solo@example.com", pooled: true) else {
+            return XCTFail("an account outside the project's pool is not a target")
+        }
+        XCTAssertTrue(message.contains("pool “Team”"), message)
+        XCTAssertFalse(message.contains("Solo"), "never offered: \(message)")
+    }
+
+    func testAPooledProjectMovesToItsOwnMembersAndPoolByAnyName() {
+        let rig = rig()
+        XCTAssertEqual(decide(rig, rig.third.id.uuidString, pooled: true), .move(to: rig.third, note: nil))
+        XCTAssertEqual(decide(rig, "second@example.com", pooled: true), .move(to: rig.second, note: nil))
+        XCTAssertEqual(decide(rig, "team", pooled: true), .move(to: rig.second, note: nil))
+    }
+
+    func testAPooledProjectIgnoresANamesakeOutsideItsPool() {
+        let rig = rig()
+        let twin = AgentAccount(agent: .claude, displayName: "second", home: dir("twin"))
+        rig.preferences.preferences.accountList.entries.append(.account(twin))
+        XCTAssertEqual(decide(rig, "Second", pooled: true), .move(to: rig.second, note: nil))
+    }
+
+    func testAPoolDefaultCountsAsTheProjectsPool() {
+        let rig = rig()
+        rig.preferences.setAccountDefault(.pool("team"), for: .claude)
+        guard case .refuse = decide(rig, "Solo") else { return XCTFail("the agent's pool default restricts too") }
+    }
+
+    func testAPooledProjectsChoicesAreItsPoolAloneWithUsageAndTheCurrentAccount() {
+        let rig = rig()
+        let resets = Date(timeIntervalSince1970: 1_800_000_000)
+        rig.ledger.ingest(UsageReading(account: CapacityPreferences.accountRef(rig.second),
+                                       windows: [UsageWindow(name: "five_hour", utilization: 0.4, resetsAt: resets)],
+                                       readAt: Date(), source: "test", hardRejection: false))
+        let choices = rig.resolver.choices(agent: .claude, project: rig.project.path, current: rig.solo)
+        XCTAssertEqual(choices.pools.map(\.id), ["team"])
+        XCTAssertEqual(choices.accounts, [], "no account outside the pool")
+        XCTAssertEqual(choices.pools[0].members[1].windows, [WireUsageWindow(name: "five_hour", utilization: 0.4, resetsAt: resets)])
+        XCTAssertNil(choices.pools[0].members[2].windows, "never read")
+        XCTAssertEqual(choices.currentAccount?.displayName, "Solo", "named even outside the pool")
+    }
+
+    func testTheStoreAddsTheTabsContextToItsChoices() {
+        let rig = rig()
+        let context = WireContextUsage(usedPercent: 37, windowSize: 200_000, readAt: Date())
+        rig.store.contextUsage = { $0 == rig.tab.id ? context : nil }
+        XCTAssertEqual(rig.store.accountChoices(for: rig.tab.id)?.context, context)
+    }
+
     // MARK: Pool pick
 
     func testAPoolPicksTheFirstMemberBelowItsLimitSkippingTheCurrentOne() {
@@ -277,11 +333,11 @@ final class AccountSwitchTests: XCTestCase {
         let rig = rig()
         rig.ledger.ingest(reading(rig.second, 0.85))
         rig.ledger.ingest(reading(rig.third, 0.99))
-        let choices = rig.resolver.choices(agent: .claude, project: rig.project.path, current: rig.first)
+        let choices = rig.resolver.choices(agent: .claude, project: rig.loose.path, current: rig.first)
         XCTAssertEqual(choices.current, rig.first.id.uuidString)
-        XCTAssertEqual(choices.assignedPool, "team")
+        XCTAssertNil(choices.assignedPool)
         XCTAssertEqual(choices.pools.map(\.id), ["team"])
-        XCTAssertEqual(choices.pools[0].isAssigned, true)
+        XCTAssertEqual(choices.pools[0].isAssigned, false)
         XCTAssertEqual(choices.pools[0].members.map(\.displayName), ["First", "Second", "Third"])
         XCTAssertEqual(choices.pools[0].members.map(\.isCurrent), [true, false, false])
         XCTAssertEqual(choices.pools[0].members.map(\.state), ["unknown", "overSoft", "overHard"])
@@ -476,15 +532,14 @@ final class AccountSwitchTests: XCTestCase {
                        "the tab reads the resumed agent, not the one the move retired")
     }
 
-    func testAMoveToAnAccountOutsideTheAssignedPoolHoldsNoLease() async {
+    func testAMoveOutOfTheAssignedPoolIsRefusedAndMovesNothing() {
         let rig = rig()
-        XCTAssertFalse(rig.store.accountResolver?.leases(heldBy: rig.tab.id).isEmpty ?? true, "precondition: leased on first")
         rig.store.injectorOverride = Composer("❯")
-        XCTAssertTrue(rig.store.requestAccountSwitch(rig.tab.id, target: "Solo").ok)
-        await settle(rig)
-        XCTAssertEqual(session(rig)?.accountID, rig.solo.id)
-        XCTAssertEqual(rig.store.accountResolver?.leases(heldBy: rig.tab.id), [], "solo is in no pool the project bills")
-        XCTAssertEqual(rig.ledger.activeLeases(pool: "team"), [])
+        let result = rig.store.requestAccountSwitch(rig.tab.id, target: "Solo")
+        XCTAssertFalse(result.ok)
+        XCTAssertTrue(result.message.contains("pool “Team”"), result.message)
+        XCTAssertTrue(rig.store.rollingOver.isEmpty)
+        XCTAssertEqual(session(rig)?.accountID, rig.first.id)
     }
 
     func testAnExplicitOverHardAccountIsMovedToAndTheResultSaysSo() async {

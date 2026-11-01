@@ -203,6 +203,46 @@ final class ClaudeStatusLineTests: XCTestCase {
         XCTAssertNotNil(s["statusLine"])
     }
 
+    // MARK: - Theme
+
+    private func writeSettings(_ json: String, to dir: URL) throws {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir.appendingPathComponent("settings.json"))
+    }
+
+    /// The user's `dark` is white text on Flight Deck's light palette; `auto` follows the palette.
+    func testAFixedThemeFromSettingsBecomesAuto() throws {
+        let home = root.appendingPathComponent("home")
+        try writeSettings(#"{"theme":"dark"}"#, to: home)
+        XCTAssertEqual(ClaudeStatusLine.theme(flags: FlagSet(), configHome: home, projectDirectory: root), "auto")
+        try writeSettings(#"{"theme":"light"}"#, to: root.appendingPathComponent(".claude"))
+        XCTAssertEqual(ClaudeStatusLine.theme(flags: FlagSet(), configHome: home, projectDirectory: root), "auto")
+        XCTAssertEqual(ClaudeStatusLine.theme(flags: FlagSet(), configHome: root.appendingPathComponent("none"),
+                                              projectDirectory: root.appendingPathComponent("none")), "auto")
+    }
+
+    func testPaletteAndColourBlindThemesAreLeftAlone() throws {
+        let home = root.appendingPathComponent("home")
+        for theme in ["dark-ansi", "light-ansi", "dark-daltonized", "light-daltonized"] {
+            try writeSettings(#"{"theme":"\#(theme)"}"#, to: home)
+            XCTAssertNil(ClaudeStatusLine.theme(flags: FlagSet(), configHome: home, projectDirectory: root), theme)
+        }
+    }
+
+    func testAThemeInTheUsersOwnSettingsFlagWins() throws {
+        var flags = FlagSet()
+        flags.values["--settings"] = .value(#"{"theme":"dark"}"#)
+        XCTAssertNil(ClaudeStatusLine.theme(flags: flags, configHome: root, projectDirectory: root))
+        let s = try settings(ClaudeStatusLine.injecting(into: flags, wrapper: wrapper, user: nil, theme: "auto", projectDirectory: nil))
+        XCTAssertEqual(s["theme"] as? String, "dark")
+    }
+
+    func testInjectingCarriesTheTheme() throws {
+        let s = try settings(ClaudeStatusLine.injecting(into: FlagSet(), wrapper: wrapper, user: nil, theme: "auto", projectDirectory: nil))
+        XCTAssertEqual(s["theme"] as? String, "auto")
+        XCTAssertNil(try settings(ClaudeStatusLine.injecting(into: FlagSet(), wrapper: wrapper, user: nil, projectDirectory: nil))["theme"])
+    }
+
     func testInjectingLeavesAnUnreadableUserValueAlone() {
         var flags = FlagSet()
         flags.values["--settings"] = .value("/nowhere/settings.json")

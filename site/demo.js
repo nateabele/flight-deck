@@ -317,13 +317,13 @@
   const BEATS = [
     {
       caption:
-        "Open a project and start a session. It's a <strong>real terminal</strong> — the Ghostty engine, Metal-rendered — with your agent running inside it.",
+        "Open a project and start a session. It's a <strong>real terminal</strong>, drawn by the Ghostty engine on Metal, with your agent running inside it.",
       selected: "refactor-sidebar",
       projects: [P("~/Projects/flight-deck", "flight-deck", [S("refactor-sidebar", "refactor-sidebar", "busy")])],
     },
     {
       caption:
-        "⌘N starts another. Sessions stack under their project, each with its <strong>own conversation and working directory</strong> — and its own subagent fan-out.",
+        "⌘N starts another. Sessions stack under their project, each with its <strong>own conversation and working directory</strong> and its own subagents.",
       selected: "refactor-sidebar",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -349,7 +349,7 @@
     },
     {
       caption:
-        "One hits a permission prompt. Its glyph turns <strong>orange the instant it needs you</strong> — you don't have to be looking at that tab to find out.",
+        "One hits a permission prompt. Its glyph turns <strong>orange as soon as it needs you</strong>, even while you're in another tab.",
       selected: "retry-backoff",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -364,7 +364,7 @@
     },
     {
       caption:
-        "The green terminal badge is the state most tools miss: the turn <strong>ended</strong>, but a backgrounded command is still running. Neither working nor done.",
+        "The green terminal badge means the turn <strong>ended</strong>, but a background command is still running.",
       selected: "oauth-refresh",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -379,7 +379,7 @@
     },
     {
       caption:
-        "A session that finished while you were elsewhere keeps a <strong>filled accent dot</strong> until you actually look at it. Nothing completes into the void.",
+        "A session that finished while you were elsewhere keeps a <strong>filled accent dot</strong> until you open it.",
       selected: "oauth-refresh",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -394,7 +394,7 @@
     },
     {
       caption:
-        "Collapse a project and it <strong>inherits the most demanding state underneath it</strong>. A blocked session can never hide inside a folded group.",
+        "Collapse a project and it <strong>shows the most urgent state of the sessions in it</strong>, so a blocked session stays visible.",
       selected: "refactor-sidebar",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -410,7 +410,7 @@
     },
     {
       caption:
-        "Quit and relaunch. Every session <strong>comes back attached to its own conversation</strong>, and anything that was mid-flight is offered a nudge to continue.",
+        "Quit and relaunch. Every session <strong>comes back attached to its own conversation</strong>, and anything that was mid-task is told to continue.",
       selected: "refactor-sidebar",
       resumed: true,
       projects: [
@@ -989,10 +989,10 @@
      at the demo — the demo is just switched on so it's already running as you
      pass it, no launch choreography to sit through. Its sticky hold means it
      stays put at the top for a moment on the way by. */
-  /* Lands on the outcome list rather than the section's top edge — far enough
-     in that the first card is the thing you arrive at, with the tail of the
+  /* Lands on the highlights rather than the section's top edge — far enough
+     in that the first tile is the thing you arrive at, with the tail of the
      heading still above it for context. */
-  const outcomesEl = $("#features .outcomes");
+  const outcomesEl = $("#features .hl-scrolly");
   const featuresEl = $("#features");
   const featuresScroll = () => {
     if (outcomesEl) return Math.max(0, docTop(outcomesEl) - LANDING_GAP - 40);
