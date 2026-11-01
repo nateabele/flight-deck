@@ -252,6 +252,12 @@ updates `fd_allow_cidr`, then reconnect.
 (with the step and error) and `orphaned` (§7.3). Persisted in `infra.json`, so a relaunch
 resumes or cleans up rather than forgetting a machine.
 
+A failure before the apply began (preflight after registration, `tofu init`, or a plan
+`ResourceProvenance.checkUp` refuses) leaves nothing in the cloud and no cost segment, so
+`up` removes the record, its enrolled host and its work directory instead of keeping a
+`failed` one: it never appears in `infra doctor` or in a session's budget projection. A
+failure after the apply began keeps the record `failed` and rolls back.
+
 ### 7.2 Nothing outlives its TTL
 
 Enforced twice, so either side alone suffices:

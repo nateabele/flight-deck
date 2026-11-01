@@ -38,6 +38,8 @@ final class ResourceProvenanceTests: XCTestCase {
         XCTAssertEqual(h.tofu.calls, ["init", "plan"], "nothing applied, so nothing to roll back")
         XCTAssertEqual(h.provenance.records, [])
         XCTAssertEqual(h.ledger.spent(name: "gpu", now: h.now.addingTimeInterval(3600)), 0)
+        XCTAssertNil(h.registry.machine(named: "gpu"), "never applied, so no record to project or list")
+        if case .success = h.hosts.registry.resolve(name: "gpu") { XCTFail("the enrolled host is forgotten") }
     }
 
     func testAnUpPlanThatChangesAnExistingResourceIsRefused() throws {
