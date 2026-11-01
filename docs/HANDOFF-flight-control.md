@@ -539,12 +539,17 @@ the heatmap.
   representation, Compare, and the states and sizes controls (`visual-sizes`). Mermaid draws in a
   `WKWebView` that loads only `fdvisual://<id>/r<n>/…` through `VisualSchemeHandler`: manifest-listed
   files, a non-persistent store, every other scheme cancelled (V-R2). Mermaid 12.2.0 is vendored
-  in `Resources/Visuals/mermaid/` with its SHA-256 (V-R5). At most 3 web views are live; an
-  off-screen block shows its snapshot (`VisualRenderHost`). A block whose id has no stored revision
-  is a fixed-height "missing visual" placeholder; a parse error shows Mermaid's own message. An
-  older checkpoint shows the block states it recorded. The open V1 items (Find inside a hidden
-  block, snapshot timing and caching, one shared render host, edit marks on hidden lines) are
-  being done in parallel V4b.
+  in `Resources/Visuals/mermaid/` with its SHA-256 (V-R5). At most 3 web views are live, counting
+  any still waiting on their picture; an off-screen block shows its snapshot, drawn one at a time
+  by one shared `VisualRenderHost` into a cache bounded at 64 MB, and a render that times out is
+  not queued again in the session. The body's height follows the stored snapshot's shape (else
+  the live drawing's), within 160–640 pt; the size switch lays the live drawing out at that size's
+  width. A block whose id has no stored revision is a fixed-height "missing visual" placeholder;
+  a parse error shows Mermaid's own message. An older checkpoint shows the block states it
+  recorded. A Find match inside a block reveals its source (the reveal comes before the
+  indicator; closing Find hides it again), and lines removed just above a block draw their ghost.
+  The block's accessibility value says what it shows ("live, drawn, wide, 840 pt", "picture", or
+  Mermaid's error); its controls are labelled State and Size.
 - **Links** (`PlanLinks.swift`): ⌘-click opens a link. Holding ⌘ shows a tip with the target. `:42` and `#L42` suffixes are stripped. In-document `#anchor` links are not supported.
 - **Outline and breadcrumb:** `PlanReadingPosition` shows "§ Title" in the pinned board's footer, and a click jumps there. `PlanFocus` is how a heatmap cell asks for a Diff at a section.
 
@@ -579,9 +584,11 @@ Ask threads (spec §6, files under `Intake/Planning/Threads/`):
   - The footer shows "N notes carried into task notes".
   - The Release button text comes from `UIText.releaseButton`.
 - `ReleaseSheetModel.swift` holds the text and counts. `ReleaseSummary.swift` (IntakeKit) holds the count line.
-- For a plan with visuals, the sheet lists what release writes to the repo, what a re-release
-  removes, and the commit (`ReleaseReview.export`, from `RepoCommitter.preview`; spec §12
-  "Confirmation").
+- The sheet lists what release writes to the repo, what a re-release removes, and the commit
+  (`ReleaseReview.export`, from `RepoCommitter.preview`; spec §12 "Confirmation"), for every plan.
+  An export release would refuse (a missing visual, a dirty plan folder) shows in red before
+  Release is pressed (`exportRefusal`), and citations validation dropped show as warnings
+  (`visualWarnings`).
 - The sheet closes only on `released` or `partiallyReleased`.
 - Not verified: that `confirmedDrift`, `droppedOps` and `ratingOverrides` are saved to `intake.json` through `mutate`. It is likely, but `mutate` was not read.
 

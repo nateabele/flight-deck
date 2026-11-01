@@ -686,6 +686,14 @@ during the build.
   export-checkpoint has written `r<n>/export/` and its snapshots are stored. Release, the phone and
   thumbnails read the stored export and never re-export; export-checkpoint refuses
   `version_missing` once the app's renderer moves on. Re-rendering old checkpoints is a follow-up.
+- **No `pins.json` for Mermaid (§7, §12).** Pins arrive with P2b comps; a Mermaid visual has no
+  pins, so its revision folder and its export carry no `pins.json`.
+- **Final review rulings.** A citation of a visual the plan no longer has, or of a state its
+  visual lacks, is dropped at validation with a warning, never a failure; a `replace` that leaves
+  `visualRefs` null keeps them and `[]` drops them. A project in a subfolder of a git repo releases
+  into `<project>/docs/plans/<slug>/`, committing only that folder; a project in no repo is
+  refused. Any `.git`-named path component (any case) is refused in a manifest and in an export.
+  A manifest entry of size 0 or less is refused.
 - **The phone's viewer** blocks every non-`fdvisual` load with a `WKContentRuleList` and keeps
   JavaScript off. The Mac's live view needs the same rule list before P2b serves any page an
   agent wrote.

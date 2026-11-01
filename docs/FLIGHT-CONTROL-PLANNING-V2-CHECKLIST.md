@@ -58,9 +58,9 @@ Every item is unverified until the maintainer checks it in the GUI.
 
 ## P2a: visual blocks
 
-Every item is unverified until the maintainer checks it in the GUI. Items 6 and 7 of the V4
-addendum (Find inside a block, snapshot timing, the shared render host, edit marks on hidden
-lines, and the phone's alternate files) land in parallel V4b; check them once it merges.
+Every item is unverified until the maintainer checks it in the GUI. V4b's items (Find inside a
+block, snapshot timing, the shared render host, edit marks on hidden lines, and the phone's
+alternate files) are merged and listed below with the rest.
 
 ### Mac
 
