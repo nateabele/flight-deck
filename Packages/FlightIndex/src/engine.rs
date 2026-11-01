@@ -752,6 +752,20 @@ impl Engine {
         Some(e.graph.clone())
     }
 
+    /// The most recently used cached commit graph of `repo`, to warm-start a new commit's
+    /// PageRank from. Recency stands in for ancestry: the graph a worktree was on just before it
+    /// moved is almost always its parent or a near neighbour, and asking git which cached commit
+    /// is nearest would cost more than the sweeps it saves. A far one is still correct (the solve
+    /// runs to the same tolerance from any start), it just takes more sweeps.
+    fn nearest_base(&self, repo: &Path) -> Option<Arc<ViewGraph>> {
+        let c = self.graphs.lock().unwrap();
+        c.map
+            .iter()
+            .filter(|(k, _)| matches!(k, GraphKey::Base(r, _) if r == repo))
+            .max_by_key(|(_, e)| e.used)
+            .map(|(_, e)| e.graph.clone())
+    }
+
     fn remember(&self, key: GraphKey, stamp: String, graph: Arc<ViewGraph>) {
         {
             let mut c = self.graphs.lock().unwrap();
@@ -814,7 +828,8 @@ impl Engine {
                     None => {
                         let mut base_label = view.label.clone();
                         base_label.dirty = false;
-                        let b = self.building(|| -> Result<_> { Ok(Arc::new(ViewGraph::build(base_label, load(&view.base)?))) })?;
+                        let near = self.nearest_base(&view.label.repo);
+                        let b = self.building(|| -> Result<_> { Ok(Arc::new(ViewGraph::build_near(base_label, load(&view.base)?, near.as_deref()))) })?;
                         if complete {
                             self.remember(base_key.clone(), String::new(), b.clone());
                         }
