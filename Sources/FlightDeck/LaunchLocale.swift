@@ -33,7 +33,14 @@ enum LaunchLocale {
     /// The fallback `ensureLocale` settles on when nothing else resolves.
     static let fallbackLang = "en_US.UTF-8"
 
-    /// The variables to change (nil = unset) so that `ensureLocale` then finds nothing to do.
+    /// `swap-release.sh`'s overrides (`FD_SWAP_NEW_APP`, ...). The app reads none of them, but it
+    /// inherits them from the shell that relaunched it, and every tab then inherits the app's
+    /// environment, so a stale `FD_SWAP_NEW_APP` aborted later plain swaps from any tab. Only
+    /// these: other `FD_*` variables are read by tests hosted in this process (`FD_LINUX_HOSTD_*`).
+    static let scriptOnlyPrefixes = ["FD_SWAP_"]
+
+    /// The variables to change (nil = unset) so that `ensureLocale` then finds nothing to do,
+    /// and so that no script-only override (`scriptOnlyPrefixes`) reaches the tabs' shells.
     ///
     /// - Parameters:
     ///   - resolve: `setlocale(LC_ALL, "")` evaluated against an environment: the locale name,
@@ -45,7 +52,9 @@ enum LaunchLocale {
         resolve: ([String: String]) -> String?,
         canonicalize: (String) -> String
     ) -> [String: String?] {
-        var env = environment
+        var env = environment.filter { key, _ in
+            !scriptOnlyPrefixes.contains { key.hasPrefix($0) }
+        }
 
         // setLangFromCocoa: only when LANG is unset or empty, and only with both codes.
         if env["LANG"]?.isEmpty ?? true,

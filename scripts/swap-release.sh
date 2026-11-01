@@ -315,7 +315,9 @@ sleep 1
 # The ONLY place this script launches the app, and it launches $INSTALLED — never $NEW_APP.
 # Running a DerivedData bundle directly is what created a second live app instance.
 if [ "$WAS_RUNNING" -eq 1 ]; then
-  if open "$INSTALLED"; then
+  # env -u: `open` passes the caller's environment to the app, and every tab inherits the app's.
+  # A leaked FD_SWAP_NEW_APP (pointing at a scratchpad) broke later plain swaps from any tab.
+  if env -u FD_SWAP_NEW_APP -u FD_SWAP_CHECK_ONLY -u FD_SWAP_ALLOW_DEBUG -u FD_SWAP_EXPECT_TEAM open "$INSTALLED"; then
     log "relaunched."
   else
     log "WARNING: relaunch failed — open \"$INSTALLED\" by hand."
