@@ -351,18 +351,56 @@ pub fn format_status(svc: &Service, data: Option<&Value>) -> String {
     let views = d["views"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     out += &format!("views:    {}\n", views.len());
     for v in views.iter().take(20) {
+        let watching = match v["kept"].as_bool() {
+            Some(true) => match v["last_sweep_ms"].as_f64() {
+                Some(ms) => format!("swept by stat ({} files, {} dirs, last {:.1} ms)", n(&v["snapshot_files"]), n(&v["snapshot_dirs"]), ms),
+                None => "swept by stat".to_string(),
+            },
+            Some(false) => "git status each time".to_string(),
+            None => String::new(),
+        };
         out += &format!(
-            "  {} (repo {}, base {}, dirty {}), {} request(s), idle {}\n",
+            "  {} (repo {}, base {}, dirty {}), {} request(s), idle {}{}\n",
             v["worktree"].as_str().unwrap_or("?"),
             v["repo"].as_str().unwrap_or("?"),
             v["base"].as_str().map(|b| &b[..b.len().min(7)]).unwrap_or("?"),
             n(&v["dirty_files"]),
             n(&v["requests"]),
             human_duration(n(&v["idle_seconds"])),
+            if watching.is_empty() { String::new() } else { format!(", {watching}") },
         );
     }
     if views.len() > 20 {
         out += &format!("  … {} more\n", views.len() - 20);
+    }
+    match (d["watch"]["keeps_views"].as_bool(), d["watch"]["enabled"].as_bool()) {
+        (Some(true), Some(true)) => {
+            let w = &d["watch"];
+            out += &format!(
+                "fresh:    views kept and swept by stat (dropped after {:.0} h idle); refs of {} repository(ies) watched, {} event(s)\n",
+                w["active_hours"].as_f64().unwrap_or(0.0),
+                w["ref_repos"].as_array().map_or(0, Vec::len),
+                n(&w["events"]),
+            );
+        }
+        (Some(true), _) => out += "fresh:    views kept and swept by stat; no ref watcher on this platform\n",
+        (Some(false), _) => out += "fresh:    off; every request reads git status\n",
+        _ => {}
+    }
+    if d["gc"].is_object() {
+        let g = &d["gc"];
+        out += &format!("gc:       {} run(s), {} reclaimed in total, {} free page(s)\n", n(&g["runs"]), human_bytes(n(&g["reclaimed_bytes_total"])), n(&g["free_pages"]));
+        if let Some(l) = g["last"].as_object() {
+            out += &format!(
+                "  last: {} repo(s), {} dropped; {} fact(s), {} tree(s) collected; {} reclaimed in {:.1}s\n",
+                l["repos"].as_u64().unwrap_or(0),
+                l["repos_dropped"].as_u64().unwrap_or(0),
+                l["facts_dropped"].as_u64().unwrap_or(0),
+                l["trees_dropped"].as_u64().unwrap_or(0),
+                human_bytes(l["bytes_reclaimed"].as_u64().unwrap_or(0)),
+                l["took_seconds"].as_f64().unwrap_or(0.0),
+            );
+        }
     }
     let builds = d["builds"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     if builds.is_empty() {
@@ -442,13 +480,15 @@ mod tests {
         assert!(format_status(&s, None).contains("daemon:   not running"));
         let d = serde_json::json!({
             "version": "0.1.0", "protocol": 1, "pid": 42, "uptime_seconds": 125, "rss_bytes": 104857600u64, "requests": 7, "errors": 1, "parses": 90,
-            "views": [{"worktree": "/w/app", "repo": "app", "base": "1a2b3c4d5e", "dirty_files": 3, "requests": 5, "idle_seconds": 9}],
+            "views": [{"worktree": "/w/app", "repo": "app", "base": "1a2b3c4d5e", "dirty_files": 3, "requests": 5, "idle_seconds": 9, "kept": true, "snapshot_files": 1500, "snapshot_dirs": 300, "last_sweep_ms": 1.4}],
             "builds": [{"worktree": "/w/app", "phase": "Parsing", "done": 4, "total": 10}],
             "graphs": {"count": 1, "bytes": 2097152, "budget": 536870912u64, "evictions": 0},
             "stores": [{"name": "app.db", "bytes": 1048576}],
+            "watch": {"enabled": true, "keeps_views": true, "active_hours": 6.0, "events": 12, "ref_repos": [{"repo": "/w/app/.git"}, {"repo": "/w/b/.git"}]},
+            "gc": {"runs": 2, "reclaimed_bytes_total": 2097152, "free_pages": 0, "last": {"repos": 2, "repos_dropped": 1, "facts_dropped": 40, "trees_dropped": 3, "bytes_reclaimed": 1048576, "took_seconds": 0.5}},
         });
         let t = format_status(&s, Some(&d));
-        for want in ["pid 42", "fdindex 0.1.0", "up 2m05s", "100.0 MB resident", "1.0 MB in 1 repository", "/w/app (repo app, base 1a2b3c4, dirty 3)", "Parsing 4 of 10"] {
+        for want in ["pid 42", "fdindex 0.1.0", "up 2m05s", "100.0 MB resident", "1.0 MB in 1 repository", "/w/app (repo app, base 1a2b3c4, dirty 3)", "Parsing 4 of 10", "views kept and swept by stat (dropped after 6 h idle); refs of 2 repository(ies) watched, 12 event(s)", "swept by stat (1500 files, 300 dirs, last 1.4 ms)", "2 run(s), 2.0 MB reclaimed in total", "1 dropped; 40 fact(s), 3 tree(s) collected; 1.0 MB reclaimed"] {
             assert!(t.contains(want), "{want} missing in\n{t}");
         }
     }

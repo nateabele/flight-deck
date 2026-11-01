@@ -8,10 +8,10 @@
 //! 1. Paths in the arguments resolve against the caller's `cwd`; the view is the one containing
 //!    the *resolved path* (so `../tessera/...` named from another repo is answered from tessera), and
 //!    a query that names no path uses the view containing `cwd`.
-//! 2. The view is recomputed from git on every request: its overlay is whatever differs from
-//!    HEAD right now. That is the freshness rule until the watcher exists (an edit made a moment
-//!    ago is in the overlay, parsed on demand, and visible to this query). `Freshness` is the seam
-//!    the watcher replaces.
+//! 2. The view's overlay is whatever differs from HEAD right now. `Freshness` keeps it between
+//!    requests and finds what changed by `stat` (an edit made a moment ago is in the overlay,
+//!    parsed on demand, and visible to this query); a worktree it cannot vouch for is read from
+//!    `git status`.
 //! 3. If the store lacks facts for the view, it is built, requested paths first, and the request
 //!    waits for that slice up to a bound; past the bound it answers from what is stored and says
 //!    so in the header.
@@ -24,7 +24,11 @@ use crate::error::{Error, Result};
 use crate::git::{self, View};
 use crate::links::{LinkIndex, Member, Role};
 use crate::proto::{state, Request, Response, PROTOCOL_VERSION};
+use crate::refresh::{self, BaseIndex, Refreshed};
+use crate::retention::{self, GcReport, Maintenance};
 use crate::tools::{self, args::Args, Ctx, ToolError};
+use crate::sweep::Snapshot;
+use crate::watch::{WatchConfig, Watcher};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,11 +47,12 @@ pub struct Config {
     pub store: PathBuf,
     pub build_wait: Duration,
     pub graph_budget: usize,
+    pub watch: WatchConfig,
 }
 
 impl Config {
     pub fn new(store: impl Into<PathBuf>) -> Config {
-        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, graph_budget: DEFAULT_GRAPH_BUDGET }
+        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, graph_budget: DEFAULT_GRAPH_BUDGET, watch: WatchConfig::default() }
     }
 }
 
@@ -82,6 +87,7 @@ enum Readiness {
 
 struct ViewInfo {
     repo: PathBuf,
+    is_git: bool,
     base: Option<String>,
     dirty_files: usize,
     requests: u64,
@@ -92,6 +98,7 @@ pub struct Service {
     pub engine: Engine,
     cfg: Config,
     freshness: Freshness,
+    watcher: Option<Arc<Watcher>>,
     builds: Mutex<HashMap<PathBuf, Arc<Job>>>,
     views: Mutex<HashMap<PathBuf, ViewInfo>>,
     cochange: Mutex<HashMap<PathBuf, (String, CoChangeCell)>>,
@@ -101,32 +108,174 @@ pub struct Service {
     /// read holds it for reading while it fetches its view and graph. A query therefore sees the
     /// worktree before a mutation or after it, never between two of its file writes.
     gates: Mutex<HashMap<PathBuf, Arc<RwLock<()>>>>,
-    /// Last `seq` seen per cwd. Nothing reads it yet; the watcher step uses it to prove a
-    /// caller's earlier edits were indexed before it is answered.
+    /// Last `seq` seen per cwd. Nothing reads it: freshness does not need it, because every
+    /// request looks at the file system itself.
     seqs: Mutex<HashMap<String, u64>>,
+    maintenance: Arc<Maintenance>,
     started: Instant,
     requests: AtomicU64,
     errors: AtomicU64,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.maintenance.stop();
+    }
 }
 
 impl Service {
     pub fn open(cfg: Config) -> Result<Arc<Service>> {
         let engine = Engine::open(&cfg.store)?;
         engine.set_graph_budget(cfg.graph_budget);
-        Ok(Arc::new(Service {
-            engine,
-            cfg,
-            freshness: Freshness::default(),
-            builds: Mutex::new(HashMap::new()),
-            views: Mutex::new(HashMap::new()),
-            cochange: Mutex::new(HashMap::new()),
-            links: LinkIndex::default(),
-            gates: Mutex::new(HashMap::new()),
-            seqs: Mutex::new(HashMap::new()),
-            started: Instant::now(),
-            requests: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-        }))
+        let svc = Arc::new_cyclic(|me: &std::sync::Weak<Service>| {
+            // The refs callback runs on the watcher's own thread, after the service exists.
+            let me = me.clone();
+            let watcher = Watcher::start(&cfg.watch, move |common| {
+                if let Some(s) = me.upgrade() {
+                    s.on_refs(common);
+                }
+            });
+            Service {
+                freshness: Freshness::new(cfg.watch.enabled),
+                watcher,
+                engine,
+                cfg,
+                builds: Mutex::new(HashMap::new()),
+                views: Mutex::new(HashMap::new()),
+                cochange: Mutex::new(HashMap::new()),
+                links: LinkIndex::default(),
+                gates: Mutex::new(HashMap::new()),
+                seqs: Mutex::new(HashMap::new()),
+                maintenance: Arc::new(Maintenance::default()),
+                started: Instant::now(),
+                requests: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+            }
+        });
+        svc.watch_known_repos();
+        let (weak, m) = (Arc::downgrade(&svc), svc.maintenance.clone());
+        std::thread::Builder::new().name("fdindex-maintenance".into()).spawn(move || maintenance_loop(weak, m)).map_err(|e| Error::Msg(format!("could not start the maintenance thread: {e}")))?;
+        Ok(svc)
+    }
+
+    // ---- maintenance ----------------------------------------------------------------------
+
+    /// One look at the world: drop worktrees whose directory is gone, release watches nobody has
+    /// used lately, and collect when a collection is due.
+    pub fn maintain(&self) {
+        let removed = self.sweep();
+        if removed > 0 {
+            // Their blobs are garbage as soon as no other tree names them.
+            self.maintenance.request_gc();
+        }
+        for root in self.freshness.release_idle(self.cfg.watch.active_for) {
+            log::info(&format!("dropped the kept view of idle worktree {}", root.display()));
+        }
+        if self.maintenance.gc_due(self.started.elapsed()) {
+            self.run_gc();
+        }
+    }
+
+    /// Forget every known worktree whose directory (or `.git`) no longer exists: its kept view,
+    /// its watch, its overlay and its graph. Returns how many went. The stat per worktree is the
+    /// whole cost, which is why this runs every tick instead of waiting for the watcher to say so.
+    fn sweep(&self) -> usize {
+        let gone: Vec<(PathBuf, PathBuf, Option<String>)> = self
+            .views
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(wt, i)| !wt.exists() || (i.is_git && !wt.join(".git").exists()))
+            .map(|(wt, i)| (wt.clone(), i.repo.clone(), i.base.clone()))
+            .collect();
+        for (wt, repo, base) in &gone {
+            self.freshness.forget(wt);
+            self.gates.lock().unwrap().remove(wt);
+            let in_use = {
+                let mut views = self.views.lock().unwrap();
+                views.remove(wt);
+                base.is_some() && views.values().any(|i| i.repo == *repo && i.base == *base)
+            };
+            self.engine.release_worktree(repo, wt, base.as_deref(), in_use);
+            log::info(&format!("worktree {} is gone: released its view, overlay and graph", wt.display()));
+        }
+        gone.len()
+    }
+
+    /// Drop the kept view of every worktree idle for `idle`, as the maintenance thread does for
+    /// `watch.active_for`. Returns how many were released.
+    pub fn release_idle_views(&self, idle: Duration) -> usize {
+        self.freshness.release_idle(idle).len()
+    }
+
+    /// Collect the whole store now, one collection at a time whoever asks.
+    pub fn run_gc(&self) -> GcReport {
+        let _one = self.maintenance.gc_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let report = retention::collect(&self.engine, &|repo| {
+            if let Some(w) = self.watcher.as_ref() {
+                w.unwatch_repo(repo);
+            }
+        });
+        log::info(&format!("gc: {}", report.summary()));
+        self.maintenance.record(report.clone());
+        report
+    }
+
+    /// A repository's refs changed (or it was just added to the ref watch). Re-read its branch
+    /// heads, which garbage collection treats as roots, and prepare the new base tree of every
+    /// kept worktree whose HEAD moved: its listing is derived from the old one and only blobs the
+    /// store has never seen are parsed, so the question that follows a commit, checkout or rebase
+    /// finds that done. Late or lost, this only costs the warm-up: a request compares HEAD itself.
+    fn on_refs(self: &Arc<Self>, common: &Path) {
+        if !common.join("HEAD").exists() {
+            // Gone, or not a git repository at all; the retention pass drops its store.
+            if let Some(w) = &self.watcher {
+                w.unwatch_repo(common);
+            }
+            return;
+        }
+        if let Err(e) = self.engine.refresh_known_refs(common) {
+            log::info(&format!("could not read the branch heads of {}: {e}", common.display()));
+        }
+        for wt in self.freshness.moved_heads(common) {
+            let started = Instant::now();
+            let parsed = self.engine.parse_count();
+            let prepared = self.view(&wt).and_then(|view| self.ensure_built(&view, &[], false, Some(MAX_BUILD_WAIT)).map(|_| view));
+            match prepared {
+                Ok(view) => log::info(&format!(
+                    "prepared {} for its new base {} in {:?}, {} blob(s) parsed",
+                    wt.display(),
+                    view.label.base_commit.as_deref().map(|c| &c[..c.len().min(7)]).unwrap_or("-"),
+                    started.elapsed(),
+                    self.engine.parse_count().saturating_sub(parsed)
+                )),
+                Err(e) => log::info(&format!("could not prepare {}: {e}", wt.display())),
+            }
+        }
+    }
+
+    /// Every repository the store already knows, so their refs are watched from the first moment
+    /// and a commit made while no request was in flight still moves the known refs.
+    fn watch_known_repos(&self) {
+        let Some(w) = self.watcher.as_ref() else { return };
+        for (_, repo) in crate::store::list_dbs(&self.cfg.store) {
+            if let Some(repo) = repo.filter(|r| r.join("HEAD").exists()) {
+                w.watch_repo(&repo);
+            }
+        }
+    }
+
+    /// The view of the worktree containing `path` as of now, recorded in the store (see
+    /// `Engine::record_view`).
+    fn view(&self, path: &Path) -> Result<View> {
+        let view = self.freshness.view(&self.engine, path)?;
+        self.engine.record_view(&view)?;
+        // A repository is watched from the first request that names it; one the store already
+        // knew was watched at startup.
+        if let (Some(w), true) = (&self.watcher, view.label.is_git) {
+            w.watch_repo(&view.label.repo);
+        }
+        Ok(view)
     }
 
     /// Answer one request. Never panics out: a bug in a tool costs that request, not the daemon.
@@ -190,7 +339,7 @@ impl Service {
         check_indexable(&located, &anchor.path)?;
         let gate = self.gate(&located.root);
         let _reading = gate.read().unwrap_or_else(|e| e.into_inner());
-        let view = self.freshness.view(&self.engine, &anchor.path)?;
+        let view = self.view(&anchor.path)?;
         self.touch(&view);
 
         // The views this one links to build while it does (a cold `formula-editor` query builds
@@ -242,7 +391,7 @@ impl Service {
         let mut attempt = 0;
         let (view, mut plan) = loop {
             attempt += 1;
-            let view = self.freshness.view(&self.engine, &anchor)?;
+            let view = self.view(&anchor)?;
             self.touch(&view);
             // A rename that misses a file because its importers were not parsed yet would leave
             // the code broken, so a mutator never works from a partial graph.
@@ -301,7 +450,7 @@ impl Service {
 
         // Re-index before answering: the next query from this cwd must see the change, so look at
         // the worktree again now (the writes are on disk) and make its graph.
-        let view = self.freshness.view(&self.engine, &anchor)?;
+        let view = self.view(&anchor)?;
         let written: Vec<PathBuf> = plan.changes.iter().filter(|c| c.after.is_some()).map(|c| c.path.clone()).collect();
         self.ensure_built(&view, &written, false, Some(MAX_BUILD_WAIT))?;
         let graph = self.engine.graph(&view)?;
@@ -350,7 +499,7 @@ impl Service {
         // The caller's own checkout is recorded first so that it counts as a dependent below.
         if let Ok(loc) = git::locate(Path::new(cwd))
             && loc.root != view.label.worktree
-            && let Ok(v) = self.freshness.view(&self.engine, &loc.root)
+            && let Ok(v) = self.view(&loc.root)
         {
             self.links.of(&v);
         }
@@ -370,7 +519,7 @@ impl Service {
         let cwd_root = git::locate(Path::new(cwd)).map(|l| l.root).ok();
         let mut out = Vec::new();
         for p in planned {
-            let Ok(view) = self.freshness.view(&self.engine, &p.root) else { continue };
+            let Ok(view) = self.view(&p.root) else { continue };
             if p.role == Role::Dependent && cwd_root.as_deref() != Some(p.root.as_path()) && !self.engine.is_ready(&view).unwrap_or(false) {
                 continue;
             }
@@ -502,6 +651,7 @@ impl Service {
         let mut views = self.views.lock().unwrap();
         let e = views.entry(view.label.worktree.clone()).or_insert_with(|| ViewInfo {
             repo: view.label.repo.clone(),
+            is_git: view.label.is_git,
             base: view.label.base_commit.clone(),
             dirty_files: 0,
             requests: 0,
@@ -637,12 +787,23 @@ impl Service {
         if tool == "workspace" && args.str(&["action"]).as_deref() == Some("remove") {
             return Ok("workspace remove: nothing to do. The daemon indexes any path on demand, so there is no scope to shrink.".into());
         }
-        let path = args.path(&["path", "root", "dir", "file_path"]).or_else(|| (!req.cwd.is_empty()).then(|| PathBuf::from(&req.cwd))).ok_or_else(|| ToolError::bad(format!("{tool} requires a path")))?;
-        let view = self.freshness.view(&self.engine, &path)?;
+        let named = args.path(&["path", "root", "dir", "file_path"]);
+        if tool == "gc" && named.is_none() {
+            // No path: the whole store. `--now` waits for it; without, it is queued for the
+            // maintenance thread and the answer says what the last one did.
+            if args.flag(&["now"], false) {
+                return Ok(format!("gc: {}", self.run_gc().summary()));
+            }
+            self.maintenance.request_gc();
+            let last = self.maintenance.last().map(|r| r.summary()).unwrap_or_else(|| "none yet".into());
+            return Ok(format!("gc requested; it runs in the background (pass --now to wait for it). Last: {last}"));
+        }
+        let path = named.or_else(|| (!req.cwd.is_empty()).then(|| PathBuf::from(&req.cwd))).ok_or_else(|| ToolError::bad(format!("{tool} requires a path")))?;
+        let view = self.view(&path)?;
         self.touch(&view);
         if tool == "gc" {
             let stats = self.engine.gc(&view.label.repo)?;
-            let freed = self.engine.incremental_vacuum(&view.label.repo, 0)?;
+            let freed = self.engine.vacuum(&view.label.repo)?;
             return Ok(format!("{}\ngc: {stats:?}; vacuumed {freed} page(s)", tools::header(&view.label, view.overlay.len(), None)));
         }
         let wait = (tool == "build").then(|| args.num(&["wait_ms"]).map(|m| Duration::from_millis(m as u64)).unwrap_or(Duration::from_secs(600)));
@@ -668,9 +829,17 @@ impl Service {
             rows.sort_by_key(|(_, i)| std::cmp::Reverse(i.last_used));
             rows.into_iter()
                 .map(|(wt, i)| {
+                    let k = self.freshness.kept_info(wt);
+                    let ago = |t: SystemTime| now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
                     json!({
                         "worktree": wt, "repo": i.repo, "base": i.base, "dirty_files": i.dirty_files, "requests": i.requests,
-                        "idle_seconds": now.duration_since(i.last_used).map(|d| d.as_secs()).unwrap_or(0),
+                        "idle_seconds": ago(i.last_used),
+                        // Kept between requests and swept by stat, or read from `git status` each time.
+                        "kept": k.is_some(),
+                        "snapshot_files": k.as_ref().map(|k| k.files), "snapshot_dirs": k.as_ref().map(|k| k.dirs),
+                        "sweeps": k.as_ref().map(|k| k.sweeps),
+                        "last_sweep_ms": k.as_ref().and_then(|k| k.last_sweep).map(|d| d.as_secs_f64() * 1000.0),
+                        "last_change_seconds_ago": k.as_ref().and_then(|k| k.last_change).map(ago),
                     })
                 })
                 .collect()
@@ -686,18 +855,27 @@ impl Service {
             })
             .collect();
         let g = self.engine.graph_cache_stats();
-        let stores: Vec<Value> = std::fs::read_dir(&self.cfg.store)
-            .map(|rd| {
-                let mut v: Vec<(String, u64)> = rd
-                    .flatten()
-                    .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
-                    .map(|e| (e.file_name().to_string_lossy().to_string(), e.metadata().map(|m| m.len()).unwrap_or(0)))
-                    .collect();
-                v.sort();
-                v.into_iter().map(|(name, bytes)| json!({"name": name, "bytes": bytes})).collect()
-            })
-            .unwrap_or_default();
-        let store_bytes: u64 = stores.iter().filter_map(|s| s["bytes"].as_u64()).sum();
+        let overview = retention::store_overview(&self.engine);
+        let stores: Vec<Value> = overview
+            .iter()
+            .map(|(db, repo, bytes, free)| json!({"name": db.file_name().map(|n| n.to_string_lossy().to_string()), "repo": repo, "bytes": bytes, "free_pages": free}))
+            .collect();
+        let store_bytes: u64 = overview.iter().map(|(_, _, b, _)| b).sum();
+        let free_pages: u64 = overview.iter().map(|(_, _, _, f)| f).sum();
+        let ago = |t: SystemTime| now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+        let watch = match self.watcher.as_ref() {
+            None => json!({"enabled": false, "keeps_views": self.cfg.watch.enabled}),
+            Some(w) => json!({
+                "enabled": true, "keeps_views": true,
+                "active_hours": self.cfg.watch.active_for.as_secs_f64() / 3600.0,
+                "events": w.total_events(),
+                "ref_repos": w.repos().into_iter().map(|r| json!({"repo": r.common, "events": r.events, "last_event_seconds_ago": r.last_event.map(ago)})).collect::<Vec<_>>(),
+            }),
+        };
+        let gc = json!({
+            "runs": self.maintenance.runs(), "reclaimed_bytes_total": self.maintenance.reclaimed_total(),
+            "free_pages": free_pages, "last": self.maintenance.last().map(|r| r.to_json()),
+        });
         let rss = crate::runtime::rss_bytes();
         let data = json!({
             "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL_VERSION, "pid": std::process::id(),
@@ -708,10 +886,11 @@ impl Service {
             "views": views, "builds": builds,
             "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "budget": g.budget, "evictions": g.evictions},
             "stores": stores,
+            "watch": watch, "gc": gc,
         });
         let mb = |b: u64| format!("{:.1} MB", b as f64 / 1_048_576.0);
         let text = format!(
-            "fdindex {} (protocol {PROTOCOL_VERSION}), pid {}, up {}s\nrss {}; {} request(s), {} error(s), {} blob(s) parsed\nviews known: {}; builds running: {}\ngraphs cached: {} ({} of {} budget, {} evicted)\nstore: {} db file(s), {}",
+            "fdindex {} (protocol {PROTOCOL_VERSION}), pid {}, up {}s\nrss {}; {} request(s), {} error(s), {} blob(s) parsed\nviews known: {}; builds running: {}\ngraphs cached: {} ({} of {} budget, {} evicted)\nstore: {} db file(s), {}, {} free page(s)\nwatch: {}\ngc: {}",
             env!("CARGO_PKG_VERSION"),
             std::process::id(),
             self.started.elapsed().as_secs(),
@@ -727,6 +906,16 @@ impl Service {
             g.evictions,
             stores.len(),
             mb(store_bytes),
+            free_pages,
+            match (self.cfg.watch.enabled, self.watcher.as_ref()) {
+                (false, _) => "off (every request reads git status)".to_string(),
+                (true, None) => "views kept and swept by stat; no ref watcher on this platform".to_string(),
+                (true, Some(w)) => format!("views kept and swept by stat; refs of {} repo(s) watched, {} event(s)", w.repos().len(), w.total_events()),
+            },
+            match self.maintenance.last() {
+                None => "no collection yet".to_string(),
+                Some(r) => format!("{} run(s); last {}s ago reclaimed {} bytes", self.maintenance.runs(), r.at.map(ago).unwrap_or(0), r.reclaimed()),
+            },
         );
         Response { ok: true, text: Some(text), data: Some(data), ..Default::default() }
     }
@@ -762,17 +951,56 @@ fn read_unless_blocked(gate: &RwLock<()>) -> Option<std::sync::RwLockReadGuard<'
     None
 }
 
-/// Where a request's view comes from. Today: git, recomputed per request. The watcher step
-/// replaces this with a view kept current by file events and a ref watcher; callers do not change.
+/// Where a request's view comes from.
 ///
-/// Concurrent requests for one worktree share a recomputation, but never an older one: a request
-/// that arrives while a `git status` is running waits for the *next* one to start and finish, so
-/// whatever it returns was computed after the request arrived (an edit made just before it is in
-/// it). Under N simultaneous clients that is two statuses per round instead of N, which matters
-/// because `git status` is 20 ms on a quiet checkout and several times that on a busy one.
+/// With `watch.enabled`, a worktree's view is *kept* between requests. A request looks at the file
+/// system (`Snapshot::check`: a `stat` of every indexed file and non-ignored directory, about 2 ms
+/// on tessera), applies only what changed (`refresh`), and compares HEAD, read from git's own
+/// files, with the one the view was built on. No process is spawned and nothing waits on an event,
+/// so an edit made a millisecond before the request is seen: the stat is of the file system as it
+/// is. (Events were tried and measured unsound; see `sweep`.)
+///
+/// Otherwise, and whenever the kept view cannot be trusted, the view is recomputed from `git
+/// status`, which is slower and always right: a worktree first seen, one whose kept view was
+/// dropped for idleness, a moved HEAD, a changed ignore file, a bulk change, a directory outside
+/// git. Concurrent requests for one worktree share a recomputation, but never an older one: a
+/// request that arrives while a `git status` is running waits for the *next* one to start and
+/// finish, so whatever it returns was computed after the request arrived. Under N simultaneous
+/// clients that is two statuses per round instead of N.
 #[derive(Default)]
 pub struct Freshness {
     slots: Mutex<HashMap<PathBuf, Arc<Slot>>>,
+    keep: bool,
+    entries: Mutex<HashMap<PathBuf, Arc<Mutex<Entry>>>>,
+}
+
+/// One worktree's kept view. The mutex serialises its requests: a second request must not read
+/// the view while the first is still applying the changes its sweep found.
+#[derive(Default)]
+struct Entry {
+    cached: Option<Cached>,
+    last_used: Option<Instant>,
+    /// How long the last sweep took, and when one last found a change, for `status`.
+    last_sweep: Option<Duration>,
+    last_change: Option<SystemTime>,
+    sweeps: u64,
+}
+
+struct Cached {
+    view: View,
+    index: BaseIndex,
+    snapshot: Snapshot,
+    gitdir: PathBuf,
+    common: PathBuf,
+}
+
+/// What `status` shows of one worktree's kept view.
+pub struct KeptInfo {
+    pub files: usize,
+    pub dirs: usize,
+    pub last_sweep: Option<Duration>,
+    pub last_change: Option<SystemTime>,
+    pub sweeps: u64,
 }
 
 #[derive(Default)]
@@ -823,7 +1051,118 @@ impl Drop for Leader<'_> {
 }
 
 impl Freshness {
+    pub fn new(keep: bool) -> Freshness {
+        Freshness { keep, ..Default::default() }
+    }
+
     pub fn view(&self, engine: &Engine, path: &Path) -> Result<View> {
+        let located = git::locate(path)?;
+        if self.keep && located.is_git {
+            self.kept(engine, &located.root, path)
+        } else {
+            self.read_status(engine, path)
+        }
+    }
+
+    fn kept(&self, engine: &Engine, root: &Path, path: &Path) -> Result<View> {
+        let entry = self.entries.lock().unwrap().entry(root.to_path_buf()).or_default().clone();
+        let mut e = entry.lock().unwrap_or_else(|x| x.into_inner());
+        e.last_used = Some(Instant::now());
+        if let Some(c) = e.cached.as_mut() {
+            let started = Instant::now();
+            let swept = Self::sweep(c);
+            let took = started.elapsed();
+            if let Some((view, changed)) = swept {
+                e.last_sweep = Some(took);
+                e.sweeps += 1;
+                if changed {
+                    e.last_change = Some(SystemTime::now());
+                }
+                return Ok(view);
+            }
+        }
+        // A full read, and a snapshot of the file system right after it: whatever changes in
+        // between has a ctime inside the snapshot's racy window and is looked at again.
+        e.cached = None;
+        let view = self.read_status(engine, path)?;
+        if let Ok((gitdir, common)) = git::git_dirs(root) {
+            e.cached = Some(Cached { index: BaseIndex::new(&view), snapshot: Snapshot::take(&view, &common), view: view.clone(), gitdir, common });
+        }
+        Ok(view)
+    }
+
+    /// The kept view brought up to date, or `None` when it needs a full read. The `bool` says
+    /// whether anything had changed.
+    fn sweep(c: &mut Cached) -> Option<(View, bool)> {
+        if git::read_head(&c.gitdir, &c.common) != c.view.label.base_commit {
+            return None;
+        }
+        let changes = c.snapshot.check();
+        if changes.rescan {
+            return None;
+        }
+        if changes.is_empty() {
+            return Some((c.view.clone(), false));
+        }
+        match refresh::refresh(&c.view, &c.index, &changes) {
+            Ok(Refreshed::View(v)) => {
+                c.snapshot.settle(&v, &|p| c.index.contains(p), &changes);
+                c.view = v.clone();
+                Some((v, true))
+            }
+            _ => None,
+        }
+    }
+
+    /// Worktrees of `common` whose kept view was built on a commit that is no longer their HEAD:
+    /// what the ref watcher prepares the next question for.
+    pub fn moved_heads(&self, common: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for (root, entry) in self.entries.lock().unwrap().iter() {
+            let Ok(e) = entry.try_lock() else { continue };
+            // A worktree whose directory is gone has no HEAD to compare, which would read as a move;
+            // the sweep releases it, and preparing it would index whatever directory is left where it was.
+            if let Some(c) = &e.cached
+                && c.common == common
+                && root.join(".git").exists()
+                && git::read_head(&c.gitdir, &c.common) != c.view.label.base_commit
+            {
+                out.push(root.clone());
+            }
+        }
+        out
+    }
+
+    /// Drop the kept view of worktrees nobody has asked about for `idle`: their next query is a
+    /// full read (spec §5.4). Returns the worktrees released.
+    pub fn release_idle(&self, idle: Duration) -> Vec<PathBuf> {
+        let mut released = Vec::new();
+        for (root, entry) in self.entries.lock().unwrap().iter() {
+            // A worktree being answered right now is not idle, whatever its stamp says.
+            let Ok(mut e) = entry.try_lock() else { continue };
+            if e.cached.is_some() && e.last_used.is_some_and(|t| t.elapsed() >= idle) {
+                e.cached = None;
+                released.push(root.clone());
+            }
+        }
+        released
+    }
+
+    /// A worktree that no longer exists.
+    pub fn forget(&self, root: &Path) {
+        self.entries.lock().unwrap().remove(root);
+    }
+
+    pub fn kept_info(&self, root: &Path) -> Option<KeptInfo> {
+        let entry = self.entries.lock().unwrap().get(root)?.clone();
+        let e = entry.try_lock().ok()?;
+        let c = e.cached.as_ref()?;
+        let (files, dirs) = c.snapshot.counts();
+        Some(KeptInfo { files, dirs, last_sweep: e.last_sweep, last_change: e.last_change, sweeps: e.sweeps })
+    }
+
+    /// The view recomputed from git, shared between concurrent callers.
+    fn read_status(&self, engine: &Engine, path: &Path) -> Result<View> {
         let root = git::locate(path)?.root;
         let slot = self.slots.lock().unwrap().entry(root).or_default().clone();
         let mut st = slot.state.lock().unwrap();
@@ -848,6 +1187,19 @@ impl Freshness {
             leader.finish(computed.as_ref().map(|v| v.clone()).map_err(|e| e.to_string()));
             return computed;
         }
+    }
+}
+
+/// Runs until the service is dropped. It waits on the shared `Maintenance` and holds the service
+/// only while it works, so it never keeps one alive.
+fn maintenance_loop(svc: std::sync::Weak<Service>, m: Arc<Maintenance>) {
+    while !m.stopped() {
+        m.wait();
+        let Some(s) = svc.upgrade() else { return };
+        if m.stopped() {
+            return;
+        }
+        s.maintain();
     }
 }
 
