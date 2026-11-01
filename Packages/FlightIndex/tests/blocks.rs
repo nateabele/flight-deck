@@ -103,3 +103,23 @@ fn the_cache_charges_a_shared_block_once() {
     assert!(one.blocks < 4 && two.blocks <= one.blocks + 1, "{} -> {} blocks", one.blocks, two.blocks);
     assert!(two.block_bytes < 2 * one.block_bytes);
 }
+
+/// The two features meet here: the overlay's early cutoff (an edit that leaves a file's export
+/// surface alone re-resolves nothing but that file) keeps the importer's block, and that block is
+/// the one a full graph of the committed edit shares too, because blocks are keyed by content and
+/// the importer's content really did not change.
+#[test]
+fn a_body_edit_the_export_surface_cuts_off_keeps_the_importers_shared_block() {
+    let (_d, e) = engine();
+    let r = fixture();
+    let base = graph(&e, &r.root);
+    write(&r.root, "lib.ts", "export function helper() { return 1; }\nexport function other() {}\n");
+    let overlay = graph(&e, &r.root);
+    assert_eq!(overlay.resolved_files(), 1, "only lib.ts is resolved again");
+    let app = |g: &ViewGraph| g.resolution(idx(g, "app.ts")) as *const _;
+    assert_eq!(app(&base), app(&overlay), "app.ts kept the base's block");
+    commit_all(&r.root, "two");
+    let committed = graph(&e, &r.root);
+    assert_eq!(overlay.fingerprint(), committed.fingerprint());
+    assert_eq!(app(&overlay), app(&committed), "the committed graph shares that block");
+}

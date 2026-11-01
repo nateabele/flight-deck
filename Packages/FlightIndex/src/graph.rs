@@ -7,11 +7,16 @@
 //! changed files and what depends on them:
 //!
 //! * the changed files themselves;
-//! * their importers (a symbol they used may have moved, been renamed, or gone);
+//! * their importers (a symbol they used may have moved, been renamed, or gone), and the files
+//!   whose resolved references land in them without an import (`ref_dependents`: qualified Rust
+//!   paths, re-exports followed through a barrel file) -- unless the edit left the file's export
+//!   surface (`surface_hash`: what another file's resolution can read from it) unchanged, as a
+//!   body-only edit does;
 //! * if any file was added or removed (or an Elm module renamed), every file with an unresolved
 //!   import, since it may resolve now (or a resolved one may now be dangling);
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
-//!   changed, because "the unique symbol with this name" may have changed.
+//!   changed, because "the unique symbol with this name" may have changed (looked up in the
+//!   base's `soft_index`, built on the first overlay, rather than scanned).
 //!
 //! File indices are stable across `with_changes` (removed files become tombstones, added files are
 //! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
@@ -31,9 +36,11 @@ mod compact;
 mod elixir;
 mod python;
 pub mod rank;
+mod surface;
 mod swift;
 
 pub use blocks::Share;
+pub use surface::surface_hash;
 use compact::{Incoming, NameIndex};
 
 use crate::facts::*;
@@ -42,7 +49,11 @@ use crate::names::{NameId, NamePool};
 use crate::resolve::{Resolved, Resolver};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Reference name, qualifier, or "qualifier.name" -> the files (ascending, deduplicated) holding a
+/// reference by that key that binds by name alone: unresolved, fallback-resolved, or Swift.
+type SoftIndex = HashMap<String, Vec<u32>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SymId {
@@ -159,6 +170,11 @@ pub struct GraphData {
     pub(crate) index: HashMap<String, u32>,
     pub(crate) res: Vec<Arc<FileRes>>,
     pub(crate) importers: Vec<Vec<u32>>,
+    /// target file -> files with a resolved reference into it that do not import it: a qualified
+    /// Rust path (`a::m::f()` records no import), or a re-export followed through a barrel
+    /// (`import { helper } from './lib'` lands in `lib/impl.ts`). `with_changes` re-resolves these
+    /// next to `importers`, or their references keep a target whose local id has moved.
+    pub(crate) ref_dependents: Vec<Vec<u32>>,
     /// Every definition (but `impl` blocks) by name; look up with `named`.
     name_index: NameIndex,
     /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
@@ -184,6 +200,13 @@ pub struct GraphData {
     /// Resolves every `RefSite` of `files`. The repository's pool as of this build; a later one
     /// would do as well (ids only append), which is what `with_changes` relies on.
     names: Arc<NamePool>,
+    /// Built on first use by `with_changes` on this graph, from this graph's own `res`; never
+    /// carried into a derived graph (`with_changes` resets it), so it always describes the data it
+    /// sits in, even if overlays are ever chained. An `Arc` so cloning `GraphData` stays cheap.
+    soft_index: Arc<OnceLock<SoftIndex>>,
+    /// How many files this graph resolved itself rather than reused from its base (all of them
+    /// for `build`): what the overlay dirty rules cost, and what tests assert they skip.
+    resolved: usize,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -244,6 +267,7 @@ impl ViewGraph {
             files,
             index: HashMap::new(),
             importers: Vec::new(),
+            ref_dependents: Vec::new(),
             name_index: NameIndex::default(),
             incoming: Incoming::default(),
             external_refs: HashMap::new(),
@@ -256,6 +280,8 @@ impl ViewGraph {
             elm_modules: HashMap::new(),
             share,
             names,
+            resolved: 0,
+            soft_index: Arc::default(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -263,6 +289,7 @@ impl ViewGraph {
                 g.res[f as usize] = g.intern(g.resolve_file(f));
             }
         }
+        g.resolved = g.files.iter().filter(|f| f.alive).count();
         g.finalize(near.map(|n| &*n.data));
         ViewGraph { label, root, data: Arc::new(g) }
     }
@@ -277,9 +304,12 @@ impl ViewGraph {
             g.names = names;
         }
         g.root = label.worktree.clone();
+        g.soft_index = Arc::default();
         let old_files_len = g.files.len();
 
         let mut changed: HashSet<u32> = HashSet::new();
+        // Changed in place with the same export surface: no other file can resolve differently.
+        let mut same_surface: HashSet<u32> = HashSet::new();
         let mut structural = false; // a path appeared/disappeared or an Elm module name moved
         let mut old_names: HashSet<String> = HashSet::new();
         let mut new_names: HashSet<String> = HashSet::new();
@@ -292,6 +322,9 @@ impl ViewGraph {
                     match g.index.get(&f.path).copied() {
                         Some(i) => {
                             let old = &g.files[i as usize];
+                            if surface_hash(&old.facts) == surface_hash(&node.facts) {
+                                same_surface.insert(i);
+                            }
                             old_names.extend(names_of(old));
                             structural |= old.facts.module_name != node.facts.module_name;
                             new_names.extend(names_of(&node));
@@ -324,40 +357,46 @@ impl ViewGraph {
         g.reindex();
 
         let mut dirty: HashSet<u32> = changed.iter().copied().filter(|i| g.files[*i as usize].alive).collect();
-        if self.data.location_sensitive && self.data.root != label.worktree {
+        let relocated = self.data.location_sensitive && self.data.root != label.worktree;
+        if relocated {
             // `../lib` is another directory from here: nothing resolved outside the root carries over.
             dirty.extend((0..g.files.len() as u32).filter(|i| g.files[*i as usize].alive));
         }
         for &c in &changed {
-            if (c as usize) < old_files_len {
+            // Early cutoff: the edit left everything another file reads from `c` alone (see
+            // `surface_hash`), so its importers' and dependents' resolutions still hold.
+            if (c as usize) < old_files_len && !same_surface.contains(&c) {
                 dirty.extend(self.data.importers[c as usize].iter().copied());
+                dirty.extend(self.data.ref_dependents[c as usize].iter().copied());
             }
         }
-        for (i, r) in g.res.iter().enumerate() {
-            let i = i as u32;
-            if dirty.contains(&i) || !g.files[i as usize].alive {
-                continue;
-            }
-            let unresolved_import = structural && r.imports.iter().any(|x| matches!(x, Resolved::Unresolved));
-            let soft_hit = !changed_names.is_empty()
-                && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
-                    // `Shop.Order.total()` names the module in its qualifier, and a `%Shop.Item{}` splits
-                    // the module name across qualifier and name; either may be what just appeared.
-                    let name = g.names.resolve(fr.name);
-                    (rr.target.is_none() || rr.confidence == Confidence::Fallback || g.files[i as usize].language == "swift")
-                        && (changed_names.contains(name)
-                            || fr.qualifier().map(|q| g.names.resolve(q)).is_some_and(|q| {
-                                changed_names.contains(q) || changed_names.contains(&format!("{q}.{name}"))
-                            }))
-                });
-            // A removed file's importers resolved into it; they are in `dirty` via `importers`.
-            if unresolved_import || soft_hit {
-                dirty.insert(i);
+        // A path appeared or disappeared, or an Elm module was renamed: an unresolved import may
+        // resolve now. (A removed file's importers resolved into it; they are dirty via `importers`.)
+        if structural && !relocated {
+            for (i, r) in g.res.iter().enumerate() {
+                if g.files[i].alive && r.imports.iter().any(|x| matches!(x, Resolved::Unresolved)) {
+                    dirty.insert(i as u32);
+                }
             }
         }
+        if !changed_names.is_empty() && !relocated {
+            // Looked up rather than scanned (19.7 ms over every reference of tessera, against
+            // microseconds). Exact: `self.res` of every file not already dirty is what `g.res` holds,
+            // and the index was built from `self.res`. Dirty files are re-resolved anyway.
+            let soft = self.data.soft_index();
+            for name in &changed_names {
+                for &i in soft.get(name).into_iter().flatten() {
+                    if g.files[i as usize].alive {
+                        dirty.insert(i);
+                    }
+                }
+            }
+        }
+        g.resolved = 0;
         for f in dirty {
             if g.files[f as usize].alive {
                 g.res[f as usize] = g.intern(g.resolve_file(f));
+                g.resolved += 1;
             }
         }
         g.finalize(Some(&self.data));
@@ -372,6 +411,44 @@ impl GraphData {
             Some(s) => s.block(r),
             None => Arc::new(r),
         }
+    }
+
+    /// Files holding a reference that binds by name alone, keyed by every name an edit could make
+    /// it bind to: its own name (`stray()`), its qualifier (`Shop.Order.total()` names the module
+    /// in its qualifier) and "qualifier.name" (`%Shop.Item{}` splits the module name across both).
+    /// Swift references count whatever they resolved to, because a nearer definition can shadow
+    /// an exact one.
+    fn soft_index(&self) -> &SoftIndex {
+        self.soft_index.get_or_init(|| {
+            let mut idx: SoftIndex = HashMap::new();
+            for (i, (f, r)) in self.files.iter().zip(&self.res).enumerate() {
+                if !f.alive {
+                    continue;
+                }
+                let i = i as u32;
+                let mut push = |k: &str| match idx.get_mut(k) {
+                    Some(v) => {
+                        if v.last() != Some(&i) {
+                            v.push(i);
+                        }
+                    }
+                    None => {
+                        idx.insert(k.to_string(), vec![i]);
+                    }
+                };
+                for (fr, rr) in f.facts.refs.iter().zip(&r.refs) {
+                    if rr.target.is_none() || rr.confidence == Confidence::Fallback || f.language == "swift" {
+                        let name = self.name(fr.name);
+                        push(name);
+                        if let Some(q) = self.qualifier(fr) {
+                            push(q);
+                            push(&format!("{q}.{name}"));
+                        }
+                    }
+                }
+            }
+            idx
+        })
     }
 
     /// Rebuild the path index, resolver and name/module indexes from `files`.
@@ -416,10 +493,18 @@ impl GraphData {
             }
         }
         let mut pairs: Vec<(SymId, (u32, u32))> = Vec::new();
+        self.ref_dependents = vec![Vec::new(); n];
         for (fi, r) in self.res.iter().enumerate() {
+            let fi = fi as u32;
             for (ri, rr) in r.refs.iter().enumerate() {
                 if let Some(t) = rr.target {
-                    pairs.push((t, (fi as u32, ri as u32)));
+                    pairs.push((t, (fi, ri as u32)));
+                    // `importers[t]` is sorted (filled in file order above), so this check is a
+                    // binary search; `deps.last()` dedups because one file's refs are visited together.
+                    let deps = &mut self.ref_dependents[t.file as usize];
+                    if t.file != fi && deps.last() != Some(&fi) && self.importers[t.file as usize].binary_search(&fi).is_err() {
+                        deps.push(fi);
+                    }
                 }
             }
         }
@@ -449,6 +534,11 @@ impl GraphData {
 
 impl ViewGraph {
     // ---- accessors ---------------------------------------------------------------------
+
+    /// Files this graph resolved rather than reused from the graph it was derived from.
+    pub fn resolved_files(&self) -> usize {
+        self.resolved
+    }
 
     pub fn file_count(&self) -> usize {
         self.files.iter().filter(|f| f.alive).count()
@@ -986,11 +1076,17 @@ impl GraphData {
             n += self.res.iter().map(|r| blocks::block_bytes(r)).sum::<usize>();
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
+        n += self.ref_dependents.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
         n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
         n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
         n += self.name_index.bytes() + self.incoming.bytes();
         n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
         n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
+        // Only once built (lazily, on the first overlay derived from this graph): about 1-2 MB on
+        // tessera (15k keys, 144k entries).
+        if let Some(idx) = self.soft_index.get() {
+            n += idx.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<u32>>() + ALLOC + v.len() * 4 + 8).sum::<usize>();
+        }
         // The resolver keeps every path of the view in a set.
         n += self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
         n

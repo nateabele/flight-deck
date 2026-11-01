@@ -322,3 +322,164 @@ fn overlay_deleting_and_renaming_files_matches_a_rebuild() {
     // Elm resolves an import by path, so a file whose declaration disagrees still answers it.
     assert!(deps.iter().any(|d| d.path.ends_with("src/Expression/Node.elm")), "{deps:?}");
 }
+
+#[test]
+fn overlay_shifting_local_ids_re_resolves_a_qualified_path_caller_without_an_import() {
+    // `a::m::f()` by full path records no import edge, so b/lib.rs is not among m.rs's importers;
+    // inserting a symbol before `f` moves `f` from local id 0 to 1, and only a rule that follows
+    // resolved references (not imports) re-resolves the caller. Found on tessera:
+    // engine/proto/src/msg.rs calling `tessera_evaluator::value::from_json`.
+    let r = init_repo();
+    write(&r.root, "crates/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
+    write(&r.root, "crates/a/src/lib.rs", "pub mod m;\n");
+    write(&r.root, "crates/a/src/m.rs", "pub fn f() {}\n");
+    write(&r.root, "crates/b/Cargo.toml", "[package]\nname = \"b\"\nversion = \"0.1.0\"\n");
+    write(&r.root, "crates/b/src/lib.rs", "pub fn g() { a::m::f() }\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "crates/a/src/m.rs", "pub fn before() { f() }\npub fn f() {}\n"));
+    let f = g.find_symbols(&NameMatch::Exact("f".into()), None, 5).data;
+    assert!(g.references(f[0].id).data.iter().any(|h| h.path.ends_with("crates/b/src/lib.rs")));
+}
+
+#[test]
+fn overlay_shifting_local_ids_behind_a_re_export_re_resolves_the_importer_of_the_barrel() {
+    // app.ts imports `lib` (index.ts), whose `export { helper } from './impl'` lands the reference
+    // in impl.ts: app.ts imports index.ts, not impl.ts, so the importer rule alone misses it.
+    let r = ts_fixture();
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "web/lib/impl.ts", "export function first() {}\nexport function helper() { first() }\n"));
+    let helper = g.find_symbols(&NameMatch::Exact("helper".into()), None, 5).data;
+    assert!(g.references(helper[0].id).data.iter().any(|h| h.path.ends_with("web/app.ts")));
+}
+
+// ---- early cutoff: an edit that leaves a file's export surface alone re-resolves only that file
+
+#[test]
+fn overlay_body_edit_in_an_imported_elm_file_re_resolves_only_that_file() {
+    let r = elm_fixture(None);
+    let (g, _) = assert_overlay_equals_full(&r, |root| {
+        write(
+            root,
+            "src/Expression/Node.elm",
+            "module Expression.Node exposing (Node(..), toString)\n\ntype Node\n    = Leaf Int\n    | Branch (List Node)\n\ntoString : Node -> String\ntoString n =\n    case n of\n        Leaf i ->\n            String.fromInt (identity i)\n\n        Branch xs ->\n            String.join \";\" (List.map toString xs)\n",
+        );
+    });
+    assert_eq!(g.resolved_files(), 1, "ExprViewer imports Node.elm, but nothing it can see there changed");
+}
+
+#[test]
+fn overlay_body_edit_in_an_imported_ts_file_re_resolves_only_that_file() {
+    let r = ts_fixture();
+    let (g, _) = assert_overlay_equals_full(&r, |root| {
+        write(root, "web/util.ts", "export function f() { return f() }\nexport default class Widget { go() { return f(); } }\n");
+    });
+    assert_eq!(g.resolved_files(), 1);
+}
+
+#[test]
+fn overlay_body_edit_in_an_imported_rust_file_re_resolves_only_that_file() {
+    let r = rust_fixture();
+    let (g, _) = assert_overlay_equals_full(&r, |root| {
+        write(root, "src/store.rs", "pub struct Store;\nimpl Store { pub fn new() -> Self { Store } pub fn close(&self) {} }\npub fn open() { super::util::helper::go(); open() }\n");
+    });
+    assert_eq!(g.resolved_files(), 1);
+}
+
+#[test]
+fn overlay_inserting_a_symbol_before_an_exported_one_re_resolves_importers() {
+    // `toString` moves from local id 3 to 4 with no name leaving or arriving that ExprViewer
+    // references, so the surface hash (which covers symbol order) is all that marks it dirty.
+    let r = elm_fixture(None);
+    let (g, _) = assert_overlay_equals_full(&r, |root| {
+        write(
+            root,
+            "src/Expression/Node.elm",
+            "module Expression.Node exposing (Node(..), toString)\n\ntype Node\n    = Leaf Int\n    | Branch (List Node)\n\nhelperBefore =\n    1\n\ntoString : Node -> String\ntoString n =\n    case n of\n        Leaf i ->\n            String.fromInt i\n\n        Branch xs ->\n            String.join \",\" (List.map toString xs)\n",
+        );
+    });
+    assert!(g.resolved_files() > 1);
+}
+
+#[test]
+fn overlay_changing_a_ts_re_export_re_resolves_importers_of_the_barrel() {
+    let r = init_repo();
+    write(&r.root, "web/lib/index.ts", "export { helper } from './impl';\n");
+    write(&r.root, "web/lib/impl.ts", "export function helper() {}\n");
+    write(&r.root, "web/lib/impl2.ts", "export function helper() {}\n");
+    write(&r.root, "web/app.ts", "import * as lib from './lib';\nexport function main() { lib.helper(); }\n");
+    commit_all(&r.root, "init");
+    // Only the barrel's import table changes: no symbol, no name.
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "web/lib/index.ts", "export { helper } from './impl2';\n"));
+    let main = exact(&g, "main");
+    let callees = g.calls(main, Direction::Out, 1).data;
+    assert!(callees.iter().any(|c| c.hit.path.ends_with("web/lib/impl2.ts")), "{:?}", callees.iter().map(|c| &c.hit.path).collect::<Vec<_>>());
+}
+
+#[test]
+fn overlay_changing_a_rust_pub_use_re_resolves_importers() {
+    let r = init_repo();
+    write(&r.root, "Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
+    write(&r.root, "src/lib.rs", "pub mod x;\npub mod y;\npub mod api;\nmod user;\n");
+    write(&r.root, "src/x.rs", "pub fn thing() {}\n");
+    write(&r.root, "src/y.rs", "pub fn thing() {}\n");
+    write(&r.root, "src/api.rs", "pub use crate::x::thing;\n");
+    write(&r.root, "src/user.rs", "use crate::api::thing;\npub fn go() { thing() }\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "src/api.rs", "pub use crate::y::thing;\n"));
+    let go = exact(&g, "go");
+    let callees = g.calls(go, Direction::Out, 1).data;
+    assert!(callees.iter().any(|c| c.hit.path.ends_with("src/y.rs")), "{:?}", callees.iter().map(|c| &c.hit.path).collect::<Vec<_>>());
+}
+
+#[test]
+fn overlay_moving_a_swift_member_out_of_its_type_re_resolves_its_users() {
+    // Same names before and after, so the soft-name rule stays quiet; `fetch` loses its parent,
+    // and `Loader.fetch()` in Store.swift must stop resolving. The parent is in the surface hash.
+    let r = init_repo();
+    write(&r.root, "Sources/App/Store.swift", "final class Store {\n    func reload() {\n        Loader.fetch()\n    }\n}\n");
+    write(&r.root, "Sources/App/Loader.swift", "enum Loader {\n    static func fetch() {}\n}\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Loader.swift", "enum Loader {\n}\nfunc fetch() {}\n"));
+    let reload = exact(&g, "reload");
+    assert!(g.calls(reload, Direction::Out, 1).data.is_empty());
+}
+
+#[test]
+fn overlay_body_edit_in_a_swift_file_re_resolves_only_that_file() {
+    let r = init_repo();
+    write(&r.root, "Sources/App/Store.swift", "final class Store {\n    func reload() {\n        Loader.fetch()\n    }\n}\n");
+    write(&r.root, "Sources/App/Loader.swift", "enum Loader {\n    static func fetch() {}\n}\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "Sources/App/Loader.swift", "enum Loader {\n    static func fetch() { print(1) }\n}\n"));
+    assert_eq!(g.resolved_files(), 1);
+}
+
+// ---- soft hits: references that bind by name alone, re-resolved when that name's definitions move
+
+#[test]
+fn overlay_defining_a_name_in_place_makes_an_unrelated_fallback_ambiguous() {
+    // No path appears or disappears and a.ts imports nothing, so only the name rule (by the
+    // reference's own name) can reach it.
+    let r = init_repo();
+    write(&r.root, "a.ts", "export function main() { stray(); }\n");
+    write(&r.root, "b.js", "function stray() {}\n");
+    write(&r.root, "c.js", "function other() {}\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "c.js", "function stray() {}\n"));
+    assert!(g.calls(exact(&g, "main"), Direction::Out, 1).data.is_empty());
+}
+
+#[test]
+fn overlay_renaming_an_elixir_module_in_place_binds_a_split_qualified_mention() {
+    // `%Other.Mod{}` arrives as qualifier `Other` + name `Mod`, so the name rule must match the
+    // new module name against "qualifier.name" (`b.ex` covers the plain qualifier key).
+    let r = init_repo();
+    write(&r.root, "lib/a.ex", "defmodule A do\n  def go, do: %Other.Mod{}\nend\n");
+    write(&r.root, "lib/b.ex", "defmodule B do\n  def go, do: Other.Mod.run()\nend\n");
+    write(&r.root, "lib/z.ex", "defmodule Unrelated do\n  defstruct [:a]\n  def run, do: 1\nend\n");
+    commit_all(&r.root, "init");
+    let (g, _) = assert_overlay_equals_full(&r, |root| write(root, "lib/z.ex", "defmodule Other.Mod do\n  defstruct [:a]\n  def run, do: 1\nend\n"));
+    for user in ["lib/a.ex", "lib/b.ex"] {
+        let deps = g.file_deps(&r.root.join(user), Direction::Out, 1).data.unwrap();
+        assert!(deps.iter().any(|d| d.path.ends_with("lib/z.ex")), "{user}: {deps:?}");
+    }
+}
