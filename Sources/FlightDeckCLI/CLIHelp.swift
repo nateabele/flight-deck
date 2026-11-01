@@ -588,6 +588,28 @@ public enum CLIHelp {
             ]
         ),
         Section(
+            title: "Visual providers",
+            blurb: "Providers draw the visuals in Flight Control planning. A provider is a folder with a provider.toml.",
+            pages: [
+                Page(
+                    name: "provider check", summary: "validate a visual provider's folder",
+                    usage: ["flightdeck provider check DIR"],
+                    about: """
+                    Reads DIR/provider.toml and reports every problem with its line number: the \
+                    contract version, the kinds, and whether each kind's instructions and assets \
+                    exist inside the folder. When the provider has a generator and DIR/samples/KIND/ \
+                    holds input for a kind, it runs the generator on that input in the sandbox and \
+                    reports the result. This runs on this Mac only and does not need Flight Deck \
+                    to be open. A provider is valid whole or not at all. \
+                    Exit status: 0 valid (warnings may print) · 1 problems found, or a sample \
+                    failed · 2 usage error.
+                    """,
+                    arguments: [("DIR", "the provider's folder, the one holding provider.toml")],
+                    examples: ["flightdeck provider check .flightdeck/visual-providers/my-charts"]
+                ),
+            ]
+        ),
+        Section(
             title: "Plumbing",
             blurb: "For Flight Deck itself and for scripts that need an operation with no verb yet.",
             pages: [
@@ -619,6 +641,8 @@ public enum CLIHelp {
                about: "The machines paired with Flight Deck that delegated runs go to."),
         Family(name: "infra", summary: "create and destroy cloud machines",
                about: "Cloud hosts created in your own AWS or GCP account. They cost money by the hour."),
+        Family(name: "provider", summary: "check a visual provider",
+               about: "Visual providers draw the visuals Flight Control planning shows. Check one before you use it."),
         Family(name: "intake", summary: "Flight Control intake runner",
                about: "Used by Flight Deck itself."),
     ]

@@ -53,6 +53,10 @@ public enum CLICommand: Equatable {
     /// `CLIRunner` never sees one dispatched. Parsed here anyway because argument validation
     /// (a real UUID, `--root` present) belongs with every other verb's, not duplicated in main.
     case intakeRun(id: UUID, root: String)
+    /// `provider check DIR`: validates a visual provider's folder. Local like `intakeRun`:
+    /// `main.swift` runs it before any transport exists, since it reads files and never asks
+    /// Flight Deck anything.
+    case providerCheck(dir: String)
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
@@ -339,6 +343,9 @@ public enum CLIArguments {
         case "intake":
             return try parseIntake(&c)
 
+        case "provider":
+            return try parseProvider(&c)
+
         case "host":
             return try parseHost(&c)
 
@@ -435,6 +442,18 @@ public enum CLIArguments {
             return .accountSwitch(session: session, target: words.joined(separator: " "))
         default:
             throw CLIUsageError("account: unknown subcommand \"\(sub)\"")
+        }
+    }
+
+    private static func parseProvider(_ c: inout Cursor) throws -> CLICommand {
+        let sub = try c.requirePositional("provider: missing subcommand")
+        switch sub {
+        case "check":
+            let dir = try c.requirePositional("provider check: missing the provider folder")
+            try c.end(verb: "provider check")
+            return .providerCheck(dir: dir)
+        default:
+            throw CLIUsageError("provider: unknown subcommand \"\(sub)\"")
         }
     }
 

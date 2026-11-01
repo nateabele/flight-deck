@@ -44,6 +44,20 @@ if case .help(let topic) = invocation.command {
     exit(0)
 }
 
+// `provider check` reads a folder and runs a sandboxed sample; it asks Flight Deck nothing, so it
+// is intercepted here, before the socket setup, and works with the app closed. Exit 0 valid,
+// 1 problems, 2 usage error (above).
+if case .providerCheck(let dir) = invocation.command {
+    let folder = URL(fileURLWithPath: dir, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+    Task {
+        let report = await ProviderCheck.run(folder: folder.standardizedFileURL)
+        print(report.text)
+        fflush(stdout)
+        exit(report.exitCode)
+    }
+    dispatchMain()
+}
+
 // The detached round runner Flight Deck launches under fd-abduco (Task 10). It has no fleet
 // to reach and needs no socket, so it is intercepted here, before any of the transport setup
 // below runs — that setup would be dead weight, and worse, a socket connect attempt this
