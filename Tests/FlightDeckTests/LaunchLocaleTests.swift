@@ -28,8 +28,8 @@ final class LaunchLocaleTests: XCTestCase {
             resolve: resolver(valid: ["en_US.UTF-8"]),
             canonicalize: identity
         )
-        XCTAssertEqual(Set(changes.keys), ["FD_SWAP_NEW_APP", "FD_SWAP_ALLOW_DEBUG", "FD_HOSTD_ASSET_BASE",
-                                           "FD_UITEST_HOST", "FD_TEST_LOCAL"])
+        XCTAssertEqual(Set(changes.keys), ["FD_SWAP_NEW_APP", "FD_SWAP_ALLOW_DEBUG"],
+                       "FD_HOSTD_/FD_UITEST_/FD_TEST_ are kept: tests hosted in the app read some FD_* variables")
         XCTAssertTrue(changes.values.allSatisfy { $0 == .some(nil) })
     }
 

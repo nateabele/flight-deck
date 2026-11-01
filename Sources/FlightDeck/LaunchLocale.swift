@@ -33,14 +33,11 @@ enum LaunchLocale {
     /// The fallback `ensureLocale` settles on when nothing else resolves.
     static let fallbackLang = "en_US.UTF-8"
 
-    /// Prefixes of operator overrides that only `scripts/` read (`FD_SWAP_NEW_APP`, `FD_HOSTD_*`, ...).
-    /// The app reads none of them, but it inherits them from whatever launched it — `swap-release.sh`
-    /// relaunches the app from the shell that set them — and every tab then inherits the app's
-    /// environment, so a stale `FD_SWAP_NEW_APP` aborted later plain swaps from any tab.
-    static let scriptOnlyPrefixes = [
-        "FD_SWAP_", "FD_HOSTD_", "FD_UITEST_", "FD_SMOKE_", "FD_TEST_", "FD_SKIP_",
-        "FD_INTEROP_", "FD_LINUX_HOSTD_", "FD_MENUBAR_", "FD_REMOTE_",
-    ]
+    /// `swap-release.sh`'s overrides (`FD_SWAP_NEW_APP`, ...). The app reads none of them, but it
+    /// inherits them from the shell that relaunched it, and every tab then inherits the app's
+    /// environment, so a stale `FD_SWAP_NEW_APP` aborted later plain swaps from any tab. Only
+    /// these: other `FD_*` variables are read by tests hosted in this process (`FD_LINUX_HOSTD_*`).
+    static let scriptOnlyPrefixes = ["FD_SWAP_"]
 
     /// The variables to change (nil = unset) so that `ensureLocale` then finds nothing to do,
     /// and so that no script-only override (`scriptOnlyPrefixes`) reaches the tabs' shells.
