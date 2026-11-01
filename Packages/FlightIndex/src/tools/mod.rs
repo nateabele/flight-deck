@@ -16,6 +16,7 @@ use crate::cochange::CoChange;
 use crate::error::Result;
 use crate::facts::SymbolKind;
 use crate::graph::ViewGraph;
+use crate::links::{Member, Views};
 use crate::proto::state;
 use crate::query::SymbolHit;
 use args::Args;
@@ -67,6 +68,9 @@ pub struct Ctx<'a> {
     /// `(done, total)` while the view's build is still running: a file or symbol that is missing
     /// may simply not have been parsed yet.
     pub building: Option<(usize, usize)>,
+    /// The views linked to `graph`'s (or depending on it) that the request pulled in; empty for a
+    /// tool that answers from one view (`links.rs`).
+    pub members: &'a [Member],
     pub cochange: &'a (dyn Fn() -> Result<Arc<CoChange>> + Sync),
 }
 
@@ -114,6 +118,18 @@ pub fn anchor(tool: &str, args: &Args) -> std::result::Result<Anchor, ToolError>
         Some(f) => Anchor { priority: vec![f.clone()], path: f, needs_index, slice_ok },
         None => Anchor { path: args.cwd.clone(), priority: Vec::new(), needs_index, slice_ok },
     })
+}
+
+/// Does this tool look beyond the view that answers it? `find` and the like search the linked
+/// views; `refs`, `calls`, `deps` and `impact` follow imports across them. `outline`, `map` and
+/// `stats` describe one view, and `read` of a file range needs only the file.
+pub fn uses_links(tool: &str, args: &Args) -> bool {
+    match tool {
+        "find" | "refs" | "calls" | "deps" | "impact" => true,
+        "grep" => !args.flag(&["search_bodies"], false),
+        "read" => !args.has(args::FILE) && (args.has(args::SYMBOL) || args.has(&["symbols"])),
+        _ => false,
+    }
 }
 
 pub fn run(tool: &str, c: &Ctx) -> ToolResult {
@@ -167,9 +183,15 @@ impl Ctx<'_> {
         }
     }
 
-    /// Definitions of `name`, optionally of one kind and in one file.
+    /// The answering view and the views linked to it.
+    pub fn views(&self) -> Views<'_> {
+        Views::new(self.graph, self.members)
+    }
+
+    /// Definitions of `name`, optionally of one kind and in one file: the answering view's first,
+    /// then its linked views' (`SymbolHit::view` says which).
     pub fn definitions(&self, name: &str, kind: Option<SymbolKind>, file: Option<&Path>) -> Vec<SymbolHit> {
-        let hits = self.graph.find_symbols(&crate::query::NameMatch::Exact(name.to_string()), kind, usize::MAX).data;
+        let hits = self.views().find_symbols(&crate::query::NameMatch::Exact(name.to_string()), kind);
         match file {
             Some(f) => hits.into_iter().filter(|h| h.path == f).collect(),
             None => hits,
@@ -222,18 +244,28 @@ pub fn status(h: &SymbolHit) -> &'static str {
     if h.exported { "exported" } else { "private" }
 }
 
-/// The view header: the first line of every result.
-///
-/// `view: /abs/worktree (repo name, base 1a2b3c4, dirty 3 files)`, with ` index: building, N of M
-/// files` appended while the index is still being built.
-pub fn header(label: &crate::git::ViewLabel, dirty_files: usize, building: Option<(usize, usize)>) -> String {
-    let repo = if label.is_git {
+fn repo_name(label: &crate::git::ViewLabel) -> String {
+    if label.is_git {
         let r = label.repo.as_path();
         let base = if r.file_name().is_some_and(|n| n == ".git") { r.parent().unwrap_or(r) } else { r };
         base.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     } else {
         label.worktree.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-    };
+    }
+}
+
+/// The label on a row that came from a view other than the one the header names:
+/// `tessera @ /Users/me/Projects/Tessera/tessera`.
+pub fn view_tag(label: &crate::git::ViewLabel) -> String {
+    format!("{} @ {}", repo_name(label), label.worktree.display())
+}
+
+/// The view header: the first line of every result.
+///
+/// `view: /abs/worktree (repo name, base 1a2b3c4, dirty 3 files)`, with ` index: building, N of M
+/// files` appended while the index is still being built.
+pub fn header(label: &crate::git::ViewLabel, dirty_files: usize, building: Option<(usize, usize)>) -> String {
+    let repo = repo_name(label);
     let base = match (&label.base_commit, label.is_git) {
         (Some(c), _) => c.chars().take(7).collect::<String>(),
         (None, true) => "no commits".to_string(),

@@ -22,6 +22,7 @@ use crate::edit;
 use crate::engine::{Engine, Phase, Progress, DEFAULT_GRAPH_BUDGET};
 use crate::error::{Error, Result};
 use crate::git::{self, View};
+use crate::links::{LinkIndex, Member, Role};
 use crate::proto::{state, Request, Response, PROTOCOL_VERSION};
 use crate::tools::{self, args::Args, Ctx, ToolError};
 use serde_json::{json, Value};
@@ -94,6 +95,8 @@ pub struct Service {
     builds: Mutex<HashMap<PathBuf, Arc<Job>>>,
     views: Mutex<HashMap<PathBuf, ViewInfo>>,
     cochange: Mutex<HashMap<PathBuf, (String, CoChangeCell)>>,
+    /// What each view's manifests link to (`links.rs`).
+    links: LinkIndex,
     /// One gate per worktree: a mutation holds it for writing from planning to re-index, and every
     /// read holds it for reading while it fetches its view and graph. A query therefore sees the
     /// worktree before a mutation or after it, never between two of its file writes.
@@ -117,6 +120,7 @@ impl Service {
             builds: Mutex::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),
             cochange: Mutex::new(HashMap::new()),
+            links: LinkIndex::default(),
             gates: Mutex::new(HashMap::new()),
             seqs: Mutex::new(HashMap::new()),
             started: Instant::now(),
@@ -189,15 +193,27 @@ impl Service {
         let view = self.freshness.view(&self.engine, &anchor.path)?;
         self.touch(&view);
 
+        // The views this one links to build while it does (a cold `formula-editor` query builds
+        // `tessera` too), and are read under their own gates for the same reason this one is.
+        let planned = if anchor.needs_index && tools::uses_links(tool, &args) { self.plan_members(&view, &req.cwd, false) } else { Vec::new() };
+        let member_gates: Vec<Arc<RwLock<()>>> = planned.iter().map(|p| self.gate(&p.root)).collect();
+        let _members_reading: Vec<_> = member_gates.iter().filter_map(|g| read_unless_blocked(g)).collect();
+        let begun = self.begin_members(planned, &req.cwd);
+
         let readiness = self.ensure_built(&view, &anchor.priority, anchor.slice_ok, anchor.needs_index.then_some(wait))?;
         let (graph, building) = match readiness {
             Readiness::Ready => (self.engine.graph(&view)?, None),
             Readiness::Building { done, total } => (self.engine.graph_partial(&view)?, Some((done, total))),
         };
+        let members = self.finish_members(begun, wait);
         let cochange = || self.cochange_for(&view);
-        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, cochange: &cochange };
+        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange };
         let body = tools::run(tool, &ctx)?;
-        Ok(format!("{}\n{body}", tools::header(&view.label, view.overlay.len(), building)))
+        let mut head = tools::header(&view.label, view.overlay.len(), building);
+        for m in &members {
+            head.push_str(&format!("\n{}", member_line(m)));
+        }
+        Ok(format!("{head}\n{body}"))
     }
 
     fn gate(&self, worktree: &Path) -> Arc<RwLock<()>> {
@@ -224,7 +240,7 @@ impl Service {
         let _writing = gate.write().unwrap_or_else(|e| e.into_inner());
 
         let mut attempt = 0;
-        let (view, plan) = loop {
+        let (view, mut plan) = loop {
             attempt += 1;
             let view = self.freshness.view(&self.engine, &anchor)?;
             self.touch(&view);
@@ -241,9 +257,10 @@ impl Service {
                 Ok(plan) => break (view, plan),
                 // The index lagged an edit made a moment ago: look again.
                 Err(e) if e.message.starts_with(mutate::STALE) && attempt < 3 => continue,
-                Err(e) => return Err(e),
+                Err(e) => return Err(self.explain_linked_definition(tool, &args, &view, &graph, &req.cwd, wait, e)),
             }
         };
+        self.refuse_cross_view(tool, &args, &view, &mut plan, &req.cwd)?;
 
         // An agent that named a path in another checkout asked for that checkout, but the answer
         // must still say so: an edit landing somewhere unexpected, unlabelled, is the failure to avoid.
@@ -316,6 +333,164 @@ impl Service {
         }
         lists(&mut out, &plan);
         Ok(out)
+    }
+
+    // ---- linked views -------------------------------------------------------------------------
+
+    /// The views that take part in a request about `view`: the ones its manifests link to, and,
+    /// when the caller stands in a different checkout (the query named a path elsewhere) or
+    /// others were seen before, the ones whose manifests link into `view`. `only_dependents`
+    /// leaves the first group out (a mutator checks who depends on what it changes).
+    fn plan_members(&self, view: &View, cwd: &str, only_dependents: bool) -> Vec<PlannedMember> {
+        let mine = self.links.of(view);
+        let mut out: Vec<PlannedMember> = Vec::new();
+        if !only_dependents {
+            out.extend(mine.roots.iter().map(|r| PlannedMember { root: r.root.clone(), role: Role::Linked, scopes: r.scopes.clone(), via: r.via.clone() }));
+        }
+        // The caller's own checkout is recorded first so that it counts as a dependent below.
+        if let Ok(loc) = git::locate(Path::new(cwd))
+            && loc.root != view.label.worktree
+            && let Ok(v) = self.freshness.view(&self.engine, &loc.root)
+        {
+            self.links.of(&v);
+        }
+        for (root, via) in self.links.dependents_of(&view.label.worktree) {
+            if !out.iter().any(|p| p.root == root) {
+                out.push(PlannedMember { root, role: Role::Dependent, scopes: Vec::new(), via });
+            }
+        }
+        out.sort_by(|a, b| a.root.cmp(&b.root));
+        out
+    }
+
+    /// Look at each planned view and start building the ones that need it. A dependent view the
+    /// caller is not standing in is used only if it is already indexed: nobody asked for it, so
+    /// it is not worth a build.
+    fn begin_members(self: &Arc<Self>, planned: Vec<PlannedMember>, cwd: &str) -> Vec<(View, PlannedMember)> {
+        let cwd_root = git::locate(Path::new(cwd)).map(|l| l.root).ok();
+        let mut out = Vec::new();
+        for p in planned {
+            let Ok(view) = self.freshness.view(&self.engine, &p.root) else { continue };
+            if p.role == Role::Dependent && cwd_root.as_deref() != Some(p.root.as_path()) && !self.engine.is_ready(&view).unwrap_or(false) {
+                continue;
+            }
+            self.touch(&view);
+            if let Err(e) = self.ensure_built(&view, &p.scopes, false, None) {
+                log::info(&format!("linked view {} could not start building: {e}", p.root.display()));
+                continue;
+            }
+            out.push((view, p));
+        }
+        out
+    }
+
+    /// Wait for the views `begin_members` started, within what is left of `wait`, and take their
+    /// graphs. One still building answers from what it has stored so far and says so.
+    fn finish_members(self: &Arc<Self>, begun: Vec<(View, PlannedMember)>, wait: Duration) -> Vec<Member> {
+        let deadline = Instant::now() + wait;
+        let mut out = Vec::new();
+        for (view, p) in begun {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let loaded = self.ensure_built(&view, &p.scopes, false, Some(left)).and_then(|ready| match ready {
+                Readiness::Ready => Ok((self.engine.graph(&view)?, None)),
+                Readiness::Building { done, total } => Ok((self.engine.graph_partial(&view)?, Some((done, total)))),
+            });
+            match loaded {
+                Ok((graph, building)) => out.push(Member { graph, role: p.role, scopes: p.scopes, via: p.via, dirty_files: view.overlay.len(), building }),
+                Err(e) => log::info(&format!("linked view {} unavailable: {e}", p.root.display())),
+            }
+        }
+        out
+    }
+
+    /// A symbol-selecting mutator that found no definition in the answering view: say so if a
+    /// linked view has one, and why nothing was written there.
+    #[allow(clippy::too_many_arguments)]
+    fn explain_linked_definition(self: &Arc<Self>, tool: &str, args: &Args, view: &View, graph: &crate::graph::ViewGraph, cwd: &str, wait: Duration, e: ToolError) -> ToolError {
+        use crate::query::NameMatch;
+        let Some(keys) = tools::mutate::symbol_keys(tool) else { return e };
+        let Some(name) = args.str(keys) else { return e };
+        if !e.message.starts_with("no definition named") {
+            return e;
+        }
+        let planned: Vec<PlannedMember> = self.plan_members(view, cwd, false).into_iter().filter(|p| p.role == Role::Linked).collect();
+        let begun = self.begin_members(planned, cwd);
+        let members = self.finish_members(begun, wait);
+        let views = crate::links::Views::new(graph, &members);
+        let hits: Vec<_> = views.find_symbols(&NameMatch::Exact(name.clone()), None).into_iter().filter(|h| h.view != 0).collect();
+        if hits.is_empty() {
+            return e;
+        }
+        let mut m = format!(
+            "refusing: '{name}' is not defined in your view {}, but a linked view defines it; {tool} never writes into a linked view unless you name a path inside it, so nothing was changed. To change it there, pass file_path=<one of these>:\n",
+            view.label.worktree.display()
+        );
+        for h in hits {
+            m.push_str(&format!("  {} {} [L{}-L{}] in {}\n", h.kind.as_str(), h.path.display(), h.start_line, h.end_line, views.tag(h.view).unwrap_or_default()));
+        }
+        ToolError::failed(m.trim_end().to_string())
+    }
+
+    /// A rename, move, delete or file rename in `view` that views depending on it would not
+    /// follow: refused, with the sites in both views. A mutator writes into one view, so applying
+    /// it would leave every importer elsewhere pointing at a name or path that is gone. The
+    /// alternative (also rewriting the other checkout) would edit a view the agent did not name,
+    /// which the spec rules out (§5.5); the safe first cut is to say what to change in each.
+    fn refuse_cross_view(self: &Arc<Self>, tool: &str, args: &Args, view: &View, plan: &mut tools::mutate::Plan, cwd: &str) -> std::result::Result<(), ToolError> {
+        use tools::mutate::{self, MutCtx};
+        if !matches!(tool, "rename" | "move" | "safe_delete" | "rename_file") {
+            return Ok(());
+        }
+        let planned = self.plan_members(view, cwd, true);
+        if planned.is_empty() {
+            return Ok(());
+        }
+        let member_gates: Vec<Arc<RwLock<()>>> = planned.iter().map(|p| self.gate(&p.root)).collect();
+        let _reading: Vec<_> = member_gates.iter().filter_map(|g| read_unless_blocked(g)).collect();
+        let roots: Vec<PathBuf> = planned.iter().map(|p| p.root.clone()).collect();
+        let begun = self.begin_members(planned, cwd);
+        let members = self.finish_members(begun, MAX_BUILD_WAIT);
+        let unchecked: Vec<String> = roots.iter().filter(|r| !members.iter().any(|m| m.graph.label.worktree == **r)).map(|r| r.display().to_string()).collect();
+        let graph = self.engine.graph(view)?;
+        let views = crate::links::Views::new(&graph, &members);
+        let ctx = MutCtx { graph: &graph, args };
+        let (file, name, mut sites) = match mutate::symbol_keys(tool) {
+            Some(keys) => {
+                let h = mutate::select(&ctx, keys)?;
+                let uses = views.references(&h).into_iter().filter(|(v, _)| *v != 0).map(|(v, r)| (v, r.path, r.line)).collect::<Vec<_>>();
+                (h.id.file, Some(h.name), uses)
+            }
+            None => match args.path(&["from", "old_path", "file_path"]).and_then(|p| graph.file_idx(&p)) {
+                Some(f) => (f, None, Vec::new()),
+                None => return Ok(()),
+            },
+        };
+        sites.extend(views.import_sites(0, file, name.as_deref()));
+        sites.sort();
+        sites.dedup();
+        if sites.is_empty() {
+            if !unchecked.is_empty() {
+                plan.warnings.push(format!("views that link into this one were not indexed, so their uses were not checked: {}", unchecked.join(", ")));
+            }
+            return Ok(());
+        }
+        let mut m = format!("refusing: {} would break views that use it; nothing was changed.\n", plan.summary);
+        m.push_str(&format!("in this view ({}), it would change {} file(s):\n", crate::tools::view_tag(&graph.label), plan.changes.len()));
+        for c in &plan.changes {
+            m.push_str(&format!("  {}\n", c.path.display()));
+        }
+        let mut by_view: std::collections::BTreeMap<usize, Vec<(&PathBuf, u32)>> = Default::default();
+        for (v, p, l) in &sites {
+            by_view.entry(*v).or_default().push((p, *l));
+        }
+        for (v, rows) in by_view {
+            m.push_str(&format!("in {} it is used at {} site(s) that would no longer resolve:\n", views.tag(v).unwrap_or_default(), rows.len()));
+            for (p, l) in rows {
+                m.push_str(&format!("  {}:{l}\n", p.display()));
+            }
+        }
+        m.push_str(&format!("A {tool} writes into one view only and never into a linked one. Make the change in each view, starting with the dependent one(s), or drop it."));
+        Err(ToolError::failed(m))
     }
 
     fn wait_bound(&self, args: &Args) -> Duration {
@@ -557,6 +732,36 @@ impl Service {
     }
 }
 
+/// A view a request will pull in, before it has been looked at.
+struct PlannedMember {
+    root: PathBuf,
+    role: Role,
+    scopes: Vec<PathBuf>,
+    via: Vec<String>,
+}
+
+/// `linked view: <header> via elm.json`: the line that names a view a result also draws on.
+fn member_line(m: &Member) -> String {
+    let h = tools::header(&m.graph.label, m.dirty_files, m.building);
+    let what = if m.role == Role::Linked { "linked view" } else { "dependent view" };
+    format!("{} via {}", h.replacen("view:", &format!("{what}:"), 1), m.via.join(", "))
+}
+
+/// Read-lock a linked view's gate unless a writer holds it for long. A query takes gates of more
+/// than one worktree, and two such queries that block on each other behind two writers would
+/// deadlock, so a gate is waited for briefly and then given up: the answer may then show a
+/// linked view between two writes of a mutation, which beats an agent hung on the daemon.
+fn read_unless_blocked(gate: &RwLock<()>) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+    for _ in 0..400 {
+        match gate.try_read() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    None
+}
+
 /// Where a request's view comes from. Today: git, recomputed per request. The watcher step
 /// replaces this with a view kept current by file events and a ref watcher; callers do not change.
 ///
@@ -647,7 +852,7 @@ impl Freshness {
 }
 
 /// Refuse a path outside any repository or project: `read /etc/hosts` must not index `/etc`.
-fn check_indexable(located: &git::Located, path: &Path) -> std::result::Result<(), ToolError> {
+pub(crate) fn check_indexable(located: &git::Located, path: &Path) -> std::result::Result<(), ToolError> {
     if !located.is_git && !has_project_marker(&located.root) {
         return Err(ToolError::failed(format!(
             "{} is not inside a git repository or a recognised project (no .git, elm.json, Cargo.toml, package.json, mix.exs, Package.swift or pyproject.toml above it), so there is no index to answer from",

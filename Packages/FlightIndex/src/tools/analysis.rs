@@ -6,6 +6,7 @@ use super::{is_test_path, range, Ctx, Format, ToolError, ToolResult};
 use crate::facts::{RefKind, SymbolKind};
 use crate::graph::{Confidence, SymId};
 use crate::query::{CallEntry, Direction, SymbolHit};
+use crate::links::Views;
 use crate::resolve::Resolved;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
@@ -24,8 +25,9 @@ fn function_like(k: SymbolKind) -> bool {
     matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Const | SymbolKind::Constructor | SymbolKind::Macro | SymbolKind::Port)
 }
 
+/// Files that transitively import `path`, in its view and in the views linked to it.
 fn blast(c: &Ctx, path: &Path) -> usize {
-    c.graph.blast_radius(path).data.map(|v| v.len()).unwrap_or(0)
+    c.graph.file_idx(path).map(|fi| c.views().blast_radius(0, fi).len()).unwrap_or(0)
 }
 
 pub fn map(c: &Ctx) -> ToolResult {
@@ -128,7 +130,7 @@ fn imports_of(c: &Ctx, fi: u32) -> Vec<(PathBuf, String, bool)> {
     for (imp, res) in node.facts.imports.iter().zip(&g.resolution(fi).imports) {
         let target = match res {
             Resolved::File { path, .. } => g.file_idx(Path::new(path)).map(|t| (g.abs(t), false)),
-            Resolved::External(p) => Some((p.clone(), true)),
+            Resolved::External(p) => Some((g.external_abs(p), true)),
             Resolved::Unresolved => None,
         };
         if let Some((p, ext)) = target
@@ -142,24 +144,32 @@ fn imports_of(c: &Ctx, fi: u32) -> Vec<(PathBuf, String, bool)> {
     out
 }
 
-/// The specifier by which `importer` imports `target`.
-fn specifier_into(c: &Ctx, importer: u32, target: u32) -> String {
-    let g = c.graph;
-    g.file(importer)
+/// The specifier by which `importer` (view, file) imports `target`, in the same view or across
+/// a link.
+fn specifier_into(views: &Views, importer: (usize, u32), target: (usize, u32)) -> String {
+    let g = views.graph(importer.0);
+    g.file(importer.1)
         .facts
         .imports
         .iter()
-        .zip(&g.resolution(importer).imports)
-        .find(|(_, r)| matches!(r, Resolved::File { path, .. } if g.file_idx(Path::new(path)) == Some(target)))
+        .zip(&g.resolution(importer.1).imports)
+        .find(|(_, r)| match r {
+            Resolved::File { path, .. } => importer.0 == target.0 && g.file_idx(Path::new(path)) == Some(target.1),
+            Resolved::External(p) => views.locate(&g.external_abs(p)) == Some(target),
+            Resolved::Unresolved => false,
+        })
         .map(|(i, _)| i.specifier.clone())
         .unwrap_or_default()
 }
 
 pub fn deps(c: &Ctx) -> ToolResult {
     let (path, fi) = c.file()?;
-    let g = c.graph;
+    let views = c.views();
     let imports = imports_of(c, fi);
-    let mut importers: Vec<(PathBuf, String)> = g.importers[fi as usize].iter().map(|&i| (g.abs(i), specifier_into(c, i, fi))).collect();
+    // Importers in this view, then in the views linked to it: `formula-editor` files that
+    // import an `tessera` file are listed, with the view they are in.
+    let mut importers: Vec<(PathBuf, String, usize)> =
+        views.importers(0, fi).into_iter().map(|(v, f)| (views.graph(v).abs(f), specifier_into(&views, (v, f), (0, fi)), v)).collect();
     importers.sort();
     importers.dedup();
     if c.format == Format::Mermaid {
@@ -173,7 +183,7 @@ pub fn deps(c: &Ctx) -> ToolResult {
         for (p, _, _) in &imports {
             edges.push((me, id(p)));
         }
-        for (p, _) in &importers {
+        for (p, _, _) in &importers {
             edges.push((id(p), me));
         }
         let mut out = String::from("graph LR\n");
@@ -189,15 +199,27 @@ pub fn deps(c: &Ctx) -> ToolResult {
     let mut out = format!("# Dependencies: {} (blast →{})\n", path.display(), blast(c, &path));
     let _ = writeln!(out, "Imports from ({}):", imports.len());
     for (p, spec, ext) in &imports {
+        // A file outside this worktree is labelled with the linked view it is in, if one is.
+        let tag = views.locate(p).and_then(|(v, _)| views.tag(v));
+        let label = match (ext, &tag) {
+            (_, Some(t)) => format!("view: {t}, "),
+            (true, None) => "external, ".to_string(),
+            (false, None) => String::new(),
+        };
         let _ = if concise {
-            writeln!(out, "-> {}", p.display())
+            writeln!(out, "-> {}{}", p.display(), tag.map(|t| format!("  [view: {t}]")).unwrap_or_default())
         } else {
-            writeln!(out, "-> {} ({}import: {spec})", p.display(), if *ext { "external, " } else { "" })
+            writeln!(out, "-> {} ({label}import: {spec})", p.display())
         };
     }
     let _ = writeln!(out, "Imported by ({}):", importers.len());
-    for (p, spec) in &importers {
-        let _ = if concise { writeln!(out, "<- {}", p.display()) } else { writeln!(out, "<- {} (import: {spec})", p.display()) };
+    for (p, spec, v) in &importers {
+        let tag = views.tag(*v);
+        let _ = if concise {
+            writeln!(out, "<- {}{}", p.display(), tag.map(|t| format!("  [view: {t}]")).unwrap_or_default())
+        } else {
+            writeln!(out, "<- {} ({}import: {spec})", p.display(), tag.map(|t| format!("view: {t}, ")).unwrap_or_default())
+        };
     }
     Ok(c.fit(out))
 }
@@ -241,22 +263,25 @@ pub fn impact(c: &Ctx) -> ToolResult {
     let (path, fi) = c.file()?;
     let g = c.graph;
     let include_tests = c.args.flag(&["include_tests"], false);
-    let keep = |p: &Path| include_tests || !is_test_path(&p.strip_prefix(&g.root).unwrap_or(p).to_string_lossy());
-    let mut direct: Vec<PathBuf> = g.importers[fi as usize].iter().map(|&i| g.abs(i)).filter(|p| keep(p)).collect();
-    direct.sort();
-    let radius: Vec<_> = g.blast_radius(&path).data.unwrap_or_default().into_iter().filter(|e| keep(&e.path)).collect();
+    let views = c.views();
+    let keep = |v: usize, p: &Path| include_tests || !is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
+    // Importers in this view and in the views linked to it, the latter labelled with their view.
+    let at = |v: usize, p: &Path| format!("{}{}", p.display(), views.tag(v).map(|t| format!("  [view: {t}]")).unwrap_or_default());
+    let mut direct: Vec<(usize, PathBuf)> = views.importers(0, fi).into_iter().map(|(v, f)| (v, views.graph(v).abs(f))).filter(|(v, p)| keep(*v, p)).collect();
+    direct.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
 
     let mut out = format!("Impact analysis: {}\n", path.display());
     let _ = writeln!(out, "Direct importers ({}):", direct.len());
-    for p in direct.iter().take(LIST_CAP) {
-        let _ = writeln!(out, "  {}", p.display());
+    for (v, p) in direct.iter().take(LIST_CAP) {
+        let _ = writeln!(out, "  {}", at(*v, p));
     }
     if direct.len() > LIST_CAP {
         let _ = writeln!(out, "  … {} more", direct.len() - LIST_CAP);
     }
     let _ = writeln!(out, "Transitive blast radius: {} file(s)", radius.len());
-    for e in radius.iter().take(LIST_CAP) {
-        let _ = writeln!(out, "- {} (depth {})", e.path.display(), e.depth);
+    for (v, e) in radius.iter().take(LIST_CAP) {
+        let _ = writeln!(out, "- {} (depth {})", at(*v, &e.path), e.depth);
     }
     if radius.len() > LIST_CAP {
         let _ = writeln!(out, "… {} more (`deps` and `refs transitive=true` list the chain)", radius.len() - LIST_CAP);
@@ -266,7 +291,7 @@ pub fn impact(c: &Ctx) -> ToolResult {
         Ok(co) => {
             let rel = &g.file(fi).path;
             let partners: Vec<(PathBuf, u32)> =
-                co.partners_of(rel, 2).into_iter().filter(|(p, _)| g.file_idx(Path::new(p)).is_some()).map(|(p, n)| (g.root.join(p), n)).filter(|(p, _)| keep(p)).take(10).collect();
+                co.partners_of(rel, 2).into_iter().filter(|(p, _)| g.file_idx(Path::new(p)).is_some()).map(|(p, n)| (g.root.join(p), n)).filter(|(p, _)| keep(0, p)).take(10).collect();
             let _ = writeln!(out, "Co-change partners ({}, from the last {} commits):", partners.len(), co.commits_scanned);
             for (p, n) in partners {
                 let _ = writeln!(out, "  {} (changed together {n}×)", p.display());
@@ -288,7 +313,7 @@ pub fn impact(c: &Ctx) -> ToolResult {
 
 pub fn refs(c: &Ctx) -> ToolResult {
     let name = c.args.str(SYMBOL).ok_or_else(|| ToolError::bad("refs requires `symbol` (aliases: name, symbol_name)"))?;
-    let g = c.graph;
+    let views = c.views();
     let include_tests = c.args.flag(&["include_tests"], true);
     let transitive = c.args.flag(&["transitive"], false);
     let file = c.args.path(super::args::FILE);
@@ -302,34 +327,41 @@ pub fn refs(c: &Ctx) -> ToolResult {
     }
     for d in defs.iter().take(MAX_CANDIDATES) {
         let _ = writeln!(out, "Symbol: {} ({})", d.name, d.kind.as_str());
-        let _ = writeln!(out, "Defined in: {} {}", d.path.display(), range(d));
-        let refs: Vec<_> = g.references(d.id).data.into_iter().filter(|r| include_tests || !is_test_path(&r.path.strip_prefix(&g.root).unwrap_or(&r.path).to_string_lossy())).collect();
-        let mut by_file: BTreeMap<&Path, Vec<&crate::query::RefHit>> = BTreeMap::new();
-        for r in &refs {
-            by_file.entry(r.path.as_path()).or_default().push(r);
+        let _ = writeln!(out, "Defined in: {} {}{}", d.path.display(), range(d), tag_suffix(&views, d.view));
+        // References in the defining view and, through the links, in the views that import it.
+        let is_test = |v: usize, p: &Path| is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
+        let refs: Vec<(usize, crate::query::RefHit)> = views.references(d).into_iter().filter(|(v, r)| include_tests || !is_test(*v, &r.path)).collect();
+        let mut by_file: BTreeMap<(usize, &Path), Vec<&crate::query::RefHit>> = BTreeMap::new();
+        for (v, r) in &refs {
+            by_file.entry((*v, r.path.as_path())).or_default().push(r);
         }
         if refs.is_empty() {
             let _ = writeln!(out, "No references found.");
         } else {
             let _ = writeln!(out, "References ({} in {} file(s)):", refs.len(), by_file.len());
         }
-        for (p, rs) in by_file {
-            let _ = writeln!(out, "{}", p.display());
+        for ((v, p), rs) in by_file {
+            let _ = writeln!(out, "{}{}", p.display(), tag_suffix(&views, v));
             for r in rs {
                 let by_name = if r.confidence == Confidence::Fallback { " (matched by name)" } else { "" };
                 let _ = writeln!(out, "  L{} {}{}{by_name}", r.line, ref_kind(r.kind), r.enclosing.as_ref().map(|e| format!(" in {e}")).unwrap_or_default());
             }
         }
         if transitive {
-            let radius: Vec<_> = g.blast_radius(&d.path).data.unwrap_or_default().into_iter().filter(|e| include_tests || !is_test_path(&e.path.strip_prefix(&g.root).unwrap_or(&e.path).to_string_lossy())).collect();
+            let radius: Vec<_> = views.blast_radius(d.view, d.id.file).into_iter().filter(|(v, e)| include_tests || !is_test(*v, &e.path)).collect();
             let _ = writeln!(out, "Transitive dependents ({} file(s)):", radius.len());
-            for e in radius.iter().take(LIST_CAP) {
-                let _ = writeln!(out, "  {} (depth {})", e.path.display(), e.depth);
+            for (v, e) in radius.iter().take(LIST_CAP) {
+                let _ = writeln!(out, "  {}{} (depth {})", e.path.display(), tag_suffix(&views, *v), e.depth);
             }
         }
         out.push('\n');
     }
     Ok(c.fit(out))
+}
+
+/// `  [view: tessera @ /path]` for a row from a view other than the one the header names.
+fn tag_suffix(views: &Views, view: usize) -> String {
+    views.tag(view).map(|t| format!("  [view: {t}]")).unwrap_or_default()
 }
 
 fn ref_kind(k: RefKind) -> &'static str {
@@ -342,7 +374,7 @@ fn ref_kind(k: RefKind) -> &'static str {
 
 pub fn calls(c: &Ctx) -> ToolResult {
     let name = c.args.str(SYMBOL).ok_or_else(|| ToolError::bad("calls requires `name` (aliases: symbol, symbol_name)"))?;
-    let g = c.graph;
+    let views = c.views();
     let direction = c.args.str(&["direction"]).unwrap_or_else(|| "both".into());
     let (want_callers, want_callees) = match direction.as_str() {
         "callers" => (true, false),
@@ -363,29 +395,28 @@ pub fn calls(c: &Ctx) -> ToolResult {
         many if file.is_none() && kind.is_none() => {
             let mut out = format!("'{name}' resolves to {} function-like candidate(s). Pass `file_path` or `kind` to pick one.\ncandidates:\n", many.len());
             for h in many.iter().take(MAX_CANDIDATES * 3) {
-                let _ = writeln!(out, "- {} ({}) @ {}:L{}-{}", h.name, h.kind.as_str(), h.path.display(), h.start_line, h.end_line);
+                let _ = writeln!(out, "- {} ({}) @ {}:L{}-{}{}", h.name, h.kind.as_str(), h.path.display(), h.start_line, h.end_line, tag_suffix(&views, h.view));
             }
             return Ok(out);
         }
         many => many[0].clone(),
     };
 
-    let keep = |h: &SymbolHit| include_tests || !is_test_path(&h.path.strip_prefix(&g.root).unwrap_or(&h.path).to_string_lossy());
+    let keep = |h: &SymbolHit| include_tests || !is_test_path(&h.path.strip_prefix(&views.graph(h.view).root).unwrap_or(&h.path).to_string_lossy());
     // Level by level, so each edge knows its parent: the flat `calls()` answer is enough for a
     // list but not for a tree or a diagram.
     let walk = |dir: Direction| -> Vec<(SymbolHit, CallEntry)> {
         let mut edges: Vec<(SymbolHit, CallEntry)> = Vec::new();
-        let mut seen: HashSet<SymId> = HashSet::from([target.id]);
+        let mut seen: HashSet<(usize, SymId)> = HashSet::from([(target.view, target.id)]);
         let mut frontier: Vec<SymbolHit> = vec![target.clone()];
         for d in 0..depth {
             let mut next = Vec::new();
             for from in &frontier {
-                for e in g.calls(from.id, dir, 1).data {
-                    if keep(&e.hit) && seen.insert(e.hit.id) {
-                        next.push(e.hit.clone());
-                        let mut e = e;
-                        e.depth = d as u32 + 1;
-                        edges.push((from.clone(), e));
+                let step = if dir == Direction::In { views.callers(from) } else { views.callees(from) };
+                for (hit, line, confidence) in step {
+                    if keep(&hit) && seen.insert((hit.view, hit.id)) {
+                        next.push(hit.clone());
+                        edges.push((from.clone(), CallEntry { hit, depth: d as u32 + 1, line, confidence }));
                     }
                 }
             }
@@ -397,11 +428,11 @@ pub fn calls(c: &Ctx) -> ToolResult {
     let callees = if want_callees { walk(Direction::Out) } else { Vec::new() };
 
     if c.format == Format::Mermaid {
-        let mut ids: BTreeMap<SymId, usize> = BTreeMap::new();
+        let mut ids: BTreeMap<(usize, SymId), usize> = BTreeMap::new();
         let mut labels: Vec<(usize, String)> = Vec::new();
         let mut node = |h: &SymbolHit| {
             let n = ids.len();
-            *ids.entry(h.id).or_insert_with(|| {
+            *ids.entry((h.view, h.id)).or_insert_with(|| {
                 labels.push((n, format!("{} {}:L{}", h.name, h.path.display(), h.start_line)));
                 n
             })
@@ -424,7 +455,7 @@ pub fn calls(c: &Ctx) -> ToolResult {
         return Ok(c.fit(out));
     }
 
-    let mut out = format!("Call hierarchy for {} ({}) @ {}:L{}-{}\n", target.name, target.kind.as_str(), target.path.display(), target.start_line, target.end_line);
+    let mut out = format!("Call hierarchy for {} ({}) @ {}:L{}-{}{}\n", target.name, target.kind.as_str(), target.path.display(), target.start_line, target.end_line, tag_suffix(&views, target.view));
     for (title, rows) in [("Callers", &callers), ("Callees", &callees)] {
         if (title == "Callers" && !want_callers) || (title == "Callees" && !want_callees) {
             continue;
@@ -433,9 +464,11 @@ pub fn calls(c: &Ctx) -> ToolResult {
         for (from, e) in rows.iter().take(limit) {
             let by_name = if e.confidence == Confidence::Fallback { " (matched by name)" } else { "" };
             // `In`: the call is in the caller's file; `Out`: in the origin's file.
-            let at = if title == "Callers" { &e.hit.path } else { &from.path };
+            let (at, at_view) = if title == "Callers" { (&e.hit.path, e.hit.view) } else { (&from.path, from.view) };
             let via = if e.depth > 1 { format!(" via {}", from.name) } else { String::new() };
-            let _ = writeln!(out, "{}[d{}] {} ({}) {}:L{}{via}{by_name}", "  ".repeat(e.depth as usize), e.depth, e.hit.name, e.hit.kind.as_str(), at.display(), e.line);
+            // A callee in another view than the call: say where it is defined.
+            let defined = if title == "Callees" && e.hit.view != from.view { format!(" (defined in {}{})", e.hit.path.display(), tag_suffix(&views, e.hit.view)) } else { String::new() };
+            let _ = writeln!(out, "{}[d{}] {} ({}) {}:L{}{via}{by_name}{defined}{}", "  ".repeat(e.depth as usize), e.depth, e.hit.name, e.hit.kind.as_str(), at.display(), e.line, tag_suffix(&views, at_view));
         }
         if rows.len() > limit {
             let _ = writeln!(out, "… {} more; pass limit={} to see all", rows.len() - limit, rows.len());

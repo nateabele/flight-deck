@@ -18,7 +18,8 @@ pub fn find(c: &Ctx) -> ToolResult {
     let regex = c.args.flag(&["regex"], false);
     let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_FIND_LIMIT);
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
-    let hits = c.graph.find_symbols(&matcher, kind, usize::MAX).data;
+    let views = c.views();
+    let hits = views.find_symbols(&matcher, kind);
     if hits.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
@@ -26,6 +27,9 @@ pub fn find(c: &Ctx) -> ToolResult {
     for h in hits.iter().take(limit) {
         let _ = writeln!(out, "{} ({})", h.name, h.kind.as_str());
         let _ = writeln!(out, "File: {} {}", h.path.display(), range(h));
+        if let Some(tag) = views.tag(h.view) {
+            let _ = writeln!(out, "View: {tag}");
+        }
         if let Some(m) = &h.module {
             let _ = writeln!(out, "Module: {m}");
         }
@@ -54,14 +58,16 @@ pub fn grep(c: &Ctx) -> ToolResult {
     // A symbol-name search: `Foo` and `Foo*` both mean "names starting with Foo", so a file path
     // that merely contains the text never matches.
     let re = if regex { compile_regex(&query)? } else { compile_regex(&format!("^{}", regex::escape(query.trim_end_matches('*'))))? };
-    let mut hits = c.graph.find_symbols(&NameMatch::Regex(re), kind, usize::MAX).data;
+    let views = c.views();
+    let mut hits = views.find_symbols(&NameMatch::Regex(re), kind);
     hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.path.cmp(&b.path)).then(a.start_line.cmp(&b.start_line)));
     if hits.is_empty() {
         return Ok(format!("No symbols match `{query}`"));
     }
     let mut out = format!("Found {} result(s) for `{query}`:\n", hits.len());
     for h in hits.iter().take(limit) {
-        let _ = writeln!(out, "{:<30} {:<12} {} {}  {}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));
+        let tag = views.tag(h.view).map(|t| format!("  [view: {t}]")).unwrap_or_default();
+        let _ = writeln!(out, "{:<30} {:<12} {} {}  {}{tag}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));
     }
     if hits.len() > limit {
         let _ = writeln!(out, "… {} more; pass limit={} to see all", hits.len() - limit, hits.len());
@@ -154,6 +160,7 @@ fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
     let file = c.args.path(FILE);
     let context = c.args.num(&["context_lines"]).unwrap_or(0);
     let mut out = String::new();
+    let views = c.views();
     for name in names {
         let defs: Vec<SymbolHit> = c.definitions(name, kind, file.as_deref());
         if defs.is_empty() {
@@ -169,7 +176,8 @@ fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
             let lines: Vec<&str> = text.lines().collect();
             let start = (d.start_line as usize).saturating_sub(1 + context);
             let end = (d.end_line as usize + context).min(lines.len());
-            let _ = writeln!(out, "// {} {} @ {}:L{}-{}", d.name, d.kind.as_str(), d.path.display(), d.start_line, d.end_line);
+            let tag = views.tag(d.view).map(|t| format!(" (view: {t})")).unwrap_or_default();
+            let _ = writeln!(out, "// {} {} @ {}:L{}-{}{tag}", d.name, d.kind.as_str(), d.path.display(), d.start_line, d.end_line);
             numbered(&mut out, &lines[start..end], start + 1, end.to_string().len());
         }
     }

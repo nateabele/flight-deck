@@ -63,6 +63,15 @@ pub struct Plan {
     pub changes: Vec<Change>,
 }
 
+/// The arguments that name the symbol a mutator works on, or `None` for one that works on a file.
+pub fn symbol_keys(tool: &str) -> Option<&'static [&'static str]> {
+    match tool {
+        "rename" => Some(&["old_name", "symbol", "name", "symbol_name"]),
+        "rename_file" => None,
+        _ => Some(SYMBOL),
+    }
+}
+
 /// Where the lookup for a mutator starts: the view containing this path.
 pub fn anchor_path(tool: &str, args: &Args) -> Result<PathBuf, ToolError> {
     let key: &[&str] = match tool {

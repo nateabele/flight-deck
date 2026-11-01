@@ -9,6 +9,7 @@ pub mod facts;
 pub mod git;
 pub mod graph;
 pub mod lang;
+pub mod links;
 pub mod mcp;
 pub mod proto;
 pub mod query;

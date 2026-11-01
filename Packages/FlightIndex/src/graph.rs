@@ -41,14 +41,24 @@ pub enum Confidence {
     Fallback,
 }
 
+/// Where an imported name points outside the worktree: a file (relative to the worktree root, see
+/// `Resolved::External`) and the name to look up in it. The graph cannot say which symbol that is,
+/// because the file belongs to another view; `links.rs` looks it up there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtTarget {
+    pub path: PathBuf,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RefRes {
     pub target: Option<SymId>,
     pub confidence: Confidence,
-    /// The reference resolved into a file outside this worktree (cross-repo link, step 7).
-    /// Boxed: nearly every reference leaves it empty, and an inline `Option<PathBuf>` is 24 bytes
-    /// a reference (16 MB on a 650k-reference repository).
-    pub external: Option<Box<PathBuf>>,
+    /// The reference leaves this worktree through an import (cross-repo link): one target when an
+    /// import names it, several when it may come from any of the `exposing (..)` imports of
+    /// linked modules. Boxed: nearly every reference leaves it empty, and an inline
+    /// `Option<Vec<_>>` is 24 bytes a reference (16 MB on a 650k-reference repository).
+    pub external: Option<Box<Vec<ExtTarget>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -118,6 +128,14 @@ pub struct GraphData {
     pub(crate) name_index: HashMap<String, Vec<SymId>>,
     /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
     pub(crate) incoming: HashMap<SymId, Vec<(u32, u32)>>,
+    /// External file (relative to the root, as in `Resolved::External`) -> (file, index into that
+    /// file's `refs`) of every reference that may land in it.
+    pub(crate) external_refs: HashMap<PathBuf, Vec<(u32, u32)>>,
+    /// External file -> the files of this view that import it.
+    pub(crate) external_importers: HashMap<PathBuf, Vec<u32>>,
+    /// Some resolution looked outside the root, so the per-file results hold for the root this
+    /// was built under and must be redone for a worktree that stands elsewhere.
+    pub(crate) location_sensitive: bool,
     pub(crate) file_rank: Vec<f64>,
     /// per file, per local symbol id
     pub(crate) symbol_rank: Vec<Vec<f64>>,
@@ -154,6 +172,9 @@ impl ViewGraph {
             importers: Vec::new(),
             name_index: HashMap::new(),
             incoming: HashMap::new(),
+            external_refs: HashMap::new(),
+            external_importers: HashMap::new(),
+            location_sensitive: false,
             file_rank: Vec::new(),
             symbol_rank: Vec::new(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
@@ -219,6 +240,10 @@ impl ViewGraph {
         g.reindex();
 
         let mut dirty: HashSet<u32> = changed.iter().copied().filter(|i| g.files[*i as usize].alive).collect();
+        if self.data.location_sensitive && self.data.root != label.worktree {
+            // `../lib` is another directory from here: nothing resolved outside the root carries over.
+            dirty.extend((0..g.files.len() as u32).filter(|i| g.files[*i as usize].alive));
+        }
         for &c in &changed {
             if (c as usize) < old_files_len {
                 dirty.extend(self.data.importers[c as usize].iter().copied());
@@ -291,6 +316,24 @@ impl GraphData {
                 }
             }
         }
+        self.external_refs.clear();
+        self.external_importers.clear();
+        for (fi, r) in self.res.iter().enumerate() {
+            for (ri, rr) in r.refs.iter().enumerate() {
+                for t in rr.external.iter().flat_map(|v| v.iter()) {
+                    self.external_refs.entry(t.path.clone()).or_default().push((fi as u32, ri as u32));
+                }
+            }
+            for imp in &r.imports {
+                if let Resolved::External(p) = imp {
+                    let v = self.external_importers.entry(p.clone()).or_default();
+                    if v.last() != Some(&(fi as u32)) {
+                        v.push(fi as u32);
+                    }
+                }
+            }
+        }
+        self.location_sensitive |= self.resolver.probed_outside();
         // File rank: importers vote for what they import.
         let edges: Vec<Vec<u32>> = self.res.iter().map(|r| r.edges.clone()).collect();
         let alive: Vec<bool> = self.files.iter().map(|f| f.alive).collect();
@@ -339,6 +382,9 @@ impl ViewGraph {
     /// The same graph for another worktree whose resolved content is identical (same base tree,
     /// empty overlay): only the root, label and root-dependent resolver change.
     pub fn for_worktree(&self, label: ViewLabel) -> ViewGraph {
+        if self.data.location_sensitive && self.data.root != label.worktree {
+            return self.with_changes(label, Vec::new());
+        }
         ViewGraph { root: label.worktree.clone(), label, data: self.data.clone() }
     }
 
@@ -419,7 +465,7 @@ impl GraphData {
     }
 
     /// A definition named `name` in `file`, following re-exports up to a few hops.
-    fn lookup_in_file(&self, file: u32, name: &str, depth: u8) -> Option<SymId> {
+    pub(crate) fn lookup_in_file(&self, file: u32, name: &str, depth: u8) -> Option<SymId> {
         let f = &self.files[file as usize];
         if let Some(cands) = f.names.get(name) {
             let best = cands.iter().max_by_key(|l| {
@@ -614,7 +660,7 @@ impl GraphData {
     ) -> RefRes {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: Confidence::Exact, external: None };
         let none = RefRes { target: None, confidence: Confidence::Exact, external: None };
-        let external = |p: &PathBuf| RefRes { target: None, confidence: Confidence::Exact, external: Some(Box::new(p.clone())) };
+        let external = |targets: Vec<ExtTarget>| RefRes { target: None, confidence: Confidence::Exact, external: Some(Box::new(targets)) };
 
         // Where an imported name lands.
         let through = |res: &Resolved, orig: &str| -> RefRes {
@@ -629,7 +675,7 @@ impl GraphData {
                     }
                     None => none.clone(),
                 },
-                Resolved::External(p) => external(p),
+                Resolved::External(p) => external(vec![ExtTarget { path: p.clone(), name: orig.to_string() }]),
                 Resolved::Unresolved => none.clone(),
             }
         };
@@ -657,7 +703,20 @@ impl GraphData {
                 }
                 match self.fallback(f, &r.name, r.kind, false) {
                     Some(id) => RefRes { target: Some(id), confidence: Confidence::Fallback, external: None },
-                    None => none,
+                    // Nothing in this view: it may be a constructor or a name a linked module
+                    // exposes through `Type(..)` or `(..)`. Which one is for the linked view to say.
+                    None => {
+                        let maybe: Vec<ExtTarget> = subs_types
+                            .iter()
+                            .map(|(res, _)| res)
+                            .chain(globs)
+                            .filter_map(|res| match res {
+                                Resolved::External(p) => Some(ExtTarget { path: p.clone(), name: r.name.clone() }),
+                                _ => None,
+                            })
+                            .collect();
+                        if maybe.is_empty() { none } else { external(maybe) }
+                    }
                 }
             }
             Some(q) => {
@@ -792,9 +851,11 @@ impl GraphData {
                     Resolved::Unresolved => 0,
                 })
                 .sum::<usize>();
-            n += r.refs.iter().filter_map(|x| x.external.as_deref()).map(|p| p.as_os_str().len() + ALLOC).sum::<usize>();
+            n += r.refs.iter().filter_map(|x| x.external.as_deref()).flatten().map(|t| t.path.as_os_str().len() + t.name.len() + 2 * ALLOC).sum::<usize>();
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
+        n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
+        n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
         n += self.name_index.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<SymId>>() + v.len() * size_of::<SymId>() + 8).sum::<usize>();
         n += self.incoming.values().map(|v| size_of::<SymId>() + size_of::<Vec<(u32, u32)>>() + v.len() * 8 + 8).sum::<usize>();
         n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();

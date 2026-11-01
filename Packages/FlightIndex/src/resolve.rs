@@ -6,13 +6,17 @@
 //! the rest of the repository has facts, and the graph needs exactly the same answer afterwards.
 //! One resolver serves both, so they cannot disagree.
 //!
-//! Cross-repository links are step 7. An Elm source directory that leaves the worktree
-//! (`../tessera/designer/src`) resolves to an absolute path and is reported as `External`; nothing
-//! follows it yet.
+//! A path that leaves the worktree (an Elm source directory `../tessera/designer/src`, a TypeScript
+//! import `../../shared/x`) resolves to `External`: the file's path *relative to the worktree
+//! root*, climbing out with `..`. Relative, because a graph is shared by every clean worktree of
+//! one commit (`ViewGraph::for_worktree`) and `../tessera` means a different directory from each
+//! of them; each worktree makes it absolute against its own root (`absolute`). `links.rs` turns
+//! that path into a file of the linked view.
 
 use crate::facts::Import;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +24,8 @@ pub enum Resolved {
     /// A file in this view (worktree-relative path). `rest` is the unresolved tail of a Rust
     /// path: items inside the file (`crate::store::open` -> file `store.rs`, rest `["open"]`).
     File { path: String, rest: Vec<String> },
-    /// A file that exists on disk outside this worktree.
+    /// A file that exists on disk outside this worktree, relative to the worktree root
+    /// (`../tessera/designer/src/Expression/Node.elm`).
     External(PathBuf),
     /// A package (`List`, `lodash`, `std`) or something we could not find.
     Unresolved,
@@ -33,6 +38,10 @@ pub struct Resolver {
     rust_crates: HashMap<String, String>,
     /// elm.json directory (relative to root, "" = root) -> absolute-normalised source dirs.
     elm_projects: Mutex<HashMap<String, Option<Vec<PathBuf>>>>,
+    /// Set when a lookup went outside the worktree. What it found there depends on where the
+    /// worktree stands (`../lib` is a different directory from each), so a graph resolved by this
+    /// resolver is exact only for the root it was resolved under.
+    probed_outside: AtomicBool,
 }
 
 const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -48,7 +57,12 @@ impl Resolver {
                 rust_crates.insert(name.replace('-', "_"), p.clone());
             }
         }
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()) }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false) }
+    }
+
+    /// Did any resolution look outside the worktree (whether or not it found anything)?
+    pub fn probed_outside(&self) -> bool {
+        self.probed_outside.load(Ordering::Relaxed)
     }
 
     pub fn has_path(&self, p: &str) -> bool {
@@ -109,8 +123,11 @@ impl Resolver {
                     if self.paths.contains(&key) {
                         return Resolved::File { path: key, rest: vec![] };
                     }
-                } else if candidate.is_file() {
-                    return Resolved::External(candidate);
+                } else {
+                    self.probed_outside.store(true, Ordering::Relaxed);
+                    if candidate.is_file() {
+                        return Resolved::External(relative_to(&candidate, &self.root));
+                    }
                 }
             }
             return Resolved::Unresolved;
@@ -134,10 +151,22 @@ impl Resolver {
             return Resolved::Unresolved; // a package; tsconfig `paths` come with step 7
         }
         let base = normalize_rel(&join_rel(Path::new(from).parent().unwrap_or(Path::new("")), spec));
-        let Some(base) = base else { return Resolved::Unresolved };
+        let Some(base) = base else { return self.ts_external(from, spec) };
         let found = self.ts_candidates(&base).into_iter().find(|c| self.paths.contains(c));
         match found {
             Some(path) => Resolved::File { path, rest: vec![] },
+            None => Resolved::Unresolved,
+        }
+    }
+
+    /// A relative import that climbs out of the worktree (`../../shared/util`): a file of the
+    /// directory it names, whichever checkout that is. Only a file that exists counts.
+    fn ts_external(&self, from: &str, spec: &str) -> Resolved {
+        self.probed_outside.store(true, Ordering::Relaxed);
+        let abs = absolute(&self.root, &Path::new(from).parent().unwrap_or(Path::new("")).join(spec));
+        let found = self.ts_candidates(&abs.to_string_lossy()).into_iter().map(PathBuf::from).find(|c| c.is_file());
+        match found {
+            Some(file) => Resolved::External(relative_to(&file, &self.root)),
             None => Resolved::Unresolved,
         }
     }
@@ -316,6 +345,22 @@ fn normalize(p: &Path) -> PathBuf {
             other => out.push(other.as_os_str()),
         }
     }
+    out
+}
+
+/// `rel` made absolute against `root`, with `.` and `..` collapsed lexically: where an
+/// `External` path lands for the worktree at `root`.
+pub(crate) fn absolute(root: &Path, rel: &Path) -> PathBuf {
+    normalize(&root.join(rel))
+}
+
+/// `abs` relative to `base` (both normalised absolute paths), climbing with `..` where `abs` is
+/// not under `base`.
+pub(crate) fn relative_to(abs: &Path, base: &Path) -> PathBuf {
+    let (a, b): (Vec<_>, Vec<_>) = (abs.components().collect(), base.components().collect());
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut out: PathBuf = std::iter::repeat_n("..", b.len() - common).collect();
+    out.extend(a[common..].iter().map(|c| c.as_os_str()));
     out
 }
 

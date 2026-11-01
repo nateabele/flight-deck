@@ -33,6 +33,9 @@ pub struct SymbolHit {
     /// The file's Elm module name, when it has one.
     pub module: Option<String>,
     pub rank: f64,
+    /// Which view of the request holds it: 0 is the view that answers, `n` is its `n`th linked
+    /// view (`links::Member`). `hit` leaves it 0; whoever merges views sets it.
+    pub view: usize,
 }
 
 pub enum NameMatch {
@@ -113,6 +116,11 @@ impl ViewGraph {
         Answer { view: self.label.clone(), data }
     }
 
+    /// Absolute path of a file outside this worktree that an import reached (`Resolved::External`).
+    pub fn external_abs(&self, rel: &Path) -> PathBuf {
+        crate::resolve::absolute(&self.root, rel)
+    }
+
     pub fn hit(&self, id: SymId) -> SymbolHit {
         let f = self.file(id.file);
         let s = f.symbol(id.local);
@@ -128,6 +136,7 @@ impl ViewGraph {
             exported: s.exported,
             module: f.facts.module_name.clone(),
             rank: self.symbol_rank[id.file as usize][id.local as usize],
+            view: 0,
         }
     }
 
@@ -237,10 +246,12 @@ impl ViewGraph {
             };
             if dir == Direction::Out {
                 for r in &self.res[f as usize].imports {
-                    if let Resolved::External(p) = r
-                        && externals.insert(p.clone()) {
-                            out.push(DepEntry { path: p.clone(), depth: d + 1, external: true });
+                    if let Resolved::External(p) = r {
+                        let abs = self.external_abs(p);
+                        if externals.insert(abs.clone()) {
+                            out.push(DepEntry { path: abs, depth: d + 1, external: true });
                         }
+                    }
                 }
             }
             for n in next {
@@ -326,7 +337,7 @@ impl ViewGraph {
     }
 
     /// Is symbol `inner` the same as, or nested inside, `outer` (same file)?
-    fn within(&self, file: u32, inner: u32, outer: u32) -> bool {
+    pub(crate) fn within(&self, file: u32, inner: u32, outer: u32) -> bool {
         let f = self.file(file);
         let mut cur = Some(inner);
         while let Some(c) = cur {
