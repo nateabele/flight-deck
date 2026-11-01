@@ -15,6 +15,7 @@ mod history;
 pub mod mutate;
 mod nav;
 pub mod pending;
+mod pkg;
 
 use crate::cochange::CoChange;
 use crate::error::Result;

@@ -380,7 +380,8 @@ impl ViewGraph {
         for r in self.res.iter().flat_map(|r| &r.refs) {
             match (r.target, r.confidence) {
                 (Some(_), Confidence::Exact) => exact += 1,
-                (Some(_), Confidence::Fallback) => fallback += 1,
+                // A package reference has no target, so it counts as unresolved here.
+                (Some(_), Confidence::Fallback | Confidence::Package) => fallback += 1,
                 (None, _) => none += 1,
             }
         }

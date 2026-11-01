@@ -21,15 +21,19 @@ pub fn find(c: &Ctx) -> ToolResult {
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
     let views = c.views();
     let mut hits = views.find_symbols(&matcher, kind);
-    let history = super::history::section(c, &name, hits.is_empty());
-    if hits.is_empty() {
+    let pkgs: Vec<_> = if regex { Vec::new() } else { super::pkg::candidates(c, &name, hits.len()) }
+        .into_iter()
+        .filter(|s| kind.is_none_or(|k| k.as_str() == s.kind.as_str()))
+        .collect();
+    let history = super::history::section(c, &name, hits.is_empty() && pkgs.is_empty());
+    if hits.is_empty() && pkgs.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match.{history}"));
     }
     let near = Near::of(c);
     if let Some(n) = &near {
         n.sort_hits(c.graph, &mut hits);
     }
-    let mut out = format!("Found {} match(es) for '{name}':\n", hits.len());
+    let mut out = format!("Found {} match(es) for '{name}':\n", hits.len() + pkgs.len());
     if let Some(n) = &near {
         let _ = writeln!(out, "{}", n.note());
     }
@@ -50,8 +54,13 @@ pub fn find(c: &Ctx) -> ToolResult {
         }
         let _ = writeln!(out, "Status: {}", status(h));
     }
-    if hits.len() > limit {
-        let _ = writeln!(out, "… {} more match(es); pass limit={} to see all", hits.len() - limit, hits.len());
+    // Package symbols go after the repository's, inside the same limit.
+    for s in pkgs.iter().take(limit.saturating_sub(hits.len())) {
+        super::pkg::find_block(&mut out, s);
+    }
+    let total = hits.len() + pkgs.len();
+    if total > limit {
+        let _ = writeln!(out, "… {} more match(es); pass limit={total} to see all", total - limit);
     }
     out.push_str(history.trim_start_matches('\n'));
     Ok(out)

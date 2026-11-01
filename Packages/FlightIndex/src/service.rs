@@ -1150,6 +1150,17 @@ impl Service {
                 Some(r) => format!("{} run(s); last {}s ago reclaimed {} bytes", self.maintenance.runs(), r.at.map(ago).unwrap_or(0), r.reclaimed()),
             },
         );
+        // Package views (`pkgview`): versions parsed, and versions skipped because the cache has
+        // no docs.json for them, whose references stay unresolved.
+        let p = crate::pkgview::stats();
+        let mut data = data;
+        data["packages"] = json!({"parsed": p.packages, "names": p.names, "missing_docs": p.missing_docs});
+        let text = format!(
+            "{text}\npackages: {} parsed, {} names{}",
+            p.packages,
+            p.names,
+            if p.missing_docs.is_empty() { String::new() } else { format!("; no docs.json: {}", p.missing_docs.join(", ")) }
+        );
         Response { ok: true, text: Some(text), data: Some(data), ..Default::default() }
     }
 }

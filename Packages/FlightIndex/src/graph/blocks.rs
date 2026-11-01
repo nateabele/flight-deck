@@ -172,10 +172,11 @@ pub fn block_bytes(r: &FileRes) -> usize {
         .map(|x| match x {
             Resolved::File { path, rest } => path.len() + ALLOC + rest.iter().map(|s| s.len() + ALLOC).sum::<usize>(),
             Resolved::External(p) => p.as_os_str().len() + ALLOC,
-            Resolved::Unresolved => 0,
+            Resolved::Package(_) | Resolved::Unresolved => 0,
         })
         .sum::<usize>();
     n += r.refs.iter().filter_map(|x| x.external.as_deref()).map(|v| ALLOC + v.iter().map(|t| t.path.as_os_str().len() + t.name.len() + 2 * ALLOC).sum::<usize>()).sum::<usize>();
+    n += r.pkg_refs.heap_bytes(); // the symbols themselves are the process-wide package views
     n
 }
 

@@ -20,6 +20,7 @@ pub mod near;
 pub mod links;
 pub mod mcp;
 pub mod names;
+pub mod pkgview;
 pub mod proto;
 pub mod query;
 pub mod resolve;
