@@ -342,3 +342,39 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(SeatThresholds.default.stalled, AgentActivityRules.stalled)
     }
 }
+
+extension IntakeWireCodingTests {
+    func testAHaltRoundTripsAndAnOlderDetailDecodesWithoutIt() throws {
+        let halt = WireHalt(
+            kind: "roundFailed", title: "Polish 5 failed", reason: "Agent error: network", whatToDo: "Retry.",
+            since: Date(timeIntervalSinceReferenceDate: 800_000_000),
+            slot: WireHaltSlot(role: "polisher", ran: "Gemini 3 Pro · high", harness: "gemini", model: "m",
+                               stage: "polish", slotIndex: 0),
+            output: "tail", actions: ["retry", "retryOther", "toReview", "showOutput"])
+        var summary = Self.summary
+        summary.haltKind = "roundFailed"; summary.haltReason = "Agent error: network"
+        let detail = WireIntakeDetail(etag: "e", project: UUID(), summary: summary, intent: "x",
+                                      servedAt: Date(timeIntervalSinceReferenceDate: 1), halted: halt, retry: true)
+        let data = try JSONEncoder().encode(detail)
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
+
+        // The Mac that predates halt status sends none of the three keys.
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "halted"); object.removeValue(forKey: "retry")
+        var summaryObject = try XCTUnwrap(object["summary"] as? [String: Any])
+        summaryObject.removeValue(forKey: "haltKind"); summaryObject.removeValue(forKey: "haltReason")
+        object["summary"] = summaryObject
+        let old = try JSONDecoder().decode(WireIntakeDetail.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(old.halted)
+        XCTAssertNil(old.retry)
+        XCTAssertNil(old.summary.haltKind)
+    }
+
+    func testAHaltWithKindsAndActionsFromANewerMacStillDecodes() throws {
+        let json = #"{"kind":"someday","title":"T","reason":"R","actions":["retry","teleport"]}"#
+        let halt = try JSONDecoder().decode(WireHalt.self, from: Data(json.utf8))
+        XCTAssertEqual(halt.kind, "someday")
+        XCTAssertEqual(halt.actions, ["retry", "teleport"])
+        XCTAssertNil(halt.slot)
+    }
+}

@@ -1443,6 +1443,10 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneTape(id, token: token, command: command, stage: stage) {
                 return .err(cid: cid, code: code)
             }
+        case .intakeRetry(let id, let token):
+            if let code = store.intakeService.phoneRetry(id, token: token) {
+                return .err(cid: cid, code: code)
+            }
         case .intakeDefaultPlay(let id, let token, let mode):
             if let code = store.intakeService.phoneDefaultPlay(id, token: token, mode: mode) {
                 return .err(cid: cid, code: code)

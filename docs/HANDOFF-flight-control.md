@@ -441,9 +441,10 @@ the heatmap.
 | Control bar | `Planning/ControlBar.swift`, `LCDModel.swift`, `TransportRules.swift` | Transport (Back · Pause \| Step · Next major · To review \| Stop), the LCD (round, elapsed, agents done, so far, billed, convergence, coverage, stops at), Extend, Annotate. `TransportRules` is shared with the phone. |
 | Run menu | `Planning/RunMenu.swift` | AppKit menu: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘., Extend ⌘=, Remove a Round ⌘-, Annotate ⌥⌘A, Section Heatmap |
 | Departures board | `Planning/DeparturesBoard.swift`, `BoardModel.swift`, `SplitFlapText.swift`, `FlapPolicy.swift`, `LabelFit.swift` | NOW / IN THE AIR / STOPS AT / CALLING AT, then the tape of slots (CLR, DRFT, SYN, RF{n}, ENC, PL{n}, FRSH, DDUP, REV) with groups and +/− handles that send extend and trim. `LabelFit` picks the full name or the code. |
-| Live card | `Planning/LiveCard.swift` | Control bar, board, pause and edit-conflict banners, "N notes queued", seat rows, finished rounds. One 1 Hz `TimelineView` drives every clock. |
+| Live card | `Planning/LiveCard.swift` | Control bar, board, the halt panel, the edit-conflict banner, "N notes queued", seat rows, finished rounds. One 1 Hz `TimelineView` drives every clock. |
 | Seat rows | `Planning/SeatRow.swift`, `SeatRowModel.swift`, `AgentStack.swift` | One row per agent: role, model, headline, footprint chips, context gauge, time, result, cost |
 | Round chips | `Planning/RoundChip.swift`, `RoundTimeline.swift`, `FinishedRounds*.swift` | Finished-round cards with one detail panel; the timeline chips in the Rounds editor |
+| Halt panel | `Planning/HaltPanel.swift`, `HaltReseat.swift`, `HaltStatus.swift` | The ONE place a halt is told (round failed, intake failed or interrupted, paused, stopped, rate limited): title, reason, what to do, a HALTED FOR clock, the failed seat, and Retry · Retry with another model · To review · Resume · Show agent output. `HaltStatus` (pure, shared with the phone) decides the words and the actions from `TransportRules`; the view only draws. It replaces the board's failure hover card and the live card's pause banner; the LCD's red SO FAR cell stays as the compact indicator. Retry sends Step (or `IntakeService.retry` for an intake-level failure); Retry with another model saves the choice to the failed seat (`HaltReseat` over `RoundConfigEditor.updatingChoice`, refused while a runner is live) and then sends Step; `IntakeDetailView.haltPanel` wires it, in the live card for a shaping tape and in the stage body for `.failed`/`.interrupted`. |
 | Floating cards | `Planning/FloatingCard.swift` | Hover cards in a non-activating child panel (`CardPlacement`). The notes selection toolbar uses it too. |
 
 ### 3.4 The convergence card and the section-churn heatmap
@@ -680,12 +681,25 @@ Control.
   `bad_range`, `unknown_file`, `too_large`, `bad_manifest` or `unreadable`. A request is safe on any Mac: an unknown
   request gets `err unsupported`.
 - **Replies:** `WireIntakeDetail` and `WireIntakePlan`.
+- **Halt status:** `WireIntakeDetail.halted` (`WireHalt`; `summary.haltKind`/`haltReason` for the list row)
+  says why planning stopped (`roundFailed`, `intakeFailed`, `interrupted`, `paused`, `stopped`,
+  `rateLimited`), the runner's `whatToDo`, the failed `slot` (role, what ran, `stage` + `slotIndex`
+  for the Rounds editor), the tail of its stderr+stdout (~4000 chars), and the `actions` the Mac
+  would accept right now: `retry`, `retryOther`, `toReview`, `resume`, `showOutput`. Built by the
+  pure `HaltStatus.make` (`Intake/Planning/HaltStatus.swift`), which the desktop panel reads too;
+  actions are derived from `TransportRules`, never a rule of their own. `retry` sends `intake.retry`
+  (a failed tape queues the same Step as ⏯; a failed/interrupted intake runs `IntakeService.retry`;
+  anything else is `not_allowed`/`intake_moved_on`); `toReview` and `resume` reuse `intake.tape`
+  (`toReview`, `step`); `retryOther` is client-side: save the new seat through `intake.rounds`
+  (a failed round has not landed, so `ShapingEdit` allows it once the runner is gone), then `intake.retry`.
+  `WireIntakeDetail.retry == true` is the licence to send `intake.retry`.
 - **Event:** `project.intakes`, which carries `WireProject.intakes`.
 - **Commands** (`Frames.swift`, `FleetCommand`):
 
 | Op | Fields | Gate |
 |---|---|---|
 | `intake.tape` | command, stage? | `steer` |
+| `intake.retry` | id, token | `retry` |
 | `intake.defaultPlay` | mode | `steer` |
 | `intake.note` | noteID, kind, text, checkpoint?, block?, quote? | `steer` |
 | `intake.removeNote` | noteID | `steer` |

@@ -366,7 +366,8 @@ struct IntakeDetailView: View {
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
-                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) })
+                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) },
+                                 halt: haltStatus(tape: tape, activities: seats.activities).map { AnyView(haltPanel($0, tape: tape)) })
             }
         default:
             EmptyView()
@@ -851,22 +852,61 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// An intake that failed or was interrupted: the halt panel, whose Retry is the primary
+    /// button's own (`performPrimary`).
+    @ViewBuilder
     private var failedBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let failure = intake.failure {
-                Text(failure).foregroundStyle(.red)
+        if let status = haltStatus(tape: nil) {
+            haltPanel(status)
+        }
+    }
+
+    // MARK: - Halt panel
+
+    /// What stopped planning, if anything: the model's one reading (`HaltStatus`), here with the
+    /// failed seat's output read only while a round is failed. `activities` carries the seats'
+    /// rate-limit marks, so a seat waiting on one still shows when the tape runs.
+    private func haltStatus(tape: Tape?, activities: [String: SeatActivity] = [:]) -> HaltStatus? {
+        let failedSeat = tape?.status == .failed ? service.failedSeat(intake.id) : nil
+        return HaltStatus.make(intake: intake, tape: tape, config: intake.roundConfig, failedSeatOutput: failedSeat?.output,
+                               rateLimitedAt: activities.values.compactMap(\.rateLimitedAt).max(),
+                               available: service.availableModels(project: intake.projectPath), failedRole: failedSeat?.role)
+    }
+
+    private func haltPanel(_ status: HaltStatus, tape: Tape? = nil) -> some View {
+        // The round the editor opens on: the one that failed, which the tape has not recorded.
+        let failed = tape.flatMap { t in intake.roundConfig.flatMap { TapePlanner.upcoming(after: t, config: $0).first } }
+        let available = service.availableModels(project: intake.projectPath)
+        let slot = status.slot
+        return HaltPanel(
+            status: status,
+            reseat: slot.flatMap { s in intake.roundConfig.map { HaltReseat.options(for: s, config: $0, available: available) } } ?? [],
+            perform: { performHalt($0) },
+            choose: { choice in
+                guard let slot, let config = intake.roundConfig.flatMap({ HaltReseat.applying(choice, to: slot, in: $0) })
+                else { return }
+                // A refused save (the runner is live, say) leaves the seat as it was: retrying
+                // would run the very agent the human just chose against.
+                guard service.saveRoundConfig(intake.id, config) == nil else { return }
+                service.send(intake.id, .step)
+            },
+            openRounds: failed.map { round in { showRoundConfig(RoundKey(stage: round.stage, round: round.round)) } },
+            naming: { available.modelLabel(agent: $0.agent, model: $0.model, account: $0.account) })
+    }
+
+    /// The controls' presses, on the paths the transport keys and the primary button take.
+    private func performHalt(_ action: HaltStatus.Action) {
+        switch action {
+        case .retry:
+            if intake.state == .shaping { service.send(intake.id, .step) } else { service.retry(intake.id) }
+        case .toReview: service.send(intake.id, .toReview)
+        case .resume:
+            switch intake.roundConfig?.defaultPlay ?? .step {
+            case .step: service.send(intake.id, .step)
+            case .nextMajor: service.send(intake.id, .nextMajor)
+            case .toReview: service.send(intake.id, .toReview)
             }
-            if let raw = intake.rawFailureOutput {
-                DisclosureGroup("Raw output") {
-                    ScrollView {
-                        Text(raw)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 200)
-                }
-            }
+        case .retryOther, .showOutput: break
         }
     }
 

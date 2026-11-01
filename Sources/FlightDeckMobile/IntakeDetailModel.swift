@@ -21,6 +21,10 @@ final class IntakeDetailModel {
     /// chosen, one for the running config while shaping. Held here, with the detail, so an edit
     /// survives leaving the inspector for the fidelity list and back.
     var roundDrafts: [String: RoundDraft] = [:]
+    /// Set by the halt panel's "Retry with another model": the rounds editor's Save then also
+    /// sends `intake.retry`. Cleared when the editor goes away, so a later ordinary save never
+    /// restarts a round nobody asked to restart.
+    var retryAfterSave = false
     /// Mac clock − phone clock, from the last detail's `servedAt` (Review Focus #1).
     private(set) var macClockOffset: TimeInterval = 0
     @ObservationIgnored private weak var fetcher: IntakeFetching?

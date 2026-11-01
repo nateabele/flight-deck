@@ -299,6 +299,9 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// code from `IntakeService`, never a throw that ends the connection.
     case intakeTape(id: UUID, token: UUID, command: String, stage: String?)
     case intakeDefaultPlay(id: UUID, token: UUID, mode: String)
+    /// Re-run what halted planning: a failed round, or a failed/interrupted intake. **Sent only
+    /// when the detail has `retry == true`** (an older Mac drops the socket on this unknown op).
+    case intakeRetry(id: UUID, token: UUID)
     case intakeNote(id: UUID, token: UUID, noteID: UUID, kind: String, text: String,
                     checkpoint: Int?, block: Int?, quote: String?)
     case intakeRemoveNote(id: UUID, token: UUID, noteID: UUID)
@@ -383,6 +386,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case abortPrompt = "prompt.abort"
         case intakeTape = "intake.tape"
         case intakeDefaultPlay = "intake.defaultPlay"
+        case intakeRetry = "intake.retry"
         case intakeNote = "intake.note"
         case intakeRemoveNote = "intake.removeNote"
         case intakeSetNoteKind = "intake.setNoteKind"
@@ -474,6 +478,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(token, forKey: .token)
             try c.encode(command, forKey: .command)
             try c.encodeIfPresent(stage, forKey: .stage)
+        case .intakeRetry(let id, let token):
+            try c.encode(Op.intakeRetry, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
         case .intakeDefaultPlay(let id, let token, let mode):
             try c.encode(Op.intakeDefaultPlay, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -655,6 +663,11 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 token: try c.decode(UUID.self, forKey: .token),
                 command: try c.decode(String.self, forKey: .command),
                 stage: try c.decodeIfPresent(String.self, forKey: .stage)
+            )
+        case .intakeRetry:
+            self = .intakeRetry(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token)
             )
         case .intakeDefaultPlay:
             self = .intakeDefaultPlay(

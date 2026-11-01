@@ -527,4 +527,43 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertNil(svc.phoneAnswer(i.id, round: 0, digest: digest(i), answers: answers, token: token))
         XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.exchanges[0].answers, ["once"])
     }
+
+    // MARK: retry
+
+    func testRetryOfAFailedTapeQueuesTheSameStepAsTheTransportKey() async throws {
+        let i = try seedTape(.failed)
+        let svc = await makeService()
+        let before = commandLines(i.id)
+        XCTAssertNil(svc.phoneRetry(i.id, token: UUID()))
+        XCTAssertEqual(commandLines(i.id), before + 1)
+        XCTAssertEqual(tapeStore(i.id).commands(after: 0).last?.command, .step)
+    }
+
+    func testARepeatedRetryTokenIsAckedOnce() async throws {
+        let i = try seedTape(.failed)
+        let svc = await makeService()
+        let before = commandLines(i.id)
+        let token = UUID()
+        XCTAssertNil(svc.phoneRetry(i.id, token: token))
+        XCTAssertNil(svc.phoneRetry(i.id, token: token))
+        XCTAssertEqual(commandLines(i.id), before + 1)
+    }
+
+    func testRetryIsRefusedWhereTheMacWouldRefuse() async throws {
+        let running = try seedTape(.running)
+        let paused = try seedTape(.paused)
+        let released = try seed(.released)
+        let svc = await makeService()
+        XCTAssertEqual(svc.phoneRetry(running.id, token: UUID()), "not_allowed")
+        XCTAssertEqual(svc.phoneRetry(paused.id, token: UUID()), "not_allowed", "Resume is a Step, not a retry")
+        XCTAssertEqual(svc.phoneRetry(released.id, token: UUID()), "intake_moved_on")
+        XCTAssertEqual(svc.phoneRetry(UUID(), token: UUID()), "unknown_intake")
+    }
+
+    func testRetryOfAnIntakeThatFailedRunsTheServicesOwnRetry() async throws {
+        let i = try seed(.failed)
+        let svc = await makeService()
+        XCTAssertNil(svc.phoneRetry(i.id, token: UUID()))
+        XCTAssertEqual(svc.intakes.first { $0.id == i.id }?.state, .shaping, "the same resume `retry(_:)` does")
+    }
 }

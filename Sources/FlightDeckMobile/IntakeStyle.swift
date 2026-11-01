@@ -101,6 +101,8 @@ enum IntakeRowStyle {
             var parts = [s.now, clock].compactMap { $0 }
             if let d = s.agentsDone, let t = s.agentsTotal { parts.append("\(d) of \(t) agents") }
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case "failed", "interrupted":
+            return s.haltReason
         default:
             return nil
         }

@@ -1393,6 +1393,82 @@ final class IntakeService: ObservableObject {
         return nil
     }
 
+    /// The phone's Retry (`intakeRetry`): re-runs whatever halted planning, by the same paths the
+    /// desktop's buttons take — ⏯ for a failed tape (validated by `TransportRules`, like
+    /// `phoneTape`'s "step"), `retry(_:)` for an intake that failed or was interrupted.
+    func phoneRetry(_ id: UUID, token: UUID) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        switch i.state {
+        case .failed, .interrupted:
+            accept(token, for: id)
+            retry(id)
+        case .shaping:
+            let tape = storedTape(id)
+            guard tape.status == .failed,
+                  TransportRules.make(tape: tape, config: i.roundConfig).enabled.contains(.step) else {
+                return refuse("not_allowed", id)
+            }
+            accept(token, for: id)
+            send(id, .step)
+        default:
+            return refuse("intake_moved_on", id)
+        }
+        return nil
+    }
+
+    /// The failed round's seat files, read straight from `runs/`. `seats.files(id)` can't serve
+    /// here: `pollSeats` only reads while the tape has a `roundInProgress`, and the runner clears
+    /// that when a round fails — so on a real failed tape the feed is empty, and the halt panel
+    /// lost the seat's output and its "Retry with another model" (seen on a failed polish round).
+    /// Runs older than this attempt's `roundStartedAt` are an earlier attempt's, as in `pollSeats`.
+    private func failedRoundSeats(_ id: UUID, round: PlannedRound) -> SeatFiles {
+        let live = seats.files(id)
+        if !live.activities.isEmpty || !live.records.isEmpty { return live }
+        let store = tapeStore(id)
+        let floor = storedTape(id).roundStartedAt?.addingTimeInterval(-1)
+        func load<T: Decodable>(_ dir: URL, _ name: String) -> T? {
+            readFile(dir.appendingPathComponent(name)).flatMap { try? IntakeJSON.decoder.decode(T.self, from: $0) }
+        }
+        var files = SeatFiles()
+        for run in store.runNames(forRound: round) {
+            let dir = store.runDirectory(run)
+            if let a: SeatActivity = load(dir, "activity.json"), floor.map({ a.startedAt >= $0 }) ?? true { files.activities[run] = a }
+            if let r: RunRecord = load(dir, "run.json"), floor.map({ r.started >= $0 }) ?? true { files.records[run] = r }
+            if files.activities[run] != nil || files.records[run] != nil, let s: SeatResult = load(dir, "result.json") {
+                files.results[run] = s
+            }
+        }
+        return files
+    }
+
+    /// The failed round's seat and the end of what it printed — `stderr` then `stdout` from its
+    /// `runs/<run>/`, each read from its own tail so a long transcript costs a seek, not a load.
+    /// Empty for a tape that has not failed, or a round whose seat left no failed run.
+    func failedSeat(_ id: UUID) -> (role: String, output: String?)? {
+        guard let i = intake(id), let config = i.roundConfig else { return nil }
+        let tape = storedTape(id)
+        guard tape.status == .failed, let round = TapePlanner.upcoming(after: tape, config: config).first,
+              let seat = HaltStatus.failedSeat(round: round, config: config, seats: failedRoundSeats(id, round: round))
+        else { return nil }
+        let dir = runDirectory(id, run: seat.run)
+        let streams = ["stderr", "stdout"].compactMap { name -> String? in
+            Self.tailOfFile(dir.appendingPathComponent(name), bytes: HaltStatus.outputLimit * 2)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        return (seat.role, streams.isEmpty ? nil : streams.joined(separator: "\n\n"))
+    }
+
+    /// The last `bytes` of a file as text (the cut moved to a character boundary), nil when unreadable.
+    private static func tailOfFile(_ url: URL, bytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        try? handle.seek(toOffset: size > UInt64(bytes) ? size - UInt64(bytes) : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        return IntakeDetailProjection.tail(String(decoding: data, as: UTF8.self), limit: bytes)
+    }
+
     /// The phone's choice of default play (spec §6.5 `intakeDefaultPlay`).
     func phoneDefaultPlay(_ id: UUID, token: UUID, mode: String) -> String? {
         if alreadyAccepted(token, for: id) { return nil }

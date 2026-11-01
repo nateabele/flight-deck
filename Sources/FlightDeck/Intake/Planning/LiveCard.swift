@@ -19,7 +19,7 @@ struct LiveCard: View {
         case triage(activity: SeatActivity?)
         case shaping(tape: Tape, seats: SeatFiles, editConflict: EditConflictNotice?, selectedRound: Binding<Int?>,
                      openRound: Binding<Int?>, selectedSeat: Binding<String?>, controlBar: (Date) -> AnyView,
-                     board: (Date) -> AnyView)
+                     board: (Date) -> AnyView, halt: AnyView?)
     }
 
     fileprivate let intake: Intake
@@ -62,12 +62,13 @@ struct LiveCard: View {
                         selectedRound: Binding<Int?> = .constant(nil), openRound: Binding<Int?> = .constant(nil),
                         selectedSeat: Binding<String?> = .constant(nil),
                         dwell: DwellBank? = nil, showConfig: ((RoundKey) -> Void)? = nil, pickedRound: RoundKey? = nil,
-                        controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
+                        controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView,
+                        halt: AnyView? = nil) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
                                 editConflict: editConflict, selectedRound: selectedRound, openRound: openRound,
                                 selectedSeat: selectedSeat,
-                                controlBar: controlBar, board: board),
+                                controlBar: controlBar, board: board, halt: halt),
                  pending: pending, sharedDwell: dwell, showConfig: showConfig, pickedRound: pickedRound)
     }
 
@@ -87,14 +88,11 @@ struct LiveCard: View {
             switch kind {
             case .triage:
                 seatSection(now: now)
-            case .shaping(let tape, _, let editConflict, let selectedRound, let openRound, _, let controlBar, let board):
+            case .shaping(let tape, _, let editConflict, let selectedRound, let openRound, _, let controlBar, let board, let halt):
                 controlBar(now)
                 board(now)
                 let model = ShapingModel(intake: intake, tape: tape)
-                if let banner = model.pauseBanner {
-                    Self.banner(symbol: "exclamationmark.triangle.fill", title: banner.title, detail: banner.action,
-                                identifier: "shaping-pause-banner")
-                }
+                if let halt { halt }
                 if let editConflict {
                     Self.banner(symbol: "arrow.triangle.merge", title: editConflict.title, detail: nil,
                                 identifier: "shaping-edit-conflict-banner",
@@ -134,7 +132,7 @@ struct LiveCard: View {
         switch kind {
         case .triage(let activity):
             return pending != nil || (intake.state == .triaging && activity?.finished != true) ? .live : .still
-        case .shaping(let tape, _, _, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _, _, _, _):
             return .shaping(tape: tape, pending: pending)
         }
     }
@@ -169,7 +167,7 @@ struct LiveCard: View {
     @ViewBuilder
     private func seatRow(_ seat: LiveSeat, now: Date) -> some View {
         let row = SeatRow(model: seat.model, queuedText: queuedText(now: now))
-        if case .shaping(_, _, _, _, _, let selectedSeat, _, _) = kind {
+        if case .shaping(_, _, _, _, _, let selectedSeat, _, _, _) = kind {
             let selected = selectedSeat.wrappedValue == seat.id
             let toggle = { selectedSeat.wrappedValue = selected ? nil : seat.id }
             row
@@ -226,14 +224,14 @@ struct LiveCard: View {
 
     /// The running (or starting) round's chip (`RoundTimeline.live`), for the header.
     private var liveChip: RoundChipModel? {
-        guard case .shaping(let tape, _, _, _, _, _, _, _) = kind else { return nil }
+        guard case .shaping(let tape, _, _, _, _, _, _, _, _) = kind else { return nil }
         return RoundTimeline.live(tape: tape, starting: pendingRound, config: intake.roundConfig)
     }
 
     private var sectionTitle: String {
         switch kind {
         case .triage: return "Triage"
-        case .shaping(let tape, _, _, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return "Agents" }
             return BoardModel.name(stage: round.stage, round: round.round)
         }
@@ -261,7 +259,7 @@ struct LiveCard: View {
             // Spec §3.1: "Reading the repo" until the first event says anything more specific.
             if model.glyph == .running, model.headline == nil { model.headline = "Reading the repo" }
             return [LiveSeat(id: "triage", model: model)]
-        case .shaping(let tape, let seats, _, _, _, _, _, _):
+        case .shaping(let tape, let seats, _, _, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
             return LiveSeats.rows(round: round, config: intake.roundConfig, seats: LiveSeats.files(seats, pending: pending),
                                   now: now)

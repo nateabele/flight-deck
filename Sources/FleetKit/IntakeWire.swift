@@ -38,12 +38,17 @@ public struct WireIntakeSummary: Codable, Equatable, Sendable, Identifiable {
     /// How many of the intake's ask threads wait on the human (`needsYou`): the fleet list's
     /// badge. nil from a Mac without threads, and from this one until they ship.
     public var threadsNeedingYou: Int?
+    /// `WireHalt.kind` and `reason` when planning is halted, so the Sessions row can say why.
+    /// nil while nothing is halted and from a Mac that predates halt status.
+    public var haltKind: String?
+    public var haltReason: String?
 
     public init(
         id: UUID, title: String, state: String, needsAttention: Bool, preset: String? = nil,
         now: String? = nil, runStatus: String? = nil, clockSince: Date? = nil,
         agentsDone: Int? = nil, agentsTotal: Int? = nil, questionCount: Int? = nil,
-        releasedTaskCount: Int? = nil, createdAt: Date, threadsNeedingYou: Int? = nil
+        releasedTaskCount: Int? = nil, createdAt: Date, threadsNeedingYou: Int? = nil,
+        haltKind: String? = nil, haltReason: String? = nil
     ) {
         self.id = id; self.title = title; self.state = state; self.needsAttention = needsAttention
         self.preset = preset; self.now = now; self.runStatus = runStatus; self.clockSince = clockSince
@@ -51,6 +56,7 @@ public struct WireIntakeSummary: Codable, Equatable, Sendable, Identifiable {
         self.questionCount = questionCount; self.releasedTaskCount = releasedTaskCount
         self.createdAt = createdAt
         self.threadsNeedingYou = threadsNeedingYou
+        self.haltKind = haltKind; self.haltReason = haltReason
     }
 }
 
@@ -111,6 +117,12 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     /// visual blocks. Separate for the same reason: an older Mac drops the socket on an op it does
     /// not know. nil from such a Mac, and from this one until visuals ship.
     public var visuals: Bool?
+    /// Why planning stopped and what can be done about it; nil while nothing is halted and from
+    /// a Mac that predates halt status. (`halt` above is the unrelated "pausing"/"stopping".)
+    public var halted: WireHalt?
+    /// true from a Mac that answers `intake.retry` — the phone's licence to offer Retry, separate
+    /// from `steer` because an older Mac drops the socket on an op it does not know.
+    public var retry: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
@@ -121,7 +133,7 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         roundConfig: WireRoundConfig? = nil, editRounds: Bool? = nil,
         roundsMenu: WireRoundsMenu? = nil, roundsLock: WireRoundsLock? = nil,
         structuredQuestions: Bool? = nil, threads: Bool? = nil,
-        visuals: Bool? = nil
+        visuals: Bool? = nil, halted: WireHalt? = nil, retry: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
@@ -133,6 +145,59 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
         self.structuredQuestions = structuredQuestions
         self.threads = threads
         self.visuals = visuals
+        self.halted = halted
+        self.retry = retry
+    }
+}
+
+/// Why planning stopped and what the person can do about it. Strings, not enums, so a newer Mac's kinds/actions degrade on an older phone.
+public struct WireHalt: Codable, Equatable, Sendable {
+    /// "roundFailed" | "intakeFailed" | "interrupted" | "paused" | "stopped" | "rateLimited"
+    public var kind: String
+    /// e.g. "Polish 5 failed".
+    public var title: String
+    /// e.g. "Harness error: There was a network issue connecting to the server…".
+    public var reason: String
+    /// The runner's `FailureDiagnosis` action, verbatim.
+    public var whatToDo: String?
+    /// failedAt / paused-at, for a "halted for" clock.
+    public var since: Date?
+    /// The seat that failed, when one did.
+    public var slot: WireHaltSlot?
+    /// Tail of the failed agent's stderr+stdout (capped, the end kept).
+    public var output: String?
+    /// Ordered: "retry", "retryOther", "toReview", "resume", "showOutput" … only what the Mac
+    /// would accept right now.
+    public var actions: [String]
+
+    public init(
+        kind: String, title: String, reason: String, whatToDo: String? = nil, since: Date? = nil,
+        slot: WireHaltSlot? = nil, output: String? = nil, actions: [String] = []
+    ) {
+        self.kind = kind; self.title = title; self.reason = reason; self.whatToDo = whatToDo
+        self.since = since; self.slot = slot; self.output = output; self.actions = actions
+    }
+}
+
+public struct WireHaltSlot: Codable, Equatable, Sendable {
+    /// "polisher"
+    public var role: String
+    /// Human label of the harness/model/effort that ran, e.g. "Gemini 3 Pro · high".
+    public var ran: String
+    /// Raw agent id, e.g. "gemini".
+    public var harness: String?
+    public var model: String?
+    /// `Stage` rawValue of the failed round.
+    public var stage: String?
+    /// Index into that stage's slots in `RoundConfig`, so the rounds editor can target it.
+    public var slotIndex: Int?
+
+    public init(
+        role: String, ran: String, harness: String? = nil, model: String? = nil,
+        stage: String? = nil, slotIndex: Int? = nil
+    ) {
+        self.role = role; self.ran = ran; self.harness = harness; self.model = model
+        self.stage = stage; self.slotIndex = slotIndex
     }
 }
 

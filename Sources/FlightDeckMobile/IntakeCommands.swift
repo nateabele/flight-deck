@@ -19,6 +19,8 @@ protocol IntakeCommanding: AnyObject {
 enum IntakeAction: Hashable {
     case tape(String), defaultPlay(String), note(UUID), removeNote(UUID), noteKind(UUID), choose(String), rounds
     case answer(String)
+    /// Planning's Retry (`intake.retry`): re-run what halted.
+    case retry
     /// Ask threads: a draft's send (by its id), a thread's resolve (by thread id). Answers are keyed
     /// on the turn they answer and a diff's decision on which decision it is (C-I1): a token kept
     /// from a lost ✓ reused for a ✗ was acked as a duplicate while the plan took the edit, and one
@@ -99,6 +101,13 @@ final class IntakeCommandModel {
     }
 
     func clearMessage() { message = nil }
+
+    /// Re-runs what planning halted on. Its own action, so the panel's button reads "Retrying…"
+    /// and a lost ack is retried under the same token, which the Mac dedupes.
+    func retry(onAck: @escaping () -> Void) {
+        let id = intake
+        send(.retry, command: { .intakeRetry(id: id, token: $0) }, onAck: onAck)
+    }
 
     /// Forget everything in flight (unpair): a late ack or deadline must not touch state that
     /// now belongs to nobody.

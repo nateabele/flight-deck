@@ -62,6 +62,11 @@ enum IntakeSummaryProjection {
                 s.agentsDone = rows.filter { $0.model.glyph == .done || $0.model.glyph == .failed }.count
             }
         }
+        if let halt = HaltStatus.make(intake: i, tape: tape, config: i.roundConfig, failedSeatOutput: nil,
+                                      rateLimitedAt: nil, available: .defaults) {
+            s.haltKind = halt.kind.rawValue
+            s.haltReason = halt.reason
+        }
         return s
     }
 

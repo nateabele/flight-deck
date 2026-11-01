@@ -72,8 +72,9 @@ final class FlapCardRenderTests: XCTestCase {
         try PlanningRender.write(reveal, size: NSSize(width: 360, height: 620), to: out.appendingPathComponent("flapcard-reveal.png"))
     }
 
-    /// A failed round: the board with its two cut-off lines under NOW, and the card resting on
-    /// them opens — the error in full and what to do — for a retry-led failure and a sign-in one.
+    /// A failed round: the board with its two cut-off lines under NOW, and under it the halt panel
+    /// — the error in full, what to do and the controls — for a retry-led failure and a sign-in
+    /// one, in both appearances.
     func testRenderFailureCard() throws {
         guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
             throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the hover card PNGs")
@@ -103,18 +104,21 @@ final class FlapCardRenderTests: XCTestCase {
                             target: .nextMajor, status: .failed, pauseDiagnosis: diagnosis,
                             roundStartedAt: t0.addingTimeInterval(470))
             let model = BoardModel(intake: intake, tape: tape, config: config, now: t0.addingTimeInterval(724), selected: nil, preview: nil)
-            let failure = try XCTUnwrap(model.failure)
+            let output = "error: There was a network issue connecting to the server\nAGY_ERROR: dial tcp: no such host"
+            let halt = try XCTUnwrap(HaltStatus.make(intake: intake, tape: tape, config: config, failedSeatOutput: output,
+                                                     rateLimitedAt: nil, available: .defaults, failedRole: "reviewer"))
             let policy = FlapPolicy()
             for (surface, text) in model.flapTexts { policy.seed(surface: surface, text: text) }
-            let pane = VStack(alignment: .leading, spacing: 16) {
-                DeparturesBoard(model: model, policy: policy, preview: .constant(nil), onSelect: { _ in }, onExtend: { _ in })
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                SplitFlapCard(full: failure.round, detail: nil, accessory: AnyView(FailureCardBody(failure: failure)),
-                              revealAt: 10).fixedSize()
+            for (appearance, look) in [(NSAppearance.Name.darkAqua, "dark"), (.aqua, "light")] {
+                let pane = VStack(alignment: .leading, spacing: 16) {
+                    DeparturesBoard(model: model, policy: policy, preview: .constant(nil), onSelect: { _ in }, onExtend: { _ in })
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    HaltPanel(status: halt, perform: { _ in })
+                }
+                .padding(16)
+                try PlanningRender.write(pane, size: NSSize(width: 700, height: 420),
+                                         to: out.appendingPathComponent("failure-card-\(name)-\(look).png"), appearance: appearance)
             }
-            .padding(16)
-            try PlanningRender.write(pane, size: NSSize(width: 700, height: 640),
-                                     to: out.appendingPathComponent("failure-card-\(name).png"), appearance: .darkAqua)
         }
     }
 }

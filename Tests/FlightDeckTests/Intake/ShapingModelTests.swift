@@ -190,20 +190,6 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(cards.map(\.title), ["drafts", "synthesis", "R1", "R2"])
     }
 
-    // MARK: - Pause banner
-
-    func testPauseBannerFromAFailedTape() throws {
-        var tape = pausedAtR2(status: .failed)
-        tape.pauseDiagnosis = Diagnosis(category: .rateLimited, detail: "429 from codex", action: "Wait 5 minutes, then retry")
-        let banner = try XCTUnwrap(ShapingModel(intake: try featureIntake(), tape: tape).pauseBanner)
-        XCTAssertEqual(banner.title, "Rate limited: 429 from codex")
-        XCTAssertEqual(banner.action, "Wait 5 minutes, then retry")
-    }
-
-    func testNoPauseBannerWithoutADiagnosis() throws {
-        XCTAssertNil(ShapingModel(intake: try featureIntake(), tape: pausedAtR2()).pauseBanner)
-    }
-
     // MARK: - Pill
 
     func testPillLabelFollowsTheRunner() {

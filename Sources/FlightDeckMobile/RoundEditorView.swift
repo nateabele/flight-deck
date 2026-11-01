@@ -23,7 +23,11 @@ struct RoundEditorView: View {
     private var shaping: Bool { preset == nil }
 
     var body: some View {
+        ScrollViewReader { proxy in
         List {
+            if model.retryAfterSave, let hint = model.detail?.halted.map({ HaltPanelModel(halt: $0, buttons: [], isFailure: true).retryOtherHint }) {
+                Section { Text(hint).font(.subheadline) }
+            }
             if let message = commands.message {
                 Section {
                     HStack(alignment: .firstTextBaseline) {
@@ -55,6 +59,7 @@ struct RoundEditorView: View {
                 } footer: {
                     if stage.id == "synthesis" { Text(RoundEditor.synthesisIntegratorNote).font(.caption) }
                 }
+                .id(stage.id)
             }
             Section {
                 Picker(selection: Binding(get: { editor.config.defaultPlay }, set: { value in edit { $0.setDefaultPlay(value) } })) {
@@ -64,6 +69,12 @@ struct RoundEditorView: View {
                 .accessibilityIdentifier("rounds-default-play")
             }
             .disabled(!editor.editable)
+        }
+        // Retrying another model lands on the stage that failed.
+        .onAppear {
+            if model.retryAfterSave, let stage = model.detail?.halted?.slot?.stage { proxy.scrollTo(stage, anchor: .top) }
+        }
+        .onDisappear { model.retryAfterSave = false }
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -294,7 +305,7 @@ struct RoundEditorView: View {
                         .buttonStyle(.bordered)
                     if shaping {
                         Button { save() } label: {
-                            Text(commands.inFlight.contains(.rounds) ? "Saving…" : "Save").frame(maxWidth: .infinity)
+                            Text(commands.inFlight.contains(.rounds) ? "Saving…" : model.retryAfterSave ? "Save & Retry" : "Save").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(commands.inFlight.contains(.rounds) || !editor.editable)
@@ -312,7 +323,12 @@ struct RoundEditorView: View {
         let draft = editing.draft
         let key = editing.key
         commands.send(.rounds, command: { .intakeRounds(id: intake, token: $0, config: draft.config, base: draft.base) },
-                      onAck: { model.roundDrafts[key] = nil; model.refresh() },
+                      onAck: {
+                          model.roundDrafts[key] = nil
+                          model.refresh()
+                          // The saved model is the reason to retry; the editor stays up if the retry fails.
+                          if model.retryAfterSave { commands.retry { model.retryAfterSave = false; model.refresh() } }
+                      },
                       // The plan moved under the edit: what it was made from is gone, so it goes too.
                       onFailure: { error in
                           if case .server(code: "rounds_changed")? = error { model.roundDrafts[key] = nil; model.refresh() }

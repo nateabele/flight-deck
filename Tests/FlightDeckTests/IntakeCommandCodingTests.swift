@@ -89,3 +89,16 @@ final class IntakeCommandCodingTests: XCTestCase {
         }
     }
 }
+
+extension IntakeCommandCodingTests {
+    func testRetryRoundTripsAndIsFleetWide() throws {
+        let id = UUID(), token = UUID()
+        let command = FleetCommand.intakeRetry(id: id, token: token)
+        let data = try JSONEncoder().encode(command)
+        XCTAssertEqual(try JSONDecoder().decode(FleetCommand.self, from: data), command)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["op"] as? String, "intake.retry")
+        XCTAssertFalse(ControlScope.permits(command, level: .ownSession, caller: .session(id)))
+        XCTAssertTrue(ControlScope.permits(command, level: .full, caller: .session(UUID())))
+    }
+}

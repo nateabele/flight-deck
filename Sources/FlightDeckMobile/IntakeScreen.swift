@@ -66,6 +66,10 @@ struct IntakeScreen: View {
                                   onAck: { model.refresh() })
                 })
             .padding(.bottom, 4)
+            if let halt = HaltPanelModel.make(detail: d, inFlight: commands.inFlight, live: frozenAt == nil, drafts: model.roundDrafts) {
+                HaltPanel(model: halt, offset: model.macClockOffset, frozenAt: frozenAt) { haltAction($0, detail: d) }
+                    .padding(.bottom, 6)
+            }
             if let message = commands.message {
                 HStack(alignment: .firstTextBaseline) {
                     Text(message).font(.caption).foregroundStyle(.orange)
@@ -148,6 +152,17 @@ struct IntakeScreen: View {
             }
         }
         .buttonStyle(.borderless)
+    }
+
+    private func haltAction(_ action: HaltAction, detail d: WireIntakeDetail) {
+        switch action {
+        case .retry: commands.retry { model.refresh() }
+        case .toReview: tape("toReview")
+        case .resume: tape(HaltPanelModel.resumeKey(d))
+        case .retryOther:
+            model.retryAfterSave = true
+            fleet.path.append(IntakeRoute.rounds(intake: id, preset: nil))
+        }
     }
 
     private func tape(_ command: String, stage: String? = nil) {

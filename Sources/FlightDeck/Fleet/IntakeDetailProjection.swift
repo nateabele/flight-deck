@@ -144,6 +144,14 @@ enum IntakeDetailProjection {
             service.halts[id].flatMap { h in h.label(for: t) == nil ? nil : (h.kind == .pause ? "pausing" : "stopping") }
         }
 
+        // The seat that failed and what it printed, read only while a round is failed — the one
+        // moment a phone has a use for it.
+        let failedSeat = tape?.status == .failed ? service.failedSeat(id) : nil
+        let halted = HaltStatus.make(
+            intake: i, tape: tape, config: i.roundConfig, failedSeatOutput: failedSeat?.output,
+            rateLimitedAt: agents.compactMap(\.rateLimitedAt).max(), available: available,
+            failedRole: failedSeat?.role)?.wire
+
         var detail = WireIntakeDetail(
             etag: "", project: project, summary: summary, intent: i.intent,
             progress: progress.map { WireProgressPhase(label: $0.label, detail: $0.detail) },
@@ -165,7 +173,7 @@ enum IntakeDetailProjection {
             // phone may offer Ask and send `intake.thread.*` / `intake.diff.decide`.
             threads: true,
             // Visual blocks (spec §10): the phone may send `intake.visual.fetch` and draw blocks.
-            visuals: service.visualsAvailable)
+            visuals: service.visualsAvailable, halted: halted, retry: true)
         detail.etag = etag(detail)
         return detail
     }

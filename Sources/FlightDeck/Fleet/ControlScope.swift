@@ -114,7 +114,7 @@ enum ControlScope {
             return id == me
         case .viewing:
             return true
-        case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
+        case .intakeTape, .intakeRetry, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote, .intakeSetNoteKind, .intakeChoose,
              .intakeAnswer, .intakeStart, .intakeRounds, .intakeThreadSend, .intakeThreadAnswer, .intakeThreadResolve, .intakeDiffDecide:
             // An intake is a project's, not the asking session's: no session id names it. Its
             // ask threads too — a thread's agent is not the tab that asked.
