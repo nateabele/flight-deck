@@ -9,7 +9,9 @@
 //! * the changed files themselves;
 //! * their importers (a symbol they used may have moved, been renamed, or gone), and the files
 //!   whose resolved references land in them without an import (`ref_dependents`: qualified Rust
-//!   paths, re-exports followed through a barrel file);
+//!   paths, re-exports followed through a barrel file) -- unless the edit left the file's export
+//!   surface (`surface_hash`: what another file's resolution can read from it) unchanged, as a
+//!   body-only edit does;
 //! * if any file was added or removed (or an Elm module renamed), every file with an unresolved
 //!   import, since it may resolve now (or a resolved one may now be dangling);
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
@@ -24,7 +26,10 @@
 
 mod elixir;
 mod python;
+mod surface;
 mod swift;
+
+pub use surface::surface_hash;
 
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
@@ -152,6 +157,9 @@ pub struct GraphData {
     pub(crate) symbol_rank: Vec<Vec<f64>>,
     resolver: Arc<Resolver>,
     elm_modules: HashMap<String, Vec<u32>>,
+    /// How many files this graph resolved itself rather than reused from its base (all of them
+    /// for `build`): what the overlay dirty rules cost, and what tests assert they skip.
+    resolved: usize,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -191,11 +199,13 @@ impl ViewGraph {
             symbol_rank: Vec::new(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
+            resolved: 0,
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
             g.res[f as usize] = g.resolve_file(f);
         }
+        g.resolved = g.files.len();
         g.finalize();
         ViewGraph { label, root, data: Arc::new(g) }
     }
@@ -208,6 +218,8 @@ impl ViewGraph {
         let old_files_len = g.files.len();
 
         let mut changed: HashSet<u32> = HashSet::new();
+        // Changed in place with the same export surface: no other file can resolve differently.
+        let mut same_surface: HashSet<u32> = HashSet::new();
         let mut structural = false; // a path appeared/disappeared or an Elm module name moved
         let mut old_names: HashSet<String> = HashSet::new();
         let mut new_names: HashSet<String> = HashSet::new();
@@ -220,6 +232,9 @@ impl ViewGraph {
                     match g.index.get(&f.path).copied() {
                         Some(i) => {
                             let old = &g.files[i as usize];
+                            if surface_hash(&old.facts) == surface_hash(&node.facts) {
+                                same_surface.insert(i);
+                            }
                             old_names.extend(names_of(old));
                             structural |= old.facts.module_name != node.facts.module_name;
                             new_names.extend(names_of(&node));
@@ -257,7 +272,9 @@ impl ViewGraph {
             dirty.extend((0..g.files.len() as u32).filter(|i| g.files[*i as usize].alive));
         }
         for &c in &changed {
-            if (c as usize) < old_files_len {
+            // Early cutoff: the edit left everything another file reads from `c` alone (see
+            // `surface_hash`), so its importers' and dependents' resolutions still hold.
+            if (c as usize) < old_files_len && !same_surface.contains(&c) {
                 dirty.extend(self.data.importers[c as usize].iter().copied());
                 dirty.extend(self.data.ref_dependents[c as usize].iter().copied());
             }
@@ -283,9 +300,11 @@ impl ViewGraph {
                 dirty.insert(i);
             }
         }
+        g.resolved = 0;
         for f in dirty {
             if g.files[f as usize].alive {
                 g.res[f as usize] = g.resolve_file(f);
+                g.resolved += 1;
             }
         }
         g.finalize();
@@ -390,6 +409,11 @@ impl GraphData {
 
 impl ViewGraph {
     // ---- accessors ---------------------------------------------------------------------
+
+    /// Files this graph resolved rather than reused from the graph it was derived from.
+    pub fn resolved_files(&self) -> usize {
+        self.resolved
+    }
 
     pub fn file_count(&self) -> usize {
         self.files.iter().filter(|f| f.alive).count()
