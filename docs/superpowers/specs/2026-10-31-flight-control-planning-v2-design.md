@@ -592,7 +592,50 @@ build.
   (`out_of_scope`), its own intake's included. Agents a runner spawns — thread agents and round
   seats — carry a caller value the socket reads as invalid, never the runner's token and never none.
 - **Rounds read thread decisions (§11)** as "What the human decided in ask threads since the last
-  round": each unresolved thread with a turn that ended after the head checkpoint landed.
+  round": each unresolved thread with a turn that ended after the head round STARTED (ruling
+  A-I2; a checkpoint with no recorded start falls back to its landing). A turn that ends while a
+  round runs reaches the next round. A mid-round accept's `plan.user.threads.json` source is
+  carried forward with its edit, so `acceptedEdit` holds on the new head.
+- **Phone answers a thread with `intake.thread.answer`** (§10's table gains it): `{id, token,
+  threadID, answers, turn?}`. `turn` is the seq of the turn whose questions are answered; the Mac
+  refuses `stale_questions` when it is not the newest turn, or when no turn asks. `turn` is
+  additive: an older phone omits it.
+- **`intake.thread.get` is a `FleetRequest`, not a command**, answered by the `intakeThread`
+  server frame carrying a `WireThreadPage`; it is a read, permitted at every scope.
+- **`ThreadStatus.answering`** is the status of a thread whose turn is queued or running.
+- **A stale accept is refused** (`diff_stale`) on the Mac and the phone, unless an earlier ✓
+  already put its `applyThreadDiff` on the tape (that edit is what made it stale); then the retry
+  records the decision. The phone keeps Accept on such a diff while its own ✓ is unacked (C-5).
+- **A thread the phone opens starts on the intake's integrator** (agent, model, effort), as a Mac
+  thread does by default.
+- **ThreadRunner keeps its runner token** (`FLIGHT_DECK_CALLER`, `intake-runner:`); the agents it
+  spawns get the invalid caller value (see "least privilege" above).
+- **Retry keys are per decision (C-I1).** The phone's retry token for a diff is keyed on
+  `(diff, accept)` and for answers on `(thread, turn)`. A draft that opens a thread or replies keeps
+  its first send's token for every Retry, past the 60 s retry window (C-6).
+- **An accepted diff is the plan the editor shows from the moment it is queued (A-I3, B-C1).** The
+  editor loads the newest plan queued for the head (`editPlan` or `applyThreadDiff`, whichever is
+  later), so an accept later than the editor's own last send supersedes it, and the editor reloads
+  when a thread accept is queued (`IntakeService.threadEditStamp` is in its key), not only on a new
+  checkpoint, mode or head. A hand edit typed on a load older than the head's current plan is
+  three-way merged onto it (line-wise replay when `git merge-file` calls adjacent lines a
+  conflict), whatever the accept's source: the Mac's ✓, Accept edited, the phone's ✓ or
+  auto-accept.
+- **Trash and Discard stop ThreadRunner (A-I1).** They append `ThreadCommand.stop` to
+  `threads/commands.jsonl` when its heartbeat is fresh, wait for the heartbeat to stop (Trash holds
+  the folder meanwhile), SIGTERM the pid after a 5 s grace, and stop waiting after a second one.
+  ThreadRunner exits when the stop folds or its intake folder is gone, checked every loop. No store
+  write creates an intake's folder (`IntakeDirectory`); only `IntakeStore` does.
+- **Send and resolve (⌘⇧↩) answers first (B-I3).** A `resolve` folded while the thread has a turn
+  to run is held (`resolveAfterTurn`) and lands when that turn ends.
+- **Minor rulings.** A decided diff is never overwritten by a turn's copy (A-4). ThreadRunner
+  writes `threads/runner.exited` on exit, and an exit newer than the spawn ends the controller's
+  15 s spawn grace (A-5). A hand edit that restores a diff's old text and drops its new text drops
+  that thread's source (A-6). On the Mac a message or answer carries the draft's id as its
+  `messageID`, and the same text still unfolded for the thread is the same press (A-7).
+  `WireThreadTurn.errors` and `checkpoint` decode as optional, defaulting to `[]` and 0 (C-7).
+- **The unit gate.** A full, unfiltered `scripts/test-unit.sh` runs `scripts/test-logic.sh` first
+  and fails if it fails; a filtered run does not (C-I2).
 
 ## Errata: P3 core (2026-11-01)
 

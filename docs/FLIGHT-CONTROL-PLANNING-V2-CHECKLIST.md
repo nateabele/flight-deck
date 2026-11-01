@@ -53,6 +53,8 @@ Every item is unverified until the maintainer checks it in the GUI.
 - [ ] Unverified. A grok or OpenCode thread says "reads files only".
 - [ ] Unverified. Pop the intake screen while answers are "Sending…", let the Mac move on, push it again: it is not stuck on "Sending…".
 - [ ] Unverified. Against a Mac without threads, the reader offers no Ask.
+- [ ] Unverified. ✓ a diff on the phone: the Mac's plan editor shows the new words, and typing there afterwards keeps them.
+- [ ] Unverified. Send an ask with the Mac unreachable, wait over a minute, reconnect and tap Retry: only one thread opens and one turn runs.
 
 ## P3 core: visual providers
 

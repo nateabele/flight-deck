@@ -648,14 +648,14 @@ Control.
 - **Capability flags** are all on `WireIntakeDetail`:
   - The flags are `steer`, `choose`, `noteKind`, `editRounds`, `structuredQuestions` and `threads`.
   - The payloads are `roundConfig`, `roundsMenu` (while choosing or shaping) and `roundsLock` (while shaping).
-  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (around line 155).
+  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (the flags at lines 155 to 166; `structuredQuestions` and `threads` at 163 to 166).
   - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make`, `AnswerFormModel.openRound` and `ThreadGate`.
 - **Handlers** (`IntakeService.phone*`, about lines 1332 to 1524, dispatched from `FleetService.swift`;
   the thread ops are `IntakeService+PhoneThreads.swift`):
   - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote`, `phoneSetNoteKind` and `phoneAnswer`.
   - `phoneAnswer` refuses `stale_questions` when the round or digest is not the open round's, or the round is already answered. Otherwise it passes on `answer(_:structured:)`'s code: `unknown_question` (a missing, unknown or repeated question id) or `invalid_answer` (an incomplete answer, or one `accepts` refuses). An unknown intake is `unknown_intake`.
   - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, `stale_questions`, `unknown_question`, `invalid_answer`, and `refused: <sentence>`.
-  - The thread ops add `empty_message`, `unknown_thread`, `thread_resolved`, `no_agent`, `unknown_diff`, `diff_stale`, `diff_decided` and `write_failed`. A new thread from the phone is named by its token (`ThreadID.opened(byToken:)`), so a retry opens no second thread. An older Mac answered every thread op `threads_unavailable`; the phone still has words for it.
+  - The thread ops add `empty_message`, `unknown_thread`, `thread_resolved`, `no_agent`, `unknown_diff`, `diff_stale`, `diff_decided` and `write_failed`. A new thread from the phone is named by its token (`ThreadID.opened(byToken:)`), so a retry opens no second thread. No shipped Mac answers `threads_unavailable` (the stubs never reached master): a Mac without threads has no `threads` flag, so the phone never sends it a thread op, and if one did arrive the older Mac would drop the socket (§4.3). The code stays as the app's own "no service" answer, and the phone still has words for it. `intake.thread.answer` carries an optional `turn`; a mismatch is `stale_questions`.
   - Each handler remembers the last 16 tokens, so a retry is idempotent.
   - The phone's words for each code are in `CommandCopy.message`.
 
