@@ -1,4 +1,5 @@
 #if DEBUG
+import CryptoKit
 import Foundation
 import IntakeKit
 
@@ -20,6 +21,11 @@ import IntakeKit
 /// ThreadRunner is started under it (`startsThreadRunner`): a turn would run a real agent CLI on
 /// the UI-test Mac and spend tokens, so an Ask sent in the test stays queued.
 ///
+/// `-FlightDeckPlanningFixture visuals` seeds the `shaping` plan with one Mermaid `fd-visual` block
+/// near its top, stored in two sizes (`VisualSizeUITests`). The fixture writes the block's
+/// `visuals/` folder itself, the one writer of it besides ThreadRunner, because no ThreadRunner
+/// makes visuals yet; it is a UI-test seed, like the rest of this file.
+///
 /// Debug-only and gated on the reset flag like every other UI fixture, so a stray default can
 /// never point a real launch's intakes at a scratch directory.
 enum PlanningUIFixture {
@@ -27,10 +33,11 @@ enum PlanningUIFixture {
     static let active: Root? = {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "FlightDeckResetState"),
-              let state = defaults.string(forKey: "FlightDeckPlanningFixture"), ["shaping", "synthesized", "threads"].contains(state) else { return nil }
+              let state = defaults.string(forKey: "FlightDeckPlanningFixture"), ["shaping", "synthesized", "threads", "visuals"].contains(state) else { return nil }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlightDeck-planning-fixture-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
-        let fixture = Root(root: root, synthesized: state == "synthesized", threads: state == "threads")
+        let fixture = Root(root: root, synthesized: state == "synthesized", threads: state == "threads",
+                           visuals: state == "visuals")
         do { try fixture.seed() } catch { return nil }
         return fixture
     }()
@@ -39,8 +46,9 @@ enum PlanningUIFixture {
         let root: URL
         var synthesized = false
         var threads = false
+        var visuals = false
         /// False under the `threads` fixture: see the type's comment.
-        var startsThreadRunner: Bool { !threads }
+        var startsThreadRunner: Bool { !threads && !visuals }
         var project: URL { root.appendingPathComponent("planning-fixture", isDirectory: true) }
         var projectPath: String { project.standardizedFileURL.path }
         var intakesRoot: URL { root.appendingPathComponent("intakes", isDirectory: true) }
@@ -58,8 +66,10 @@ enum PlanningUIFixture {
             let tapes = TapeStore(intakeDirectory: store.directory(for: intake.id))
             var tape = tapes.loadTape()
             if synthesized { return try seedSynthesized(tapes, into: &tape) }
+            let text = visuals ? PlanningUIFixture.visualPlan : PlanningUIFixture.plan
             try tapes.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date()),
-                                      files: ["drafts/0.md": Data(PlanningUIFixture.plan.utf8)], into: &tape)
+                                      files: ["drafts/0.md": Data(text.utf8)], into: &tape)
+            if visuals { try PlanningUIFixture.seedVisual(tapes) }
             // Notes waiting for the next round, unanchored so the rail stacks them: the state a
             // plan someone has been reading is in, and the one whose cards once sized the window.
             tape.pendingNotes = (1...3).map { PlanNote(note: "Fixture note \($0): say more about the rollout and who signs it off.") }
@@ -135,6 +145,32 @@ enum PlanningUIFixture {
         try (line.encode(turn) + Data("\n".utf8)).write(to: dir.appendingPathComponent("turns.jsonl"), options: .atomic)
         let diff = ThreadDiff(thread: id, turn: 1, checkpoint: 1, anchor: anchor, old: threadOld, new: threadNew)
         try IntakeJSON.encoder.encode(diff).write(to: dir.appendingPathComponent("diffs/\(diff.id.uuidString).json"), options: .atomic)
+    }
+
+    static let visualID = "fixture-flow"
+    static let visualSizes = ["wide", "narrow"]
+
+    /// `plan` with a Mermaid block after its opening sentence, so the block is on screen first.
+    static let visualPlan: String = plan.replacingOccurrences(
+        of: "\(threadOld)\n\n",
+        with: "\(threadOld)\n\n```fd-visual id=\(visualID)\nHow a fixture request flows\n```\n\n")
+
+    /// One Mermaid revision in two sizes, primary, as ThreadRunner will leave it.
+    private static func seedVisual(_ tapes: TapeStore) throws {
+        let id = VisualID(rawValue: visualID)!
+        let dir = tapes.revisionDirectory(id, r: 1)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let source = Data("flowchart LR\n  phone[Phone] --> mac[Mac]\n  mac --> host[hostd]\n  host --> mac\n".utf8)
+        try source.write(to: dir.appendingPathComponent("diagram.mmd"), options: .atomic)
+        let hash = SHA256.hash(data: source).map { String(format: "%02x", $0) }.joined()
+        let manifest = VisualManifest(provider: "mermaid", providerVersion: "12.2.0", kind: "flowchart", title: "Fixture flow",
+                                      entry: "diagram.mmd", states: ["default"], sizes: visualSizes, madeOnCheckpoint: 1,
+                                      madeBy: .you, primary: true,
+                                      files: [VisualFileEntry(path: "diagram.mmd", size: Int64(source.count), sha256: hash)])
+        try IntakeJSON.encoder.encode(manifest).write(to: dir.appendingPathComponent("manifest.json"), options: .atomic)
+        let ref = RevisionRef(visualID: id, r: 1)
+        try IntakeJSON.encoder.encode(BlockState(representations: [ref], primary: ref))
+            .write(to: tapes.visualsDirectory(id).appendingPathComponent("block.json"), options: .atomic)
     }
 
     /// After the store exists: a tab in the project (so the sidebar lists it), its plan
