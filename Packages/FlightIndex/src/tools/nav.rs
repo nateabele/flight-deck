@@ -123,7 +123,7 @@ fn grep_bodies(c: &Ctx, query: &str, regex: bool, limit: usize) -> ToolResult {
     Ok(c.fit(out))
 }
 
-fn is_body(k: SymbolKind) -> bool {
+pub(super) fn is_body(k: SymbolKind) -> bool {
     matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Macro | SymbolKind::Const)
 }
 

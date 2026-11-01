@@ -43,7 +43,7 @@ use std::time::Duration;
 
 /// Flags that never take a value, so `find --regex foo` reads `foo` as the name, not as regex's value.
 const BOOLEAN_FLAGS: &[&str] = &[
-    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start", "no_watch", "now", "dry_run", "rollback", "list_old_dbs", "no_service",
+    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start", "no_watch", "now", "dry_run", "rollback", "list_old_dbs", "no_service", "refresh",
 ];
 
 fn main() {

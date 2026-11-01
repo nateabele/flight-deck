@@ -10,6 +10,7 @@
 mod analysis;
 pub mod args;
 pub mod mutate;
+pub mod multigrep;
 mod nav;
 
 use crate::cochange::CoChange;

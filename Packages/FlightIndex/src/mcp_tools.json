@@ -252,6 +252,23 @@
       "integer",
       "null"
      ]
+    },
+    "worktrees": {
+     "default": null,
+     "description": "With search_bodies=true only: search many worktrees of the caller's repository at once. `all` (every worktree the index knows, plus the caller's) or a list of worktree paths. Rows are grouped by file, each group headed `[N worktrees: a, b, … +k]`; limit counts rows, not worktrees. Omit for the single-view search.",
+     "anyOf": [
+      {"type": "string"},
+      {"type": "array", "items": {"type": "string"}},
+      {"type": "null"}
+     ]
+    },
+    "refresh": {
+     "default": null,
+     "description": "With worktrees only: ask git for the current state of every worktree instead of trusting the recorded state of those with no sign of change. Slower (about 1.5 s for 85 worktrees). Default false.",
+     "type": [
+      "boolean",
+      "null"
+     ]
     }
    },
    "required": [

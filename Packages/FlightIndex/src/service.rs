@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+mod multi;
+
 /// A request never waits on a build longer than this, whatever it asks for: an agent blocked on
 /// the index is worse off than one told "building" (spec §6 puts the ceiling at the 30 s lock
 /// deadline).
@@ -335,8 +337,12 @@ impl Service {
         }
         let args = Args::new(req.args.clone(), PathBuf::from(&req.cwd));
         let (format, token_budget) = tools::common_params(tool, &args)?;
-        let anchor = tools::anchor(tool, &args)?;
         let wait = self.wait_bound(&args);
+        // One body search over many worktrees of the repository (`multi.rs`): no graph, no gate.
+        if tool == "grep" && args.has(&["worktrees"]) {
+            return self.grep_worktrees(&args, wait);
+        }
+        let anchor = tools::anchor(tool, &args)?;
 
         let located = git::locate(&anchor.path)?;
         check_indexable(&located, &anchor.path)?;

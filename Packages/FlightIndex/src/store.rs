@@ -641,6 +641,51 @@ impl Reader {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Only a blob's symbols, or `None` when its facts are absent (a skipped blob has none). A body
+    /// search needs nothing else, and `get_facts` would also load every reference and import row:
+    /// most of a fact's bytes, for each blob that has a hit.
+    pub fn get_symbols(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<Vec<Symbol>>> {
+        let row = self
+            .conn
+            .prepare_cached("SELECT id, status FROM facts WHERE blob_id = ?1 AND language = ?2 AND parser_version = ?3")?
+            .query_row(params![blob_id, language, parser_version], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .optional()?;
+        let Some((id, status)) = row else { return Ok(None) };
+        if status != 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT local_id, name, kind, start_line, start_col, end_line, end_col, signature, parent, exported
+             FROM symbols WHERE facts_id = ?1 ORDER BY local_id",
+        )?;
+        let symbols = st
+            .query_map(params![id], |r| {
+                Ok(Symbol {
+                    local_id: r.get(0)?,
+                    name: r.get(1)?,
+                    kind: SymbolKind::parse(&r.get::<_, String>(2)?).unwrap_or(SymbolKind::Function),
+                    start_line: r.get(3)?,
+                    start_col: r.get(4)?,
+                    end_line: r.get(5)?,
+                    end_col: r.get(6)?,
+                    signature: r.get(7)?,
+                    parent: r.get(8)?,
+                    exported: r.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Some(symbols))
+    }
+
+    /// Every recorded worktree with its HEAD and when its row or overlay was last written (unix
+    /// seconds). A file or directory of the worktree modified at or after that moment may not be in
+    /// the recorded overlay.
+    pub fn worktree_rows(&self) -> Result<Vec<(PathBuf, Option<String>, i64)>> {
+        let mut st = self.conn.prepare_cached("SELECT path, head_commit, last_seen FROM worktrees ORDER BY path")?;
+        let rows = st.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn worktrees(&self) -> Result<Vec<(PathBuf, Option<String>)>> {
         let mut st = self.conn.prepare_cached("SELECT path, head_commit FROM worktrees ORDER BY path")?;
         let rows = st.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?)))?;
