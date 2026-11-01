@@ -19,10 +19,11 @@ mod swift;
 pub use swift::swift_module_key;
 
 use crate::facts::Import;
+use crate::pkgview::{ModuleExports, ProjectPackages};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
@@ -32,7 +33,10 @@ pub enum Resolved {
     /// A file that exists on disk outside this worktree, relative to the worktree root
     /// (`../tessera/designer/src/Expression/Node.elm`).
     External(PathBuf),
-    /// A package (`List`, `lodash`, `std`) or something we could not find.
+    /// A module of a dependency whose exports a package view knows (`Json.Decode` from
+    /// `elm/json@1.1.3`, see `pkgview`).
+    Package(Arc<ModuleExports>),
+    /// A package no package view covers (`lodash`, `std`) or something we could not find.
     Unresolved,
 }
 
@@ -41,14 +45,23 @@ pub struct Resolver {
     paths: HashSet<String>,
     /// Rust crate name -> its `src/lib.rs`, from every `Cargo.toml` next to a `src/lib.rs`.
     rust_crates: HashMap<String, String>,
-    /// elm.json directory (relative to root, "" = root) -> absolute-normalised source dirs.
-    elm_projects: Mutex<HashMap<String, Option<Vec<PathBuf>>>>,
+    /// elm.json directory (relative to root, "" = root) -> that project.
+    elm_projects: Mutex<HashMap<String, Option<Arc<ElmProject>>>>,
     /// Set when a lookup went outside the worktree. What it found there depends on where the
     /// worktree stands (`../lib` is a different directory from each), so a graph resolved by this
     /// resolver is exact only for the root it was resolved under.
     probed_outside: AtomicBool,
     /// Swift module name -> the module keys (directories) bearing it.
     swift_modules: HashMap<String, Vec<String>>,
+}
+
+/// One `elm.json`.
+struct ElmProject {
+    /// Absolute-normalised source directories.
+    dirs: Vec<PathBuf>,
+    /// The manifest's text, for the dependencies.
+    manifest: String,
+    packages: OnceLock<Arc<ProjectPackages>>,
 }
 
 const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -96,8 +109,8 @@ impl Resolver {
 
     // ---- Elm ---------------------------------------------------------------------------
 
-    /// Source directories of the nearest `elm.json` above `from`, as normalised absolute paths.
-    fn elm_source_dirs(&self, from: &str) -> Option<Vec<PathBuf>> {
+    /// The nearest `elm.json` above `from`, parsed once per directory.
+    fn elm_project(&self, from: &str) -> Option<Arc<ElmProject>> {
         let mut dir = Path::new(from).parent();
         while let Some(d) = dir {
             let key = d.to_string_lossy().to_string();
@@ -111,15 +124,29 @@ impl Resolver {
                     Some(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
                     None => vec!["src".to_string()],
                 };
-                Some(dirs.iter().map(|s| normalize(&self.root.join(d).join(s))).collect())
+                let dirs = dirs.iter().map(|s| normalize(&self.root.join(d).join(s))).collect();
+                Some(Arc::new(ElmProject { dirs, manifest: text, packages: OnceLock::new() }))
             });
-            if let Some(dirs) = entry.clone() {
-                return Some(dirs);
+            if let Some(p) = entry.clone() {
+                return Some(p);
             }
             drop(cache);
             dir = d.parent();
         }
         None
+    }
+
+    /// Source directories of the nearest `elm.json` above `from`, as normalised absolute paths.
+    fn elm_source_dirs(&self, from: &str) -> Option<Vec<PathBuf>> {
+        self.elm_project(from).map(|p| p.dirs.clone())
+    }
+
+    /// The package modules the nearest `elm.json` above `from` can import, read from the
+    /// package caches on first use: once per project per resolver, and each docs.json once per
+    /// process (`pkgview`).
+    pub fn elm_packages(&self, from: &str) -> Option<Arc<ProjectPackages>> {
+        let p = self.elm_project(from)?;
+        Some(p.packages.get_or_init(|| Arc::new(crate::pkgview::elm_project_packages(&p.manifest, crate::pkgview::elm_home().as_deref()))).clone())
     }
 
     fn elm_module(&self, from: &str, module: &str) -> Resolved {
@@ -138,6 +165,10 @@ impl Resolver {
                         return Resolved::External(relative_to(&candidate, &self.root));
                     }
                 }
+            }
+            // Not a source file anywhere: a dependency's module, if a package view has it.
+            if let Some(m) = self.elm_packages(from).and_then(|p| p.modules.get(module).cloned()) {
+                return Resolved::Package(m);
             }
             return Resolved::Unresolved;
         }

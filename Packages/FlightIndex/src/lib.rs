@@ -13,6 +13,7 @@ pub mod guard;
 pub mod lang;
 pub mod links;
 pub mod mcp;
+pub mod pkgview;
 pub mod proto;
 pub mod query;
 pub mod resolve;

@@ -151,7 +151,7 @@ fn imports_of(c: &Ctx, fi: u32) -> Vec<(PathBuf, String, bool)> {
         let target = match res {
             Resolved::File { path, .. } => g.file_idx(Path::new(path)).map(|t| (g.abs(t), false)),
             Resolved::External(p) => Some((g.external_abs(p), true)),
-            Resolved::Unresolved => None,
+            Resolved::Package(_) | Resolved::Unresolved => None,
         };
         if let Some((p, ext)) = target
             && p != g.abs(fi)
@@ -176,7 +176,7 @@ fn specifier_into(views: &Views, importer: (usize, u32), target: (usize, u32)) -
         .find(|(_, r)| match r {
             Resolved::File { path, .. } => importer.0 == target.0 && g.file_idx(Path::new(path)) == Some(target.1),
             Resolved::External(p) => views.locate(&g.external_abs(p)) == Some(target),
-            Resolved::Unresolved => false,
+            Resolved::Package(_) | Resolved::Unresolved => false,
         })
         .map(|(i, _)| i.specifier.clone())
         .unwrap_or_default()
@@ -343,11 +343,19 @@ pub fn refs(c: &Ctx) -> ToolResult {
     let include_tests = c.args.flag(&["include_tests"], true);
     let transitive = c.args.flag(&["transitive"], false);
     let file = c.args.path(super::args::FILE);
-    let defs = c.definitions(&name, c.kind()?, file.as_deref());
-    if defs.is_empty() {
+    let kind = c.kind()?;
+    let defs = c.definitions(&name, kind, file.as_deref());
+    let pkgs: Vec<_> = if file.is_some() { Vec::new() } else { super::pkg::candidates(c, &name, defs.len()) }
+        .into_iter()
+        .filter(|s| kind.is_none_or(|k| k.as_str() == s.kind.as_str()))
+        .collect();
+    if defs.is_empty() && pkgs.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
     let mut out = String::new();
+    for s in pkgs.iter().take(MAX_CANDIDATES) {
+        super::pkg::refs_section(c, &mut out, s, include_tests);
+    }
     if defs.len() > 1 {
         let _ = writeln!(out, "{} matches for name '{name}'; refs reports each candidate in order. Pass file_path or kind to narrow.", defs.len());
     }

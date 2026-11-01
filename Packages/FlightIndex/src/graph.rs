@@ -9,9 +9,11 @@
 //! * the changed files themselves;
 //! * their importers (a symbol they used may have moved, been renamed, or gone);
 //! * if any file was added or removed (or an Elm module renamed), every file with an unresolved
-//!   import, since it may resolve now (or a resolved one may now be dangling);
+//!   import, since it may resolve now (or a resolved one may now be dangling), and every file
+//!   with an import resolved to a package module that the changed file could now provide;
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
-//!   changed, because "the unique symbol with this name" may have changed.
+//!   changed, because "the unique symbol with this name" may have changed. A reference resolved
+//!   to a package symbol is neither (see `elm_pkg`).
 //!
 //! File indices are stable across `with_changes` (removed files become tombstones, added files are
 //! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
@@ -21,6 +23,7 @@
 //! rather than reusing the base's ranks, so ranks are exact for the view.
 
 mod elixir;
+mod elm_pkg;
 mod python;
 mod swift;
 
@@ -43,6 +46,10 @@ pub enum Confidence {
     Exact,
     /// The only symbol with this name in the view; no import justified it.
     Fallback,
+    /// A symbol of a dependency (`List.map`, `Json.Decode.field`): `target` is `None`, because
+    /// it is in no file of the view, and `GraphData::package_target` names it. Every consumer of
+    /// `target` (incoming index, ranks, rename, move) therefore ignores it.
+    Package,
 }
 
 /// Where an imported name points outside the worktree: a file (relative to the worktree root, see
@@ -71,6 +78,9 @@ pub struct FileRes {
     pub refs: Vec<RefRes>,
     /// Files this file depends on (deduplicated, no self edge).
     pub edges: Vec<u32>,
+    /// The package symbol of each `Confidence::Package` reference. A side table rather than a
+    /// field of `RefRes`: only package references pay for it.
+    pub pkg_refs: elm_pkg::PkgRefs,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +214,17 @@ impl ViewGraph {
         let mut old_names: HashSet<String> = HashSet::new();
         let mut new_names: HashSet<String> = HashSet::new();
         let names_of = |n: &FileNode| -> Vec<String> { n.facts.symbols.iter().map(|s| s.name.clone()).collect() };
+        // Elm module names a changed file has, had, or could be found under: an import of one of
+        // them that resolved to a package may now resolve to the file (or back).
+        let mut changed_modules: HashSet<String> = HashSet::new();
+        let mut note_module = |n: &FileNode| {
+            if n.language == "elm" {
+                changed_modules.extend(n.facts.module_name.clone());
+                let stem = n.path.trim_end_matches(".elm");
+                changed_modules.extend(stem.match_indices('/').map(|(i, _)| stem[i + 1..].replace('/', ".")));
+                changed_modules.insert(stem.replace('/', "."));
+            }
+        };
 
         for ch in changes {
             match ch {
@@ -212,6 +233,8 @@ impl ViewGraph {
                     match g.index.get(&f.path).copied() {
                         Some(i) => {
                             let old = &g.files[i as usize];
+                            note_module(old);
+                            note_module(&node);
                             old_names.extend(names_of(old));
                             structural |= old.facts.module_name != node.facts.module_name;
                             new_names.extend(names_of(&node));
@@ -220,6 +243,7 @@ impl ViewGraph {
                         }
                         None => {
                             structural = true;
+                            note_module(&node);
                             new_names.extend(names_of(&node));
                             g.files.push(node);
                             let i = g.files.len() as u32 - 1;
@@ -231,6 +255,7 @@ impl ViewGraph {
                 FileChange::Remove(path) => {
                     if let Some(i) = g.index.remove(&path) {
                         structural = true;
+                        note_module(&g.files[i as usize]);
                         old_names.extend(names_of(&g.files[i as usize]));
                         g.files[i as usize] = g.files[i as usize].tombstone();
                         g.res[i as usize] = FileRes::default();
@@ -258,12 +283,22 @@ impl ViewGraph {
             if dirty.contains(&i) || !g.files[i as usize].alive {
                 continue;
             }
-            let unresolved_import = structural && r.imports.iter().any(|x| matches!(x, Resolved::Unresolved));
+            let unresolved_import = structural
+                && r.imports.iter().any(|x| match x {
+                    Resolved::Unresolved => true,
+                    Resolved::Package(m) => changed_modules.contains(&*m.name),
+                    _ => false,
+                });
             let soft_hit = !changed_names.is_empty()
                 && g.files[i as usize].facts.refs.iter().zip(&r.refs).any(|(fr, rr)| {
                     // `Shop.Order.total()` names the module in its qualifier, and a `%Shop.Item{}` splits
                     // the module name across qualifier and name; either may be what just appeared.
-                    (rr.target.is_none() || rr.confidence == Confidence::Fallback || g.files[i as usize].language == "swift")
+                    // A package reference is not soft: the scope that found it is consulted only
+                    // after the file's own imports, and before any fallback, so no name
+                    // appearing in another file can take it over.
+                    (rr.target.is_none() && rr.confidence != Confidence::Package
+                        || rr.confidence == Confidence::Fallback
+                        || g.files[i as usize].language == "swift")
                         && (changed_names.contains(&fr.name)
                             || fr.qualifier.as_ref().is_some_and(|q| {
                                 changed_names.contains(q) || changed_names.contains(&format!("{q}.{}", fr.name))
@@ -408,15 +443,16 @@ impl ViewGraph {
             let mut edges: Vec<&str> = r.edges.iter().map(|e| self.files[*e as usize].path.as_str()).collect();
             edges.sort();
             out.push(format!("{} edges={:?}", f.path, edges));
-            for (rr, fr) in r.refs.iter().zip(&f.facts.refs) {
+            for (ri, (rr, fr)) in r.refs.iter().zip(&f.facts.refs).enumerate() {
                 out.push(format!(
-                    "{} ref {}:{} -> {:?} {:?} {:?}",
+                    "{} ref {}:{} -> {:?} {:?} {:?} {:?}",
                     f.path,
                     fr.line,
                     fr.name,
                     rr.target.map(sym),
                     rr.confidence,
-                    rr.external
+                    rr.external,
+                    r.pkg_refs.get(ri as u32).map(|s| s.scip())
                 ));
             }
         }
@@ -535,7 +571,20 @@ impl GraphData {
     }
 
     fn fallback(&self, from_file: u32, name: &str, kind: RefKind, qualified: bool) -> Option<SymId> {
-        let cands: Vec<SymId> = self.name_index.get(name)?.iter().copied().filter(|c| c.file != from_file).collect();
+        // Only a definition the referring language could call: a TypeScript `Result` is not the
+        // Elm `Result`, and an Elm type position cannot name a constructor. Measured on tessera,
+        // 8,896 of 24,982 fallbacks crossed a language family (JavaScript -> Elixir 2,495, Rust ->
+        // Elm 1,687, Elm -> TypeScript 1,556, …).
+        let from_lang = self.files[from_file as usize].language;
+        let elm_type = from_lang == "elm" && kind == RefKind::Type;
+        let cands: Vec<SymId> = self
+            .name_index
+            .get(name)?
+            .iter()
+            .copied()
+            .filter(|c| c.file != from_file && language_family(self.files[c.file as usize].language) == language_family(from_lang))
+            .filter(|c| !elm_type || self.symbol(*c).kind != SymbolKind::Constructor)
+            .collect();
         let type_like = |id: &SymId| {
             matches!(
                 self.symbol(*id).kind,
@@ -659,11 +708,26 @@ impl GraphData {
 
         let mut refs = Vec::with_capacity(facts.refs.len());
         let swift_keys = (lang == "swift").then(|| self.swift_keys(f));
-        for r in &facts.refs {
-            refs.push(match &swift_keys {
+        let pkg_scope = (lang == "elm")
+            .then(|| self.resolver.elm_packages(&node.path))
+            .flatten()
+            .filter(|p| !p.modules.is_empty())
+            .map(|p| elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports));
+        let mut pkg_refs = elm_pkg::PkgRefs::default();
+        for (ri, r) in facts.refs.iter().enumerate() {
+            let mut rr = match &swift_keys {
                 Some(keys) => self.swift_ref(f, r, keys),
                 None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
-            });
+            };
+            // Nothing in the view, or only a unique-name guess: a package name beats both.
+            if let Some(scope) = &pkg_scope
+                && (rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none())
+                && let Some(sym) = scope.lookup(r)
+            {
+                pkg_refs.push(ri as u32, sym);
+                rr = RefRes { target: None, confidence: Confidence::Package, external: None };
+            }
+            refs.push(rr);
         }
         // No import is needed to call `Shop.Order.total()` or to use a type from the same Swift
         // module, so for these languages a resolved reference is itself the dependency.
@@ -672,7 +736,7 @@ impl GraphData {
                 add_edge(&mut edges, t.file);
             }
         }
-        FileRes { imports, refs, edges }
+        FileRes { imports, refs, edges, pkg_refs }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -704,7 +768,8 @@ impl GraphData {
                     None => none.clone(),
                 },
                 Resolved::External(p) => external(vec![ExtTarget { path: p.clone(), name: orig.to_string() }]),
-                Resolved::Unresolved => none.clone(),
+                // Left to the package scope, which also sees the implicit imports.
+                Resolved::Package(_) | Resolved::Unresolved => none.clone(),
             }
         };
 
@@ -721,8 +786,11 @@ impl GraphData {
                 if let Some((res, orig)) = locals.get(&r.name) {
                     return through(res, orig);
                 }
-                // Elm `exposing (Type(..))`: the constructors come with the type.
-                for (res, ty) in subs_types {
+                // Elm `exposing (Type(..))`: the constructors come with the type. They are values:
+                // a type position never names one (`exposing (Token(..))` with a constructor
+                // `String` leaves the type `String` elm/core's).
+                let ctor_position = !(lang == "elm" && r.kind == RefKind::Type);
+                for (res, ty) in subs_types.iter().filter(|_| ctor_position) {
                     if let Some(t) = self.file_of(res)
                         && let Some(id) = self.member_of(t, ty, &r.name) {
                             return exact(id);
@@ -787,7 +855,8 @@ impl GraphData {
                     return none;
                 }
                 if lang == "elm" {
-                    // A qualifier that is not an import is a core/package module (`List`, `Html`).
+                    // A qualifier that is not an import names a default import (`List`, `Cmd`),
+                    // which the package scope in `resolve_file` looks up next, or nothing.
                     return none;
                 }
                 // `Type::method`, `obj.method`, `Class.method`.
@@ -842,6 +911,15 @@ impl GraphData {
     }
 }
 
+/// Languages that can name each other's definitions without a manifest in between: a
+/// TypeScript file imports JavaScript and the reverse; every other language only itself.
+fn language_family(lang: &str) -> &str {
+    match lang {
+        "typescript" | "tsx" | "javascript" => "ecma",
+        other => other,
+    }
+}
+
 /// Estimated heap bytes of one blob's facts (struct sizes plus string payloads, with a flat
 /// allocator overhead per string). An estimate on purpose: it only has to rank graphs for the
 /// memory budget, and the daemon reports measured RSS next to it.
@@ -881,10 +959,11 @@ impl GraphData {
                 .map(|x| match x {
                     Resolved::File { path, rest } => path.len() + ALLOC + rest.iter().map(|s| s.len() + ALLOC).sum::<usize>(),
                     Resolved::External(p) => p.as_os_str().len() + ALLOC,
-                    Resolved::Unresolved => 0,
+                    Resolved::Package(_) | Resolved::Unresolved => 0,
                 })
                 .sum::<usize>();
             n += r.refs.iter().filter_map(|x| x.external.as_deref()).flatten().map(|t| t.path.as_os_str().len() + t.name.len() + 2 * ALLOC).sum::<usize>();
+            n += r.pkg_refs.heap_bytes(); // the symbols themselves are the process-wide package views
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
         n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
