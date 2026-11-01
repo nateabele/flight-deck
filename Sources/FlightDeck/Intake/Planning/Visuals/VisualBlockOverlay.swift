@@ -144,9 +144,30 @@ final class VisualBlockOverlay {
         return model
     }
 
-    /// The height the styler holds a block's lines to.
+    /// The height the styler holds a block's lines to, at the text's width.
     func height(id: String, pending: Bool) -> CGFloat {
-        VisualBlockLayout.height(for: model(id: id, pending: pending))
+        let model = model(id: id, pending: pending)
+        let primary = model.representations.indices.contains(model.primaryIndex) ? model.representations[model.primaryIndex].revision : nil
+        return VisualBlockLayout.height(for: model, width: bodyWidth,
+                                        renderedAspect: primary.flatMap { drawnAspects["\($0.id.rawValue)|\($0.r)"] })
+    }
+
+    /// The live drawings' shapes, by `id|r`, for revisions with no stored snapshot (this session).
+    private var drawnAspects: [String: Double] = [:]
+    /// Restyles the blocks: a body's height changed (the editor sets it).
+    var onHeightsChanged: (() -> Void)?
+
+    /// A block's body width: the text container's, as the block's view is laid in it.
+    private var bodyWidth: CGFloat {
+        guard let container = view.textContainer, container.size.width < 10_000, container.size.width > 0 else { return 760 }
+        return max(0, container.size.width - 2 * container.lineFragmentPadding - 2)
+    }
+
+    private func drawn(_ id: VisualID, r: Int, aspect: Double) {
+        let key = "\(id.rawValue)|\(r)"
+        guard drawnAspects[key].map({ abs($0 - aspect) > 0.01 }) ?? true else { return }
+        drawnAspects[key] = aspect
+        onHeightsChanged?()
     }
 
     /// Forget what was read: a new plan was loaded, or the store changed.
@@ -238,6 +259,7 @@ final class VisualBlockOverlay {
                     self?.updateLiveness()
                 }
                 block.onMakePrimary = onMakePrimary.map { action in { r in action(ref.id, r) } }
+                block.onDrawnAspect = { [weak self] id, r, aspect in self?.drawn(id, r: r, aspect: aspect) }
                 view.addSubview(block)
                 blocks[key] = block
             }
@@ -297,13 +319,26 @@ final class VisualLivePool {
 
     private struct WeakBlock { weak var block: VisualBlockView? }
 
-    var hasRoom: Bool { prune(); return budget.hasRoom }
+    /// Web views out of live mode still waiting for their picture to be taken: they hold a web
+    /// content process, so they count against the limit (B-M4).
+    private(set) var retiring = 0
+
+    var hasRoom: Bool { prune(); return budget.live.count + retiring < Self.limit }
+    func beginRetiring() { retiring += 1 }
+    func endRetiring() { retiring = max(0, retiring - 1) }
     var liveCount: Int { prune(); return budget.live.count }
 
     /// `block` goes live; the least recently used block goes back to its picture if the pool was full.
     func grant(_ block: VisualBlockView) {
         prune()
         let id = ObjectIdentifier(block)
+        // Views waiting on their picture take slots too: evict down to what is left.
+        while budget.live.count + retiring >= Self.limit, !budget.isLive(id), let oldest = budget.live.first {
+            budget.release(oldest)
+            views[oldest]?.block?.goSnapshot()
+            views[oldest] = nil
+        }
+        guard budget.live.count + retiring < Self.limit || budget.isLive(id) else { return }
         let evicted = budget.use(id)
         views[id] = WeakBlock(block: block)
         if let evicted, let other = views[evicted]?.block {

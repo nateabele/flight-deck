@@ -143,7 +143,7 @@ public enum VisualSize {
     public static let range = 200...2400
 
     public static func width(_ name: String) -> Int {
-        let named: [String: Int] = ["default": defaultWidth, "phone": 390, "compact": 390, "tablet": 768,
+        let named: [String: Int] = ["default": defaultWidth, "phone": 390, "compact": 390, "narrow": 390, "tablet": 768,
                                     "mac": 1024, "desktop": 1280, "wide": 1280]
         if let w = named[name.lowercased()] { return w }
         let head = name.lowercased().split(separator: "x", maxSplits: 1).first.map(String.init) ?? ""

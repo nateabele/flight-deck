@@ -585,8 +585,16 @@ final class EditLayerFragment: NSTextLayoutFragment {
         }
         super.draw(at: point, in: context)
         // A hidden visual block: one bar for the whole block, on its first line, whatever its lines hold.
+        // Its own lines draw nothing of the layer (the view covers them), but a line removed just
+        // above or below the block is a ghost in the gap beside it, struck and with its red bar.
         if isVisualLine {
             if let bar = visualBar { drawVisualBar(bar, at: point, in: context) }
+            let edges = ghosts.filter { $0.ghost.placement == .above || $0.ghost.placement == .below }.map(\.ghost)
+            guard !edges.isEmpty, !textLineFragments.isEmpty else { return }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            edges.forEach { drawEdgeGhost($0, at: point) }
             return
         }
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
@@ -631,16 +639,7 @@ final class EditLayerFragment: NSTextLayoutFragment {
                 ghost.attributed(ghost.text).draw(at: CGPoint(x: point.x + origin.x + gapStart + 3,
                                                               y: point.y + baseline - ghost.font.ascender))
             case .above, .below:
-                let top = ghost.placement == .above
-                    ? textLineFragments[0].typographicBounds.minY - ghost.height
-                    : textLineFragments[textLineFragments.count - 1].typographicBounds.maxY
-                // One unwrapped line each, at full length: fitted to the paragraph's own width
-                // a removed line longer than the line below it lost its end
-                // (`renderingSurfaceBounds` makes the room).
-                for (k, line) in ghost.lines.enumerated() {
-                    ghost.attributed(line).draw(at: CGPoint(x: point.x, y: point.y + top + 1 + CGFloat(k) * ghost.lineHeight))
-                }
-                bar(top + 1, top + ghost.height - 1, EditLayer.deletedColor)
+                drawEdgeGhost(ghost, at: point)
             }
         }
         for (i, line) in textLineFragments.enumerated() where inserted.contains(i) || removedIn.contains(i) {
@@ -654,6 +653,21 @@ final class EditLayerFragment: NSTextLayoutFragment {
             default: bar(b.minY, b.maxY, EditLayer.deletedColor)
             }
         }
+    }
+
+    /// A whole removed line above or below this paragraph: struck, with the red bar beside it.
+    /// Draws into the current (flipped) graphics context.
+    private func drawEdgeGhost(_ ghost: EditGhost, at point: CGPoint) {
+        let top = ghost.placement == .above
+            ? textLineFragments[0].typographicBounds.minY - ghost.height
+            : textLineFragments[textLineFragments.count - 1].typographicBounds.maxY
+        // One unwrapped line each, at full length: fitted to the paragraph's own width
+        // a removed line longer than the line below it lost its end
+        // (`renderingSurfaceBounds` makes the room).
+        for (k, line) in ghost.lines.enumerated() {
+            ghost.attributed(line).draw(at: CGPoint(x: point.x, y: point.y + top + 1 + CGFloat(k) * ghost.lineHeight))
+        }
+        drawBar(top + 1, top + ghost.height - 1, EditLayer.deletedColor, at: point)
     }
 
     /// The proposed text in the plan's typography, the green bar in the edit lane beside it and a

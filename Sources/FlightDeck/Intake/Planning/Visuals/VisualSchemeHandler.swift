@@ -142,6 +142,8 @@ final class VisualWebView: NSObject, WKNavigationDelegate {
     let view: WKWebView
     var onStatus: ((VisualRenderStatus) -> Void)?
     private(set) var status: VisualRenderStatus = .loading
+    /// The drawing's width over height, as the page last reported it (0 or nil: unknown).
+    private(set) var drawnAspect: Double?
     /// Navigations this view refused, newest last: what a test checks the policy by.
     private(set) var cancelled: [URL] = []
     private let handler: VisualSchemeHandler
@@ -189,7 +191,9 @@ final class VisualWebView: NSObject, WKNavigationDelegate {
         let width = (message["width"] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
         let height = (message["height"] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
         switch kind {
-        case "rendered": status = .rendered(width: width, height: height)
+        case "rendered":
+            status = .rendered(width: width, height: height)
+            drawnAspect = (message["aspect"] as? NSNumber).map(\.doubleValue).flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
         case "error": status = .failed(message: message["message"] as? String ?? "Unknown error", height: height)
         default: return
         }

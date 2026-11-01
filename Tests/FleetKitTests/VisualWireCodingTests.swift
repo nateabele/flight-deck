@@ -62,7 +62,8 @@ final class VisualWireCodingTests: XCTestCase {
         XCTAssertEqual(VisualSizeWidth.width("500x900"), 500)
         XCTAssertEqual(VisualSizeWidth.width("5"), 200, "clamped up")
         XCTAssertEqual(VisualSizeWidth.width("99999"), 2400, "clamped down")
-        XCTAssertEqual(VisualSizeWidth.width("narrow"), 760, "not a name the Mac knows: the default")
+        XCTAssertEqual(VisualSizeWidth.width("narrow"), 390, "the phone's width: the fixture's and the size switch's narrow")
+        XCTAssertEqual(VisualSizeWidth.width("roomy"), 760, "not a name the Mac knows: the default")
     }
 
     /// An older Mac's plan has no `visuals`; it decodes as nil, and writing it back adds nothing.

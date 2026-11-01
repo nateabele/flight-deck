@@ -30,6 +30,8 @@ struct VisualBlockModel: Equatable {
 
     let id: String
     let content: Content
+    /// Width over height of the primary's stored default snapshot, when it has one.
+    var aspect: Double? = nil
 
     var representations: [Representation] {
         if case .ready(let reps) = content { return reps }
@@ -76,7 +78,11 @@ struct VisualBlockModel: Equatable {
                                   label: VisualKindLabel.label(alternate?.kind ?? revision.manifest.kind),
                                   isPrimary: i == star, proposedByRound: i != star && byRound, reason: alternate?.reason)
         }
-        return VisualBlockModel(id: id, content: .ready(reps))
+        // The stored default snapshot's shape, when there is one, sizes the body (B-M1).
+        let starred = revisions[star]
+        let aspect = PlanExporter.defaultSnapshot(starred.manifest)
+            .flatMap { IntakeVisualProjection.aspect(store, vid, r: starred.r, png: $0) }
+        return VisualBlockModel(id: id, content: .ready(reps), aspect: aspect)
     }
 }
 
@@ -110,6 +116,21 @@ enum VisualBlockLayout {
     /// Room kept above and below the block, as paragraph spacing on its hidden lines.
     static let spaceBefore: CGFloat = 6
     static let spaceAfter: CGFloat = 14
+
+    /// The body's bounds when it follows the drawing's shape (final review B-M1).
+    static let minBody: CGFloat = 160
+    static let maxBody: CGFloat = 640
+
+    /// The block's height at body width `width`: the body follows the stored snapshot's shape, or
+    /// with none the live drawing's (`renderedAspect`), clamped to 160–640 pt; with neither, `body`.
+    static func height(for model: VisualBlockModel, width: CGFloat, renderedAspect: Double? = nil) -> CGFloat {
+        guard case .ready(let reps) = model.content else { return placeholder }
+        var bodyHeight = body
+        if let aspect = model.aspect ?? renderedAspect, aspect > 0, aspect.isFinite, width > 0 {
+            bodyHeight = min(max((width / aspect).rounded(), minBody), maxBody)
+        }
+        return header + bodyHeight + (reps.count > 1 ? filmstrip : 0)
+    }
 
     static func height(for model: VisualBlockModel) -> CGFloat {
         switch model.content {

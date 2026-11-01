@@ -264,6 +264,7 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.textView = container.textView
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.onFindMatch = { [weak coordinator] in coordinator?.focusChanged() }
+        container.textView.visualBlocks.onHeightsChanged = { [weak coordinator] in coordinator?.restyleVisuals() }
         container.textView.onContainerWidth = { [weak coordinator] in coordinator?.containerWidthChanged() }
         if let folds { coordinator.foldStore = folds }
         coordinator.readingMemory = scrollMemory
@@ -709,6 +710,13 @@ struct PlanTextView: NSViewRepresentable {
                 return before != store.map(VisualStoreIdentity.of) || beforeCheckpoint != checkpoint
             }
             guard changed else { return }
+            restyleVisuals()
+        }
+
+        /// The visual blocks take their heights again (their store changed, or a live drawing
+        /// reported its shape) and the plan is laid out around them.
+        func restyleVisuals() {
+            guard let textView, let storage = textView.textStorage else { return }
             let visuals = blocks.indices.filter { if case .visual = blocks[$0].kind { true } else { false } }
             guard !visuals.isEmpty else { return }
             style(storage, indices: visuals, reveal: revealed)
@@ -1412,12 +1420,30 @@ class PlanNSTextView: NSTextView {
     /// hidden visual block for. Cleared when the plan takes focus.
     private(set) var findMatch: NSRange?
     var onFindMatch: (() -> Void)?
+    /// How many times the system's find indicator was shown (tests check it comes after the reveal).
+    private(set) var indicatorShows = 0
 
     override func showFindIndicator(for charRange: NSRange) {
+        // Reveal first: the block's source must be laid out before the indicator is placed on it.
         findMatch = charRange
-        super.showFindIndicator(for: charRange)
         onFindMatch?()
+        if let layout = textLayoutManager, let content = textContentStorage,
+           let start = content.location(content.documentRange.location, offsetBy: charRange.location),
+           let end = content.location(start, offsetBy: charRange.length), let range = NSTextRange(location: start, end: end) {
+            layout.ensureLayout(for: range)
+        }
+        super.showFindIndicator(for: charRange)
+        indicatorShows += 1
     }
+    /// Find closing forgets its match, so the block it revealed hides again.
+    override func performTextFinderAction(_ sender: Any?) {
+        super.performTextFinderAction(sender)
+        if (sender as? NSValidatedUserInterfaceItem)?.tag == NSTextFinder.Action.hideFindInterface.rawValue, findMatch != nil {
+            findMatch = nil
+            onFindMatch?()
+        }
+    }
+
     /// The text container took a new width: what the tables are laid out in.
     var onContainerWidth: (() -> Void)?
     /// How much of the page's top edge something is drawn over — the pinned control bar and

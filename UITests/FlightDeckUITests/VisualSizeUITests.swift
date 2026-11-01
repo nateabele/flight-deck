@@ -63,6 +63,11 @@ final class VisualSizeUITests: XCTestCase {
         return condition()
     }
 
+    /// The width in "live, drawn, <size>, <width> pt".
+    private static func width(in value: String) -> Int? {
+        value.split(separator: ",").last.flatMap { Int($0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " pt", with: "")) }
+    }
+
     private func isOn(_ button: XCUIElement) -> Bool { (button.value as? Int) == 1 || button.isSelected }
 
     func testOpenAPlanWithADiagramAndSwitchItsSize() {
@@ -74,7 +79,8 @@ final class VisualSizeUITests: XCTestCase {
         scrollTo(block, in: app)
         XCTAssertTrue(sizes.waitForExistence(timeout: 10), "the block has no size control")
         // Mermaid draws in a web view: the block says when it has drawn ("live, drawn").
-        let drawn = eventually(20) { (block.value as? String) == "live, drawn" }
+        // "live, drawn, <size>, <width> pt": the page drew at that size, this wide.
+        let drawn = eventually(20) { (block.value as? String)?.hasPrefix("live, drawn, wide,") == true }
         shot(app, "wide")
         let state = (block.value as? String) ?? "nil"
         let note = XCTAttachment(string: "block value: \(state)")
@@ -82,13 +88,17 @@ final class VisualSizeUITests: XCTestCase {
         note.lifetime = .keepAlways
         add(note)
         XCTAssertTrue(drawn, "the diagram was never drawn; the block says: \(state)")
+        let wideWidth = Self.width(in: state)
         let wide = sizes.radioButtons["wide"], narrow = sizes.radioButtons["narrow"]
         XCTAssertTrue(wide.exists && narrow.exists, "the size control does not offer both sizes")
         XCTAssertTrue(isOn(wide), "the first size is not the one shown")
 
         narrow.click()
-        XCTAssertTrue(eventually(20) { (block.value as? String) == "live, drawn" },
+        XCTAssertTrue(eventually(20) { (block.value as? String)?.hasPrefix("live, drawn, narrow,") == true },
                       "the diagram was not drawn at the new size; the block says: \((block.value as? String) ?? "nil")")
+        let narrowWidth = Self.width(in: (block.value as? String) ?? "")
+        XCTAssertNotNil(wideWidth)
+        XCTAssertLessThan(narrowWidth ?? .max, wideWidth ?? 0, "narrow drew narrower than wide")
         shot(app, "narrow")
         XCTAssertTrue(isOn(narrow), "choosing narrow did not switch the block's size")
         XCTAssertFalse(isOn(wide))

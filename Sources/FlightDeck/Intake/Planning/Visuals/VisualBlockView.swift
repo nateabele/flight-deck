@@ -31,6 +31,9 @@ final class VisualBlockView: NSView {
     var onAnotherView: (() -> Void)? { didSet { rebuildFilmstrip() } }
     /// Ask about this visual in its thread. Nil hides the button.
     var onAsk: (() -> Void)? { didSet { rebuildHeader() } }
+    /// The live page drew a revision that has no stored snapshot: its shape, width over height,
+    /// so the overlay can size the block's body to it (final review B-M1).
+    var onDrawnAspect: ((_ id: VisualID, _ r: Int, _ aspect: Double) -> Void)?
 
     /// The representation in the body (and on the right in Compare).
     private(set) var selected: Int
@@ -102,6 +105,8 @@ final class VisualBlockView: NSView {
         addTile.onClick = { [weak self] in self?.onAnotherView?() }
         filmstrip.wantsLayer = true
         apply()
+        // `didSet` does not run in an initializer: VoiceOver reads the value from the start.
+        setAccessibilityValue(drawState)
     }
 
     @available(*, unavailable)
@@ -157,8 +162,8 @@ final class VisualBlockView: NSView {
         compareButton.isHidden = model.representations.count < 2
         statesControl?.removeFromSuperview()
         sizesControl?.removeFromSuperview()
-        statesControl = segmented(rep.revision.manifest.states, current: state, action: #selector(stateChosen(_:)), id: "visual-states")
-        sizesControl = segmented(rep.revision.manifest.sizes, current: size, action: #selector(sizeChosen(_:)), id: "visual-sizes")
+        statesControl = segmented(rep.revision.manifest.states, current: state, action: #selector(stateChosen(_:)), id: "visual-states", label: "State")
+        sizesControl = segmented(rep.revision.manifest.sizes, current: size, action: #selector(sizeChosen(_:)), id: "visual-sizes", label: "Size")
         askButton?.removeFromSuperview()
         askButton = nil
         if onAsk != nil {
@@ -171,12 +176,13 @@ final class VisualBlockView: NSView {
         needsLayout = true
     }
 
-    private func segmented(_ names: [String], current: String?, action: Selector, id: String) -> NSSegmentedControl? {
+    private func segmented(_ names: [String], current: String?, action: Selector, id: String, label: String) -> NSSegmentedControl? {
         guard names.count > 1, !comparing else { return nil }
         let control = NSSegmentedControl(labels: names, trackingMode: .selectOne, target: self, action: action)
         control.controlSize = .small
         control.selectedSegment = current.flatMap { names.firstIndex(of: $0) } ?? 0
         control.setAccessibilityIdentifier(id)
+        control.setAccessibilityLabel(label)
         header.addSubview(control)
         return control
     }
@@ -263,7 +269,10 @@ final class VisualBlockView: NSView {
 
     private func picture(_ rep: VisualBlockModel.Representation, into pane: VisualPane) {
         pane.image = (pane === mainPane && !comparing && !hasStored(rep) ? fitted(rep) : nil) ?? storedOrCached(rep)
-        if pane.image == nil { pane.message = wantsPictures ? "Drawing…" : nil }
+        // A picture already shown (the live view's fitted capture) stays: a full-size render of
+        // the same revision would lay out differently and make the body jump (B-M2).
+        guard pane.image == nil else { return }
+        pane.message = wantsPictures ? "Drawing…" : nil
         fetch(rep) { [weak pane] image in pane?.image = image; if image == nil { pane?.message = "No picture of this visual yet." } }
     }
 
@@ -349,9 +358,15 @@ final class VisualBlockView: NSView {
             return
         }
         retiring.append(web)
+        // It still holds a web content process, so it counts against the live pool until it goes
+        // (B-M4), once, whichever of the capture and the timeout comes first, block or no block.
+        let pool = VisualLivePool.shared
+        pool.beginRetiring()
+        let freed = VisualOnce { pool.endRetiring() }
         snapshotter(web) { [weak self] image in
             // A blank or empty capture (a view that had left its window) is not the block's picture.
             if let image, !Self.isBlank(image) { VisualSnapshotCache.shared.put(image, for: key) }
+            freed.run()
             guard let self else { return }
             self.retire(web)
             self.rebuildBody()
@@ -359,6 +374,7 @@ final class VisualBlockView: NSView {
         // A web view that never answers (the block left its window) must not be kept for ever.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(3))
+            freed.run()
             self?.retire(web)
         }
         rebuildBody()
@@ -398,15 +414,19 @@ final class VisualBlockView: NSView {
     /// Whether a web view is still attached, live or waiting for its picture to be taken (tests).
     var holdsWebView: Bool { web != nil || !retiring.isEmpty }
 
-    private func liveStatusChanged(_ status: VisualRenderStatus) {
+    /// The live page's word. The block's accessibility value carries it, which is what VoiceOver
+    /// reads: "live, drawn, <size>, <width> pt", or Mermaid's error until the next draw clears it.
+    func liveStatusChanged(_ status: VisualRenderStatus) {
         liveStatus = status
         switch status {
         case .loading: drawState = "live, loading"
-        case .rendered: drawState = "live, drawn"
-        case .failed(let message, _): drawState = "live, failed: \(message)"
-        }
-        if case .failed(let message, _) = status {
-            body.setAccessibilityLabel("Mermaid could not draw this diagram: \(message)")
+        case .rendered(let width, _):
+            let size = shown.map { snapshotKey($0).size } ?? "default"
+            drawState = "live, drawn, \(size), \(Int(width.rounded())) pt"
+            if let rep = shown, !hasStored(rep), let aspect = web?.drawnAspect {
+                onDrawnAspect?(rep.revision.id, rep.revision.r, aspect)
+            }
+        case .failed(let message, _): drawState = "live, failed: Mermaid could not draw this diagram: \(message)"
         }
     }
 
@@ -518,16 +538,16 @@ final class VisualBlockView: NSView {
             compareLabel.frame = NSRect(x: left, y: (h - c.height) / 2, width: c.width, height: c.height)
         }
         // Inset a point at the sides, so the block's border still shows beside the white paper.
-        body.frame = NSRect(x: 1, y: h, width: w - 2, height: VisualBlockLayout.body - (filmstrip.isHidden ? 1 : 0))
+        body.frame = NSRect(x: 1, y: h, width: w - 2, height: bodyHeight - (filmstrip.isHidden ? 1 : 0))
         let bw = body.frame.width
         if comparing {
             let half = (bw - 14 * 3) / 2
-            mainPane.frame = NSRect(x: 13, y: 12, width: half, height: VisualBlockLayout.body - 24)
-            otherPane.frame = NSRect(x: 27 + half, y: 12, width: half, height: VisualBlockLayout.body - 24)
+            mainPane.frame = NSRect(x: 13, y: 12, width: half, height: bodyHeight - 24)
+            otherPane.frame = NSRect(x: 27 + half, y: 12, width: half, height: bodyHeight - 24)
         } else {
             mainPane.frame = body.bounds
         }
-        filmstrip.frame = NSRect(x: 0, y: h + VisualBlockLayout.body, width: w, height: filmstrip.isHidden ? 0 : VisualBlockLayout.filmstrip)
+        filmstrip.frame = NSRect(x: 0, y: h + bodyHeight, width: w, height: filmstrip.isHidden ? 0 : VisualBlockLayout.filmstrip)
         let count = CGFloat(tiles.count + 1)
         let gap: CGFloat = 12
         let tileWidth = min(180, (w - 28 - gap * (count - 1)) / count)
@@ -571,12 +591,18 @@ final class VisualBlockView: NSView {
         if model.representations.isEmpty { updateColors() }
     }
 
+    /// The body's height: what the overlay's frame leaves below the header and above the
+    /// filmstrip (the overlay sizes the block from the drawing's shape, B-M1).
+    private var bodyHeight: CGFloat {
+        max(0, bounds.height - VisualBlockLayout.header - (filmstrip.isHidden ? 0 : VisualBlockLayout.filmstrip))
+    }
+
     // Lines between the header, body and filmstrip.
     override func draw(_ dirtyRect: NSRect) {
         guard !model.representations.isEmpty else { return }
         PlanTheme.wash(dark: 0.14, light: 0.12).setFill()
         NSRect(x: 0, y: VisualBlockLayout.header - 1, width: bounds.width, height: 1).fill()
-        if !filmstrip.isHidden { NSRect(x: 0, y: VisualBlockLayout.header + VisualBlockLayout.body, width: bounds.width, height: 1).fill() }
+        if !filmstrip.isHidden { NSRect(x: 0, y: VisualBlockLayout.header + bodyHeight, width: bounds.width, height: 1).fill() }
     }
 
     // MARK: - For tests
@@ -593,6 +619,14 @@ final class VisualBlockView: NSView {
     }
 }
 
+/// An action that runs at most once, from whichever caller gets there first.
+@MainActor
+final class VisualOnce {
+    private var action: (() -> Void)?
+    init(_ action: @escaping () -> Void) { self.action = action }
+    func run() { action?(); action = nil }
+}
+
 /// The body's one picture, or its live web view, on white paper (the page's own colour, so
 /// switching between the two does not flash). In Compare it has a small header of its own.
 @MainActor
@@ -600,6 +634,9 @@ final class VisualPane: NSView {
     var image: NSImage? { didSet { imageView.image = image; messageField.isHidden = image != nil || webView != nil } }
     var message: String? { didSet { messageField.stringValue = message ?? ""; messageField.isHidden = image != nil || message == nil } }
     var onMakePrimary: (() -> Void)?
+    /// Where the picture is drawn and how it sits there (tests).
+    var pictureFrame: NSRect { imageView.frame }
+    var pictureAlignment: NSImageAlignment { imageView.imageAlignment }
     private let imageView = NSImageView()
     private let messageField = NSTextField(labelWithString: "")
     private let titleField = NSTextField(labelWithString: "")
@@ -615,7 +652,9 @@ final class VisualPane: NSView {
         layer?.backgroundColor = NSColor.white.cgColor
         layer?.cornerRadius = 0
         imageView.imageScaling = .scaleProportionallyDown
-        imageView.imageAlignment = .alignTop
+        // Centred and filling the body, as the fitted live page draws: a picture that replaces
+        // the live view (or the reverse) does not move (B-M2).
+        imageView.imageAlignment = .alignCenter
         messageField.font = .systemFont(ofSize: 12)
         messageField.textColor = NSColor.black.withAlphaComponent(0.45)
         messageField.alignment = .center
@@ -678,7 +717,7 @@ final class VisualPane: NSView {
             makePrimaryButton.frame = NSRect(x: bounds.width - b.width - 8, y: (30 - b.height) / 2, width: b.width, height: b.height)
         }
         let content = contentFrame
-        imageView.frame = content.insetBy(dx: 4, dy: 4)
+        imageView.frame = content
         messageField.frame = NSRect(x: 8, y: content.midY - 8, width: bounds.width - 16, height: 16)
         webView?.frame = content
     }

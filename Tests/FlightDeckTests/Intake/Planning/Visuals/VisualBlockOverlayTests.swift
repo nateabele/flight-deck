@@ -318,6 +318,25 @@ final class VisualBlockOverlayTests: XCTestCase {
         let e = editor(Self.missingPlan, store: fixture.store, focused: false, generated: generated)
         defer { e.close() }
         XCTAssertEqual(try visualRef(e).edit, [], "the block itself is unchanged")
+        // And the ghost is drawn: its struck words and its red bar, in the gap above the block
+        // (final review B-I1: the visual line returned before its ghosts).
+        let block = try XCTUnwrap(e.blocks.first)
+        let above = CGRect(x: 0, y: max(0, block.frame.minY - 80), width: e.view.bounds.width, height: 80)
+        XCTAssertGreaterThan(Self.redPixels(in: e.view, rect: above), 20, "no struck ghost or red bar above the block")
+    }
+
+    /// Pixels in `rect` of `view`'s drawing that read as the edit lane's red.
+    static func redPixels(in view: NSView, rect: CGRect) -> Int {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return 0 }
+        view.cacheDisplay(in: rect, to: rep)
+        var n = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if c.redComponent > 0.6, c.greenComponent < 0.5, c.blueComponent < 0.5 { n += 1 }
+            }
+        }
+        return n
     }
 
     func testDeletingTheClosingFenceRemovesTheView() throws {

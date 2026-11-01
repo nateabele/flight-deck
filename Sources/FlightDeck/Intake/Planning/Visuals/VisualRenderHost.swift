@@ -160,27 +160,53 @@ final class VisualSnapshotCache {
     }
 
     private var images: [Key: NSImage] = [:]
+    private var sizes: [Key: Int] = [:]
     private var order: [Key] = []
     private var inFlight: [Key: [(NSImage?) -> Void]] = [:]
-    let capacity = 64
+    /// Renders that came back with nothing (a timeout, a revision that will not draw): not queued
+    /// again this session, so a redraw does not put every other block behind another wait (B-M5).
+    private var failed: Set<Key> = []
+    /// The bound is bytes of decoded pixels, not a count: one picture can be 4000 pt tall (B-M7).
+    static let byteCapacity = 64 << 20
+    private(set) var bytes = 0
+    /// How a picture is drawn; replaceable so a test can stand in for the render host.
+    var renderer: (Key, any VisualStoreReading) async -> NSImage? = { key, store in
+        let shot = try? await VisualRenderHost.shared.render(key.id, r: key.r, key: key.snapshot, store: store)
+        return shot.flatMap { NSImage(data: $0.png) }
+    }
 
     func image(_ key: Key) -> NSImage? { images[key] }
 
     func put(_ image: NSImage, for key: Key) {
-        if images[key] == nil { order.append(key) }
+        if let old = sizes[key] { bytes -= old; order.removeAll { $0 == key } }
+        let size = Self.byteCount(image)
         images[key] = image
-        while order.count > capacity { images[order.removeFirst()] = nil }
+        sizes[key] = size
+        order.append(key)
+        bytes += size
+        while bytes > Self.byteCapacity, order.count > 1 {
+            let oldest = order.removeFirst()
+            images[oldest] = nil
+            bytes -= sizes.removeValue(forKey: oldest) ?? 0
+        }
+    }
+
+    /// Decoded size: pixels × 4 bytes, from the largest representation.
+    static func byteCount(_ image: NSImage) -> Int {
+        let pixels = image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max()
+            ?? Int(image.size.width * image.size.height)
+        return max(1, pixels) * 4
     }
 
     /// The cached picture, or one drawn now; `done` runs on the main actor once it is known.
     func fetch(_ key: Key, store: any VisualStoreReading, done: @escaping (NSImage?) -> Void) {
         if let image = images[key] { return done(image) }
+        if failed.contains(key) { return done(nil) }
         if inFlight[key] != nil { inFlight[key]?.append(done); return }
         inFlight[key] = [done]
         Task { @MainActor in
-            let shot = try? await VisualRenderHost.shared.render(key.id, r: key.r, key: key.snapshot, store: store)
-            let image = shot.flatMap { NSImage(data: $0.png) }
-            if let image { put(image, for: key) }
+            let image = await renderer(key, store)
+            if let image { put(image, for: key) } else { failed.insert(key) }
             let waiting = inFlight.removeValue(forKey: key) ?? []
             waiting.forEach { $0(image) }
         }

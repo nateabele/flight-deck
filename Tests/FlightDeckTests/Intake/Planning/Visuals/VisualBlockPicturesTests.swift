@@ -51,6 +51,9 @@ final class VisualBlockPicturesTests: XCTestCase {
         let store = CountingStore(fixture.store)
         let model = VisualBlockModel.load(id: "shot", pending: false, store: store)
         XCTAssertEqual(model.representations.count, 1)
+        // Loading the model reads the snapshot's 24-byte header once, for the body's shape (B-M1).
+        let atLoad = store.reads(name)
+        XCTAssertLessThanOrEqual(atLoad, 1)
         let block = VisualBlockView(model: model, caption: "c", store: store)
         block.setWantsPictures(true)
         XCTAssertTrue(block.picturesReady, "the stored picture is in")
@@ -59,7 +62,7 @@ final class VisualBlockPicturesTests: XCTestCase {
         block.setWantsPictures(true)
         block.update(model: model, caption: "another caption")
         XCTAssertTrue(block.picturesReady)
-        XCTAssertEqual(store.reads(name), 1, "read from the store once; later draws reuse the decoded image")
+        XCTAssertEqual(store.reads(name) - atLoad, 1, "read from the store once; later draws reuse the decoded image")
     }
 
     // MARK: - M2: one draw at a time, across intakes

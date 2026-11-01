@@ -74,7 +74,12 @@ enum MermaidPage {
     static func html(id: VisualID, source: String?, state: String?, size: String?, error: String? = nil) -> String {
         var config: [String: Any] = ["source": source ?? ""]
         if let state { config["state"] = state }
-        if let size { config["size"] = size }
+        if let size {
+            config["size"] = size
+            // The width the size names: a live, fitted page lays the drawing out no wider, so the
+            // size switch changes the drawing, not just the label (final review B-I2).
+            config["width"] = VisualSize.width(size)
+        }
         if let error { config["error"] = error }
         let json = (try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -131,6 +136,12 @@ enum MermaidPage {
       if (config.error) { return fail(config.error); }
       if (typeof mermaid === 'undefined') { return fail('The diagram library did not load.'); }
       if (config.state) { document.body.dataset.state = config.state; }
+      if (config.width) {
+        out.style.boxSizing = 'border-box';
+        out.style.maxWidth = config.width + 'px';
+        out.style.marginLeft = 'auto';
+        out.style.marginRight = 'auto';
+      }
       mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default',
                            fontFamily: '-apple-system, system-ui, sans-serif' });
       (async function () {
@@ -138,8 +149,12 @@ enum MermaidPage {
           await mermaid.parse(config.source);
           var result = await mermaid.render('fd-diagram', config.source);
           out.innerHTML = result.svg;
-          var box = out.getBoundingClientRect();
-          post({ status: 'rendered', width: Math.ceil(box.width), height: height() });
+          // The drawing's own box, not the page's: its width is what the size changed, and its
+          // shape is what the block's body is sized from when there is no stored snapshot.
+          var svg = out.querySelector('svg');
+          var box = (svg || out).getBoundingClientRect();
+          post({ status: 'rendered', width: Math.ceil(box.width), height: height(),
+                 aspect: box.height > 0 ? box.width / box.height : 0 });
         } catch (e) {
           var stray = document.getElementById('dfd-diagram');
           if (stray) { stray.remove(); }

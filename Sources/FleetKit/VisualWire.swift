@@ -41,7 +41,7 @@ public struct WireVisualFile: Codable, Equatable, Sendable {
 /// primary, which kinds exist, the other ways to see it, and the states a snapshot exists for.
 ///
 /// **There is no archive.** A revision is a set of files, not one bundle. `files` lists every
-/// file the revision serves (the manifest's `files`; for a comp, those under `r<n>/export/`).
+/// file the revision serves: every entry of the manifest's `files`, a comp's `export/` files among them.
 /// The phone fetches them one at a time with `intake.visual.fetch` and `part: "file:<path>"`,
 /// chunked by `offset` and `limit`; each reply's `WireFileChunk.path` is that relative path. It
 /// checks the assembled file's SHA-256 against `sha256` and caches it by
@@ -117,7 +117,7 @@ public enum VisualSizeWidth {
     public static let range = 200...2400
 
     public static func width(_ name: String) -> Int {
-        let named: [String: Int] = ["default": defaultWidth, "phone": 390, "compact": 390, "tablet": 768,
+        let named: [String: Int] = ["default": defaultWidth, "phone": 390, "compact": 390, "narrow": 390, "tablet": 768,
                                     "mac": 1024, "desktop": 1280, "wide": 1280]
         if let w = named[name.lowercased()] { return w }
         let head = name.lowercased().split(separator: "x", maxSplits: 1).first.map(String.init) ?? ""
