@@ -102,6 +102,13 @@ type BaseListing = Arc<Vec<FileRef>>;
 /// Commits whose listing `Engine::view_for_path` keeps (about 2000 entries each for a large repo).
 const MAX_KNOWN_BASES: usize = 64;
 
+/// What the budget charges for `bytes` of estimated graph. The estimate counts struct sizes and
+/// string payloads but not allocator rounding or hash-table slack; measured against the daemon's
+/// RSS on tessera it runs about a fifth low, so the budget is charged 5/4 of it.
+fn charged(estimate: usize) -> usize {
+    estimate / 4 * 5
+}
+
 /// A blob's facts as held weakly by the shared cache, with their estimated size.
 type SharedFacts = (Weak<BlobFacts>, usize);
 
@@ -137,8 +144,10 @@ struct GraphCache {
 #[derive(Debug, Clone, Default)]
 pub struct GraphCacheStats {
     pub graphs: usize,
-    /// Own bytes of every cached graph plus the distinct facts still held by anything.
+    /// Estimated bytes of every cached graph plus the distinct facts still held by anything, as
+    /// charged against the budget (the raw estimate scaled to RSS).
     pub bytes: usize,
+    /// The distinct facts part of the estimate, unscaled.
     pub facts_bytes: usize,
     pub budget: usize,
     pub evictions: u64,
@@ -449,7 +458,7 @@ impl Engine {
             (c.map.len(), c.map.values().map(|g| g.own_bytes).sum::<usize>(), c.budget, c.evictions)
         };
         let facts_bytes = self.live_facts_bytes();
-        GraphCacheStats { graphs, bytes: own + facts_bytes, facts_bytes, budget, evictions }
+        GraphCacheStats { graphs, bytes: charged(own + facts_bytes), facts_bytes, budget, evictions }
     }
 
     fn live_facts_bytes(&self) -> usize {
@@ -463,7 +472,7 @@ impl Engine {
             let facts = self.live_facts_bytes();
             let mut c = self.graphs.lock().unwrap();
             let own: usize = c.map.values().map(|g| g.own_bytes).sum();
-            if own + facts <= c.budget || c.map.len() <= 1 {
+            if charged(own + facts) <= c.budget || c.map.len() <= 1 {
                 return;
             }
             let Some(victim) = c.map.iter().filter(|(k, _)| *k != keep).min_by_key(|(_, g)| g.used).map(|(k, _)| k.clone()) else {
