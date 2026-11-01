@@ -393,11 +393,12 @@ fn rename_file_rust(w: &mut Work, fi: u32, from: &Path, to: &Path, sites: &mut u
                 let (a, b) = d.extent(imp.line as usize);
                 let (s, e) = d.lines_bytes(a, b);
                 if imp.kind == ImportKind::ModDecl {
-                    if imp.specifier == old_stem && matches!(resolver.rust_path(&node.path, &["self".into(), old_stem.clone()]), Resolved::File { path, .. } if path == from_rel) {
-                        if let Some(t) = d.tokens_in(s, e, &old_stem).first() {
-                            v.push((*t, old_stem.len()));
-                            found_decl = true;
-                        }
+                    if imp.specifier == old_stem
+                        && matches!(resolver.rust_path(&node.path, &["self".into(), old_stem.clone()]), Resolved::File { path, .. } if path == from_rel)
+                        && let Some(t) = d.tokens_in(s, e, &old_stem).first()
+                    {
+                        v.push((*t, old_stem.len()));
+                        found_decl = true;
                     }
                     continue;
                 }
@@ -468,7 +469,7 @@ fn rename_file_rust(w: &mut Work, fi: u32, from: &Path, to: &Path, sites: &mut u
 
 // ---- move -------------------------------------------------------------------------------------
 
-/// How one file says to import something: a statement to add.
+/// An import statement to add to a file.
 struct NewImport {
     text: String,
 }
@@ -536,7 +537,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     let in_block = |line: u32| line >= t.start_line && line <= t.end_line;
 
     let mut w = Work::new(g);
-    let (block, first_line, last_line, export_prefix_fix) = {
+    let (block, first_line, last_line) = {
         let d = w.doc(sf)?;
         if !whole_lines(d, &t, sym.start_col, sym.end_col) {
             return Err(ToolError::failed(format!("{} shares its lines with other code; move cannot cut it out by line. Nothing was changed.", t.name)));
@@ -545,7 +546,6 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         let (a, b) = d.lines_bytes(first, t.end_line as usize);
         let mut text = d.src.text[a..b].to_string();
         // Visibility the destination needs: the move changes who can see it.
-        let mut fix = false;
         if !sym.exported && lang != "elm" {
             let first_code = t.start_line as usize - first;
             let mut lines: Vec<String> = text.split_inclusive('\n').map(String::from).collect();
@@ -553,17 +553,16 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
                 let prefix = if lang == "rust" { "pub(crate) " } else { "export " };
                 let ws = l.len() - l.trim_start().len();
                 l.insert_str(ws, prefix);
-                fix = true;
             }
             text = lines.concat();
         }
-        (text, first, t.end_line as usize, fix)
+        (text, first, t.end_line as usize)
     };
-    let _ = export_prefix_fix;
 
     // What the moved code needs imported at its new home, and who among its neighbours it uses.
     let mut needed: BTreeSet<usize> = BTreeSet::new();
     let mut siblings: Vec<String> = Vec::new();
+    let mut sibling_items: Vec<String> = Vec::new();
     let mut used_names: HashSet<String> = HashSet::new();
     for (ri, r) in sfile.facts.refs.iter().enumerate() {
         if !(in_block(r.line) || r.enclosing.is_some_and(&inside)) {
@@ -580,7 +579,13 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         if let Some(tid) = res.target
             && tid.file == sf
         {
-            siblings.push(g.symbol(tid).name.clone());
+            let sib = g.symbol(tid);
+            siblings.push(sib.name.clone());
+            // What Elm's `exposing` calls it: a constructor travels with its type.
+            sibling_items.push(match (sib.kind, sib.parent) {
+                (SymbolKind::Constructor, Some(p)) => format!("{}(..)", sfile.symbol(p).name),
+                _ => sib.name.clone(),
+            });
             continue;
         }
         let binding = sfile.facts.imports.iter().enumerate().find(|(ii, imp)| {
@@ -603,6 +608,8 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     }
     siblings.sort();
     siblings.dedup();
+    sibling_items.sort();
+    sibling_items.dedup();
 
     // Uses of the moved code from what stays behind.
     let uses_after = moved.iter().any(|&l| {
@@ -661,10 +668,10 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     let mut dest_imports: Vec<String> = Vec::new();
     for &ii in &needed {
         let imp = &sfile.facts.imports[ii];
-        if let Some(text) = import_for_destination(w.doc(sf)?, g, sf, imp, &used_names, lang, &s_dir, &to_dir, &sfile.path) {
-            if !dest_imports.contains(&text) {
-                dest_imports.push(text);
-            }
+        if let Some(text) = import_for_destination(w.doc(sf)?, g, imp, &used_names, lang, &s_dir, &to_dir, &sfile.path)
+            && !dest_imports.contains(&text)
+        {
+            dest_imports.push(text);
         }
     }
     // The moved code's own neighbours, when they are exported: import them from the old module.
@@ -672,7 +679,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         let text = match lang {
             "elm" => {
                 let (old_module, _) = elm_names.as_ref().expect("elm");
-                format!("import {old_module} exposing ({})", siblings.join(", "))
+                format!("import {old_module} exposing ({})", sibling_items.join(", "))
             }
             "rust" => format!("use {}::{{{}}};", rust_module_path(g, &sfile.path, &sfile.path).unwrap_or_else(|| "crate".into()), siblings.join(", ")),
             _ => format!("import {{ {} }} from '{}';", siblings.join(", "), new_specifier("./x", &to_dir, &from_path)),
@@ -701,14 +708,18 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
             let d = w.doc(ti)?;
             let existing: Vec<String> = d.src.text.lines().map(|l| l.trim().to_string()).collect();
             let fresh: Vec<&String> = dest_imports.iter().filter(|s| !existing.contains(&s.trim().to_string())).collect();
-            if !fresh.is_empty() {
-                let timports = g.file(ti).facts.imports.clone();
-                let at = d.after_last_import(&timports).unwrap_or_else(|| top_insert_line(d));
+            let timports = g.file(ti).facts.imports.clone();
+            if !fresh.is_empty() && timports.is_empty() {
+                // No imports yet: they go together, with a blank line between them and what follows.
+                let at = top_insert_line(d);
                 let body = fresh.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-                let text = if timports.is_empty() { format!("{body}\n") } else { body };
-                // With no imports yet, leave a blank line between them and what follows.
-                let text = if timports.is_empty() && !d.src.line(at).trim().is_empty() { text } else { text.trim_end().to_string() };
+                let text = if d.src.line(at).trim().is_empty() { body } else { format!("{body}\n") };
                 d.insert_lines_before(at, &text);
+            } else {
+                for stmt in fresh {
+                    let at = import_line(d, &timports, stmt);
+                    d.insert_lines_before(at, stmt);
+                }
             }
             let gap = if lang == "elm" { "\n\n" } else { "\n" };
             let end = d.src.line_count() + 1;
@@ -718,6 +729,9 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
             }
         }
         None => {
+            if lang == "elm" {
+                dest_imports.sort();
+            }
             let body = dest_imports.join("\n");
             let mut text = String::new();
             if let Some((_, new_module)) = &elm_names {
@@ -736,7 +750,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
             });
             w.docs.insert(to.clone(), nd);
             if lang == "rust" {
-                register_rust_module(&mut w, &to, &sfile.path)?;
+                register_rust_module(&mut w, &to)?;
             }
         }
     }
@@ -746,14 +760,23 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         let d = w.doc(sf)?;
         let (mut a, mut b) = (first_line, last_line);
         let blank = |d: &Doc, l: usize| l >= 1 && l <= d.src.line_count() && d.src.line(l).trim().is_empty();
-        if blank(d, b + 1) && (a == 1 || blank(d, a - 1)) {
-            b += 1;
-        } else if blank(d, a.saturating_sub(1)) && b == d.src.line_count() {
+        if blank(d, a.saturating_sub(1)) && b == d.src.line_count() {
             a -= 1;
+        }
+        // Trailing blank lines go too when blank lines precede the block, so the neighbours keep
+        // the gap they had (Elm puts two between declarations).
+        if a == 1 || blank(d, a - 1) {
+            while blank(d, b + 1) && b < d.src.line_count() {
+                b += 1;
+            }
         }
         d.delete_lines(a, b);
         if lang == "elm" {
             remove_from_module_exposing(d, &t.name);
+            // The neighbours the moved code reaches back for must be exposed to be imported.
+            for item in &sibling_items {
+                add_to_module_exposing(d, item);
+            }
         }
     }
 
@@ -802,13 +825,13 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         if gi == sf && !uses_after && uses.is_empty() {
             continue;
         }
-        let rels = RelocCx { g, t_name: &t.name, lang, sfile_rel: &sfile.path, from_path: &from_path, to: &to, elm: elm_names.as_ref(), elm_item: elm_item.as_deref(), rust_to: rust_to_path.as_deref(), ti, kind: t.kind };
+        let rels = RelocCx { g, t_name: &t.name, lang, sfile_rel: &sfile.path, from_path: &from_path, to: &to, elm: elm_names.as_ref(), elm_item: elm_item.as_deref(), rust_to: rust_to_path.as_deref() };
         let d = w.doc(gi)?;
         let stmts = rewrite_user(d, &rels, gi, &uses, &imps, is_dest, &mut sites)?;
         for s in stmts {
             if added.insert((d.path.clone(), s.text.clone())) {
                 let imports = g.file(gi).facts.imports.clone();
-                let at = d.after_last_import(&imports).unwrap_or_else(|| top_insert_line(d));
+                let at = import_line(d, &imports, &s.text);
                 d.insert_lines_before(at, &s.text);
             }
         }
@@ -833,8 +856,18 @@ struct RelocCx<'a> {
     elm: Option<&'a (String, String)>,
     elm_item: Option<&'a str>,
     rust_to: Option<&'a str>,
-    ti: Option<u32>,
-    kind: SymbolKind,
+}
+
+/// Where a new import statement goes: for Elm in alphabetical place among the imports (elm-format
+/// keeps them sorted), elsewhere after the last one.
+fn import_line(d: &Doc, imports: &[Import], stmt: &str) -> usize {
+    if d.elm()
+        && let Some(name) = stmt.strip_prefix("import ").and_then(|r| r.split_whitespace().next())
+        && let Some(next) = imports.iter().filter(|i| i.specifier.as_str() > name).min_by(|a, b| a.specifier.cmp(&b.specifier))
+    {
+        return next.line as usize;
+    }
+    d.after_last_import(imports).unwrap_or_else(|| top_insert_line(d))
 }
 
 /// Where a new `mod` line or top-of-file import goes in a file with no imports: below module
@@ -842,9 +875,8 @@ struct RelocCx<'a> {
 fn top_insert_line(d: &Doc) -> usize {
     let total = d.src.line_count();
     if d.elm() {
-        let Some((hs, he)) = elm_header(d) else { return 1 };
+        let Some((_, he)) = elm_header(d) else { return 1 };
         let mut l = d.src.line_of(he.saturating_sub(1)) + 1;
-        let _ = hs;
         while l <= total && d.src.line(l).trim().is_empty() {
             l += 1;
         }
@@ -876,7 +908,7 @@ fn top_insert_line(d: &Doc) -> usize {
 
 /// The statement a destination needs to get what an import of the source gave the moved code.
 #[allow(clippy::too_many_arguments)]
-fn import_for_destination(d: &Doc, g: &ViewGraph, sf: u32, imp: &Import, used: &HashSet<String>, lang: &str, s_dir: &Path, to_dir: &Path, from_rel: &str) -> Option<String> {
+fn import_for_destination(d: &Doc, g: &ViewGraph, imp: &Import, used: &HashSet<String>, lang: &str, s_dir: &Path, to_dir: &Path, from_rel: &str) -> Option<String> {
     let (a, b) = d.extent(imp.line as usize);
     let (s, e) = d.lines_bytes(a, b);
     let raw = d.src.text[s..e].trim_end().to_string();
@@ -930,7 +962,6 @@ fn import_for_destination(d: &Doc, g: &ViewGraph, sf: u32, imp: &Import, used: &
                 (Some(al), name) => format!("{name} as {al}"),
                 (None, name) => name.to_string(),
             }).collect();
-            let _ = sf;
             match items.len() {
                 0 if imp.names.is_empty() => Some(format!("{vis}use {path};")),
                 0 => None,
@@ -962,9 +993,8 @@ fn rust_parent_module_file(g: &ViewGraph, dir: &Path) -> Option<(String, u32)> {
     candidates.into_iter().find_map(|c| g.file_idx(&c).map(|i| (g.file(i).path.clone(), i)))
 }
 
-fn register_rust_module(w: &mut Work, to: &Path, source_rel: &str) -> Result<(), ToolError> {
+fn register_rust_module(w: &mut Work, to: &Path) -> Result<(), ToolError> {
     let g = w.g;
-    let _ = source_rel;
     let dir = to.parent().ok_or_else(|| ToolError::failed("the destination has no directory"))?;
     let stem = to.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let (_, pi) = rust_parent_module_file(g, dir).ok_or_else(|| {
@@ -1088,7 +1118,6 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
 
     // 2. Point qualified uses at the new home, and add what the file needs to import.
     let unqualified = uses.iter().any(|&(_, q)| !q);
-    let any_qualified = uses.iter().any(|&(_, q)| q);
     match cx.lang {
         "elm" => {
             let (_, new_module) = cx.elm.expect("elm names");
@@ -1125,8 +1154,6 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
             }
         }
         l if is_ts(l) => {
-            let to_dir = cx.to.parent().unwrap_or(Path::new("/"));
-            let _ = to_dir;
             let spec = {
                 let importer_dir = g.abs(gi).parent().unwrap_or(Path::new("/")).to_path_buf();
                 new_specifier("./x", &importer_dir, cx.to)
@@ -1183,13 +1210,12 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
                     }
                 }
             }
-            let item = removed_item.clone().or_else(|| (unqualified && !any_qualified || unqualified).then(|| name.to_string()));
+            let item = removed_item.clone().or_else(|| unqualified.then(|| name.to_string()));
             if let Some(item) = item {
                 add.push(NewImport { text: format!("use {to_path}::{item};") });
             }
         }
         _ => {}
     }
-    let _ = (cx.ti, cx.kind);
     Ok(add)
 }
