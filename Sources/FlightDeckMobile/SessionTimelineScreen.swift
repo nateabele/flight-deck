@@ -41,31 +41,6 @@ struct SessionTimelineScreen: View {
     /// The session sheet (context, account, usage, account switcher) is up.
     @State private var showsInfo = false
 
-    /// The newest item the screen has already scrolled to, so arriving pages move it once each
-    /// rather than on every re-evaluation of the body.
-    @State private var lastFollowed: String?
-    /// Whether the end of the conversation is on screen. Driven by the sentinel row below
-    /// appearing and disappearing, and the only thing that separates "following a live turn"
-    /// from "yanking a reader out of the history they scrolled up to read".
-    @State private var readerIsAtBottom = true
-    /// When the reader last had a finger on the list.
-    ///
-    /// The sentinel below goes off screen for TWO different reasons and they mean opposite
-    /// things: the reader scrolled up into the history (stop following), or a new row was
-    /// appended underneath it and pushed it out (keep following — this is the case following
-    /// exists for). `onDisappear` alone cannot tell them apart, so it used to treat both as
-    /// "the reader left", and the first live message turned following off and left it off
-    /// until the reader scrolled back down by hand. This timestamp is what separates them:
-    /// only a disappearance the reader's own gesture caused counts.
-    @State private var lastReaderScroll: Date = .distantPast
-    /// The long answers the reader has opened. **On the screen, not on the row** — see
-    /// `Expansion`, which is entirely about why.
-    @State private var expansion = Expansion()
-    /// Whether the prefetch trigger is on screen, i.e. the reader is within a page of the
-    /// oldest history the phone holds. The only thing a failed prefetch can be retried on:
-    /// `onAppear` has already fired for a row that is still visible, so without this a read
-    /// that failed while the reader sat at the top would never be attempted again.
-    @State private var isNearOldest = false
     /// The review the reader is in: built once, in the banner's own `Button` action, and kept
     /// here for as long as the pushed screen is up. `nil` both drives
     /// `.navigationDestination(isPresented:)` and holds what it presents.
@@ -87,228 +62,32 @@ struct SessionTimelineScreen: View {
     /// Whether the prompt card wants the composer out of the way — see the inset.
     @State private var promptHidesComposer = false
     @State private var reviewModel: PlanReviewModel?
-    /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
-    /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
-    /// the row that answered their tap for exactly as long as the fade takes and not a frame
-    /// longer.
-    @State private var highlightedID: String?
-    /// The clamped-segments memo every row on this screen shares, so a row's three segmenter
-    /// passes collapse to one cached split that survives re-render and cell recycling. See
-    /// `TimelineSegmentCache`.
-    @State private var segmentCache = TimelineSegmentCache()
-    /// The link-detection memo every plain-text row on this screen shares — `TimelineLinkCache`,
-    /// `segmentCache`'s counterpart for the machine-text kinds a row draws with `Text(_:)`
-    /// rather than through the segmenter.
-    @State private var linkCache = TimelineLinkCache()
-    /// The list's own width, bucketed to 32pt so hairline jitter does not invalidate the memo
-    /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
-    /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
-    @State private var widthBucket = 0
-    /// The rows currently on screen, kept up to date by the row `.onAppear`/`.onDisappear`
-    /// below. Only ever read through `reportWindow()`, which turns it into the first/last id in
-    /// feed order the model needs to schedule spill and rehydrate.
-    @State private var visibleIDs: Set<String> = []
+
+    #if DEBUG
+    /// How many times `body` has run. `ScrollBodyCostTests` reads it: a scroll must not re-run
+    /// this body, because each run re-diffs the `ForEach` over the whole conversation.
+    nonisolated(unsafe) static var bodyEvaluations = 0
+    /// How many times the conversation `List` was rebuilt, which is what costs O(conversation).
+    nonisolated(unsafe) static var listBodyEvaluations = 0
+    #endif
 
     var body: some View {
-        ScrollViewReader { scroll in
-            List {
-                // At the head, so a reader sees which background agent is asking for them
-                // before scrolling a long conversation.
-                if let subs = session?.subagents, !subs.isEmpty {
-                    SubagentTreeSection(nodes: subs)
-                }
-                // Notices sit ABOVE the conversation whenever there is a conversation, because
-                // the fetch a reader can still trigger with content on screen — returning to a
-                // kept screen, which re-reads the live edge — has no row of its own, and the
-                // bottom of a long list is somewhere they are not looking. See
-                // `topNotice`/`bottomNotice`: exactly one of the two ever answers.
-                if let notice = Self.topNotice(
-                    phase: model.phase, hasItems: !model.feed.items.isEmpty,
-                    isLoadingOlder: model.isLoadingOlder
-                ) {
-                    noticeRow(notice)
-                }
-                // Never a control: see `olderStatusRow`. `hasOlder` is what decides, because
-                // `olderAnchor` is non-nil at the top of history too.
-                if model.feed.hasOlder || model.olderFailure != nil {
-                    olderStatusRow
-                        // **The backstop for the trigger row below.** A page that lands while
-                        // the reader is within `prefetchDepth` rows of the top moves the trigger
-                        // to a row beneath them, one already scrolled past, and nothing asked
-                        // again: a 34 MB transcript stopped at whatever the runway reached. This
-                        // row is the top of what is held, so while it is on screen the reader is
-                        // at that top, and each page that moves `oldest` asks for the next one.
-                        // It stops by itself: once pages push this row out of the list's
-                        // realised range, the task is cancelled. A 40-row "any of these asks"
-                        // zone was tried instead and paged through a whole transcript on launch,
-                        // because rows inserted above the viewport count as appearing.
-                        .task(id: model.feed.oldest) {
-                            guard model.olderFailure == nil else { return }
-                            model.prefetchOlder()
-                        }
-                }
-                ForEach(model.rendered) { entry in
-                    entryRow(entry)
-                        .listRowInsets(Self.rowInsets)
-                        // The card and the tinted user turn are what separate one entry from
-                        // the next. A hairline through them as well draws a line across the
-                        // middle of a rounded panel, which is the same defect that keeps the
-                        // fleet list inset-grouped and this list plain.
-                        .listRowSeparator(.hidden)
-                        // The search-jump highlight. `entry.id == highlightedID` is a plain
-                        // comparison, not a fade of its own — the fade is `highlightedID`
-                        // being cleared under `withAnimation` in the `onChange` below, and a
-                        // `List` row animates a background change on its own.
-                        .listRowBackground(
-                            entry.id == highlightedID
-                                ? Color.accentColor.opacity(0.15) : Color.clear
-                        )
-                        // **The prefetch trigger, and its depth is the whole design.** It is
-                        // NOT the top row: an `onAppear` up there re-fires on every bounce of
-                        // an over-scroll and lands its page while the list is still settling,
-                        // which drags the reader upward — that defect is why this screen had a
-                        // button instead. A page down, the rubber-band never reaches it and
-                        // the read finishes before the reader arrives.
-                        .onAppear {
-                            visibleIDs.insert(entry.id)
-                            reportWindow()
-                            guard entry.id == model.prefetchTriggerID else { return }
-                            isNearOldest = true
-                            model.prefetchOlder()
-                        }
-                        .onDisappear {
-                            visibleIDs.remove(entry.id)
-                            reportWindow()
-                            if entry.id == model.prefetchTriggerID { isNearOldest = false }
-                        }
-                }
-                if let notice = Self.bottomNotice(
-                    phase: model.phase, hasItems: !model.feed.items.isEmpty
-                ) {
-                    noticeRow(notice)
-                }
-                if !model.feed.items.isEmpty, let activity = Self.activityFooter(for: session) {
-                    activityRow(activity)
-                }
-                bottomSentinel
-            }
-            // The list's own width, bucketed for `segmentCache`. A background reader rather
-            // than a row: every row needs the same number before it can ask the cache for
-            // anything, and a `GeometryReader` inside one row would only ever see that row's
-            // own bounds.
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { widthBucket = Int((geo.size.width / 32).rounded()) }
-                        .onChange(of: geo.size.width) { _, width in
-                            widthBucket = Int((width / 32).rounded())
-                        }
-                }
-            )
-            // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
-            // taste: this list holds full-width cards of command output, and inset-grouped's
-            // own card edges cut every one of them short and put a second rounded corner
-            // inside the first. The fleet list's own comment explains why IT keeps
-            // inset-grouped; the two screens differ because what they hold differs.
-            .listStyle(.plain)
-            // `.interactively`, the Messages/Mail behaviour: a downward drag through the list
-            // pulls the keyboard down with the finger. Without it the default, `.automatic`,
-            // resolves to never dismissing on a List, so the keyboard stays up over the
-            // conversation until the person hunts for some other way to put it away. This does
-            // not undo the composer keeping focus after a send (see `PromptComposer`): only a
-            // scroll dismisses, and a person scrolling has already stopped typing.
-            .scrollDismissesKeyboard(.interactively)
-            // `simultaneousGesture`, so the list keeps scrolling and rows keep taking taps —
-            // this only observes. `minimumDistance: 1` because the point is to know a drag
-            // happened at all, not to interpret it.
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 1).onChanged { _ in
-                    lastReaderScroll = Date()
-                    // The retry, and it is deliberately conditioned on there being something
-                    // to retry. Re-arming the prefetch on every drag would let a reader who
-                    // rests near the top pull the whole transcript a runway at a time; re-arming
-                    // it only after a failure recovers the one case the trigger cannot, at the
-                    // cost of nothing when history is arriving normally. `prefetchOlder` clears
-                    // the failure as it goes, so this fires once per failure, not once per
-                    // frame of the gesture.
-                    if isNearOldest, model.olderFailure != nil { model.prefetchOlder() }
-                }
-            )
-            // `initial: true` so the first page a screen ever draws is followed too. Without
-            // it the jump only happens on the SECOND page, and opening a session lands on the
-            // oldest row of the newest page — which is what shipped.
-            .onChange(of: model.feed.items.last?.id, initial: true) { _, newest in
-                guard let target = Self.follow(
-                    newest: newest, lastFollowed: lastFollowed,
-                    readerIsAtBottom: readerIsAtBottom
-                ) else { return }
-                let isFirst = lastFollowed == nil
-                lastFollowed = target
-                // Next run-loop turn, because the row being scrolled to is inserted by this
-                // same change and a `List` has not laid it out yet when `onChange` runs.
-                DispatchQueue.main.async {
-                    // **Unanimated, including when following a live turn.** The previous
-                    // version animated everything but the opening jump, on the reasoning that
-                    // "there the movement is the information". It did not scroll at all.
-                    //
-                    // A console trace of three consecutive follows settled it: `follow()`
-                    // returned SCROLL for every one of them with `atBottom=true`, so the
-                    // decision was never in question — but only the FIRST, the unanimated
-                    // opening jump, was followed by the bottom sentinel reappearing. The
-                    // animated ones produced no `onAppear` at all, which is the sentinel
-                    // saying the list never moved. `withAnimation` around `scrollTo`, in a
-                    // lazy `List` whose target row was de-materialised by the same insertion
-                    // that triggered this, silently does nothing.
-                    // A SECOND hop before scrolling at all. The row this change inserted is
-                    // not laid out when `onChange` runs, and one hop is not always enough —
-                    // scrolling to a row `List` has not placed yet is what silently did
-                    // nothing when this was first written.
-                    DispatchQueue.main.async {
-                        // Animated again, deliberately. An earlier version dropped the
-                        // animation because animated follows were not moving the list at all,
-                        // but the console trace that showed this could not separate "animated"
-                        // from "single hop": the one call that worked was ALSO the only
-                        // unanimated one AND the only whole-page open rather than a one-row
-                        // append. The extra hop above addresses the layout half; the animation
-                        // stays because a list that jumps loses the reader's place.
-                        withAnimation(isFirst ? nil : .easeOut(duration: 0.25)) {
-                            scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
-                        }
-                        // The net, and it is why the animation is safe to keep. If the
-                        // animated scroll no-ops the way it used to, this lands it anyway a
-                        // third of a second later. When the animation DID work this is a
-                        // scroll to where the list already is, which is invisible — so the
-                        // failure mode is a late snap instead of never arriving.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                            scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            // A search jump. `model.scrollTarget` is set exactly once per `.around` fetch that
-            // lands (see `SessionTimelineModel.fetch`), so this fires once per tap on a
-            // transcript result rather than on every re-render.
-            .onChange(of: model.scrollTarget) { _, target in
-                guard let target else { return }
-                // Two hops, the same reason as the follow-to-bottom jump above: the row this
-                // targets was inserted by the very fetch that set `scrollTarget`, and `List`
-                // has not laid it out yet when `onChange` runs.
-                DispatchQueue.main.async {
-                    DispatchQueue.main.async {
-                        withAnimation { scroll.scrollTo(target, anchor: .center) }
-                    }
-                }
-                highlightedID = target
-                Task {
-                    try? await Task.sleep(for: .milliseconds(1_500))
-                    // `fadedHighlight` owns the guard against a second jump landing while the
-                    // first is still fading — see its own doc comment.
-                    withAnimation(.easeOut(duration: 0.4)) {
-                        highlightedID = Self.fadedHighlight(current: highlightedID, target: target)
-                    }
-                }
-            }
-        }
+        #if DEBUG
+        let _ = Self.bodyEvaluations += 1
+        #endif
+        // The conversation, in its own view with comparable inputs. A fleet update rebuilds
+        // this screen (the fleet list constructs it inside a closure that reads the fleet,
+        // with fresh callback closures each time), and SwiftUI cannot see that closures are
+        // unchanged, so it re-ran this whole body. With the List inline that re-diffed every
+        // row of the conversation each time: 20 updates, 20 re-diffs (`ScrollBodyCostTests`).
+        // Here SwiftUI compares four values and skips the List when none moved.
+        ConversationList(
+            model: model,
+            agent: session?.agent,
+            subagents: session?.subagents ?? [],
+            activity: Self.activityFooter(for: session)
+        )
+        .equatable()
         .navigationTitle(session?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -539,162 +318,10 @@ struct SessionTimelineScreen: View {
     /// moment after an unrelated tap-drag is still followed.
     private static let scrollGestureWindow: TimeInterval = 1
 
-    /// The first and last visible entry ids, in feed order, handed to the model so it can spill
-    /// far history to disk and rehydrate what the reader is approaching. Cheap: a set-membership
-    /// filter over `rendered`, which is already the on-screen-sized list every row draws from.
-    private func reportWindow() {
-        let visible = model.rendered.filter { visibleIDs.contains($0.id) }
-        model.reportVisibleWindow(firstID: visible.first?.id, lastID: visible.last?.id)
-    }
 
-    /// A zero-height row at the very end, and it does two jobs that both need something to
-    /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
-    /// since a tall card scrolled to its own bottom still leaves the footer off screen — and
-    /// its appearing and disappearing is how the screen knows whether the reader is at the
-    /// live edge or up in the history.
-    private var bottomSentinel: some View {
-        Color.clear
-            .frame(height: 1)
-            .id(Self.bottomAnchor)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .accessibilityHidden(true)
-            .onAppear { readerIsAtBottom = true }
-            // Gated on a recent gesture — see `lastReaderScroll`. A sentinel pushed off the
-            // bottom by the very row we are about to follow to must NOT count as the reader
-            // leaving, or following stops on the first message it was supposed to follow.
-            .onDisappear {
-                if Date().timeIntervalSince(lastReaderScroll) < Self.scrollGestureWindow {
-                    readerIsAtBottom = false
-                }
-            }
-    }
 
-    /// One entry, as a link into the detail screen or as a row that is simply itself.
-    ///
-    /// **A `NavigationLink` only where there is something to navigate to**, which is
-    /// `TimelineStyle.opensDetail(_:)` and nothing else. A prose row now draws its message
-    /// whole, so the screen one tap away would repeat it word for word — and a `List` puts a
-    /// disclosure chevron on every link it holds, floated at the row's vertical centre. On a
-    /// forty-line answer that chevron sits twenty lines down, pointing at nothing, promising
-    /// a screen that has nothing more on it. The renders in
-    /// `.superpowers/sdd/ui-renders/prose-full/` are what settled that.
-    ///
-    /// The rows that keep the link keep it because they really are showing less than they
-    /// have AND have no way to show it here: a tool card's three-line command and six-line
-    /// output, a clamped thinking block, a JSON input worth a tree. **A prose body past the
-    /// ceiling is no longer among them** — it opens where it stopped instead, which is also
-    /// what makes its More button tappable: a `NavigationLink` swallows the tap on any control
-    /// inside it, so a row cannot be a link and carry a button at once.
-    @ViewBuilder
-    private func entryRow(_ entry: TimelineEntry) -> some View {
-        if entry.item.body.isPlaceholder {
-            // A spilled row never got as far as being a ghost — a ghost is an outbox entry,
-            // never spilled — but checking this first is correct regardless of what else the
-            // entry is: a skeleton is the one thing a spilled body can ever draw.
-            TimelineSkeletonRow(item: entry.item)
-        } else if entry.isGhost {
-            ghostRow(entry)
-        } else {
-            let row = TimelineRow(
-                item: entry.item, result: entry.result, agent: session?.agent,
-                isExpanded: expansion.isExpanded(entry.id),
-                // Not animated, and that is the same judgement the opening jump above is made
-                // on: a row growing by two thousand points is not a transition anything can
-                // follow, and `List` animating a height change that large under the finger
-                // reads as the screen having lost its place. The rest of the message is simply
-                // there.
-                toggleExpanded: { expansion.toggle(entry.id) },
-                // Straight onto the model, which is where the draft lives — the row never
-                // learns that a composer exists.
-                onReply: { model.quote($0) },
-                segmentCache: segmentCache,
-                widthBucket: widthBucket,
-                linkCache: linkCache
-            )
-            if TimelineStyle.opensDetail(entry.item) {
-                NavigationLink(value: entry.item) { row }
-            } else {
-                row
-            }
-        }
-    }
 
-    /// A `.delivered` outbox message, inline where it will land as a real `.userTurn` once the
-    /// agent's own transcript catches up — and visibly not one yet.
-    ///
-    /// **Dimmed and captioned rather than the accent-tinted panel `TimelineRow` gives a real
-    /// user turn**, which is the whole point: a reader scanning the transcript for the
-    /// landmarks they wrote must not mistake something still in flight for something that
-    /// happened. Italic body text and a small "Queued to your agent" caption, with a clock
-    /// glyph — the same pending vocabulary a `.sending`/`.accepted` outbox row used to carry
-    /// below the composer, before delivery moved the cue in here.
-    ///
-    /// **No `NavigationLink`, no expansion, no callID folding.** A ghost has none of the state
-    /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
-    /// recognise, and answers no tool call — so it is drawn straight rather than routed through
-    /// `TimelineRow`, which would have nothing to do with most of what it offers.
-    private func ghostRow(_ entry: TimelineEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(entry.item.body.text)
-                .font(.body)
-                .italic()
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Label("Queued to your agent", systemImage: "clock")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Queued: \(entry.item.body.text)")
-    }
 
-    /// What sits above the oldest row the phone holds: a spinner while history is on its way,
-    /// the reason if the last read of it failed, and **nothing at all** once the beginning of
-    /// the conversation is reached.
-    ///
-    /// **Not a button, and that is the point of this whole change.** It used to be one — "Load
-    /// earlier" — on the reasoning that an automatic fetch fires on over-scroll bounce and
-    /// drags the reader upward, and that an explicit tap puts them in charge of where they
-    /// are. Both halves of that were true and the conclusion was still wrong: it made every
-    /// trip into history a tap followed by a wait, on a screen whose entire job is reading.
-    /// The fetch is now started a page early by the trigger in the list body, so by the time
-    /// the reader gets here the rows are usually already in place and this row is not drawn at
-    /// all. What is left of it is a report, never a control — there is nothing here to press,
-    /// and nothing that fails to load leaves the reader with a decision to make.
-    ///
-    /// The failure is shown without a retry for the same reason: `prefetchOlder` is re-armed
-    /// by the reader's next scroll near the top, so the recovery is the gesture they were
-    /// already making.
-    @ViewBuilder
-    private var olderStatusRow: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            if let failure = model.olderFailure {
-                Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
-                Text(failure)
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ProgressView().controlSize(.small)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 8)
-        .foregroundStyle(.secondary)
-        // Stated rather than left to the content: half the time the content is a
-        // `ProgressView`, which announces nothing, and a reader on VoiceOver arriving at the
-        // top of what has loaded would be told only that the conversation ends there.
-        .accessibilityLabel(model.olderFailure ?? "Loading earlier messages")
-        .listRowInsets(Self.rowInsets)
-        .listRowSeparator(.hidden)
-    }
 
     /// The entry whose appearance starts the next read of history, or `nil` when there is no
     /// history left to read. `prefetchDepth` and the trigger computation itself moved to
@@ -833,77 +460,7 @@ struct SessionTimelineScreen: View {
         }
     }
 
-    /// The three empty screens, drawn as screens rather than as a grey line of footnote text.
-    /// Each one is the *only* thing a reader sees when it appears, and a sentence flush against
-    /// the navigation bar with nothing else on the page reads as a rendering failure.
-    @ViewBuilder
-    private func noticeRow(_ notice: Notice) -> some View {
-        switch notice {
-        case .loading:
-            VStack(spacing: 10) {
-                ProgressView()
-                Text("Loading conversation…").font(.footnote).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 220)
-            .listRowInsets(Self.rowInsets)
-            .listRowSeparator(.hidden)
-        case .empty:
-            ContentUnavailableView(
-                "No messages yet",
-                systemImage: "bubble.left.and.bubble.right",
-                description: Text("This session hasn't said anything your Mac can read yet.")
-            )
-            .listRowInsets(Self.rowInsets)
-            .listRowSeparator(.hidden)
-        case .notStarted:
-            // **No Try again here, and that absence is the fix.** This is what every session
-            // looks like between being created and taking its first turn, and it used to draw
-            // the failure notice — a warning triangle and a retry button, over a session where
-            // nothing had gone wrong and where the button re-asked a question the Mac had
-            // already answered correctly. What ends this state is the agent taking a turn, and
-            // the composer for that is directly below.
-            ContentUnavailableView(
-                "Nothing here yet",
-                systemImage: "bubble.left",
-                description: Text("This session hasn't taken its first turn.")
-            )
-            .listRowInsets(Self.rowInsets)
-            .listRowSeparator(.hidden)
-        case .failed(let message):
-            failureNotice(message)
-        }
-    }
 
-    /// The reason, and a way to try again.
-    ///
-    /// **The button used to be withheld when there was content on screen**, on the reasoning
-    /// that the failure was almost always the "Load earlier" tap and that button was the row
-    /// directly below this one — so a second control doing the same job one row apart was how
-    /// a reader ended up re-issuing a fetch they could not see the state of. That row is gone
-    /// now, and with it the argument: `phase` can only reach `.failed` from a fetch the reader
-    /// caused, a prefetch reports itself in `olderFailure` instead, and withholding the button
-    /// here would leave a reader who returned to a screen that failed to re-read the live edge
-    /// with nothing to touch at all.
-    private func failureNotice(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Try again") { model.loadLatest() }
-                .font(.footnote.weight(.medium))
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
-        )
-        .listRowInsets(Self.rowInsets)
-        .listRowSeparator(.hidden)
-    }
 
     /// The two fields a blocked card is a function of, as one `.task(id:)` key.
     ///
@@ -984,51 +541,6 @@ struct SessionTimelineScreen: View {
         }
     }
 
-    /// Same symbol and same tint as the fleet list's glyph for the same three states, because
-    /// a reader arrives here from that row and the two screens describing one session
-    /// differently is the disagreement `SessionStatusGlyph`'s comment exists to prevent.
-    @ViewBuilder
-    private func activityRow(_ activity: Activity) -> some View {
-        switch activity {
-        case .working(let text):
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.mini)
-                Text(text).font(.footnote)
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(.secondary)
-            .padding(.vertical, 8)
-            .listRowInsets(Self.rowInsets)
-            .listRowSeparator(.hidden)
-        case .waiting(let text):
-            Label(text, systemImage: "questionmark.circle.fill")
-                .font(.footnote)
-                .foregroundStyle(.orange)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .listRowInsets(Self.rowInsets)
-                .listRowSeparator(.hidden)
-        case .background(let text):
-            Label(text, systemImage: "terminal.fill")
-                .font(.footnote)
-                .foregroundStyle(.green)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .listRowInsets(Self.rowInsets)
-                .listRowSeparator(.hidden)
-        case .error(let text):
-            // Same symbol and tint as `SessionStatusGlyph`'s error branch and the fleet list's
-            // badge — `exclamationmark.triangle.fill` in `.red` — so a reader who tapped a red
-            // triangle to get here sees the same claim restated, not a different one.
-            Label(text, systemImage: "exclamationmark.triangle.fill")
-                .font(.footnote)
-                .foregroundStyle(.red)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .listRowInsets(Self.rowInsets)
-                .listRowSeparator(.hidden)
-        }
-    }
 
     /// The result that answers a tool call, when the feed happens to hold it, so the detail
     /// screen can show a command and its output together.
@@ -1215,6 +727,562 @@ struct SessionTimelineScreen: View {
               case .string(let plan) = members.first(where: { $0.key == "plan" })?.value
         else { return nil }
         return plan
+    }
+
+    /// The conversation `List` and everything only it reads: the follow/at-bottom latches, the
+    /// expansion set, the row memos, the visible window.
+    ///
+    /// **Its own view so a fleet update can skip it.** Its inputs are four values SwiftUI can
+    /// compare (`==` below), and the model by identity: rows and paging read the model
+    /// through observation, so a new page still redraws it. Nothing else the parent is handed —
+    /// the callback closures, the rest of `WireSession` — reaches this body.
+    struct ConversationList: View, Equatable {
+        let model: SessionTimelineModel
+        let agent: String?
+        let subagents: [WireSubagent]
+        let activity: Activity?
+
+        nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.model === rhs.model && lhs.agent == rhs.agent
+                && lhs.subagents == rhs.subagents && lhs.activity == rhs.activity
+        }
+
+        /// The newest item the screen has already scrolled to, so arriving pages move it once each
+        /// rather than on every re-evaluation of the body.
+        @State private var lastFollowed: String?
+
+        /// Whether the end of the conversation is on screen. Driven by the sentinel row below
+        /// appearing and disappearing, and the only thing that separates "following a live turn"
+        /// from "yanking a reader out of the history they scrolled up to read".
+        @State private var readerIsAtBottom = true
+
+        /// When the reader last had a finger on the list.
+        ///
+        /// The sentinel below goes off screen for TWO different reasons and they mean opposite
+        /// things: the reader scrolled up into the history (stop following), or a new row was
+        /// appended underneath it and pushed it out (keep following — this is the case following
+        /// exists for). `onDisappear` alone cannot tell them apart, so it used to treat both as
+        /// "the reader left", and the first live message turned following off and left it off
+        /// until the reader scrolled back down by hand. This timestamp is what separates them:
+        /// only a disappearance the reader's own gesture caused counts.
+        @State private var lastReaderScroll: Date = .distantPast
+
+        /// The long answers the reader has opened. **On the screen, not on the row** — see
+        /// `Expansion`, which is entirely about why.
+        @State private var expansion = Expansion()
+
+        /// Whether the prefetch trigger is on screen, i.e. the reader is within a page of the
+        /// oldest history the phone holds. The only thing a failed prefetch can be retried on:
+        /// `onAppear` has already fired for a row that is still visible, so without this a read
+        /// that failed while the reader sat at the top would never be attempted again.
+        @State private var isNearOldest = false
+
+        /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
+        /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
+        /// the row that answered their tap for exactly as long as the fade takes and not a frame
+        /// longer.
+        @State private var highlightedID: String?
+
+        /// The clamped-segments memo every row on this screen shares, so a row's three segmenter
+        /// passes collapse to one cached split that survives re-render and cell recycling. See
+        /// `TimelineSegmentCache`.
+        @State private var segmentCache = TimelineSegmentCache()
+
+        /// The link-detection memo every plain-text row on this screen shares — `TimelineLinkCache`,
+        /// `segmentCache`'s counterpart for the machine-text kinds a row draws with `Text(_:)`
+        /// rather than through the segmenter.
+        @State private var linkCache = TimelineLinkCache()
+
+        /// The list's own width, bucketed to 32pt so hairline jitter does not invalidate the memo
+        /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
+        /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
+        @State private var widthBucket = 0
+
+        /// The rows currently on screen, kept up to date by the row `.onAppear`/`.onDisappear`
+        /// below. Only ever read through `reportWindow()`, which turns it into the first/last id in
+        /// feed order the model needs to schedule spill and rehydrate.
+        @State private var visibleIDs: Set<String> = []
+
+        var body: some View {
+            #if DEBUG
+            let _ = SessionTimelineScreen.listBodyEvaluations += 1
+            #endif
+            ScrollViewReader { scroll in
+                List {
+                    // At the head, so a reader sees which background agent is asking for them
+                    // before scrolling a long conversation.
+                    if !subagents.isEmpty {
+                        SubagentTreeSection(nodes: subagents)
+                    }
+                    // Notices sit ABOVE the conversation whenever there is a conversation, because
+                    // the fetch a reader can still trigger with content on screen — returning to a
+                    // kept screen, which re-reads the live edge — has no row of its own, and the
+                    // bottom of a long list is somewhere they are not looking. See
+                    // `topNotice`/`bottomNotice`: exactly one of the two ever answers.
+                    if let notice = SessionTimelineScreen.topNotice(
+                        phase: model.phase, hasItems: !model.feed.items.isEmpty,
+                        isLoadingOlder: model.isLoadingOlder
+                    ) {
+                        noticeRow(notice)
+                    }
+                    // Never a control: see `olderStatusRow`. `hasOlder` is what decides, because
+                    // `olderAnchor` is non-nil at the top of history too.
+                    if model.feed.hasOlder || model.olderFailure != nil {
+                        olderStatusRow
+                            // **The backstop for the trigger row below.** A page that lands while
+                            // the reader is within `prefetchDepth` rows of the top moves the trigger
+                            // to a row beneath them, one already scrolled past, and nothing asked
+                            // again: a 34 MB transcript stopped at whatever the runway reached. This
+                            // row is the top of what is held, so while it is on screen the reader is
+                            // at that top, and each page that moves `oldest` asks for the next one.
+                            // It stops by itself: once pages push this row out of the list's
+                            // realised range, the task is cancelled. A 40-row "any of these asks"
+                            // zone was tried instead and paged through a whole transcript on launch,
+                            // because rows inserted above the viewport count as appearing.
+                            .task(id: model.feed.oldest) {
+                                guard model.olderFailure == nil else { return }
+                                model.prefetchOlder()
+                            }
+                    }
+                    ForEach(model.rendered) { entry in
+                        entryRow(entry)
+                            .listRowInsets(SessionTimelineScreen.rowInsets)
+                            // The card and the tinted user turn are what separate one entry from
+                            // the next. A hairline through them as well draws a line across the
+                            // middle of a rounded panel, which is the same defect that keeps the
+                            // fleet list inset-grouped and this list plain.
+                            .listRowSeparator(.hidden)
+                            // The search-jump highlight. `entry.id == highlightedID` is a plain
+                            // comparison, not a fade of its own — the fade is `highlightedID`
+                            // being cleared under `withAnimation` in the `onChange` below, and a
+                            // `List` row animates a background change on its own.
+                            .listRowBackground(
+                                entry.id == highlightedID
+                                    ? Color.accentColor.opacity(0.15) : Color.clear
+                            )
+                            // **The prefetch trigger, and its depth is the whole design.** It is
+                            // NOT the top row: an `onAppear` up there re-fires on every bounce of
+                            // an over-scroll and lands its page while the list is still settling,
+                            // which drags the reader upward — that defect is why this screen had a
+                            // button instead. A page down, the rubber-band never reaches it and
+                            // the read finishes before the reader arrives.
+                            .onAppear {
+                                visibleIDs.insert(entry.id)
+                                reportWindow()
+                                guard entry.id == model.prefetchTriggerID else { return }
+                                isNearOldest = true
+                                model.prefetchOlder()
+                            }
+                            .onDisappear {
+                                visibleIDs.remove(entry.id)
+                                reportWindow()
+                                if entry.id == model.prefetchTriggerID { isNearOldest = false }
+                            }
+                    }
+                    if let notice = SessionTimelineScreen.bottomNotice(
+                        phase: model.phase, hasItems: !model.feed.items.isEmpty
+                    ) {
+                        noticeRow(notice)
+                    }
+                    if !model.feed.items.isEmpty, let activity {
+                        activityRow(activity)
+                    }
+                    bottomSentinel
+                }
+                // The list's own width, bucketed for `segmentCache`. A background reader rather
+                // than a row: every row needs the same number before it can ask the cache for
+                // anything, and a `GeometryReader` inside one row would only ever see that row's
+                // own bounds.
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { widthBucket = Int((geo.size.width / 32).rounded()) }
+                            .onChange(of: geo.size.width) { _, width in
+                                widthBucket = Int((width / 32).rounded())
+                            }
+                    }
+                )
+                // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
+                // taste: this list holds full-width cards of command output, and inset-grouped's
+                // own card edges cut every one of them short and put a second rounded corner
+                // inside the first. The fleet list's own comment explains why IT keeps
+                // inset-grouped; the two screens differ because what they hold differs.
+                .listStyle(.plain)
+                // `.interactively`, the Messages/Mail behaviour: a downward drag through the list
+                // pulls the keyboard down with the finger. Without it the default, `.automatic`,
+                // resolves to never dismissing on a List, so the keyboard stays up over the
+                // conversation until the person hunts for some other way to put it away. This does
+                // not undo the composer keeping focus after a send (see `PromptComposer`): only a
+                // scroll dismisses, and a person scrolling has already stopped typing.
+                .scrollDismissesKeyboard(.interactively)
+                // `simultaneousGesture`, so the list keeps scrolling and rows keep taking taps —
+                // this only observes. `minimumDistance: 1` because the point is to know a drag
+                // happened at all, not to interpret it.
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 1).onChanged { _ in
+                        lastReaderScroll = Date()
+                        // The retry, and it is deliberately conditioned on there being something
+                        // to retry. Re-arming the prefetch on every drag would let a reader who
+                        // rests near the top pull the whole transcript a runway at a time; re-arming
+                        // it only after a failure recovers the one case the trigger cannot, at the
+                        // cost of nothing when history is arriving normally. `prefetchOlder` clears
+                        // the failure as it goes, so this fires once per failure, not once per
+                        // frame of the gesture.
+                        if isNearOldest, model.olderFailure != nil { model.prefetchOlder() }
+                    }
+                )
+                // `initial: true` so the first page a screen ever draws is followed too. Without
+                // it the jump only happens on the SECOND page, and opening a session lands on the
+                // oldest row of the newest page — which is what shipped.
+                .onChange(of: model.feed.items.last?.id, initial: true) { _, newest in
+                    guard let target = SessionTimelineScreen.follow(
+                        newest: newest, lastFollowed: lastFollowed,
+                        readerIsAtBottom: readerIsAtBottom
+                    ) else { return }
+                    let isFirst = lastFollowed == nil
+                    lastFollowed = target
+                    // Next run-loop turn, because the row being scrolled to is inserted by this
+                    // same change and a `List` has not laid it out yet when `onChange` runs.
+                    DispatchQueue.main.async {
+                        // **Unanimated, including when following a live turn.** The previous
+                        // version animated everything but the opening jump, on the reasoning that
+                        // "there the movement is the information". It did not scroll at all.
+                        //
+                        // A console trace of three consecutive follows settled it: `follow()`
+                        // returned SCROLL for every one of them with `atBottom=true`, so the
+                        // decision was never in question — but only the FIRST, the unanimated
+                        // opening jump, was followed by the bottom sentinel reappearing. The
+                        // animated ones produced no `onAppear` at all, which is the sentinel
+                        // saying the list never moved. `withAnimation` around `scrollTo`, in a
+                        // lazy `List` whose target row was de-materialised by the same insertion
+                        // that triggered this, silently does nothing.
+                        // A SECOND hop before scrolling at all. The row this change inserted is
+                        // not laid out when `onChange` runs, and one hop is not always enough —
+                        // scrolling to a row `List` has not placed yet is what silently did
+                        // nothing when this was first written.
+                        DispatchQueue.main.async {
+                            // Animated again, deliberately. An earlier version dropped the
+                            // animation because animated follows were not moving the list at all,
+                            // but the console trace that showed this could not separate "animated"
+                            // from "single hop": the one call that worked was ALSO the only
+                            // unanimated one AND the only whole-page open rather than a one-row
+                            // append. The extra hop above addresses the layout half; the animation
+                            // stays because a list that jumps loses the reader's place.
+                            withAnimation(isFirst ? nil : .easeOut(duration: 0.25)) {
+                                scroll.scrollTo(SessionTimelineScreen.bottomAnchor, anchor: .bottom)
+                            }
+                            // The net, and it is why the animation is safe to keep. If the
+                            // animated scroll no-ops the way it used to, this lands it anyway a
+                            // third of a second later. When the animation DID work this is a
+                            // scroll to where the list already is, which is invisible — so the
+                            // failure mode is a late snap instead of never arriving.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                scroll.scrollTo(SessionTimelineScreen.bottomAnchor, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+                // A search jump. `model.scrollTarget` is set exactly once per `.around` fetch that
+                // lands (see `SessionTimelineModel.fetch`), so this fires once per tap on a
+                // transcript result rather than on every re-render.
+                .onChange(of: model.scrollTarget) { _, target in
+                    guard let target else { return }
+                    // Two hops, the same reason as the follow-to-bottom jump above: the row this
+                    // targets was inserted by the very fetch that set `scrollTarget`, and `List`
+                    // has not laid it out yet when `onChange` runs.
+                    DispatchQueue.main.async {
+                        DispatchQueue.main.async {
+                            withAnimation { scroll.scrollTo(target, anchor: .center) }
+                        }
+                    }
+                    highlightedID = target
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(1_500))
+                        // `fadedHighlight` owns the guard against a second jump landing while the
+                        // first is still fading — see its own doc comment.
+                        withAnimation(.easeOut(duration: 0.4)) {
+                            highlightedID = SessionTimelineScreen.fadedHighlight(current: highlightedID, target: target)
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The first and last visible entry ids, in feed order, handed to the model so it can spill
+        /// far history to disk and rehydrate what the reader is approaching. Cheap: a set-membership
+        /// filter over `rendered`, which is already the on-screen-sized list every row draws from.
+        private func reportWindow() {
+            let visible = model.rendered.filter { visibleIDs.contains($0.id) }
+            model.reportVisibleWindow(firstID: visible.first?.id, lastID: visible.last?.id)
+        }
+
+        /// A zero-height row at the very end, and it does two jobs that both need something to
+        /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
+        /// since a tall card scrolled to its own bottom still leaves the footer off screen — and
+        /// its appearing and disappearing is how the screen knows whether the reader is at the
+        /// live edge or up in the history.
+        private var bottomSentinel: some View {
+            Color.clear
+                .frame(height: 1)
+                .id(SessionTimelineScreen.bottomAnchor)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .accessibilityHidden(true)
+                .onAppear { readerIsAtBottom = true }
+                // Gated on a recent gesture — see `lastReaderScroll`. A sentinel pushed off the
+                // bottom by the very row we are about to follow to must NOT count as the reader
+                // leaving, or following stops on the first message it was supposed to follow.
+                .onDisappear {
+                    if Date().timeIntervalSince(lastReaderScroll) < SessionTimelineScreen.scrollGestureWindow {
+                        readerIsAtBottom = false
+                    }
+                }
+        }
+
+        /// One entry, as a link into the detail screen or as a row that is simply itself.
+        ///
+        /// **A `NavigationLink` only where there is something to navigate to**, which is
+        /// `TimelineStyle.opensDetail(_:)` and nothing else. A prose row now draws its message
+        /// whole, so the screen one tap away would repeat it word for word — and a `List` puts a
+        /// disclosure chevron on every link it holds, floated at the row's vertical centre. On a
+        /// forty-line answer that chevron sits twenty lines down, pointing at nothing, promising
+        /// a screen that has nothing more on it. The renders in
+        /// `.superpowers/sdd/ui-renders/prose-full/` are what settled that.
+        ///
+        /// The rows that keep the link keep it because they really are showing less than they
+        /// have AND have no way to show it here: a tool card's three-line command and six-line
+        /// output, a clamped thinking block, a JSON input worth a tree. **A prose body past the
+        /// ceiling is no longer among them** — it opens where it stopped instead, which is also
+        /// what makes its More button tappable: a `NavigationLink` swallows the tap on any control
+        /// inside it, so a row cannot be a link and carry a button at once.
+        @ViewBuilder
+        private func entryRow(_ entry: TimelineEntry) -> some View {
+            if entry.item.body.isPlaceholder {
+                // A spilled row never got as far as being a ghost — a ghost is an outbox entry,
+                // never spilled — but checking this first is correct regardless of what else the
+                // entry is: a skeleton is the one thing a spilled body can ever draw.
+                TimelineSkeletonRow(item: entry.item)
+            } else if entry.isGhost {
+                ghostRow(entry)
+            } else {
+                let row = TimelineRow(
+                    item: entry.item, result: entry.result, agent: agent,
+                    isExpanded: expansion.isExpanded(entry.id),
+                    // Not animated, and that is the same judgement the opening jump above is made
+                    // on: a row growing by two thousand points is not a transition anything can
+                    // follow, and `List` animating a height change that large under the finger
+                    // reads as the screen having lost its place. The rest of the message is simply
+                    // there.
+                    toggleExpanded: { expansion.toggle(entry.id) },
+                    // Straight onto the model, which is where the draft lives — the row never
+                    // learns that a composer exists.
+                    onReply: { model.quote($0) },
+                    segmentCache: segmentCache,
+                    widthBucket: widthBucket,
+                    linkCache: linkCache
+                )
+                if TimelineStyle.opensDetail(entry.item) {
+                    NavigationLink(value: entry.item) { row }
+                } else {
+                    row
+                }
+            }
+        }
+
+        /// A `.delivered` outbox message, inline where it will land as a real `.userTurn` once the
+        /// agent's own transcript catches up — and visibly not one yet.
+        ///
+        /// **Dimmed and captioned rather than the accent-tinted panel `TimelineRow` gives a real
+        /// user turn**, which is the whole point: a reader scanning the transcript for the
+        /// landmarks they wrote must not mistake something still in flight for something that
+        /// happened. Italic body text and a small "Queued to your agent" caption, with a clock
+        /// glyph — the same pending vocabulary a `.sending`/`.accepted` outbox row used to carry
+        /// below the composer, before delivery moved the cue in here.
+        ///
+        /// **No `NavigationLink`, no expansion, no callID folding.** A ghost has none of the state
+        /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
+        /// recognise, and answers no tool call — so it is drawn straight rather than routed through
+        /// `TimelineRow`, which would have nothing to do with most of what it offers.
+        private func ghostRow(_ entry: TimelineEntry) -> some View {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.item.body.text)
+                    .font(.body)
+                    .italic()
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Label("Queued to your agent", systemImage: "clock")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Queued: \(entry.item.body.text)")
+        }
+
+        /// What sits above the oldest row the phone holds: a spinner while history is on its way,
+        /// the reason if the last read of it failed, and **nothing at all** once the beginning of
+        /// the conversation is reached.
+        ///
+        /// **Not a button, and that is the point of this whole change.** It used to be one — "Load
+        /// earlier" — on the reasoning that an automatic fetch fires on over-scroll bounce and
+        /// drags the reader upward, and that an explicit tap puts them in charge of where they
+        /// are. Both halves of that were true and the conclusion was still wrong: it made every
+        /// trip into history a tap followed by a wait, on a screen whose entire job is reading.
+        /// The fetch is now started a page early by the trigger in the list body, so by the time
+        /// the reader gets here the rows are usually already in place and this row is not drawn at
+        /// all. What is left of it is a report, never a control — there is nothing here to press,
+        /// and nothing that fails to load leaves the reader with a decision to make.
+        ///
+        /// The failure is shown without a retry for the same reason: `prefetchOlder` is re-armed
+        /// by the reader's next scroll near the top, so the recovery is the gesture they were
+        /// already making.
+        @ViewBuilder
+        private var olderStatusRow: some View {
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                if let failure = model.olderFailure {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                    Text(failure)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 8)
+            .foregroundStyle(.secondary)
+            // Stated rather than left to the content: half the time the content is a
+            // `ProgressView`, which announces nothing, and a reader on VoiceOver arriving at the
+            // top of what has loaded would be told only that the conversation ends there.
+            .accessibilityLabel(model.olderFailure ?? "Loading earlier messages")
+            .listRowInsets(SessionTimelineScreen.rowInsets)
+            .listRowSeparator(.hidden)
+        }
+
+        /// The three empty screens, drawn as screens rather than as a grey line of footnote text.
+        /// Each one is the *only* thing a reader sees when it appears, and a sentence flush against
+        /// the navigation bar with nothing else on the page reads as a rendering failure.
+        @ViewBuilder
+        private func noticeRow(_ notice: Notice) -> some View {
+            switch notice {
+            case .loading:
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Loading conversation…").font(.footnote).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 220)
+                .listRowInsets(SessionTimelineScreen.rowInsets)
+                .listRowSeparator(.hidden)
+            case .empty:
+                ContentUnavailableView(
+                    "No messages yet",
+                    systemImage: "bubble.left.and.bubble.right",
+                    description: Text("This session hasn't said anything your Mac can read yet.")
+                )
+                .listRowInsets(SessionTimelineScreen.rowInsets)
+                .listRowSeparator(.hidden)
+            case .notStarted:
+                // **No Try again here, and that absence is the fix.** This is what every session
+                // looks like between being created and taking its first turn, and it used to draw
+                // the failure notice — a warning triangle and a retry button, over a session where
+                // nothing had gone wrong and where the button re-asked a question the Mac had
+                // already answered correctly. What ends this state is the agent taking a turn, and
+                // the composer for that is directly below.
+                ContentUnavailableView(
+                    "Nothing here yet",
+                    systemImage: "bubble.left",
+                    description: Text("This session hasn't taken its first turn.")
+                )
+                .listRowInsets(SessionTimelineScreen.rowInsets)
+                .listRowSeparator(.hidden)
+            case .failed(let message):
+                failureNotice(message)
+            }
+        }
+
+        /// The reason, and a way to try again.
+        ///
+        /// **The button used to be withheld when there was content on screen**, on the reasoning
+        /// that the failure was almost always the "Load earlier" tap and that button was the row
+        /// directly below this one — so a second control doing the same job one row apart was how
+        /// a reader ended up re-issuing a fetch they could not see the state of. That row is gone
+        /// now, and with it the argument: `phase` can only reach `.failed` from a fetch the reader
+        /// caused, a prefetch reports itself in `olderFailure` instead, and withholding the button
+        /// here would leave a reader who returned to a screen that failed to re-read the live edge
+        /// with nothing to touch at all.
+        private func failureNotice(_ message: String) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try again") { model.loadLatest() }
+                    .font(.footnote.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+            )
+            .listRowInsets(SessionTimelineScreen.rowInsets)
+            .listRowSeparator(.hidden)
+        }
+
+        /// Same symbol and same tint as the fleet list's glyph for the same three states, because
+        /// a reader arrives here from that row and the two screens describing one session
+        /// differently is the disagreement `SessionStatusGlyph`'s comment exists to prevent.
+        @ViewBuilder
+        private func activityRow(_ activity: Activity) -> some View {
+            switch activity {
+            case .working(let text):
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.mini)
+                    Text(text).font(.footnote)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 8)
+                .listRowInsets(SessionTimelineScreen.rowInsets)
+                .listRowSeparator(.hidden)
+            case .waiting(let text):
+                Label(text, systemImage: "questionmark.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowInsets(SessionTimelineScreen.rowInsets)
+                    .listRowSeparator(.hidden)
+            case .background(let text):
+                Label(text, systemImage: "terminal.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowInsets(SessionTimelineScreen.rowInsets)
+                    .listRowSeparator(.hidden)
+            case .error(let text):
+                // Same symbol and tint as `SessionStatusGlyph`'s error branch and the fleet list's
+                // badge — `exclamationmark.triangle.fill` in `.red` — so a reader who tapped a red
+                // triangle to get here sees the same claim restated, not a different one.
+                Label(text, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowInsets(SessionTimelineScreen.rowInsets)
+                    .listRowSeparator(.hidden)
+            }
+        }
+
     }
 }
 
