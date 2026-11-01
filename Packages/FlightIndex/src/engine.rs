@@ -11,7 +11,7 @@ use crate::alloc;
 use crate::error::{Error, Result};
 use crate::facts::BlobFacts;
 use crate::git::{self, FileRef, Overlay, View, MAX_FILE_BYTES};
-use crate::graph::{facts_bytes, FileChange, ViewGraph};
+use crate::graph::{facts_bytes, FileChange, Share, ViewGraph};
 use crate::lang;
 use crate::resolve::{Resolved, Resolver};
 use crate::store::{GcStats, ParsedBlob, Reader, Writer};
@@ -95,6 +95,10 @@ pub struct Engine {
     /// any more is freed: ten graphs of ten commits of one repository hold one copy of each blob
     /// they share, not ten.
     facts: Mutex<HashMap<(String, &'static str), SharedFacts>>,
+    /// Per repository: the file numbering and the hash-consed per-file blocks every graph of it
+    /// shares (see `graph::blocks`), so a graph of a nearby commit holds pointers to the blocks
+    /// that resolved the same instead of copies.
+    shares: Mutex<HashMap<PathBuf, Arc<Share>>>,
     /// What the store's `worktrees` row says for each worktree, so a request whose view has not
     /// changed writes nothing (see `record_view`).
     recorded: Mutex<HashMap<PathBuf, Recorded>>,
@@ -209,6 +213,10 @@ pub struct GraphCacheStats {
     pub bytes: usize,
     /// The distinct facts part of the estimate, unscaled.
     pub facts_bytes: usize,
+    /// Distinct per-file blocks (and name tables) live across every repository's graphs, and
+    /// their estimated bytes, unscaled; part of `bytes`, charged once however many graphs hold them.
+    pub blocks: usize,
+    pub block_bytes: usize,
     pub budget: usize,
     pub evictions: u64,
     pub heap_limit: usize,
@@ -230,6 +238,7 @@ impl Engine {
             bases: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
             facts: Mutex::new(HashMap::new()),
+            shares: Mutex::new(HashMap::new()),
             recorded: Mutex::new(HashMap::new()),
             heap_limit: AtomicUsize::new(0),
             builds: (Mutex::new(0), Condvar::new()),
@@ -374,6 +383,7 @@ impl Engine {
             GraphKey::Overlay(_) => g.graph.label.repo != repo,
         });
         self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        self.shares.lock().unwrap().remove(repo);
         crate::store::remove_repo_db(&self.store_root, repo);
     }
 
@@ -656,7 +666,19 @@ impl Engine {
             (c.map.len(), c.map.values().map(|g| g.own_bytes).sum::<usize>(), c.budget, c.evictions)
         };
         let facts_bytes = self.live_facts_bytes();
-        GraphCacheStats { graphs, bytes: charged(own + facts_bytes), facts_bytes, budget, evictions, heap_limit: self.heap_limit.load(Ordering::Relaxed) }
+        let (blocks, block_bytes) = self.live_share_bytes();
+        GraphCacheStats { graphs, bytes: charged(own + facts_bytes + block_bytes), facts_bytes, blocks, block_bytes, budget, evictions, heap_limit: self.heap_limit.load(Ordering::Relaxed) }
+    }
+
+    /// The repository's share of numbering and blocks, created on first use.
+    fn share(&self, repo: &Path) -> Arc<Share> {
+        self.shares.lock().unwrap().entry(repo.to_path_buf()).or_default().clone()
+    }
+
+    /// Distinct live blocks (and name tables) and their estimated bytes, over every repository.
+    fn live_share_bytes(&self) -> (usize, usize) {
+        let shares: Vec<Arc<Share>> = self.shares.lock().unwrap().values().cloned().collect();
+        shares.iter().map(|s| s.stats()).fold((0, 0), |(b, n), s| (b + s.blocks, n + s.block_bytes + s.name_bytes))
     }
 
     fn live_facts_bytes(&self) -> usize {
@@ -673,7 +695,7 @@ impl Engine {
     }
 
     fn over_budget(&self) -> bool {
-        let facts = self.live_facts_bytes();
+        let facts = self.live_facts_bytes() + self.live_share_bytes().1;
         let c = self.graphs.lock().unwrap();
         charged(c.map.values().map(|g| g.own_bytes).sum::<usize>() + facts) > c.budget
     }
@@ -706,8 +728,10 @@ impl Engine {
         c.map.remove(&victim);
         c.evictions += 1;
         drop(c);
-        // Facts nothing holds any more are dead weight in the index of weak pointers.
+        // Facts and blocks nothing holds any more are dead weight in the indexes of weak pointers.
         self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        let shares: Vec<Arc<Share>> = self.shares.lock().unwrap().values().cloned().collect();
+        shares.iter().for_each(|s| s.prune());
         true
     }
 
@@ -814,7 +838,7 @@ impl Engine {
         };
 
         let Some(commit) = &view.label.base_commit else {
-            return self.building(|| Ok(Arc::new(ViewGraph::build(view.label.clone(), load(&view.files())?))));
+            return self.building(|| Ok(Arc::new(ViewGraph::build_shared(view.label.clone(), load(&view.files())?, self.share(&view.label.repo), None))));
         };
         let base_key = GraphKey::Base(view.label.repo.clone(), commit.clone());
         let base = match self.cached(&base_key, "").filter(|_| complete) {
@@ -829,7 +853,10 @@ impl Engine {
                         let mut base_label = view.label.clone();
                         base_label.dirty = false;
                         let near = self.nearest_base(&view.label.repo);
-                        let b = self.building(|| -> Result<_> { Ok(Arc::new(ViewGraph::build_near(base_label, load(&view.base)?, near.as_deref()))) })?;
+                        let b = self.building(|| -> Result<_> { Ok(Arc::new(ViewGraph::build_shared(base_label, load(&view.base)?, self.share(&view.label.repo), near.as_deref()))) })?;
+                        // Let go of the warm-start neighbour before caching: a graph someone holds is
+                        // never evicted, so keeping it here would pin it past the budget check below.
+                        drop(near);
                         if complete {
                             self.remember(base_key.clone(), String::new(), b.clone());
                         }

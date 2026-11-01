@@ -56,8 +56,7 @@ impl GraphData {
 
         // Definitions of this name in visible modules, with how near their module is (0 = own).
         let cands: Vec<(SymId, usize)> = self
-            .name_index
-            .get(&r.name)
+            .named(&r.name)
             .into_iter()
             .flatten()
             .filter(|id| self.files[id.file as usize].language == "swift")
@@ -115,8 +114,7 @@ impl GraphData {
                 return none.clone();
             }
             let pool: Vec<SymId> = self
-                .name_index
-                .get(&r.name)
+                .named(&r.name)
                 .into_iter()
                 .flatten()
                 .copied()

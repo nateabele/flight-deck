@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resolved {
     /// A file in this view (worktree-relative path). `rest` is the unresolved tail of a Rust
     /// path: items inside the file (`crate::store::open` -> file `store.rs`, rest `["open"]`).

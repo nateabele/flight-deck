@@ -891,6 +891,12 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   what stayed live. On tessera with about 90 worktrees queried in turn: 1.8 GB RSS under the old
   1.5 GB budget, 1.43 GB under the new default; with 30 busy clients 2.6 GB became 1.66 GB (the
   contract spec has the table, and the latency price of a smaller cache).
+- **Shared blocks.** The graphs of one repository share each file's resolution (imports,
+  reference targets, file edges) as an `Arc` block, hash-consed by content in a per-repository
+  table (`src/graph/blocks.rs`), with file indices from a per-repository numbering so that blocks
+  of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
+  incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
+  before, 0.81 GB after.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.
