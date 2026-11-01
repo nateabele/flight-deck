@@ -565,7 +565,7 @@ impl<'a> Walker<'a> {
                 if name == "spec" {
                     let spec = one_line(text(n, src));
                     self.frame().specs.insert((fname, arity), spec);
-                    self.walk(def, Ctx { in_type: true, ..ctx });
+                    self.spec_refs(def, head, Ctx { in_type: true, ..ctx });
                 } else {
                     let id = self.facts.push_symbol(symbol(
                         n,
@@ -575,7 +575,7 @@ impl<'a> Walker<'a> {
                         ctx.parent,
                         true,
                     ));
-                    self.walk(def, Ctx { enclosing: Some(id), in_type: true, ..ctx });
+                    self.spec_refs(def, head, Ctx { enclosing: Some(id), in_type: true, ..ctx });
                 }
             }
             _ => {
@@ -584,6 +584,18 @@ impl<'a> Walker<'a> {
                     self.walk(a, ctx);
                 }
             }
+        }
+    }
+
+    /// The types in `name(args) :: ret`: everything but the head's own name, which is the
+    /// declaration (walking it would record every spec as a reference to its function).
+    fn spec_refs(&mut self, def: Node, head: Node, ctx: Ctx) {
+        if let Some(a) = Self::args(head) {
+            self.walk_children(a, ctx);
+        }
+        let mut c = def.walk();
+        for child in def.named_children(&mut c).filter(|k| k.start_byte() != head.start_byte()) {
+            self.walk(child, ctx);
         }
     }
 

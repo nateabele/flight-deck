@@ -175,3 +175,9 @@ fn scripts_without_a_module_still_extract() {
     assert_eq!(sym(&f, "X").kind, SymbolKind::Module);
     assert!(has_ref(&f, Some("X"), "hi", RefKind::Call));
 }
+
+#[test]
+fn a_spec_head_is_a_declaration_not_a_reference_to_itself() {
+    let f = facts();
+    assert!(!f.refs.iter().any(|r| r.name == "run"), "`@spec run(integer)` names the function it describes");
+}
