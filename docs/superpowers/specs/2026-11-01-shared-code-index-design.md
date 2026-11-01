@@ -202,7 +202,7 @@ Measure each one on the real machine with the real Tessera repository, not on fi
 - A second worktree on the same commit parses **zero** blobs.
 - With every Tessera worktree known, the store is smaller than one master index plus the sum of the overlays, plus a stated margin. Compare: 32.6 GB today for one 1,583-file root.
 - `find traverseStep` and `find checkPartial` return their Elm definitions.
-- From `formula-editor`, `qartez_find Expression.Node.toString` returns the definition in `tessera/designer/src`, and `qartez_refs` on it includes `src/ExprViewer.elm`.
+- From `formula-editor`, `qartez_find Expression.Node.toString` returns the definition in `tessera/designer/src`, and `qartez_refs Expression.Node.identifierToString` includes `src/ExprViewer.elm`. (The first draft used `refs` on `toString`, but `ExprViewer.elm` never calls `toString`, as checked on 2026-11-01.)
 - `qartez_read /absolute/path/in/another/worktree.ex` works.
 - Read-your-writes: an `Edit` immediately followed by `qartez_find` of a new symbol finds it, in 100 of 100 runs. The test counts results and does not use timing.
 - 30 concurrent clients doing mixed reads, writes and builds produce no "database is locked" or other lock errors.
