@@ -855,7 +855,7 @@ impl Freshness {
         if self.keep && located.is_git {
             self.kept(engine, &located.root, path)
         } else {
-            self.from_status(engine, path)
+            self.read_status(engine, path)
         }
     }
 
@@ -879,7 +879,7 @@ impl Freshness {
         // A full read, and a snapshot of the file system right after it: whatever changes in
         // between has a ctime inside the snapshot's racy window and is looked at again.
         e.cached = None;
-        let view = self.from_status(engine, path)?;
+        let view = self.read_status(engine, path)?;
         if let Ok((gitdir, common)) = git::git_dirs(root) {
             e.cached = Some(Cached { index: BaseIndex::new(&view), snapshot: Snapshot::take(&view, &common), view: view.clone(), gitdir, common });
         }
@@ -915,8 +915,11 @@ impl Freshness {
         let mut out = Vec::new();
         for (root, entry) in self.entries.lock().unwrap().iter() {
             let Ok(e) = entry.try_lock() else { continue };
+            // A worktree whose directory is gone has no HEAD to compare, which would read as a move;
+            // the sweep releases it, and preparing it would index whatever directory is left where it was.
             if let Some(c) = &e.cached
                 && c.common == common
+                && root.join(".git").exists()
                 && git::read_head(&c.gitdir, &c.common) != c.view.label.base_commit
             {
                 out.push(root.clone());
@@ -954,7 +957,7 @@ impl Freshness {
     }
 
     /// The view recomputed from git, shared between concurrent callers.
-    fn from_status(&self, engine: &Engine, path: &Path) -> Result<View> {
+    fn read_status(&self, engine: &Engine, path: &Path) -> Result<View> {
         let root = git::locate(path)?.root;
         let slot = self.slots.lock().unwrap().entry(root).or_default().clone();
         let mut st = slot.state.lock().unwrap();

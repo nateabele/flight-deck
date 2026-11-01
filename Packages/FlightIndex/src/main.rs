@@ -159,7 +159,11 @@ fn mutator_positionals(tool: &str) -> Option<&'static [&'static str]> {
 
 fn run() -> Result<i32> {
     let argv0 = std::env::args().next().unwrap_or_default();
-    let cli = parse(alias::normalize(&argv0, std::env::args().skip(1).collect())).map_err(Error::Msg)?;
+    let mut cli = parse(alias::normalize(&argv0, std::env::args().skip(1).collect())).map_err(Error::Msg)?;
+    // Absolute from here on: the daemon changes its working directory to `/` (its starter's may be
+    // deleted later), and a relative `--store` would then name a different place.
+    cli.store = std::path::absolute(&cli.store).map_err(|e| Error::Msg(format!("--store: {e}")))?;
+    cli.socket = cli.socket.as_deref().map(std::path::absolute).transpose().map_err(|e| Error::Msg(format!("--socket: {e}")))?;
     if cli.verb.is_empty() {
         eprintln!("usage: fdindex <daemon|mcp|service|status|start|stop|restart|install|uninstall|map|find|grep|read|outline|deps|stats|impact|refs|calls|build|gc|add_root> [args] [--flags]");
         return Ok(2);

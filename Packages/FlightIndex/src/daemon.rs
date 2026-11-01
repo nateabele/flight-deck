@@ -80,6 +80,9 @@ pub fn run(opts: Options) -> Result<()> {
             return Ok(());
         }
     };
+    // The daemon inherits the directory of whoever started it, often a worktree that is deleted
+    // later; a process whose working directory is gone cannot run git without a directory of its own.
+    let _ = std::env::set_current_dir("/");
     log::open(&opts.paths.log);
     let svc = Service::open(opts.config.clone())?;
 

@@ -511,6 +511,10 @@ pub fn branch_heads(common: &Path) -> Result<Vec<(String, String)>> {
         .arg("--git-dir")
         .arg(common)
         .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"])
+        // git reads its working directory before it looks at `--git-dir`, and fails outright when
+        // that directory was deleted. The daemon inherits its starter's, which is often a worktree
+        // that is later removed; without this every collection skipped its repository.
+        .current_dir(common)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|e| Error::io(common, e))?;

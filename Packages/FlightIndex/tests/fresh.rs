@@ -340,3 +340,24 @@ fn a_checkout_is_prepared_before_anyone_asks() {
     assert!(t.lines().next().unwrap().contains(&git(&r.root, &["rev-parse", "--short=7", "HEAD"])), "{t}");
     assert_eq!(svc.engine.parse_count() - before, differing, "the question itself parsed nothing more");
 }
+
+#[test]
+fn a_removed_worktree_is_not_prepared_when_the_repository_moves() {
+    // Its kept view is still there until the sweep, and its HEAD file is gone, so it looks like a
+    // worktree whose HEAD moved. Preparing it would resolve its path to the nearest existing
+    // ancestor (a plain directory) and index that, creating a store for a directory that is not a
+    // project. Found on tessera, where it indexed a scratch directory of twenty checkouts.
+    let (d, svc) = service();
+    let r = project();
+    ok(&svc, &r.root, "find", json!({"name": "a"}));
+    let (keep, wt) = add_worktree(&r.root, "HEAD");
+    ok(&svc, &wt, "find", json!({"name": "a"}));
+    ok(&svc, &wt, "find", json!({"name": "a"}));
+    git(&r.root, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+    write(&r.root, "lib.rs", "pub fn moved() {}\n");
+    commit_all(&r.root, "moves the refs");
+    // The ref watcher reacts within a quarter second; give it time to do the wrong thing.
+    std::thread::sleep(Duration::from_millis(1500));
+    drop(keep);
+    assert_eq!(store::list_dbs(&d.path().join("store")).len(), 1, "a database for something that is not a repository appeared");
+}

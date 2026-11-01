@@ -201,7 +201,7 @@ impl Snapshot {
         let t = now();
         let (dirs, _, gitignores) = walk(&root, None);
         let mut paths: BTreeSet<String> = view.base.iter().map(|f| f.path.clone()).collect();
-        paths.extend(view.overlay.iter().filter_map(|o| matches!(o, crate::git::Overlay::Present(_)).then(|| o.path().to_string())));
+        paths.extend(view.overlay.iter().filter(|o| matches!(o, crate::git::Overlay::Present(_))).map(|o| o.path().to_string()));
         let files = paths.into_par_iter().map(|p| (root.join(&p), p)).map(|(abs, p)| (p, stat(&abs, t, racy))).collect();
         let dirs = dirs.into_iter().map(|d| (stat(&root.join(&d), t, racy), d)).map(|(s, d)| (d, s)).collect();
         let ignores = gitignores.into_iter().chain(fixed_ignores(common)).map(|p| (ignore_hash(&p), p)).map(|(h, p)| (p, h)).collect();
