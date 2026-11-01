@@ -29,7 +29,7 @@ settings:
     # The version of both apps (Mac and phone), and the hostd release tag (`hostd-v<this>`) the
     # Add Host sheet's install command downloads from. scripts/build-hostd-linux.sh and the
     # release scripts read it from this line, so keep it the only MARKETING_VERSION in this file.
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.3.0"
     # The build number. scripts/release-ios.sh overrides it per upload, since App Store
     # Connect refuses a build number it has already seen.
     CURRENT_PROJECT_VERSION: "1"
