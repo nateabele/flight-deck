@@ -312,6 +312,12 @@ final class IntakeRunnerController {
             firstSeenStale.removeValue(forKey: id)
             return false
         }
+        // A thread runner that came and went inside the grace (it folded a ✓ and exited, leaving
+        // its idle daemon) is not running: its exit mark is newer than the spawn (A-5). Without
+        // this the next ✓ or message waited out the whole grace.
+        if kind == .threads, let spawned = spawnedAt[id], let exited = threadExitedAt(id), exited >= spawned {
+            spawnedAt.removeValue(forKey: id)
+        }
         if let spawnedAt = spawnedAt[id], now().timeIntervalSince(spawnedAt) < spawnGrace {
             return true
         }
@@ -335,6 +341,10 @@ final class IntakeRunnerController {
         let firstStale = firstSeenStale[id] ?? now()
         firstSeenStale[id] = firstStale
         return now().timeIntervalSince(firstStale) < staleGrace
+    }
+
+    private func threadExitedAt(_ id: UUID) -> Date? {
+        ThreadStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).exitedAt()
     }
 
     private func heartbeat(_ id: UUID, tape: Tape?) -> Date? {

@@ -132,6 +132,8 @@ final class IntakeRunnerControllerTests: XCTestCase {
 
     private func saveTape(_ tape: Tape, for id: UUID, intakesRoot: URL) throws {
         let dir = IntakeStore(root: intakesRoot).directory(for: id)
+        // A tape is saved only into an intake's existing folder (A-I1); `IntakeStore` makes it.
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try TapeStore(intakeDirectory: dir).saveTape(tape)
     }
 
@@ -233,6 +235,26 @@ final class IntakeRunnerControllerTests: XCTestCase {
         XCTAssertTrue(fixture.controller.isRunning(id, tape: tape))
         clock = clock.addingTimeInterval(60)
         XCTAssertFalse(fixture.controller.isRunning(id, tape: nil), "stale, and no daemon pid")
+    }
+
+    /// A-5: a thread runner that folded a ✓ and exited inside the spawn grace is not running:
+    /// its `runner.exited` mark is newer than the spawn, so the next ✓ starts a fresh one at once
+    /// rather than waiting out the 15 s grace behind the idle daemon.
+    func testAThreadRunnerThatExitedInsideTheSpawnGraceIsNotRunning() throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixture = try makeFixture(kind: .threads, now: { clock })
+        let id = UUID()
+        let threads = ThreadStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        try FileManager.default.createDirectory(at: threads.threadsDirectory, withIntermediateDirectories: true)
+        expectSuccess(fixture.controller.ensureRunning(id))
+        fixture.control.liveSockets.insert(fixture.controller.socketPath(for: id))
+        XCTAssertTrue(fixture.controller.isRunning(id, tape: nil), "just spawned: inside the grace")
+
+        clock = clock.addingTimeInterval(1)
+        threads.saveExited(clock)
+        XCTAssertFalse(fixture.controller.isRunning(id, tape: nil), "it came and went")
+        expectSuccess(fixture.controller.ensureRunning(id))
+        XCTAssertEqual(fixture.spawner.calls.count, 2, "started again at once")
     }
 
     /// The default `environment` recipe, exercised end to end: repaired PATH, no Claude
@@ -418,6 +440,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
         fixture.control.liveSockets.insert(socket)
         fixture.control.pidfiledSockets.insert(socket)
         let store = TapeStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        try FileManager.default.createDirectory(at: store.intakeDirectory, withIntermediateDirectories: true)
         try store.saveTape(Tape(status: .running, heartbeat: current))
 
         current = current.addingTimeInterval(11)      // stale — first sighting, within grace
