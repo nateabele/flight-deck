@@ -786,6 +786,34 @@ impl Reader {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Only a blob's symbols, or `None` when its facts are absent (a skipped blob has none). A body
+    /// search needs nothing else; the chunk is decoded whole (see `chunk`) and everything but the
+    /// symbols is dropped, with no name lookups.
+    pub fn get_symbols(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<Vec<Symbol>>> {
+        let row = self
+            .conn
+            .prepare_cached(
+                "SELECT f.status, c.data FROM facts f LEFT JOIN chunks c ON c.facts_id = f.id
+                 WHERE f.blob_id = ?1 AND f.language = ?2 AND f.parser_version = ?3",
+            )?
+            .query_row(params![blob_id, language, parser_version], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)))
+            .optional()?;
+        let Some((status, data)) = row else { return Ok(None) };
+        match (status, data) {
+            (0, Some(data)) => Ok(Some(chunk::decode(&data)?.symbols)),
+            _ => Ok(Some(Vec::new())),
+        }
+    }
+
+    /// Every recorded worktree with its HEAD and when its row or overlay was last written (unix
+    /// seconds). A file or directory of the worktree modified at or after that moment may not be in
+    /// the recorded overlay.
+    pub fn worktree_rows(&self) -> Result<Vec<(PathBuf, Option<String>, i64)>> {
+        let mut st = self.conn.prepare_cached("SELECT path, head_commit, last_seen FROM worktrees ORDER BY path")?;
+        let rows = st.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn worktrees(&self) -> Result<Vec<(PathBuf, Option<String>)>> {
         let mut st = self.conn.prepare_cached("SELECT path, head_commit FROM worktrees ORDER BY path")?;
         let rows = st.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?)))?;

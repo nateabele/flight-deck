@@ -152,7 +152,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max matches (default 50), most important first.",
+     "description": "Max matches (default 50).",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -320,6 +320,32 @@
       "string",
       "null"
      ]
+    },
+    "worktrees": {
+     "default": null,
+     "description": "With search_bodies: search many worktrees of this repo at once: `all` or a list of paths.",
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "refresh": {
+     "default": null,
+     "description": "With worktrees: re-read each worktree's state from git, not the recorded one (~1.5 s for 85).",
+     "type": [
+      "boolean",
+      "null"
+     ]
     }
    },
    "required": [
@@ -443,7 +469,7 @@
  },
  {
   "name": "qartez_outline",
-  "description": "Every symbol in one file, grouped by kind, with line ranges and signatures. Use to see a file's structure before reading it; for a symbol's code use qartez_read.",
+  "description": "Every symbol in one file, grouped by kind, with line ranges and signatures. To see a file's structure before reading it; a symbol's code: qartez_read.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -509,7 +535,7 @@
  },
  {
   "name": "qartez_deps",
-  "description": "A file's direct imports and direct importers. Use for one file's coupling; for everything a change could break (transitive, co-change) use qartez_impact.",
+  "description": "A file's direct imports and direct importers. For everything a change could break (transitive, co-change): qartez_impact.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -565,7 +591,7 @@
  },
  {
   "name": "qartez_stats",
-  "description": "Counts: files, LOC, symbols and edges by language, and the most imported files. With file_path: that file's LOC, symbols, imports, importers and PageRank.",
+  "description": "Counts: files, LOC, symbols, edges by language, and the most imported files. With file_path: that file's LOC, symbols, imports, importers, PageRank.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -676,7 +702,7 @@
  },
  {
   "name": "qartez_refs",
-  "description": "Every reference to a symbol (calls, type uses, imports), grouped by file with line and enclosing function. Use before renaming or deleting, or to see all uses. Calls only, or chains past one hop: qartez_calls. A whole file: qartez_impact.",
+  "description": "Every reference to a symbol (calls, type uses, imports), grouped by file with line and enclosing function. Use before renaming or deleting. Calls only, or chains past one hop: qartez_calls. A whole file: qartez_impact.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -758,7 +784,7 @@
  },
  {
   "name": "qartez_calls",
-  "description": "Callers and callees of a function, up to 10 hops. Use to follow a call chain; for every kind of use (types, imports) use qartez_refs. A name with several definitions needs file_path or kind.",
+  "description": "Callers and callees of a function, up to 10 hops. For every kind of use (types, imports): qartez_refs. A name with several definitions needs file_path or kind.",
   "inputSchema": {
    "$defs": {
     "CallDirection": {
@@ -838,7 +864,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows per section (default 50), nearest the target first; a cut names how to narrow.",
+     "description": "Max rows per section (default 50), nearest first; a cut names how to narrow.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -886,7 +912,7 @@
  },
  {
   "name": "qartez_replace_symbol",
-  "description": "Replace a symbol's whole definition, signature included, with new_code. To add code beside it use qartez_insert_before_symbol or qartez_insert_after_symbol. Preview unless apply=true.",
+  "description": "Replace a symbol's whole definition, signature included, with new_code. To add code beside it: qartez_insert_before_symbol or qartez_insert_after_symbol. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -1039,7 +1065,7 @@
  },
  {
   "name": "qartez_rename",
-  "description": "Rename a symbol everywhere: definition, resolved references, import and exposing lists; strings and comments are left alone. For a file use qartez_rename_file. Preview unless apply=true.",
+  "description": "Rename a symbol everywhere: definition, resolved references, import and exposing lists; strings and comments are left alone. A file: qartez_rename_file. Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -1098,7 +1124,7 @@
  },
  {
   "name": "qartez_move",
-  "description": "Move a top-level symbol to another file and repoint its importers (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
+  "description": "Move a top-level symbol to another file, repointing importers (Elm, TypeScript/JavaScript, Rust). Preview unless apply=true.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -1149,7 +1175,7 @@
  },
  {
   "name": "qartez_safe_delete",
-  "description": "Delete a symbol, listing every reference that would break; refuses while any remain unless force=true. Preview unless apply=true.",
+  "description": "Delete a symbol, listing every reference that would break; refuses while any remain unless force=true. Preview by default.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {

@@ -14,6 +14,7 @@ pub mod args;
 mod history;
 pub mod caps;
 pub mod mutate;
+pub mod multigrep;
 mod nav;
 pub mod pending;
 mod pkg;

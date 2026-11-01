@@ -53,7 +53,7 @@ fn tool_and_parameter_names_stay_the_qartez_set() {
     let want: BTreeMap<&str, Vec<&str>> = BTreeMap::from([
         ("qartez_map", vec!["all_files", "boost_files", "boost_terms", "by", "format", "personalize", "token_budget", "top_n", "with_health"]),
         ("qartez_find", vec!["detail", "format", "history", "kind", "limit", "name", "near", "regex"]),
-        ("qartez_grep", vec!["detail", "format", "history", "kind", "limit", "near", "query", "rank", "regex", "search_bodies", "token_budget"]),
+        ("qartez_grep", vec!["detail", "format", "history", "kind", "limit", "near", "query", "rank", "refresh", "regex", "search_bodies", "token_budget", "worktrees"]),
         ("qartez_read", vec!["context_lines", "end_line", "file_path", "limit", "max_bytes", "start_line", "symbol_name", "symbols", "with"]),
         ("qartez_outline", vec!["file_path", "format", "offset", "token_budget"]),
         ("qartez_deps", vec!["file_path", "format", "token_budget"]),
