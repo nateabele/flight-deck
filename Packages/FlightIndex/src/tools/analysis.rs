@@ -1,7 +1,7 @@
 //! Tools that answer structural questions from the graph: `map`, `deps`, `stats`, `impact`,
 //! `refs`, `calls`.
 
-use super::args::SYMBOL;
+use super::caps::{by_proximity, counts, symbol_id, Fit, LIST_LIMIT};
 use super::{is_test_path, range, Ctx, Format, ToolError, ToolResult};
 use crate::facts::{RefKind, SymbolKind};
 use crate::graph::{Confidence, SymId};
@@ -19,6 +19,8 @@ const MAX_CANDIDATES: usize = 10;
 /// symbols) are worth more than its tail, so each list is capped before the token budget can cut
 /// those sections off.
 const LIST_CAP: usize = 30;
+/// Co-change partners listed by `impact`, most often changed together first.
+const CO_CHANGE_CAP: usize = 10;
 /// Rows of one view in a list that spans several: see `shown`.
 const VIEW_CAP: usize = 40;
 
@@ -291,18 +293,25 @@ pub fn impact(c: &Ctx) -> ToolResult {
     let keep = |v: usize, p: &Path| include_tests || !is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
     // Importers in this view and in the views linked to it, the latter labelled with their view.
     let at = |v: usize, p: &Path| format!("{}{}", p.display(), views.tag(v).map(|t| format!("  [view: {t}]")).unwrap_or_default());
-    let mut direct: Vec<(usize, PathBuf)> = views.importers(0, fi).into_iter().map(|(v, f)| (v, views.graph(v).abs(f))).filter(|(v, p)| keep(*v, p)).collect();
-    direct.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
+    // Both lists are ranked before the 30-row cap: nearest directory to the file first, then
+    // PageRank, then depth. The old order (direct importers by path, the radius by PageRank)
+    // kept 66.5% / 65.3% of later co-edited files inside the caps (tessera / flight-deck
+    // history); this order keeps 75.1% / 77.5%.
+    let mut direct: Vec<(usize, PathBuf, f64)> =
+        views.importers(0, fi).into_iter().map(|(v, f)| (v, views.graph(v).abs(f), views.graph(v).file_rank[f as usize])).filter(|(v, p, _)| keep(*v, p)).collect();
+    direct.sort_by(|a, b| by_proximity(&path, (&a.1, 1, a.2), (&b.1, 1, b.2)).then(a.0.cmp(&b.0)));
+    let mut radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
+    radius.sort_by(|a, b| by_proximity(&path, (&a.1.path, a.1.depth, a.1.rank), (&b.1.path, b.1.depth, b.1.rank)).then(a.0.cmp(&b.0)));
+    let narrow = if include_tests { "include_tests=false, or " } else { "" };
 
     let mut out = format!("Impact analysis: {}\n", path.display());
     let _ = writeln!(out, "Direct importers ({}):", direct.len());
     let rows = shown(&direct, |r| r.0, LIST_CAP);
-    for (v, p) in rows.iter().map(|r| &**r) {
+    for (v, p, _) in rows.iter().map(|r| &**r) {
         let _ = writeln!(out, "  {}", at(*v, p));
     }
     if rows.len() < direct.len() {
-        let _ = writeln!(out, "  … {} more", direct.len() - rows.len());
+        let _ = writeln!(out, "  … {} more (ranked by directory proximity); narrow with {narrow}`deps` for the importers with their specifiers", direct.len() - rows.len());
     }
     let _ = writeln!(out, "Transitive blast radius: {} file(s)", radius.len());
     let rows = shown(&radius, |r| r.0, LIST_CAP);
@@ -310,17 +319,20 @@ pub fn impact(c: &Ctx) -> ToolResult {
         let _ = writeln!(out, "- {} (depth {})", at(*v, &e.path), e.depth);
     }
     if rows.len() < radius.len() {
-        let _ = writeln!(out, "… {} more (`deps` and `refs transitive=true` list the chain)", radius.len() - rows.len());
+        let _ = writeln!(out, "… {} more (ranked by directory proximity); narrow with {narrow}`deps` / `refs transitive=true` for the chain", radius.len() - rows.len());
     }
 
     match (c.cochange)() {
         Ok(co) => {
             let rel = &g.file(fi).path;
             let partners: Vec<(PathBuf, u32)> =
-                co.partners_of(rel, 2).into_iter().filter(|(p, _)| g.file_idx(Path::new(p)).is_some()).map(|(p, n)| (g.root.join(p), n)).filter(|(p, _)| keep(0, p)).take(10).collect();
-            let _ = writeln!(out, "Co-change partners ({}, from the last {} commits):", partners.len(), co.commits_scanned);
-            for (p, n) in partners {
+                co.partners_of(rel, 2).into_iter().filter(|(p, _)| g.file_idx(Path::new(p)).is_some()).map(|(p, n)| (g.root.join(p), n)).filter(|(p, _)| keep(0, p)).collect();
+            let _ = writeln!(out, "Co-change partners ({}, from the last {} commits):", counts(partners.len().min(CO_CHANGE_CAP), partners.len()).trim_matches(|c| c == '(' || c == ')'), co.commits_scanned);
+            for (p, n) in partners.iter().take(CO_CHANGE_CAP) {
                 let _ = writeln!(out, "  {} (changed together {n}×)", p.display());
+            }
+            if partners.len() > CO_CHANGE_CAP {
+                let _ = writeln!(out, "  … {} more, changed together less often", partners.len() - CO_CHANGE_CAP);
             }
         }
         Err(e) => {
@@ -330,7 +342,7 @@ pub fn impact(c: &Ctx) -> ToolResult {
 
     let mut hot: Vec<SymbolHit> = g.file(fi).facts.symbols.iter().filter(|s| !matches!(s.kind, SymbolKind::Field | SymbolKind::Impl)).map(|s| g.hit(SymId { file: fi, local: s.local_id })).collect();
     hot.sort_by(|a, b| b.rank.partial_cmp(&a.rank).unwrap_or(std::cmp::Ordering::Equal).then(a.start_line.cmp(&b.start_line)));
-    let _ = writeln!(out, "Hot symbols in this file ({}):", hot.len().min(5));
+    let _ = writeln!(out, "Hot symbols in this file {}:", counts(hot.len().min(5), hot.len()));
     for h in hot.iter().take(5) {
         let _ = writeln!(out, "  {} ({}) pr={:.4} {}", h.name, h.kind.as_str(), h.rank, range(h));
     }
@@ -338,22 +350,34 @@ pub fn impact(c: &Ctx) -> ToolResult {
 }
 
 pub fn refs(c: &Ctx) -> ToolResult {
-    let name = c.args.str(SYMBOL).ok_or_else(|| ToolError::bad("refs requires `symbol` (aliases: name, symbol_name)"))?;
+    let (name, file) = c.symbol_arg().ok_or_else(|| ToolError::bad("refs requires `symbol` (aliases: name, symbol_name)"))?;
     let views = c.views();
     let include_tests = c.args.flag(&["include_tests"], true);
     let transitive = c.args.flag(&["transitive"], false);
-    let file = c.args.path(super::args::FILE);
     let defs = c.definitions(&name, c.kind()?, file.as_deref());
     if defs.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
-    let mut out = String::new();
+    let mut f = Fit::new();
     if defs.len() > 1 {
-        let _ = writeln!(out, "{} matches for name '{name}'; refs reports each candidate in order. Pass file_path or kind to narrow.", defs.len());
+        f.line(format!("{} matches for name '{name}'; refs reports each candidate in order. Pass file_path, kind or an id (path:Type.name) to narrow.", defs.len()));
     }
+    let narrow = {
+        let mut n: Vec<&str> = Vec::new();
+        if file.is_none() {
+            n.push("file_path=");
+        }
+        if !c.args.has(&["kind"]) {
+            n.push("kind=");
+        }
+        if include_tests {
+            n.push("include_tests=false");
+        }
+        n.join(" / ")
+    };
     for d in defs.iter().take(MAX_CANDIDATES) {
-        let _ = writeln!(out, "Symbol: {} ({})", d.name, d.kind.as_str());
-        let _ = writeln!(out, "Defined in: {} {}{}", d.path.display(), range(d), tag_suffix(&views, d.view));
+        f.line(format!("Symbol: {} ({})", d.name, d.kind.as_str()));
+        f.line(format!("Defined in: {} {}{}", d.path.display(), range(d), tag_suffix(&views, d.view)));
         // References in the defining view and, through the links, in the views that import it.
         let is_test = |v: usize, p: &Path| is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
         let refs: Vec<(usize, crate::query::RefHit)> = views.references(d).into_iter().filter(|(v, r)| include_tests || !is_test(*v, &r.path)).collect();
@@ -361,35 +385,41 @@ pub fn refs(c: &Ctx) -> ToolResult {
         for (v, r) in &refs {
             by_file.entry((*v, r.path.as_path())).or_default().push(r);
         }
-        if refs.is_empty() {
-            let _ = writeln!(out, "No references found.");
-        } else {
-            let _ = writeln!(out, "References ({} in {} file(s)):", refs.len(), by_file.len());
-        }
-        let files: Vec<((usize, &Path), Vec<&crate::query::RefHit>)> = by_file.into_iter().collect();
+        // Files ranked before any cut: the defining view first, then nearest the definition.
+        let rank_of = |v: usize, p: &Path| views.graph(v).file_idx(p).map(|i| views.graph(v).file_rank[i as usize]).unwrap_or(0.0);
+        let mut files: Vec<((usize, &Path), Vec<&crate::query::RefHit>)> = by_file.into_iter().collect();
+        files.sort_by(|a, b| (a.0.0 != d.view).cmp(&(b.0.0 != d.view)).then(by_proximity(&d.path, (a.0.1, 0, rank_of(a.0.0, a.0.1)), (b.0.1, 0, rank_of(b.0.0, b.0.1)))));
         let listed = shown(&files, |f| (f.0).0, usize::MAX);
-        let omitted = files.len() - listed.len();
+        if refs.is_empty() {
+            f.line("No references found.");
+        } else {
+            f.line(format!("References ({} in {} file(s)):", refs.len(), files.len()));
+        }
+        let sec = f.section(refs.len(), "reference(s)", narrow.clone(), None, "");
         for ((v, p), rs) in listed.into_iter().map(|f| (&f.0, &f.1)) {
             let (v, p) = (*v, *p);
-            let _ = writeln!(out, "{}{}", p.display(), tag_suffix(&views, v));
+            f.group(sec, format!("{}{}", p.display(), tag_suffix(&views, v)));
             for r in rs {
                 let by_name = if r.confidence == Confidence::Fallback { " (matched by name)" } else { "" };
-                let _ = writeln!(out, "  L{} {}{}{by_name}", r.line, ref_kind(r.kind), r.enclosing.as_ref().map(|e| format!(" in {e}")).unwrap_or_default());
+                f.row(sec, format!("  L{} {}{}{by_name}", r.line, ref_kind(r.kind), r.enclosing.as_ref().map(|e| format!(" in {e}")).unwrap_or_default()));
             }
         }
-        if omitted > 0 {
-            let _ = writeln!(out, "… {omitted} more file(s) in the views above; narrow with file_path or include_tests=false");
-        }
+        // Files a per-view cap left out count as hidden rows in the footer, like a budget cut.
+        f.footer(sec);
         if transitive {
-            let radius: Vec<_> = views.blast_radius(d.view, d.id.file).into_iter().filter(|(v, e)| include_tests || !is_test(*v, &e.path)).collect();
-            let _ = writeln!(out, "Transitive dependents ({} file(s)):", radius.len());
+            let mut radius: Vec<_> = views.blast_radius(d.view, d.id.file).into_iter().filter(|(v, e)| include_tests || !is_test(*v, &e.path)).collect();
+            radius.sort_by(|a, b| by_proximity(&d.path, (&a.1.path, a.1.depth, a.1.rank), (&b.1.path, b.1.depth, b.1.rank)).then(a.0.cmp(&b.0)));
+            let total = radius.len();
+            f.line(format!("Transitive dependents ({total} file(s)):"));
+            let sec = f.section(total, "", "`impact file_path=` for the ranked radius with co-change", None, "  ");
             for (v, e) in radius.iter().take(LIST_CAP) {
-                let _ = writeln!(out, "  {}{} (depth {})", e.path.display(), tag_suffix(&views, *v), e.depth);
+                f.row(sec, format!("  {}{} (depth {})", e.path.display(), tag_suffix(&views, *v), e.depth));
             }
+            f.footer(sec);
         }
-        out.push('\n');
+        f.line("");
     }
-    Ok(c.fit(out))
+    Ok(f.render(c.token_budget))
 }
 
 /// `  [view: tessera @ /path]` for a row from a view other than the one the header names.
@@ -406,7 +436,7 @@ fn ref_kind(k: RefKind) -> &'static str {
 }
 
 pub fn calls(c: &Ctx) -> ToolResult {
-    let name = c.args.str(SYMBOL).ok_or_else(|| ToolError::bad("calls requires `name` (aliases: symbol, symbol_name)"))?;
+    let (name, file) = c.symbol_arg().ok_or_else(|| ToolError::bad("calls requires `name` (aliases: symbol, symbol_name)"))?;
     let views = c.views();
     let direction = c.args.str(&["direction"]).unwrap_or_else(|| "both".into());
     let (want_callers, want_callees) = match direction.as_str() {
@@ -416,9 +446,8 @@ pub fn calls(c: &Ctx) -> ToolResult {
         other => return Err(ToolError::bad(format!("unknown direction '{other}': use callers, callees or both"))),
     };
     let depth = c.args.num(&["depth"]).unwrap_or(1).min(10);
-    let limit = c.args.num(&["limit"]).unwrap_or(50);
+    let limit = c.args.num(&["limit"]).unwrap_or(LIST_LIMIT);
     let include_tests = c.args.flag(&["include_tests"], false);
-    let file = c.args.path(super::args::FILE);
     let kind = c.kind()?;
 
     let candidates: Vec<SymbolHit> = c.definitions(&name, kind, file.as_deref()).into_iter().filter(|h| function_like(h.kind)).collect();
@@ -426,9 +455,12 @@ pub fn calls(c: &Ctx) -> ToolResult {
         [] => return Ok(format!("No function-like symbol found with name '{name}'")),
         [one] => one.clone(),
         many if file.is_none() && kind.is_none() => {
-            let mut out = format!("'{name}' resolves to {} function-like candidate(s). Pass `file_path` or `kind` to pick one.\ncandidates:\n", many.len());
+            let mut out = format!("'{name}' resolves to {} function-like candidate(s). Pass one of these ids as name, or `file_path` / `kind`, to pick one.\ncandidates:\n", many.len());
             for h in many.iter().take(MAX_CANDIDATES * 3) {
-                let _ = writeln!(out, "- {} ({}) @ {}:L{}-{}{}", h.name, h.kind.as_str(), h.path.display(), h.start_line, h.end_line, tag_suffix(&views, h.view));
+                let _ = writeln!(out, "- {} ({}) [L{}-L{}]{}", symbol_id(h), h.kind.as_str(), h.start_line, h.end_line, tag_suffix(&views, h.view));
+            }
+            if many.len() > MAX_CANDIDATES * 3 {
+                let _ = writeln!(out, "… {} more candidate(s); narrow with file_path= or kind=", many.len() - MAX_CANDIDATES * 3);
             }
             return Ok(out);
         }
@@ -457,8 +489,21 @@ pub fn calls(c: &Ctx) -> ToolResult {
         }
         edges
     };
-    let callers = if want_callers { walk(Direction::In) } else { Vec::new() };
-    let callees = if want_callees { walk(Direction::Out) } else { Vec::new() };
+    // Ranked before the limit: level by level, and within a level nearest the target's file,
+    // then PageRank, so the cut drops far, minor call sites first.
+    let rank = |h: &SymbolHit| views.graph(h.view).file_rank.get(h.id.file as usize).copied().unwrap_or(0.0);
+    let ranked = |mut edges: Vec<(SymbolHit, CallEntry)>| {
+        edges.sort_by(|a, b| {
+            a.1.depth
+                .cmp(&b.1.depth)
+                .then(by_proximity(&target.path, (&a.1.hit.path, 0, rank(&a.1.hit)), (&b.1.hit.path, 0, rank(&b.1.hit))))
+                .then(a.1.hit.start_line.cmp(&b.1.hit.start_line))
+                .then(a.1.line.cmp(&b.1.line))
+        });
+        edges
+    };
+    let callers = if want_callers { ranked(walk(Direction::In)) } else { Vec::new() };
+    let callees = if want_callees { ranked(walk(Direction::Out)) } else { Vec::new() };
 
     if c.format == Format::Mermaid {
         let mut ids: BTreeMap<(usize, SymId), usize> = BTreeMap::new();
@@ -488,12 +533,25 @@ pub fn calls(c: &Ctx) -> ToolResult {
         return Ok(c.fit(out));
     }
 
-    let mut out = format!("Call hierarchy for {} ({}) @ {}:L{}-{}{}\n", target.name, target.kind.as_str(), target.path.display(), target.start_line, target.end_line, tag_suffix(&views, target.view));
+    let mut f = Fit::new();
+    f.line(format!("Call hierarchy for {} ({}) @ {}:L{}-{}{}", target.name, target.kind.as_str(), target.path.display(), target.start_line, target.end_line, tag_suffix(&views, target.view)));
     for (title, rows) in [("Callers", &callers), ("Callees", &callees)] {
         if (title == "Callers" && !want_callers) || (title == "Callees" && !want_callees) {
             continue;
         }
-        let _ = writeln!(out, "{title} ({}):", rows.len().min(limit));
+        let mut narrow: Vec<String> = Vec::new();
+        if direction == "both" {
+            narrow.push(format!("direction={}", title.to_lowercase()));
+        }
+        if depth > 1 {
+            narrow.push(format!("depth={}", depth - 1));
+        }
+        if include_tests {
+            narrow.push("include_tests=false".into());
+        }
+        let hint = narrow.join(" / ");
+        let sec = f.section(rows.len(), "", hint, Some("limit"), "");
+        f.title(sec, move |shown, total| format!("{title} {}:", counts(shown, total)));
         for (from, e) in rows.iter().take(limit) {
             let by_name = if e.confidence == Confidence::Fallback { " (matched by name)" } else { "" };
             // `In`: the call is in the caller's file; `Out`: in the origin's file.
@@ -501,11 +559,9 @@ pub fn calls(c: &Ctx) -> ToolResult {
             let via = if e.depth > 1 { format!(" via {}", from.name) } else { String::new() };
             // A callee in another view than the call: say where it is defined.
             let defined = if title == "Callees" && e.hit.view != from.view { format!(" (defined in {}{})", e.hit.path.display(), tag_suffix(&views, e.hit.view)) } else { String::new() };
-            let _ = writeln!(out, "{}[d{}] {} ({}) {}:L{}{via}{by_name}{defined}{}", "  ".repeat(e.depth as usize), e.depth, e.hit.name, e.hit.kind.as_str(), at.display(), e.line, tag_suffix(&views, at_view));
+            f.row(sec, format!("{}[d{}] {} ({}) {}:L{}{via}{by_name}{defined}{}", "  ".repeat(e.depth as usize), e.depth, e.hit.name, e.hit.kind.as_str(), at.display(), e.line, tag_suffix(&views, at_view)));
         }
-        if rows.len() > limit {
-            let _ = writeln!(out, "… {} more; pass limit={} to see all", rows.len() - limit, rows.len());
-        }
+        f.footer(sec);
     }
-    Ok(c.fit(out))
+    Ok(f.render(c.token_budget))
 }

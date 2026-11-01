@@ -109,7 +109,7 @@
  },
  {
   "name": "qartez_find",
-  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, and visibility for every match. Use kind filter to disambiguate (e.g., kind='struct').",
+  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, visibility and a readable id (`Id: path:Type.name`) that read, refs and calls accept. Most important definitions first. Use kind filter to disambiguate (e.g., kind='struct').",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -144,7 +144,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Maximum number of results to return in regex mode. Default 100. Ignored for exact-name lookups.",
+     "description": "Maximum number of matches to print (default 50), in exact and regex mode. A cut ends with how many more there are and how to narrow.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -153,7 +153,7 @@
      ]
     },
     "name": {
-     "description": "Exact symbol name to search for (or regex when regex=true). Accepts aliases `symbol`, `symbol_name`, and `query`.",
+     "description": "Exact symbol name to search for (or regex when regex=true), or an id `path:Type.name`. Accepts aliases `symbol`, `symbol_name`, and `query`.",
      "type": "string"
     },
     "regex": {
@@ -161,6 +161,14 @@
      "description": "If true, interpret `name` as a regex applied to indexed symbol names. Uses `regex::Regex::is_match` (find anywhere, not anchored - prepend `^` for start-anchored, `$` for end-anchored, both for full-match). Case-insensitive by default; prepend `(?-i)` to force case-sensitive. Default false (exact name lookup).",
      "type": [
       "boolean",
+      "null"
+     ]
+    },
+    "detail": {
+     "default": null,
+     "description": "'full' or 'rows'. Default: full up to 10 hits, rows past that. Full prints a block per match (file, id, signature, status); rows prints one line per match.",
+     "type": [
+      "string",
       "null"
      ]
     }
@@ -215,7 +223,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max number of results (default: 200). The active governor is `token_budget`; raise `limit` only if you need more than 200 rows.",
+     "description": "Max number of rows (default: 50). Rows are ranked before the cut, by file importance (PageRank), then name. A cut by limit or token_budget ends with `\u2026 N more (K of M shown); narrow with kind=, a longer prefix, or regex=true`.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -252,6 +260,14 @@
       "integer",
       "null"
      ]
+    },
+    "detail": {
+     "default": null,
+     "description": "'full' or 'rows'. Default: full up to 5 hits, rows past that. Full adds each hit's signature under its row.",
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "required": [
@@ -269,7 +285,7 @@
  },
  {
   "name": "qartez_read",
-  "description": "Read one or more symbols' source code from disk with line numbers. Faster than Read \u2014 jumps directly to the symbol without scanning. Pass `symbol_name` for a single symbol, or `symbols=[...]` to batch-fetch multiple in one call. Use file_path to disambiguate. Passing just `file_path` (no symbol) reads the whole file or a slice via start_line/end_line/limit \u2014 replaces the built-in Read for module headers, imports, and small files.",
+  "description": "Read one or more symbols' source code from disk with line numbers. Pass `symbol_name` for a single symbol, or `symbols=[...]` to batch-fetch several; each may be an id `path:Type.name` (as `find` prints). A symbol is read whole up to max_bytes; a cut names its line range and the start_line to read on. Passing just `file_path` (no symbol) reads a file of up to 150 lines whole; a longer source file returns its outline (every symbol with its line range) and lines 1-100, so follow the outline with symbol_name or start_line/end_line. Pass start_line/end_line/limit for a slice, or max_bytes to read a long file whole.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -294,7 +310,7 @@
      ]
     },
     "file_path": {
-     "description": "Filter all symbols to a specific file path. When set without any symbol, reads the raw file contents - the whole file by default, or the slice defined by start_line/end_line/limit. max_bytes still bounds the output. Aliases: `file`, `path`.",
+     "description": "Filter all symbols to a specific file path. When set without any symbol, reads the raw file: a file of up to 150 lines whole; a longer source file as its outline plus lines 1-100, unless start_line/end_line/limit or max_bytes is given. Aliases: `file`, `path`.",
      "type": [
       "string",
       "null"
@@ -312,7 +328,7 @@
     },
     "max_bytes": {
      "default": null,
-     "description": "Max response size in bytes (default: 25000). Symbols past the cap are omitted with a truncation marker.",
+     "description": "Max response size in bytes (default: 25000). The cut is made at a line and says where to read on (inside a symbol: its line range and the next start_line). Giving max_bytes with only `file_path` reads the whole file instead of the outline and first 100 lines.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -331,7 +347,7 @@
      ]
     },
     "symbol_name": {
-     "description": "Name of a single symbol to read. For batch reads, use `symbols` instead. Accepts the aliases `symbol` and `name`.",
+     "description": "Name of a single symbol to read. For batch reads, use `symbols` instead. Accepts the aliases `symbol` and `name`. An id `path:Name` or `path:Type.name` (as `find` prints on its `Id:` line) names the file too.",
      "type": [
       "string",
       "null"
@@ -339,7 +355,7 @@
     },
     "symbols": {
      "default": null,
-     "description": "Batch mode: list of symbol names to read in one call. Results are concatenated in order. Cheaper than multiple qartez_read calls. Either `symbols` or `symbol_name` must be set.",
+     "description": "Batch mode: list of symbol names (or ids `path:Type.name`) to read in one call. Results are concatenated in order. Either `symbols` or `symbol_name` must be set.",
      "items": {
       "type": "string"
      },
@@ -606,7 +622,7 @@
      ]
     },
     "symbol": {
-     "description": "Symbol name to find references for. Accepts aliases `name` and `symbol_name`.",
+     "description": "Symbol name to find references for, or an id `path:Type.name`. Accepts aliases `name` and `symbol_name`.",
      "type": "string"
     },
     "token_budget": {
@@ -723,7 +739,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows per caller/callee section (default: 50). Rows beyond the cap are truncated with a `... +N more, raise limit=` footer.",
+     "description": "Max rows per caller/callee section (default: 50). Rows are ranked (per depth, nearest the target's file first) before the cut, and the header reads `Callers (50 of 80):`; the footer names the narrowing arguments and `limit=` to see all.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -732,7 +748,7 @@
      ]
     },
     "name": {
-     "description": "Function/method name to analyze call hierarchy for. Accepts aliases `symbol` and `symbol_name`.",
+     "description": "Function/method name to analyze call hierarchy for, or an id `path:Type.name`. Accepts aliases `symbol` and `symbol_name`.",
      "type": "string"
     },
     "token_budget": {

@@ -1,32 +1,60 @@
 //! Tools that locate and show code: `find`, `grep`, `read`, `outline`.
 
-use super::args::{FILE, SYMBOL};
-use super::{compile_regex, range, status, Ctx, ToolError, ToolResult};
+use super::args::FILE;
+use super::caps::{parse_symbol_id, symbol_id, Fit, LIST_LIMIT};
+use super::{compile_regex, range, status, Ctx, Format, ToolError, ToolResult};
 use crate::facts::SymbolKind;
 use crate::query::{NameMatch, SymbolHit};
 use std::fmt::Write;
 use std::path::Path;
 
-const DEFAULT_FIND_LIMIT: usize = 100;
-const DEFAULT_GREP_LIMIT: usize = 200;
 const DEFAULT_MAX_BYTES: usize = 25_000;
 const OUTLINE_PAGE: usize = 100;
+/// `find` prints full blocks up to this many hits and one row per hit past it (`detail`).
+const FIND_FULL_UP_TO: usize = 10;
+/// `grep` adds each hit's signature up to this many hits (`detail`).
+const GREP_FULL_UP_TO: usize = 5;
+/// A whole-file `read` of a longer file returns its outline and the first `READ_WINDOW` lines.
+const READ_WHOLE_UP_TO: usize = 150;
+const READ_WINDOW: usize = 100;
+
+/// `detail`: `full` or `rows`, defaulting from the hit count.
+fn detail_full(c: &Ctx, hits: usize, full_up_to: usize) -> std::result::Result<bool, ToolError> {
+    match c.args.str(&["detail"]).as_deref() {
+        None => Ok(hits <= full_up_to),
+        Some("full") => Ok(true),
+        Some("rows") => Ok(false),
+        Some(other) => Err(ToolError::bad(format!("unknown detail '{other}': use full or rows"))),
+    }
+}
 
 pub fn find(c: &Ctx) -> ToolResult {
-    let name = c.args.str(SYMBOL).ok_or_else(|| ToolError::bad("find requires `name` (aliases: symbol, symbol_name)"))?;
+    let (name, file) = c.symbol_arg().ok_or_else(|| ToolError::bad("find requires `name` (aliases: symbol, symbol_name)"))?;
     let kind = c.kind()?;
     let regex = c.args.flag(&["regex"], false);
-    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_FIND_LIMIT);
+    let limit = c.args.num(&["limit"]).unwrap_or(LIST_LIMIT);
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
     let views = c.views();
-    let hits = views.find_symbols(&matcher, kind);
+    let mut hits = views.find_symbols(&matcher, kind);
+    if let Some(f) = &file {
+        hits.retain(|h| h.path == *f);
+    }
     if hits.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
+    let full = detail_full(c, hits.len().min(limit), FIND_FULL_UP_TO)?;
     let mut out = format!("Found {} match(es) for '{name}':\n", hits.len());
     for h in hits.iter().take(limit) {
+        if !full {
+            let tag = views.tag(h.view).map(|t| format!("  [view: {t}]")).unwrap_or_default();
+            let _ = writeln!(out, "{} {} {} {}  {}{tag}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));
+            continue;
+        }
         let _ = writeln!(out, "{} ({})", h.name, h.kind.as_str());
         let _ = writeln!(out, "File: {} {}", h.path.display(), range(h));
+        if c.format != Format::Concise {
+            let _ = writeln!(out, "Id: {}", symbol_id(h));
+        }
         if let Some(tag) = views.tag(h.view) {
             let _ = writeln!(out, "View: {tag}");
         }
@@ -42,7 +70,7 @@ pub fn find(c: &Ctx) -> ToolResult {
         let _ = writeln!(out, "Status: {}", status(h));
     }
     if hits.len() > limit {
-        let _ = writeln!(out, "… {} more match(es); pass limit={} to see all", hits.len() - limit, hits.len());
+        let _ = writeln!(out, "… {} more match(es) ({limit} of {} shown, most important first); narrow with kind= or file_path=; or pass limit={} to see all", hits.len() - limit, hits.len(), hits.len());
     }
     Ok(out)
 }
@@ -51,7 +79,7 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let query = c.args.str(&["query", "pattern"]).ok_or_else(|| ToolError::bad("grep requires `query` (alias: pattern)"))?;
     let kind = c.kind()?;
     let regex = c.args.flag(&["regex"], false);
-    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT);
+    let limit = c.args.num(&["limit"]).unwrap_or(LIST_LIMIT);
     if c.args.flag(&["search_bodies"], false) {
         return grep_bodies(c, &query, regex, limit);
     }
@@ -60,19 +88,37 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let re = if regex { compile_regex(&query)? } else { compile_regex(&format!("^{}", regex::escape(query.trim_end_matches('*'))))? };
     let views = c.views();
     let mut hits = views.find_symbols(&NameMatch::Regex(re), kind);
-    hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.path.cmp(&b.path)).then(a.start_line.cmp(&b.start_line)));
+    // Ranked before the cut: the files the codebase leans on most (PageRank) first, then name,
+    // path and line. Alphabetical order put the first gold mention a median 24-37% down a cut
+    // list; this order lifted File@10 by 1.3 (tessera) and 4.7 (flight-deck) points in the eval.
+    // Putting exact-name matches first cost 1.4 points on tessera, where an Elm `view` or `Model`
+    // is defined in hundreds of modules, so `find` stays the tool for an exact name.
+    let file_rank = |h: &SymbolHit| views.graph(h.view).file_rank.get(h.id.file as usize).copied().unwrap_or(0.0);
+    hits.sort_by(|a, b| {
+        file_rank(b)
+            .partial_cmp(&file_rank(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then(a.path.cmp(&b.path))
+            .then(a.start_line.cmp(&b.start_line))
+    });
     if hits.is_empty() {
         return Ok(format!("No symbols match `{query}`"));
     }
-    let mut out = format!("Found {} result(s) for `{query}`:\n", hits.len());
+    let full = detail_full(c, hits.len().min(limit), GREP_FULL_UP_TO)?;
+    let mut f = Fit::new();
+    f.line(format!("Found {} result(s) for `{query}`:", hits.len()));
+    let s = f.section(hits.len(), "", "kind=, a longer prefix, or regex=true", Some("limit"), "");
     for h in hits.iter().take(limit) {
         let tag = views.tag(h.view).map(|t| format!("  [view: {t}]")).unwrap_or_default();
-        let _ = writeln!(out, "{:<30} {:<12} {} {}  {}{tag}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));
+        let mut row = format!("{:<30} {:<12} {} {}  {}{tag}", h.name, h.kind.as_str(), h.path.display(), range(h), status(h));
+        if full && let Some(sig) = &h.signature {
+            row.push_str(&format!("\n    {}", one_line(sig)));
+        }
+        f.row(s, row);
     }
-    if hits.len() > limit {
-        let _ = writeln!(out, "… {} more; pass limit={} to see all", hits.len() - limit, hits.len());
-    }
-    Ok(c.fit(out))
+    f.footer(s);
+    Ok(f.render(c.token_budget))
 }
 
 /// `search_bodies`: lines of function bodies containing the query, reported against the function
@@ -85,7 +131,7 @@ fn grep_bodies(c: &Ctx, query: &str, regex: bool, limit: usize) -> ToolResult {
     let kind = c.kind()?;
     let graph = c.graph;
     let files: Vec<u32> = (0..graph.files.len() as u32).filter(|i| graph.file(*i).alive).collect();
-    let mut found: Vec<(String, SymbolKind, std::path::PathBuf, u32, String)> = files
+    let mut found: Vec<(String, SymbolKind, std::path::PathBuf, u32, String, f64)> = files
         .par_iter()
         .flat_map_iter(|&fi| {
             let node = graph.file(fi);
@@ -103,24 +149,25 @@ fn grep_bodies(c: &Ctx, query: &str, regex: bool, limit: usize) -> ToolResult {
                 // The innermost body containing the line.
                 let owner = bodies.iter().filter(|s| s.start_line <= line_no && line_no <= s.end_line).min_by_key(|s| s.end_line - s.start_line);
                 if let Some(s) = owner {
-                    rows.push((s.name.clone(), s.kind, graph.abs(fi), line_no, line.trim().chars().take(160).collect::<String>()));
+                    rows.push((s.name.clone(), s.kind, graph.abs(fi), line_no, line.trim().chars().take(160).collect::<String>(), graph.file_rank[fi as usize]));
                 }
             }
             rows.into_iter()
         })
         .collect();
-    found.sort_by(|a, b| a.2.cmp(&b.2).then(a.3.cmp(&b.3)));
+    // Files the codebase leans on most first; within a file, in line order.
+    found.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
     if found.is_empty() {
         return Ok(format!("No function body matches `{query}`"));
     }
-    let mut out = format!("Found {} body match(es) for `{query}`:\n", found.len());
-    for (name, kind, path, line, text) in found.iter().take(limit) {
-        let _ = writeln!(out, "{}:L{} in {} ({}): {}", path.display(), line, name, kind.as_str(), text);
+    let mut f = Fit::new();
+    f.line(format!("Found {} body match(es) for `{query}`:", found.len()));
+    let s = f.section(found.len(), "", "a longer query, kind=, or regex=true", Some("limit"), "");
+    for (name, kind, path, line, text, _) in found.iter().take(limit) {
+        f.row(s, format!("{}:L{} in {} ({}): {}", path.display(), line, name, kind.as_str(), text));
     }
-    if found.len() > limit {
-        let _ = writeln!(out, "… {} more; pass limit={} to see all", found.len() - limit, found.len());
-    }
-    Ok(c.fit(out))
+    f.footer(s);
+    Ok(f.render(c.token_budget))
 }
 
 fn is_body(k: SymbolKind) -> bool {
@@ -128,8 +175,9 @@ fn is_body(k: SymbolKind) -> bool {
 }
 
 pub fn read(c: &Ctx) -> ToolResult {
-    let mut names = c.args.list(&["symbols"]);
-    if let Some(n) = c.args.str(SYMBOL) {
+    // Each name may be an id (`path:Type.name`) carrying its own file.
+    let mut names: Vec<String> = c.args.list(&["symbols"]);
+    if let Some(n) = c.args.str(super::args::SYMBOL) {
         names.insert(0, n);
     }
     let max_bytes = c.args.num(&["max_bytes"]).unwrap_or(DEFAULT_MAX_BYTES);
@@ -137,6 +185,8 @@ pub fn read(c: &Ctx) -> ToolResult {
     Ok(cap_bytes(body, max_bytes))
 }
 
+/// Cut at `max_bytes`, at a line, and say where to read on: the next line, and, inside a symbol's
+/// source, that symbol's range, so the agent can page through a long definition.
 fn cap_bytes(text: String, max: usize) -> String {
     if text.len() <= max {
         return text;
@@ -146,7 +196,24 @@ fn cap_bytes(text: String, max: usize) -> String {
         cut -= 1;
     }
     let cut = text[..cut].rfind('\n').unwrap_or(cut);
-    format!("{}\n… truncated at max_bytes={max}; pass start_line / limit to read on, or raise max_bytes", &text[..cut])
+    let kept = &text[..cut];
+    let last_line = kept.lines().rev().find_map(|l| l.split_once(" | ").and_then(|(n, _)| n.trim().parse::<usize>().ok()));
+    // The last `// name kind @ path:Ls-Le` heading above the cut, if the cut is inside a symbol.
+    let within = kept.lines().rev().find(|l| l.starts_with("// ")).and_then(|h| {
+        let (what, at) = h.strip_prefix("// ")?.split_once(" @ ")?;
+        let name = what.split(' ').next()?;
+        let (path, lines) = at.split(" (view: ").next()?.rsplit_once(":L")?;
+        let (a, b) = lines.split_once('-')?;
+        Some((name.to_string(), path.to_string(), a.parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+    });
+    let next = match (within, last_line) {
+        (Some((name, path, a, b)), Some(n)) if n < b => {
+            format!("inside {name} [L{a}-L{b}]: pass file_path={path} start_line={} end_line={b} to read on", n + 1)
+        }
+        (_, Some(n)) => format!("pass start_line={} (or limit=) to read on", n + 1),
+        _ => "pass start_line / limit to read on".to_string(),
+    };
+    format!("{kept}\n… truncated at max_bytes={max} {next}, or raise max_bytes")
 }
 
 fn numbered(out: &mut String, lines: &[&str], first: usize, width: usize) {
@@ -161,17 +228,21 @@ fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
     let context = c.args.num(&["context_lines"]).unwrap_or(0);
     let mut out = String::new();
     let views = c.views();
-    for name in names {
+    for raw in names {
+        let (name, from_id) = parse_symbol_id(raw, &c.args.cwd);
+        let file = file.clone().or(from_id);
+        let name = &name;
         let defs: Vec<SymbolHit> = c.definitions(name, kind, file.as_deref());
         if defs.is_empty() {
             let _ = writeln!(out, "// no symbol '{name}' found{}", file.as_ref().map(|f| format!(" in {}", f.display())).unwrap_or_default());
             continue;
         }
-        let files: std::collections::BTreeSet<String> = defs.iter().map(|d| d.path.display().to_string()).collect();
-        if files.len() > 1 {
-            let _ = writeln!(out, "// warning: symbol '{name}' defined in {} files: {}. Pass file_path=<one-of> to disambiguate.", files.len(), files.into_iter().collect::<Vec<_>>().join(", "));
+        if defs.len() > 1 {
+            let ids: Vec<String> = defs.iter().take(MAX_LISTED_IDS).map(symbol_id).collect();
+            let more = if defs.len() > MAX_LISTED_IDS { format!(" and {} more", defs.len() - MAX_LISTED_IDS) } else { String::new() };
+            let _ = writeln!(out, "// warning: symbol '{name}' has {} definitions: {}{more}. Pass one of these ids as symbol_name, or file_path / kind, to pick one.", defs.len(), ids.join(", "));
         }
-        for d in defs.iter().take(5) {
+        for d in defs.iter().take(MAX_READ_DEFS) {
             let text = std::fs::read_to_string(&d.path).map_err(|e| ToolError::failed(format!("{}: {e}", d.path.display())))?;
             let lines: Vec<&str> = text.lines().collect();
             let start = (d.start_line as usize).saturating_sub(1 + context);
@@ -180,16 +251,34 @@ fn read_symbols(c: &Ctx, names: &[String]) -> ToolResult {
             let _ = writeln!(out, "// {} {} @ {}:L{}-{}{tag}", d.name, d.kind.as_str(), d.path.display(), d.start_line, d.end_line);
             numbered(&mut out, &lines[start..end], start + 1, end.to_string().len());
         }
+        if defs.len() > MAX_READ_DEFS {
+            let _ = writeln!(out, "// … {} more definition(s) of '{name}' not shown ({MAX_READ_DEFS} of {}); pass an id from the warning above", defs.len() - MAX_READ_DEFS, defs.len());
+        }
     }
     Ok(out)
 }
 
+const MAX_READ_DEFS: usize = 5;
+const MAX_LISTED_IDS: usize = 20;
+
 /// A line range of a file, or all of it. Reads the file from disk: no index is needed, so it works
 /// on any file under any path, built or not.
+///
+/// With only `file_path`, a source file longer than `READ_WHOLE_UP_TO` lines comes back as its outline
+/// and its first `READ_WINDOW` lines. Measured on 200 commits each of tessera and flight-deck, a
+/// whole-file read shipped 4-5k tokens at the median and cut 23-25% of the later edit sites off at
+/// `max_bytes` with no map of the rest; the outline points at every symbol by line range instead.
 fn read_range(c: &Ctx) -> ToolResult {
     let path = c.args.path(FILE).ok_or_else(|| ToolError::bad("read requires symbol_name (or symbols) and/or file_path"))?;
     let text = read_text(&path)?;
     let lines: Vec<&str> = text.lines().collect();
+    let ranged = c.args.has(&["start_line", "offset", "start", "end_line", "end", "limit"]);
+    // Only source files: the measurement covered them, and the outline is what makes the window
+    // safe. A long Markdown spec or config file is still read whole.
+    if !ranged && !c.args.has(&["max_bytes"]) && lines.len() > READ_WHOLE_UP_TO && crate::lang::for_path(&path).is_some() {
+        let outline = c.graph.outline(&path).data;
+        return Ok(read_window(&path, &lines, outline.as_deref()));
+    }
     let start = c.args.num(&["start_line", "offset", "start"]).unwrap_or(1).max(1);
     let end = match (c.args.num(&["end_line", "end"]), c.args.num(&["limit"])) {
         (Some(e), _) => e,
@@ -205,6 +294,28 @@ fn read_range(c: &Ctx) -> ToolResult {
         numbered(&mut out, &lines[start - 1..end], start, end.to_string().len());
     }
     Ok(out)
+}
+
+/// The outline of a long file (when it is indexed) and its first `READ_WINDOW` lines.
+pub fn read_window(path: &Path, lines: &[&str], outline: Option<&[crate::query::OutlineEntry]>) -> String {
+    let end = READ_WINDOW.min(lines.len());
+    let mut out = format!("// {} [L1-L{end} of {}]\n", path.display(), lines.len());
+    if let Some(entries) = outline.filter(|e| !e.is_empty()) {
+        let page: Vec<&crate::query::OutlineEntry> = entries.iter().take(OUTLINE_PAGE).collect();
+        let _ = writeln!(out, "// outline ({} symbols):", entries.len());
+        out.push_str(&outline_rows(&page));
+        if entries.len() > page.len() {
+            let _ = writeln!(out, "// … {} more symbols: outline file_path={} offset={}", entries.len() - page.len(), path.display(), page.len());
+        }
+    }
+    numbered(&mut out, &lines[..end], 1, end.to_string().len());
+    let _ = writeln!(
+        out,
+        "… lines {}-{} not shown: pass symbol_name= (or an id path:Name), start_line/end_line, or limit= to read on; max_bytes= reads the whole file",
+        end + 1,
+        lines.len()
+    );
+    out
 }
 
 fn read_text(path: &Path) -> std::result::Result<String, ToolError> {
@@ -238,15 +349,11 @@ fn group(k: SymbolKind) -> (u8, &'static str) {
     }
 }
 
-pub fn outline(c: &Ctx) -> ToolResult {
-    let (path, _) = c.file()?;
-    let entries = c.graph.outline(&path).data.ok_or_else(|| c.missing(&path))?;
-    let offset = c.args.num(&["offset"]).unwrap_or(0);
-    let total = entries.len();
-    let page: Vec<_> = entries.iter().skip(offset).take(OUTLINE_PAGE).collect();
-    let mut out = format!("# Outline: {} ({total} symbols)\n", path.display());
+/// Outline rows, grouped by section, each indented under its parent.
+fn outline_rows(page: &[&crate::query::OutlineEntry]) -> String {
+    let mut out = String::new();
     let mut sections: std::collections::BTreeMap<(u8, &str), Vec<&crate::query::OutlineEntry>> = Default::default();
-    for e in &page {
+    for e in page {
         sections.entry(group(e.hit.kind)).or_default().push(e);
     }
     for ((_, title), rows) in sections {
@@ -257,8 +364,35 @@ pub fn outline(c: &Ctx) -> ToolResult {
             let _ = writeln!(out, "{}{} {} {}{sig}", "  ".repeat(e.depth as usize), if h.exported { "+" } else { "-" }, h.name, range(h));
         }
     }
-    if offset + page.len() < total {
-        let _ = writeln!(out, "next_offset: {} (of {total})", offset + page.len());
+    out
+}
+
+pub fn outline(c: &Ctx) -> ToolResult {
+    let (path, _) = c.file()?;
+    let entries = c.graph.outline(&path).data.ok_or_else(|| c.missing(&path))?;
+    let offset = c.args.num(&["offset"]).unwrap_or(0);
+    let total = entries.len();
+    let head = format!("# Outline: {} ({total} symbols)\n", path.display());
+    let max = c.token_budget.saturating_mul(4);
+    // A page is a run of symbols in source order, so a page the budget shortens still ends at a
+    // usable `next_offset`: shrink the page until it fits, rather than cutting its text.
+    let mut size = OUTLINE_PAGE.min(total.saturating_sub(offset));
+    loop {
+        let page: Vec<&crate::query::OutlineEntry> = entries.iter().skip(offset).take(size).collect();
+        let mut out = head.clone();
+        out.push_str(&outline_rows(&page));
+        let next = offset + page.len();
+        let cut = size < OUTLINE_PAGE.min(total.saturating_sub(offset));
+        if cut {
+            let _ = writeln!(out, "… truncated: {} of {total} symbols shown (token_budget={}); next_offset: {next} (of {total}), or raise token_budget", page.len(), c.token_budget);
+        } else if next < total {
+            let _ = writeln!(out, "next_offset: {next} (of {total})");
+        }
+        if out.len() <= max || size == 0 {
+            return Ok(if size == 0 { c.fit(out) } else { out });
+        }
+        // Shrink in proportion to the overshoot, at least one symbol a step.
+        let fit = (size * max / out.len()).min(size - 1);
+        size = fit;
     }
-    Ok(c.fit(out))
 }
