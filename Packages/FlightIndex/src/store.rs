@@ -634,6 +634,13 @@ impl Reader {
         Ok(out)
     }
 
+    /// Branch heads recorded by `set_known_refs`.
+    pub fn known_refs(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached("SELECT name, commit_id FROM known_refs ORDER BY name")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn worktrees(&self) -> Result<Vec<(PathBuf, Option<String>)>> {
         let mut st = self.conn.prepare_cached("SELECT path, head_commit FROM worktrees ORDER BY path")?;
         let rows = st.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?)))?;

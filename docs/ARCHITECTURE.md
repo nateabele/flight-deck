@@ -848,6 +848,27 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
   answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
   (a symlink, installed at switch-over) it is the qartez alias with the same tool names.
+- **Freshness.** A request sees every edit made before it, by whatever tool, because it looks at
+  the file system itself: the daemon keeps each active worktree's view and, per request, `stat`s
+  every indexed file and every non-ignored directory (~2 ms on tessera, against 14 to 20 ms for the
+  `git status` it replaced), re-reads only what changed and asks git about new paths only. Racy
+  timestamps (ctime within 2 s) are re-read, as git does. HEAD is compared with the commit the
+  view was built on (two small file reads) and a move, a changed ignore file, a bulk change or a
+  worktree idle for 6 h (`--watch-hours`) is read in full with `git status`. `--no-watch` makes
+  every request do that. File *events* are deliberately not on this path: an FSEvents cookie
+  barrier was built first and measured unsound (4 misses in 115,000 external writes, an event
+  delivered after a cookie written after it); the numbers are in `src/sweep.rs`. Events do run
+  the ref watcher (macOS, one FSEvents stream over every known repository's common dir): a
+  commit, checkout or rebase re-reads the branch heads and prepares the new base tree of each kept
+  worktree before anyone asks (listing derived from the old tree with `git diff-tree`, only unseen
+  blobs parsed). Linux has no ref watcher yet; nothing depends on it.
+- **Retention.** A blob's facts live while a tree of a live worktree's HEAD, an overlay or a branch
+  head names the blob; every view a request answers from is recorded in the store, which is what
+  makes it a root. The daemon collects hourly, after a worktree's directory disappears (noticed
+  by a stat per known worktree every 5 s), and on `fdindex gc [--now]`: roots, then orphan facts
+  2000 at a time with the writer released between chunks, then free pages 256 at a time and a WAL
+  truncate. A repository whose common dir is gone has its database deleted. `fdindex status`
+  reports the last collection, bytes reclaimed and free pages.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use flightindex::git::{self, Overlay, View};
 use flightindex::refresh::{refresh, BaseIndex, Refreshed};
-use flightindex::watch::Pending;
+use flightindex::sweep::Changes;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -26,8 +26,8 @@ fn files_of(v: &View) -> BTreeMap<String, String> {
     v.files().into_iter().map(|f| (f.path, f.blob_id)).collect()
 }
 
-fn pending(root: &Path, paths: &[&str], subtrees: &[&str]) -> Pending {
-    Pending { paths: paths.iter().map(|p| root.join(p)).collect(), subtrees: subtrees.iter().map(|p| root.join(p)).collect(), ..Default::default() }
+fn pending(root: &Path, paths: &[&str], subtrees: &[&str]) -> Changes {
+    Changes { paths: paths.iter().map(|p| root.join(p)).collect(), subtrees: subtrees.iter().map(|p| root.join(p)).collect(), ..Default::default() }
 }
 
 fn project() -> Repo {
@@ -44,7 +44,7 @@ fn project() -> Repo {
 
 /// Apply `refresh` to the view from before `edit`, and require it to equal a view computed from
 /// scratch after it: the watcher path may never see a different worktree than `git status` does.
-fn agrees(r: &Repo, edit: impl FnOnce(&Path), p: impl FnOnce(&Path) -> Pending) {
+fn agrees(r: &Repo, edit: impl FnOnce(&Path), p: impl FnOnce(&Path) -> Changes) {
     let before = git::view_for_path(&r.root).unwrap();
     let index = BaseIndex::new(&before);
     edit(&r.root);

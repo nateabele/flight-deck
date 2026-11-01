@@ -1,4 +1,4 @@
-//! macOS: one FSEvents stream over every watched path.
+//! macOS: one FSEvents stream over the common dir of every known repository.
 //!
 //! Declared directly against CoreServices rather than through a wrapper crate: the surface is a
 //! dozen functions, and a wrapper would hide the two things this needs (a stream we can replace
@@ -6,14 +6,13 @@
 //!
 //! Replacing the path set creates the *new* stream and starts it before the old one is stopped, so
 //! a change under a path both streams cover is seen by at least one of them (a duplicate is
-//! harmless: the watcher only remembers paths). Stopping first would leave a window in which an
-//! edit made while a worktree was being added is lost, and the read-your-writes barrier cannot
-//! see that.
+//! harmless: the watcher only remembers that refs moved). Stopping first would leave a window in
+//! which a ref change made while a repository was being added is lost.
 //!
 //! Callbacks run on a private serial dispatch queue, not a run loop, so there is no thread of ours
 //! to park and no run-loop mode to get wrong.
 
-use super::{Backend, Raw, Sink, Spec};
+use super::{Backend, Raw, Sink};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -26,20 +25,11 @@ type StreamRef = *mut c_void;
 const SINCE_NOW: u64 = u64::MAX;
 // FSEventStreamCreateFlags
 const NO_DEFER: u32 = 0x2;
-const WATCH_ROOT: u32 = 0x4;
 const FILE_EVENTS: u32 = 0x10;
 // FSEventStreamEventFlags
-const MUST_SCAN_SUBDIRS: u32 = 0x1;
 const USER_DROPPED: u32 = 0x2;
 const KERNEL_DROPPED: u32 = 0x4;
 const EVENT_IDS_WRAPPED: u32 = 0x8;
-const ROOT_CHANGED: u32 = 0x20;
-const MOUNT: u32 = 0x40;
-const UNMOUNT: u32 = 0x80;
-const ITEM_CREATED: u32 = 0x100;
-const ITEM_REMOVED: u32 = 0x200;
-const ITEM_RENAMED: u32 = 0x800;
-const ITEM_IS_DIR: u32 = 0x20000;
 
 const UTF8: u32 = 0x0800_0100;
 
@@ -79,6 +69,11 @@ unsafe extern "C" {
 
 extern "C" fn nothing(_: *mut c_void) {}
 
+thread_local! {
+    /// Set while this thread is inside a stream callback, i.e. running on the private queue.
+    static IN_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 struct Live {
     stream: StreamRef,
     /// The callback's context, freed only after the stream is gone and its queue has drained.
@@ -116,8 +111,8 @@ impl FsEvents {
             let array = CFArrayCreate(std::ptr::null(), strings.as_ptr(), strings.len() as isize, &raw const kCFTypeArrayCallBacks);
             let sink = Box::into_raw(Box::new(self.sink.clone()));
             let ctx = StreamContext { version: 0, info: sink as *mut c_void, retain: None, release: None, copy_description: None };
-            // No latency and NoDefer: the barrier waits on delivery, so batching only adds to it.
-            let stream = FSEventStreamCreate(std::ptr::null(), on_events, &ctx, array, SINCE_NOW, 0.0, NO_DEFER | WATCH_ROOT | FILE_EVENTS);
+            // File events, so a ref rewritten inside `refs/heads` names its path; no latency.
+            let stream = FSEventStreamCreate(std::ptr::null(), on_events, &ctx, array, SINCE_NOW, 0.0, NO_DEFER | FILE_EVENTS);
             CFRelease(array);
             for s in strings {
                 CFRelease(s);
@@ -145,6 +140,13 @@ impl FsEvents {
             FSEventStreamStop(live.stream);
             FSEventStreamInvalidate(live.stream);
             FSEventStreamRelease(live.stream);
+            // `dispatch_sync` onto the queue the caller is running on is a libdispatch trap
+            // (SIGTRAP). That happens if the last reference to the watcher is dropped by code a
+            // callback runs. Nothing can be waiting on this thread's own callback, so the sink is
+            // simply leaked in that case: a few bytes, once, at teardown.
+            if IN_CALLBACK.with(|c| c.get()) {
+                return;
+            }
             dispatch_sync_f(self.queue, std::ptr::null_mut(), nothing);
             drop(Box::from_raw(live.sink));
         }
@@ -161,14 +163,8 @@ impl Drop for FsEvents {
 
 /// Paths to hand FSEvents: the existing ones, with any path inside another dropped (FSEvents is
 /// recursive, and an overlapping pair would deliver everything under the inner one twice).
-fn stream_paths(specs: &[Spec]) -> Vec<PathBuf> {
-    let mut all: Vec<&Path> = specs
-        .iter()
-        .map(|s| match s {
-            Spec::Tree(p) | Spec::Refs(p) | Spec::Dir(p) => p.as_path(),
-        })
-        .filter(|p| p.exists())
-        .collect();
+fn stream_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut all: Vec<&Path> = paths.iter().map(PathBuf::as_path).filter(|p| p.exists()).collect();
     all.sort();
     all.dedup();
     let mut out: Vec<PathBuf> = Vec::new();
@@ -181,8 +177,8 @@ fn stream_paths(specs: &[Spec]) -> Vec<PathBuf> {
 }
 
 impl Backend for FsEvents {
-    fn set_specs(&self, specs: &[Spec]) -> io::Result<()> {
-        let paths = stream_paths(specs);
+    fn set_paths(&self, paths: &[PathBuf]) -> io::Result<()> {
+        let paths = stream_paths(paths);
         let mut live = self.live.lock().unwrap();
         if live.as_ref().is_some_and(|l| l.paths == paths) {
             return Ok(());
@@ -208,44 +204,33 @@ extern "C" fn on_events(_: StreamRef, info: *mut c_void, n: usize, paths: *mut c
         batch.push(classify(path, f));
     }
     // A panic must not unwind into CoreServices.
+    IN_CALLBACK.with(|c| c.set(true));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&batch)));
+    IN_CALLBACK.with(|c| c.set(false));
 }
 
 fn classify(path: PathBuf, f: u32) -> Raw {
     if f & (USER_DROPPED | KERNEL_DROPPED | EVENT_IDS_WRAPPED) != 0 {
         return Raw::Overflow;
     }
-    if f & ROOT_CHANGED != 0 {
-        return Raw::RootGone(path);
-    }
-    if f & (MUST_SCAN_SUBDIRS | MOUNT | UNMOUNT) != 0 {
-        return Raw::Rescan(path);
-    }
-    let dir = f & ITEM_IS_DIR != 0;
-    Raw::Changed { path, dir, structural: dir && f & (ITEM_CREATED | ITEM_REMOVED | ITEM_RENAMED) != 0 }
+    // A coalesced subtree or a mount change says only "something under here": the common dir (or
+    // `refs/`) as a whole, which the watcher reads as "refs may have moved".
+    Raw::Changed(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn dropped_events_and_subtree_scans_are_never_read_as_ordinary_changes() {
-        // Reading a coalesced `MustScanSubDirs` as a plain change of the directory would lose
-        // every file under it.
-        assert_eq!(classify("/a".into(), MUST_SCAN_SUBDIRS), Raw::Rescan("/a".into()));
-        assert_eq!(classify("/a".into(), KERNEL_DROPPED), Raw::Overflow);
-        assert_eq!(classify("/a".into(), USER_DROPPED | ITEM_IS_DIR), Raw::Overflow);
-        assert_eq!(classify("/a".into(), ROOT_CHANGED), Raw::RootGone("/a".into()));
-    }
+    const MUST_SCAN_SUBDIRS: u32 = 0x1;
 
     #[test]
-    fn only_a_structural_directory_event_names_its_contents() {
-        // A directory's mtime changing on every file written inside it must not make the watcher
-        // rescan the directory each time.
-        assert_eq!(classify("/d".into(), ITEM_IS_DIR | ITEM_RENAMED), Raw::Changed { path: "/d".into(), dir: true, structural: true });
-        assert_eq!(classify("/d".into(), ITEM_IS_DIR), Raw::Changed { path: "/d".into(), dir: true, structural: false });
-        assert_eq!(classify("/f".into(), ITEM_CREATED), Raw::Changed { path: "/f".into(), dir: false, structural: false });
+    fn dropped_events_are_never_read_as_ordinary_changes() {
+        // Reading a dropped batch as a plain change of one path would lose every ref in it.
+        assert_eq!(classify("/a".into(), KERNEL_DROPPED), Raw::Overflow);
+        assert_eq!(classify("/a".into(), USER_DROPPED), Raw::Overflow);
+        assert_eq!(classify("/a".into(), EVENT_IDS_WRAPPED), Raw::Overflow);
+        assert_eq!(classify("/a".into(), MUST_SCAN_SUBDIRS), Raw::Changed("/a".into()));
     }
 
     #[test]
@@ -253,7 +238,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().canonicalize().unwrap();
         std::fs::create_dir_all(p.join("wt/.git")).unwrap();
-        let got = stream_paths(&[Spec::Tree(p.join("wt")), Spec::Dir(p.join("wt/.git")), Spec::Refs(p.join("wt/.git")), Spec::Tree(p.join("gone"))]);
+        let got = stream_paths(&[p.join("wt"), p.join("wt/.git"), p.join("gone")]);
         assert_eq!(got, vec![p.join("wt")]);
     }
 }

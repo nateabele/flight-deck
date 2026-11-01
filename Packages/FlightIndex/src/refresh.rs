@@ -1,8 +1,8 @@
-//! Bring a cached view up to date from what the watcher saw, without asking git about the whole
+//! Bring a cached view up to date from what a sweep found, without asking git about the whole
 //! worktree.
 //!
-//! `git status` over a worktree costs 14 to 20 ms however little changed. Once the watcher has
-//! delivered every change since the view was computed, only those paths need looking at:
+//! `git status` over a worktree costs 14 to 20 ms however little changed. Once a sweep has found
+//! every change since the view was computed, only those paths need looking at:
 //!
 //! * a path the base tree has: read it and compare its blob with the base's (no process spawned);
 //! * a path the base tree does not have: ask git, for that path only, whether it is a new file or
@@ -10,13 +10,13 @@
 //! * a directory that was created, moved or deleted: every path under it that the base tree or the
 //!   overlay knows, plus whatever now exists beneath it.
 //!
-//! The result must equal what `git status` would have produced. `tests/watch.rs` checks that
+//! The result must equal what `git status` would have produced. `tests/refresh.rs` checks that
 //! after a series of edits made by other processes.
 
 use crate::error::Result;
 use crate::git::{self, FileRef, Overlay, View};
 use crate::lang;
-use crate::watch::Pending;
+use crate::sweep::Changes;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -38,6 +38,10 @@ impl BaseIndex {
     pub fn new(view: &View) -> BaseIndex {
         BaseIndex { by_path: view.base.iter().map(|f| (f.path.clone(), f.clone())).collect(), commit: view.label.base_commit.clone() }
     }
+
+    pub fn contains(&self, path: &str) -> bool {
+        self.by_path.contains_key(path)
+    }
 }
 
 pub enum Refreshed {
@@ -47,9 +51,9 @@ pub enum Refreshed {
     Rescan,
 }
 
-/// `prev` with the changes in `pending` applied. `pending.rescan` and a changed `.gitignore` are
-/// the caller's to handle (they mean "ask git"); this assumes neither.
-pub fn refresh(prev: &View, index: &BaseIndex, pending: &Pending) -> Result<Refreshed> {
+/// `prev` with `pending` applied. `pending.rescan` is the caller's to handle (it means "ask git");
+/// this assumes it is not set.
+pub fn refresh(prev: &View, index: &BaseIndex, pending: &Changes) -> Result<Refreshed> {
     let root = &prev.label.worktree;
     let rel = |p: &Path| -> Option<String> {
         let r = p.strip_prefix(root).ok()?;

@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! fdindex daemon [--foreground] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon
+//!                [--watch-hours N] [--no-watch]                              (keep the views of worktrees active in the last N hours; default 6)
 //! fdindex status [--json] | stop                                            ask it, or stop it
 //! fdindex mcp [--no-start]                                                  stdio MCP server (a client of the daemon)
 //! fdindex service install|uninstall|start|stop|status|restart [--label L]   keep it running at login
@@ -11,7 +12,8 @@
 //! tools: map find grep read outline deps stats impact refs calls
 //! mutators (preview unless --apply): replace_symbol insert_before_symbol insert_after_symbol
 //!        rename move safe_delete rename_file
-//!        build <path> | gc <path> | add_root <path>          (admin: index a view now, collect, hint)
+//!        build <path> | gc [path] [--now] | add_root <path>   (admin: index a view now, collect, hint)
+//!        `gc` alone collects the whole store (queued; --now waits), `gc <path>` that path's repository
 //! global flags: --store DIR  --socket PATH  --cwd DIR  --json
 //! ```
 //!
@@ -36,7 +38,7 @@ use std::time::Duration;
 
 /// Flags that never take a value, so `find --regex foo` reads `foo` as the name, not as regex's value.
 const BOOLEAN_FLAGS: &[&str] = &[
-    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start",
+    "regex", "transitive", "include_tests", "all_files", "search_bodies", "apply", "with_health", "json", "foreground", "allow_collision", "force", "no_start", "no_watch", "now",
 ];
 
 fn main() {
@@ -57,6 +59,8 @@ struct Cli {
     foreground: bool,
     graph_budget_mb: Option<usize>,
     build_wait_ms: Option<u64>,
+    watch_hours: Option<f64>,
+    no_watch: bool,
     verb: String,
     positional: Vec<String>,
     args: Map<String, Value>,
@@ -71,6 +75,8 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
         foreground: false,
         graph_budget_mb: None,
         build_wait_ms: None,
+        watch_hours: None,
+        no_watch: false,
         verb: String::new(),
         positional: Vec::new(),
         args: Map::new(),
@@ -103,6 +109,8 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
             ("json", _) => cli.json = true,
             ("foreground", _) => cli.foreground = true,
             ("graph_budget_mb", Some(v)) => cli.graph_budget_mb = Some(v.parse().map_err(|_| "--graph-budget-mb takes a number")?),
+            ("watch_hours", Some(v)) => cli.watch_hours = Some(v.parse().map_err(|_| "--watch-hours takes a number")?),
+            ("no_watch", _) => cli.no_watch = true,
             ("build_wait_ms", Some(v)) if cli.verb == "daemon" => cli.build_wait_ms = Some(v.parse().map_err(|_| "--build-wait-ms takes a number")?),
             (k, None) => {
                 cli.args.insert(k.to_string(), Value::Bool(true));
@@ -166,6 +174,10 @@ fn run() -> Result<i32> {
         if let Some(ms) = cli.build_wait_ms {
             config.build_wait = Duration::from_millis(ms);
         }
+        if let Some(h) = cli.watch_hours {
+            config.watch.active_for = Duration::from_secs_f64(h * 3600.0);
+        }
+        config.watch.enabled = !cli.no_watch;
         let _ = cli.foreground; // the daemon always logs to its file; there is no terminal mode to enter
         daemon::run(daemon::Options { paths, config })?;
         return Ok(0);
@@ -248,6 +260,12 @@ fn daemon_args(cli: &Cli) -> Vec<String> {
     let mut a = Vec::new();
     if let Some(mb) = cli.graph_budget_mb {
         a.extend(["--graph-budget-mb".to_string(), mb.to_string()]);
+    }
+    if let Some(h) = cli.watch_hours {
+        a.extend(["--watch-hours".to_string(), h.to_string()]);
+    }
+    if cli.no_watch {
+        a.push("--no-watch".to_string());
     }
     a
 }

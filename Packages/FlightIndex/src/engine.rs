@@ -301,7 +301,11 @@ impl Engine {
             }
         }
         self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
-        if let Ok(w) = self.writer(repo) {
+        // Not through `writer`, which would create the database of a repository that was just
+        // dropped because its directory went too.
+        if crate::store::db_path(&self.store_root, repo).exists()
+            && let Ok(w) = self.writer(repo)
+        {
             let _ = w.lock().unwrap().remove_worktree(worktree);
         }
     }
