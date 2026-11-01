@@ -241,3 +241,19 @@ fn no_start_is_honoured_by_every_query_verb() {
         assert!(!env.socket.exists() && !env.store.exists(), "{flags:?} started a daemon");
     }
 }
+
+/// `--help` prints usage and starts nothing. Two agents ran `fdindex daemon --help` expecting
+/// help and got a daemon on the real default store.
+#[test]
+fn help_prints_usage_and_starts_no_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    for args in [vec!["daemon", "--help"], vec!["--help"], vec!["help"], vec!["find", "--help"]] {
+        let mut full = vec!["--store", store.to_str().unwrap()];
+        full.extend(args.iter().copied());
+        let out = Command::new(BIN).args(&full).output().unwrap();
+        assert!(out.status.success(), "{args:?} exits 0");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: fdindex"), "{args:?} prints usage");
+        assert!(!store.join("daemon.pid").exists() && !store.join("daemon.log").exists(), "{args:?} started a daemon");
+    }
+}

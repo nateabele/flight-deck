@@ -172,8 +172,20 @@ fn run() -> Result<i32> {
     // deleted later), and a relative `--store` would then name a different place.
     cli.store = std::path::absolute(&cli.store).map_err(|e| Error::Msg(format!("--store: {e}")))?;
     cli.socket = cli.socket.as_deref().map(std::path::absolute).transpose().map_err(|e| Error::Msg(format!("--socket: {e}")))?;
+    const USAGE: &str = "usage: fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <verb> [args] [--flags]\n\
+  verbs: daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]\n\
+         mcp | service <install|uninstall|start|stop|restart|status> | status | start | stop | restart\n\
+         map | find | grep | read | outline | deps | stats | impact | refs | calls | build | gc | add_root\n\
+         guard | session-start | switchover [--dry-run|--apply|--rollback|--list-old-dbs]\n\
+  Tool flags map to tool arguments (--file-path x is file_path); see docs/superpowers/specs/2026-11-01-index-tool-contract.md.";
+    // `--help` anywhere (or `help`) prints usage and does nothing else: `fdindex daemon --help`
+    // used to start a daemon, which twice put one on the real default store.
+    if cli.verb == "help" || cli.args.contains_key("help") || cli.positional.iter().any(|p| p == "-h") {
+        println!("{USAGE}");
+        return Ok(0);
+    }
     if cli.verb.is_empty() {
-        eprintln!("usage: fdindex <daemon|mcp|service|status|start|stop|restart|install|uninstall|map|find|grep|read|outline|deps|stats|impact|refs|calls|build|gc|add_root> [args] [--flags]");
+        eprintln!("{USAGE}");
         return Ok(2);
     }
     let paths = Paths::new(&cli.store, cli.socket.clone());
