@@ -87,12 +87,15 @@ struct ThreadPanel: View {
 
     @ViewBuilder
     private var conversation: some View {
-        if let selected = model.selected, !model.isComposingNewThread, model.record(selected) != nil {
+        switch model.conversation {
+        case .thread(let selected):
             ThreadConversation(model: model, id: selected, withdraw: withdraw, openCitation: openCitation,
                                projectPath: projectPath, focusesComposer: focusesComposer)
-        } else if let anchor = model.newThreadAnchor {
+        case .pending(let started):
+            PendingThreadView(started: started)
+        case .newThread(let anchor):
             NewThreadView(model: model, anchor: anchor, focusesComposer: focusesComposer)
-        } else {
+        case .none:
             InspectorPlaceholder(title: "No thread open", message: "Pick one from the list, or select text in the plan and press ✦ Ask.")
         }
     }
@@ -325,6 +328,34 @@ private struct FlowRow: Layout {
             widest = max(widest, x - spacing)
         }
         return (CGSize(width: widest, height: y + rowHeight), origins)
+    }
+}
+
+/// A thread just started here, before ThreadRunner has folded its open (about a second): its
+/// title and anchor, the words sent, and "answering…". The real conversation replaces it.
+private struct PendingThreadView: View {
+    let started: PendingThread
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("✦ \(started.title)").font(.system(size: 13, weight: .semibold)).lineLimit(2)
+            if let quote = started.anchor.note?.quote, !quote.isEmpty {
+                Text("“\(quote)”").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3)
+            }
+            Divider()
+            Text("You").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
+            Text(started.you)
+                .font(.system(size: 12.5))
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Text("● answering…").font(.system(size: 12)).foregroundStyle(.green)
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("thread-pending")
     }
 }
 

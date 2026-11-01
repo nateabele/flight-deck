@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import IntakeKit
+import os
 
 /// The pill a thread wears on its card and in the index. Resolved threads wear none: their group
 /// says it.
@@ -67,6 +68,24 @@ struct ThreadHeaderModel: Equatable {
 }
 
 /// What the store held at one poll. Equatable so a poll that finds nothing new publishes nothing.
+/// A thread this panel just opened that ThreadRunner has not folded yet: what the conversation
+/// shows meanwhile (the anchor, the words sent, "answering…"), so a send never lands on
+/// "No thread open".
+struct PendingThread: Equatable {
+    let id: ThreadID
+    let title: String
+    let anchor: ThreadAnchor
+    let you: String
+}
+
+/// What the conversation column shows.
+enum ThreadConversationState: Equatable {
+    case thread(ThreadID)
+    case pending(PendingThread)
+    case newThread(ThreadAnchor)
+    case none
+}
+
 struct ThreadSnapshot: Equatable {
     var threads: [ThreadRecord] = []
     var turns: [ThreadID: [ThreadTurn]] = [:]
@@ -186,6 +205,20 @@ final class ThreadPanelModel: ObservableObject {
     }
     @Published private(set) var newThreadAnchor: ThreadAnchor?
     @Published var composer = ""
+    /// Threads opened here that the reader does not have yet (`PendingThread`).
+    @Published private(set) var pending: [ThreadID: PendingThread] = [:]
+
+    func pendingThread(_ id: ThreadID) -> PendingThread? { pending[id] }
+
+    /// The conversation column: the open thread once the reader has it, the one just started
+    /// until then, a new thread being composed, or nothing.
+    var conversation: ThreadConversationState {
+        if let anchor = newThreadAnchor { return .newThread(anchor) }
+        guard let selected else { return .none }
+        if record(selected) != nil { return .thread(selected) }
+        if let started = pending[selected] { return .pending(started) }
+        return .none
+    }
     /// A refusal or failure to show under the composer; cleared by the next thing that works.
     @Published private(set) var notice: String?
     /// The answers being picked for the open question, by question id.
@@ -259,6 +292,9 @@ final class ThreadPanelModel: ObservableObject {
         }
         for record in records { next.questions[record.id] = Self.unansweredQuestions(next.turns[record.id] ?? []) }
         if next != snapshot { snapshot = next }
+        // A started thread the runner has folded is shown as itself from now on.
+        let folded = pending.keys.filter { id in records.contains { $0.id == id } }
+        if !folded.isEmpty { for id in folded { pending[id] = nil } }
         settleOverrides()
         rebuildIndex()
     }
@@ -461,6 +497,7 @@ final class ThreadPanelModel: ObservableObject {
             case .failure(let refusal): return fail(refusal)
             case .success(let id):
                 thread = id
+                pending[id] = PendingThread(id: id, title: Self.title(from: text), anchor: anchor, you: text)
                 newThreadAnchor = nil
                 drafts[ThreadID?.none] = nil
                 selected = id
@@ -482,8 +519,14 @@ final class ThreadPanelModel: ObservableObject {
     func reopen(_ id: ThreadID) { run(actions.reopen(id)) }
     /// ✓ or ✗. `editedMarkdown` is the plan as the human changed the proposal into (Accept edited).
     func decide(_ diff: ThreadDiff, accept: Bool, editedMarkdown: String? = nil) {
-        run(actions.decide(diff.thread, diff.id, accept, editedMarkdown))
+        let refusal = actions.decide(diff.thread, diff.id, accept, editedMarkdown)
+        // A ✓ or ✗ is the one panel action whose effect lands elsewhere (the plan), so it says
+        // in the log that it ran and how it ended: the evidence a "pressed, nothing happened"
+        // report needs.
+        Self.logger.info("decide diff=\(diff.id, privacy: .public) accept=\(accept) edited=\(editedMarkdown != nil) refusal=\(refusal?.code ?? "none", privacy: .public)")
+        run(refusal)
     }
+    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "threads")
     func repropose(_ diff: ThreadDiff) { run(actions.repropose(diff.thread, diff.id)) }
 
     func setAutoAccept(_ id: ThreadID, _ on: Bool) {

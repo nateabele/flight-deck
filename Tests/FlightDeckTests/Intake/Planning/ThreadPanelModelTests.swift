@@ -66,6 +66,36 @@ final class ThreadPanelModelTests: XCTestCase {
                                         options: [.init(id: "a", label: "A")]))
     }
 
+    // MARK: A thread just started
+
+    /// Concern 2: after ✦ Ask's first send the thread exists only as a queued open until
+    /// ThreadRunner folds it. The conversation shows it — its anchor, the words sent and
+    /// "answering…" — never "No thread open"; once the reader has the thread, the real one replaces it.
+    func testAThreadJustStartedShowsItsWordsUntilTheRunnerHasIt() {
+        let started = ThreadID()
+        let anchor = ThreadAnchor(note: NoteAnchor(checkpoint: 2, quote: "the opening sentence", section: "## Scope"))
+        let m = model(.init(open: { _, _, _, _ in .success(started) }))
+        m.refresh()
+        XCTAssertEqual(m.conversation, .none)
+        m.beginThread(on: anchor)
+        XCTAssertEqual(m.conversation, .newThread(anchor))
+        m.composer = "Why this step?\nAnd not a smaller one?"
+        m.send()
+        XCTAssertEqual(m.conversation, .pending(PendingThread(id: started, title: "Why this step?", anchor: anchor,
+                                                              you: "Why this step?\nAnd not a smaller one?")))
+        m.refresh()
+        XCTAssertEqual(m.conversation, .pending(PendingThread(id: started, title: "Why this step?", anchor: anchor,
+                                                              you: "Why this step?\nAnd not a smaller one?")),
+                       "still queued: the runner has not folded the open")
+
+        store.records.append(ThreadRecord(id: started, title: "Why this step?", anchor: anchor, status: .answering,
+                                          agent: .claude, model: "opus", effort: "high", followsCheckpoint: 2,
+                                          createdAt: FakeThreadStore.date))
+        m.refresh()
+        XCTAssertEqual(m.conversation, .thread(started))
+        XCTAssertNil(m.pendingThread(started), "the real thread replaces the local one")
+    }
+
     // MARK: Index
 
     func testIndexGroupsOpenNeedsYouAndResolved() {
