@@ -2,6 +2,7 @@ pub mod ack;
 pub mod alloc;
 pub mod alias;
 pub mod client;
+pub mod chunk;
 pub mod cochange;
 pub mod daemon;
 pub mod edit;

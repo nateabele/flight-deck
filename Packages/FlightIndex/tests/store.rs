@@ -167,3 +167,37 @@ fn incremental_vacuum_returns_freed_pages() {
     w.incremental_vacuum(0).unwrap();
     assert_eq!(w.stats().unwrap().free_pages, 0);
 }
+
+fn table_rows(root: &Path, repo: &Path, table: &str) -> Option<i64> {
+    let conn = rusqlite::Connection::open(db_path(root, repo)).unwrap();
+    conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).ok()
+}
+
+/// Facts are only ever read a whole blob at a time, so a blob is one columnar chunk (see
+/// `chunk`), not a row per symbol, import, reference and relation.
+#[test]
+fn a_blob_is_stored_as_one_chunk_not_a_row_per_fact() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    w.put_facts(&[parsed("b1", Some(sample())), parsed("b2", None)]).unwrap();
+    for t in ["symbols", "imports", "refs", "hierarchy"] {
+        assert_eq!(table_rows(root.path(), repo, t), None, "no `{t}` table");
+    }
+    assert_eq!(table_rows(root.path(), repo, "chunks"), Some(1), "one chunk for the parsed blob, none for the skipped one");
+    assert_eq!(w.stats().unwrap().symbols, 2);
+    assert_eq!(Reader::open(root.path(), repo).unwrap().get_facts("b1", "elm", 1).unwrap(), Some(sample()));
+}
+
+#[test]
+fn gc_drops_the_chunks_of_collected_facts() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    w.put_facts(&["kept", "orphan1", "orphan2"].map(|b| parsed(b, Some(sample())))).unwrap();
+    w.put_tree("c", &[fref("a.elm", "kept")]).unwrap();
+    w.set_worktree(root.path(), Some("c"), &[]).unwrap();
+    assert_eq!(w.gc().unwrap().facts_dropped, 2);
+    assert_eq!(table_rows(root.path(), repo, "chunks"), Some(1));
+    assert_eq!(w.get_facts("kept", "elm", 1).unwrap(), Some(sample()));
+}
