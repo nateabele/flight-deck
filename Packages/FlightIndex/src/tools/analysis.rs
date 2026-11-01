@@ -25,7 +25,7 @@ const VIEW_CAP: usize = 40;
 /// The rows of a list to print. A list from one view is cut at `cap`; a list that spans several
 /// views is cut at `VIEW_CAP` rows *per view*, so a long list in one view cannot push another
 /// view's rows (the cross-view ones the caller asked about) past the end of the token budget.
-fn shown<'a, T>(rows: &'a [T], view_of: impl Fn(&T) -> usize, cap: usize) -> Vec<&'a T> {
+fn shown<T>(rows: &[T], view_of: impl Fn(&T) -> usize, cap: usize) -> Vec<&T> {
     let multi = rows.iter().map(&view_of).collect::<HashSet<_>>().len() > 1;
     if !multi {
         return rows.iter().take(cap).collect();
