@@ -92,7 +92,7 @@ final class VisualSchemeHandler: NSObject, WKURLSchemeHandler {
             "Content-Type": mime,
             "Content-Length": String(data.count),
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src fdvisual: data:; script-src 'none'; connect-src 'none'; form-action 'none'; style-src fdvisual: data: 'unsafe-inline'",
+            "Content-Security-Policy": VisualWebConfig.contentSecurityPolicy,
         ]
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)
             ?? URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
@@ -102,6 +102,39 @@ final class VisualSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+}
+
+/// How the viewer's web view is locked down, in one place so a test can pin it.
+enum VisualWebConfig {
+    /// Sent on every `fdvisual:` response.
+    static let contentSecurityPolicy = "default-src 'none'; img-src fdvisual:; style-src fdvisual: 'unsafe-inline'; font-src fdvisual:; "
+        + "frame-src 'none'; base-uri 'none'; form-action 'none'; script-src 'none'"
+
+    /// Content-blocker rules. `decidePolicyFor` only sees navigations, never an `<img>`, a
+    /// stylesheet, a font or an `@import`, so this is what stops those: block every URL, then
+    /// un-block our own scheme.
+    static let contentRuleListJSON = """
+    [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},\
+    {"trigger":{"url-filter":"^fdvisual:"},"action":{"type":"ignore-previous-rules"}}]
+    """
+
+    static let ruleListIdentifier = "io.radify.flightdeck.visual-viewer.v1"
+
+    /// Compiles the rules. A failure is a failure to open the viewer, never a viewer without them.
+    @MainActor static func compileRules() async -> WKContentRuleList? {
+        try? await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: ruleListIdentifier, encodedContentRuleList: contentRuleListJSON)
+    }
+
+    /// Non-persistent store (nothing written to disk), our handler as the only source, no script.
+    @MainActor static func makeConfiguration(handler: VisualSchemeHandler, rules: WKContentRuleList?) -> WKWebViewConfiguration {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.setURLSchemeHandler(handler, forURLScheme: VisualSchemeHandler.scheme)
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        if let rules { config.userContentController.add(rules) }
+        return config
+    }
 }
 
 /// The viewer's state: which of the revision's files it opens, and the state and size switches.
@@ -122,6 +155,7 @@ final class VisualViewerModel {
     var state: String?
     var size: String?
     private(set) var phase: Phase = .loading
+    private(set) var rules: WKContentRuleList?
     @ObservationIgnored private let loader: VisualLoader?
 
     init(intake: UUID, ref: WireVisualRef, state: String?, loader: VisualLoader?) {
@@ -164,6 +198,10 @@ final class VisualViewerModel {
         phase = .loading
         guard let loader else { phase = .failed; return }
         if entryPath != nil {
+            // Rules first, and fail closed: a web view that could load a subresource from the
+            // network is never shown.
+            rules = await VisualWebConfig.compileRules()
+            guard rules != nil else { phase = .failed; return }
             phase = await loader.ensureAll(intake: intake, ref: ref) ? .live : .failed
         } else {
             let data = await loader.snapshot(intake: intake, ref: ref, state: state, size: size)
@@ -225,7 +263,7 @@ struct VisualViewerScreen: View {
             }
         case .live:
             if let url = model.entryURL, let handler = model.handler() {
-                VisualWebView(url: url, handler: handler)
+                VisualWebView(url: url, handler: handler, rules: model.rules)
                     // The size switch: narrow is a phone-width page centred, wide the full screen.
                     .frame(maxWidth: model.size == "narrow" ? 390 : .infinity)
             }
@@ -256,14 +294,12 @@ struct VisualViewerScreen: View {
 private struct VisualWebView: UIViewRepresentable {
     let url: URL
     let handler: VisualSchemeHandler
+    let rules: WKContentRuleList?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
-        config.setURLSchemeHandler(handler, forURLScheme: VisualSchemeHandler.scheme)
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        let config = VisualWebConfig.makeConfiguration(handler: handler, rules: rules)
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator

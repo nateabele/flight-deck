@@ -72,6 +72,81 @@ final class VisualLoaderTests: XCTestCase {
         XCTAssertEqual(fetcher.requests.count, 1)
     }
 
+    // MARK: - Review 1
+
+    private func loader(_ fetcher: FakeFetcher, budget: Int64 = 1_000_000, chunk: Int = 100,
+                        deadline: Duration = .seconds(15)) -> VisualLoader {
+        VisualLoader(fetcher: fetcher, cache: VisualCache(directory: dir, budget: budget), chunkSize: chunk, chunkDeadline: deadline)
+    }
+
+    func testARefWithNoFilesTooManyFilesNegativeOrOverCapSizesIsRefusedBeforeAnyRequest() async {
+        let fetcher = FakeFetcher(files: [:], chunk: 100)
+        let l = loader(fetcher)
+        let ok = WireVisualFile(path: "a", size: 1, sha256: "")
+        let many = (0..<65).map { WireVisualFile(path: "f\($0)", size: 1, sha256: "") }
+        let half = Int64(VisualLimits.maxBytes / 2 + 1)
+        let cases: [(String, [WireVisualFile]?)] = [
+            ("nil", nil), ("empty", []), ("65 files", many),
+            ("negative", [ok, WireVisualFile(path: "b", size: -1, sha256: "")]),
+            ("over cap", [WireVisualFile(path: "a", size: half, sha256: ""), WireVisualFile(path: "b", size: half, sha256: "")]),
+            ("overflow", [WireVisualFile(path: "a", size: Int64.max, sha256: ""), WireVisualFile(path: "b", size: Int64.max, sha256: "")]),
+        ]
+        for (name, files) in cases {
+            let ref = WireVisualRef(id: "flow", revision: 1, states: ["s"], sizes: ["narrow"], files: files)
+            let all = await l.ensureAll(intake: intake, ref: ref)
+            XCTAssertFalse(all, name)
+            let snap = await l.snapshot(intake: intake, ref: ref, state: nil, size: nil)
+            XCTAssertNil(snap, name)
+        }
+        XCTAssertTrue(fetcher.requests.isEmpty)
+    }
+
+    /// The cache evicts its own revision's earlier file to fit the later one; success is not
+    /// claimed for a file that is gone.
+    func testEnsureAllFailsWhenTheCacheHasEvictedAFileOfTheRevision() async {
+        let a = Data("aa".utf8), b = Data("bb".utf8)
+        let fetcher = FakeFetcher(files: ["export/a.html": a, "export/b.css": b], chunk: 100)
+        let l = loader(fetcher, budget: 3)
+        let ref = WireVisualRef(id: "flow", revision: 1, files: [wire("export/a.html", a), wire("export/b.css", b)])
+        let ok = await l.ensureAll(intake: intake, ref: ref)
+        XCTAssertFalse(ok)
+    }
+
+    func testAFileOverTheCapIsNotFetched() async {
+        let big = WireVisualFile(path: "export/big.bin", size: Int64(VisualLimits.maxBytes) + 1, sha256: String(repeating: "a", count: 64))
+        let fetcher = FakeFetcher(files: ["export/big.bin": Data(count: 10)], chunk: 100)
+        let got = await loader(fetcher).data(intake: intake, visualID: "flow", revision: 1, file: big)
+        XCTAssertNil(got)
+        XCTAssertTrue(fetcher.requests.isEmpty)
+    }
+
+    func testAChunkLongerThanAskedOrForAnotherPathIsRefused() async {
+        let bytes = Data("0123456789".utf8)
+        let long = FakeFetcher(files: ["export/a.html": bytes], chunk: 100)
+        long.overLength = true
+        let l1 = loader(long, chunk: 4)
+        let g1 = await l1.data(intake: intake, visualID: "flow", revision: 1, file: wire("export/a.html", bytes))
+        XCTAssertNil(g1, "10 bytes came back for a limit of 4")
+        let other = FakeFetcher(files: ["export/a.html": bytes], chunk: 100)
+        other.pathOverride = "export/other.html"
+        let g2 = await loader(other).data(intake: intake, visualID: "flow", revision: 1, file: wire("export/a.html", bytes))
+        XCTAssertNil(g2)
+    }
+
+    func testAMacThatNeverAnswersTimesOutAndRetryStartsFresh() async {
+        let bytes = Data("hello".utf8)
+        let fetcher = FakeFetcher(files: ["export/a.html": bytes], chunk: 100)
+        fetcher.silent = true
+        let l = loader(fetcher, deadline: .milliseconds(50))
+        let file = wire("export/a.html", bytes)
+        let first = await l.data(intake: intake, visualID: "flow", revision: 1, file: file)
+        XCTAssertNil(first)
+        fetcher.silent = false
+        let retry = await l.data(intake: intake, visualID: "flow", revision: 1, file: file)
+        XCTAssertEqual(retry, bytes)
+        XCTAssertEqual(fetcher.requests.count, 2, "the retry made its own request, not joining the dead one")
+    }
+
     func testEnsureAllFetchesEveryListedFileOnce() async {
         let a = Data("a".utf8), b = Data("bb".utf8)
         let fetcher = FakeFetcher(files: ["export/a.html": a, "export/b.css": b], chunk: 100)
@@ -91,15 +166,19 @@ private final class FakeFetcher: VisualFetching {
     var requests: [Request] = []
     private let files: [String: Data]
     private let chunk: Int
+    var silent = false
+    var overLength = false
+    var pathOverride: String?
     init(files: [String: Data], chunk: Int) { self.files = files; self.chunk = chunk }
 
     func fetchVisual(intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
                      then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) {
         requests.append(Request(part: part, offset: offset, revision: revision))
         let path = WireVisualPart.filePath(in: part) ?? (part.hasPrefix("snapshot@") ? part + ".png" : "")
+        if silent { return }
         guard let bytes = files[path] else { return completion(.failure(.server(code: "unknown_file"))) }
         let start = Int(offset)
-        let end = min(bytes.count, start + min(chunk, limit))
-        completion(.success(WireFileChunk(path: path, size: Int64(bytes.count), offset: offset, data: bytes.subdata(in: start..<end))))
+        let end = overLength ? bytes.count : min(bytes.count, start + min(chunk, limit))
+        completion(.success(WireFileChunk(path: pathOverride ?? path, size: Int64(bytes.count), offset: offset, data: bytes.subdata(in: start..<end))))
     }
 }

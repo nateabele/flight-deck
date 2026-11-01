@@ -22,7 +22,8 @@ enum VisualFetch {
     ///
     /// Refuses `visuals_unavailable` (gate shut, or no reader), `unknown_visual`,
     /// `unknown_revision`, `bad_part`, `bad_range`, `unknown_file` (not in the manifest's `files`),
-    /// `too_large` (the revision's files add up to more than `VisualLimits.maxBytes`, §10) and
+    /// `too_large` (the revision's files add up to more than `VisualLimits.maxBytes`, §10, or overflow),
+    /// `bad_manifest` (a negative size) and
     /// `unreadable` (the store would not hand the bytes over: gone, a symlink, a hard link).
     ///
     /// **Everything is read through `VisualStoreReading.read`**, which returns bytes: this file
@@ -46,8 +47,15 @@ enum VisualFetch {
         guard let entry = rev.manifest.files.first(where: { $0.path == name }) else {
             return .failure(VisualRefusal(code: "unknown_file"))
         }
-        let total = rev.manifest.files.reduce(Int64(0)) { $0 + $1.size }
-        guard total <= Int64(VisualLimits.maxBytes) else { return .failure(VisualRefusal(code: "too_large")) }
+        // Checked addition: a hostile manifest's sizes must refuse, not trap the Mac. A negative
+        // size is a manifest no writer makes.
+        var total: Int64 = 0
+        for file in rev.manifest.files {
+            guard file.size >= 0 else { return .failure(VisualRefusal(code: "bad_manifest")) }
+            let (sum, overflow) = total.addingReportingOverflow(file.size)
+            guard !overflow, sum <= Int64(VisualLimits.maxBytes) else { return .failure(VisualRefusal(code: "too_large")) }
+            total = sum
+        }
         guard offset <= entry.size else { return .failure(VisualRefusal(code: "bad_range")) }
         guard let slice = reader.read(id, r: revision, name: name, offset: offset, limit: min(limit, FileLimits.maxChunk)) else {
             return .failure(VisualRefusal(code: "unreadable"))

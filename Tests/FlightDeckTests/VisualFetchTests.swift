@@ -132,6 +132,23 @@ final class VisualFetchTests: XCTestCase {
         XCTAssertEqual(chunk.data.count, 10)
     }
 
+    /// A hostile local manifest: sizes that overflow a sum (a trap with `reduce`) or are negative.
+    func testAnOverflowingOrNegativeManifestIsRefusedNotTrapped() async throws {
+        let dir = tape.revisionDirectory(id, r: 1)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        func manifest(_ sizes: [Int64]) throws {
+            let m = VisualManifest(provider: "p", providerVersion: "1", kind: "k", title: "T", entry: "a", madeOnCheckpoint: 1, madeBy: .you,
+                                   files: sizes.enumerated().map { VisualFileEntry(path: "f\($0.offset)", size: $0.element, sha256: "") })
+            try IntakeJSON.encoder.encode(m).write(to: dir.appendingPathComponent("manifest.json"))
+        }
+        try manifest([Int64.max, Int64.max])
+        let over = await serve("file:f0")
+        XCTAssertEqual(code(over), "too_large")
+        try manifest([5, -1])
+        let neg = await serve("file:f0")
+        XCTAssertEqual(code(neg), "bad_manifest")
+    }
+
     func testRefusals() async throws {
         try install(files: ["export/index.html": Data("x".utf8)], unlisted: ["export/secret.txt": Data("s".utf8)])
         let listed = WireVisualPart.file("export/index.html")
