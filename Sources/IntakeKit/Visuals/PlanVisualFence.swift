@@ -91,11 +91,19 @@ extension PlanVisualFence {
     /// nothing to export, so a task cannot be built to match it yet. Empty, never nil, for a
     /// plan with no visuals or no plan at all.
     public static func knownVisuals(plan: String?, store: any VisualStoreReading, checkpoint: Int? = nil) -> Set<String> {
-        guard let plan else { return [] }
-        return Set(blocks(in: plan).filter { b in
-            guard !b.pending, let state = checkpoint.flatMap({ store.blockState(b.id, checkpoint: $0) }) ?? store.blockState(b.id)
-            else { return false }
-            return store.revision(b.id, r: state.primary.r) != nil
-        }.map(\.id.rawValue))
+        Set(knownVisualStates(plan: plan, store: store, checkpoint: checkpoint).keys)
+    }
+
+    /// `knownVisuals` with each visual's states (its primary manifest's; `default` when it names
+    /// none), for `ChangeSetValidator`'s `visualStates`.
+    public static func knownVisualStates(plan: String?, store: any VisualStoreReading, checkpoint: Int? = nil) -> [String: Set<String>] {
+        guard let plan else { return [:] }
+        var out: [String: Set<String>] = [:]
+        for b in blocks(in: plan) where !b.pending {
+            guard let state = checkpoint.flatMap({ store.blockState(b.id, checkpoint: $0) }) ?? store.blockState(b.id),
+                  let rev = store.revision(b.id, r: state.primary.r) else { continue }
+            out[b.id.rawValue] = Set(rev.manifest.states.isEmpty ? ["default"] : rev.manifest.states)
+        }
+        return out
     }
 }

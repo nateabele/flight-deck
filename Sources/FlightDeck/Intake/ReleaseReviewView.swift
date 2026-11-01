@@ -89,6 +89,15 @@ struct ReleaseReviewView: View {
                 .disabled(releasing || review.intake.state == .releasing)
 
                 exportSection(model(review).exportLines)
+                // Why release would refuse to export (A-M4), before the button is pressed; and the
+                // visual citations validation dropped (A-I2), which release goes ahead without.
+                if let refusal = review.exportRefusal {
+                    Text(refusal).font(.caption).foregroundStyle(.red)
+                        .accessibilityIdentifier("release-review-export-refusal")
+                }
+                ForEach(review.visualWarnings, id: \.self) { warning in
+                    Text(warning).font(.caption2).foregroundStyle(.orange)
+                }
             } else if hasLoadedOnce {
                 VStack(spacing: 8) {
                     Text("Couldn't load the review").foregroundStyle(.secondary)

@@ -50,14 +50,21 @@ extension IntakeService {
         (tapeStore(id), tapes[id] ?? latestTapes[id], visualReader(id))
     }
 
-    /// The visual ids `id`'s change set may cite (`ChangeSetValidator`'s `knownVisuals`), by the
-    /// released checkpoint's block states: `Set()`, never nil, for a plan with none or no plan.
-    func knownVisuals(_ id: UUID) async -> Set<String> {
+    /// The visuals `id`'s change set may cite, each with its states (`ChangeSetValidator`'s
+    /// `knownVisuals` and `visualStates`), by the released checkpoint's block states: empty, never
+    /// nil, for a plan with none or no plan.
+    func knownVisuals(_ id: UUID) async -> [String: Set<String>] {
         let (tapes, cached, reader) = releaseSources(id)
         return await Task.detached {
-            guard let plan = ReleasePlan.read(tapes, cached: cached) else { return Set<String>() }
-            return PlanVisualFence.knownVisuals(plan: plan.markdown, store: reader, checkpoint: plan.checkpoint)
+            guard let plan = ReleasePlan.read(tapes, cached: cached) else { return [String: Set<String>]() }
+            return PlanVisualFence.knownVisualStates(plan: plan.markdown, store: reader, checkpoint: plan.checkpoint)
         }.value
+    }
+
+    /// `cs` validated against `graph` with `id`'s visuals: refs to a removed visual or state are
+    /// dropped with a warning (final review A-I2, A-M5).
+    func validate(_ cs: ChangeSet, against graph: GraphSnapshot, visuals: [String: Set<String>]) -> Result<ValidatedChangeSet, ValidationErrors> {
+        ChangeSetValidator.validate(cs, against: graph, knownVisuals: Set(visuals.keys), visualStates: visuals)
     }
 
     /// What release writes to `docs/plans/<slug>/` (D14, §12: every plan), or nil for an intake
@@ -92,11 +99,17 @@ extension IntakeService {
     }
 
     /// What release would write and commit, for the sheet: the files, the commit, and what a
-    /// re-release removes. Without git's answer (not a repo yet) the files and commit still show.
-    func releasePreview(_ i: Intake) async -> PlanExportPreview? {
-        guard case .success(let export)? = await releaseExport(i) else { return nil }
-        let repo = URL(fileURLWithPath: i.projectPath, isDirectory: true)
-        return (try? await RepoCommitter().preview(export, repo: repo)) ?? export.preview
+    /// re-release removes; or why it would refuse (A-M4), so the sheet says so before Release is
+    /// pressed. Without git's answer (not a repo yet) the files and commit still show. nil for an
+    /// intake with no plan.
+    func releasePreview(_ i: Intake) async -> Result<PlanExportPreview, ReleaseExportRefusal>? {
+        switch await releaseExport(i) {
+        case nil: return nil
+        case .failure(let refusal)?: return .failure(refusal)
+        case .success(let export)?:
+            let repo = URL(fileURLWithPath: i.projectPath, isDirectory: true)
+            return .success((try? await RepoCommitter().preview(export, repo: repo)) ?? export.preview)
+        }
     }
 
     /// A release export or commit failure in the human's words, naming the path.

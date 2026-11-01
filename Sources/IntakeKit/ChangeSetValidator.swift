@@ -3,8 +3,6 @@ import Foundation
 public enum ValidationError: Equatable, Sendable {
     case unknownBead(String), undefinedTempId(String), duplicateTempId(String)
     case selfEdge(String), cycle, missingDelivery(String), preconditionMismatch(String)
-    /// A new task's `visualRefs` names a visual the plan does not have.
-    case unknownVisual(String)
 }
 public struct ValidationErrors: Error, Equatable, Sendable { public let errors: [ValidationError] }
 
@@ -21,7 +19,6 @@ extension ValidationError {
         case .cycle: "the blocking edges, together with the graph's existing edges, form a cycle"
         case .missingDelivery(let id): "`\(id)` is in_progress, so its editTask needs a `delivery` rating"
         case .preconditionMismatch(let id): "the `pre` for `\(id)` does not match its current status and assignee in the graph"
-        case .unknownVisual(let id): "`visualRefs` names the visual `\(id)`, which the plan does not have"
         }
     }
     /// The same failure for the human, when the corrected change set fails too (spec §11): in
@@ -36,7 +33,6 @@ extension ValidationError {
         case .cycle: "the new dependencies, with the graph's own, go round in a circle"
         case .missingDelivery(let id): "\(id) is in progress, so its edit needs a rating for how to tell its holder"
         case .preconditionMismatch(let id): "\(id)'s status or holder doesn't match the task graph"
-        case .unknownVisual(let id): "a task points at a visual (\(id)) the plan doesn't have"
         }
     }
 }
@@ -47,14 +43,18 @@ public struct ValidatedChangeSet: Equatable, Sendable {
     /// Computed here, never taken from the agent: such an edge blocks a live bead the moment
     /// it is written (observed on br 0.6.0), so it waits for release.
     public let heldOpIndices: Set<Int>
+    /// What validation changed without failing, in the human's words (visual refs dropped).
+    public var warnings: [String] = []
 }
 
 public enum ChangeSetValidator {
     /// `knownVisuals`: the ids of the visuals the plan has. nil skips the visual check, which is
     /// right for every caller that predates visuals. `Set()` is different: it means the plan
-    /// has no visuals, so every `visualRefs` entry is unknown.
+    /// has no visuals, so every `visualRefs` entry is dropped. `visualStates` names each known
+    /// visual's states; a ref's state outside them is dropped. Drops are `warnings`, not errors.
     public static func validate(_ cs: ChangeSet, against graph: GraphSnapshot,
-                                knownVisuals: Set<String>? = nil) -> Result<ValidatedChangeSet, ValidationErrors> {
+                                knownVisuals: Set<String>? = nil,
+                                visualStates: [String: Set<String>] = [:]) -> Result<ValidatedChangeSet, ValidationErrors> {
         var errors: [ValidationError] = []
         var temps = Set<String>()
         for op in cs.ops {
@@ -68,14 +68,31 @@ public enum ChangeSetValidator {
             }
         }
         var held = Set<Int>()
+        var ops = cs.ops
+        var warnings: [String] = []
         var blocking: [(String, String)] = graph.edges.map { ($0.dependent, $0.dependency) }
         for (i, op) in cs.ops.enumerated() {
             switch op {
-            case .createBead(let bead):
-                if let known = knownVisuals {
-                    for ref in bead.visualRefs ?? [] where !known.contains(ref.visualID) {
-                        errors.append(.unknownVisual(ref.visualID))
+            case .createBead(var bead):
+                // A ref to a visual the plan no longer has, or to a state its visual lacks, is
+                // dropped with a warning, never a failure (V4 final review, A-I2, A-M5): a block
+                // removed after encode must not block release or pause polish.
+                if let known = knownVisuals, let refs = bead.visualRefs {
+                    var kept: [VisualRef] = []
+                    for var ref in refs {
+                        guard known.contains(ref.visualID) else {
+                            warnings.append("Task \u{201C}\(bead.title)\u{201D} no longer cites \(ref.visualID): the visual was removed")
+                            continue
+                        }
+                        if let states = visualStates[ref.visualID] {
+                            for state in ref.states where !states.contains(state) {
+                                warnings.append("Task \u{201C}\(bead.title)\u{201D} cites state \(state) of \(ref.visualID), which the visual does not have; it was dropped")
+                            }
+                            ref.states = ref.states.filter(states.contains)
+                        }
+                        kept.append(ref)
                     }
+                    if kept != refs { bead.visualRefs = kept; ops[i] = .createBead(bead) }
                 }
             case .addEdge(let from, let to, let kind):
                 check(from); check(to)
@@ -97,7 +114,9 @@ public enum ChangeSetValidator {
             }
         }
         if hasCycle(blocking) { errors.append(.cycle) }
-        return errors.isEmpty ? .success(ValidatedChangeSet(changeSet: cs, heldOpIndices: held))
+        var checked = cs
+        checked.ops = ops
+        return errors.isEmpty ? .success(ValidatedChangeSet(changeSet: checked, heldOpIndices: held, warnings: warnings))
                               : .failure(ValidationErrors(errors: errors))
     }
 

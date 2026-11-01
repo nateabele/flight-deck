@@ -129,7 +129,7 @@ final class VisualRoundsTests: XCTestCase {
         let item = try XCTUnwrap(refs["items"] as? [String: Any])
         XCTAssertEqual(item["required"] as? [String], ["visualID", "states"])
         XCTAssertEqual(item["additionalProperties"] as? Bool, false)
-        XCTAssertTrue(Triage.changeSetRulesText(observedAt: Date()).contains("`visualRefs`: null unless a visuals list below"))
+        XCTAssertTrue(Triage.changeSetRulesText(observedAt: Date()).contains("`[]` drops"))
     }
 
     /// The flat op an agent returns decodes its refs onto the new task.

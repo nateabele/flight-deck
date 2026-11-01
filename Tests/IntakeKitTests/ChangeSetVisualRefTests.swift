@@ -25,18 +25,32 @@ final class ChangeSetVisualRefTests: XCTestCase {
         XCTAssertEqual(try ChangeSet.decode(cs.encoded()), cs)
     }
 
-    func testAnUnknownVisualIsRejectedWhenTheKnownSetIsGiven() {
+    /// Ruling (V4 final review, A-I2): a ref to a visual the plan no longer has is dropped at
+    /// validation with a warning, never a failure, so a block removed after encode cannot block
+    /// release or pause polish.
+    func testAnUnknownVisualIsDroppedWithAWarning() throws {
         let cs = create([VisualRef(visualID: "pairing-handshake"), VisualRef(visualID: "ghost")])
-        let errors = ChangeSetValidator.validate(cs, against: graph, knownVisuals: ["pairing-handshake"]).errors
-        XCTAssertEqual(errors, [.unknownVisual("ghost")])
-        XCTAssertTrue(ValidationError.unknownVisual("ghost").message.contains("ghost"))
-        XCTAssertTrue(ValidationError.unknownVisual("ghost").userMessage.contains("ghost"))
+        let v = try ChangeSetValidator.validate(cs, against: graph, knownVisuals: ["pairing-handshake"]).get()
+        guard case .createBead(let b) = v.changeSet.ops[0] else { return XCTFail() }
+        XCTAssertEqual(b.visualRefs, [VisualRef(visualID: "pairing-handshake")])
+        XCTAssertEqual(v.warnings, ["Task \u{201C}\(b.title)\u{201D} no longer cites ghost: the visual was removed"])
     }
 
-    /// nil means "no check"; an empty set means the plan has no visuals, so every ref is unknown.
-    func testAnEmptyKnownSetRejectsEveryRef() {
-        let cs = create([VisualRef(visualID: "a")])
-        XCTAssertEqual(ChangeSetValidator.validate(cs, against: graph, knownVisuals: Set()).errors, [.unknownVisual("a")])
+    /// nil means "no check"; an empty set means the plan has no visuals, so every ref is dropped.
+    func testAnEmptyKnownSetDropsEveryRef() throws {
+        let v = try ChangeSetValidator.validate(create([VisualRef(visualID: "a")]), against: graph, knownVisuals: Set()).get()
+        guard case .createBead(let b) = v.changeSet.ops[0] else { return XCTFail() }
+        XCTAssertEqual(b.visualRefs, [])
+        XCTAssertEqual(v.warnings.count, 1)
+    }
+
+    /// A-M5: a state the visual's manifest lacks is dropped from the ref, with a warning.
+    func testAStateTheVisualLacksIsDroppedWithAWarning() throws {
+        let cs = create([VisualRef(visualID: "a", states: ["default", "loading"])])
+        let v = try ChangeSetValidator.validate(cs, against: graph, knownVisuals: ["a"], visualStates: ["a": ["default", "error"]]).get()
+        guard case .createBead(let b) = v.changeSet.ops[0] else { return XCTFail() }
+        XCTAssertEqual(b.visualRefs, [VisualRef(visualID: "a", states: ["default"])])
+        XCTAssertEqual(v.warnings, ["Task \u{201C}\(b.title)\u{201D} cites state loading of a, which the visual does not have; it was dropped"])
     }
 
     func testKnownVisualsPass() {

@@ -757,19 +757,34 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("notes.md"), encoding: .utf8), "mine\n")
     }
 
-    /// A task citing a visual the plan does not have fails the release's validation, with
-    /// nothing exported or written.
-    func testReleaseRefusesATaskCitingAVisualThePlanDoesNotHave() async throws {
+    /// A block removed after encode (ruling A-I2): its citation is dropped with a warning that
+    /// the release review shows, and release goes ahead without it, never a hard failure.
+    func testACitationOfARemovedVisualIsDroppedWithAWarningAndReleaseGoesAhead() async throws {
         let repo = try repo()
         let id = try reviewIntake(project: repo, cites: "ghost")
         let br = releaseBr
         let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        let loaded = await svc.reviewModel(id)
+        let review = try XCTUnwrap(loaded, "the review loads")
+        XCTAssertEqual(review.visualWarnings, ["Task \u{201C}Note\u{201D} no longer cites ghost: the visual was removed"])
         await svc.release(id)
         let i = intake(svc, id)
-        XCTAssertEqual(i.state, .review)
-        XCTAssertTrue(i.failure?.contains("ghost") == true, i.failure ?? "nil")
-        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] })
-        XCTAssertEqual(try git(repo, "log", "--format=%s"), "init\n")
+        XCTAssertEqual(i.state, .released, i.failure ?? "")
+        XCTAssertTrue(i.release?.warnings.contains { $0.contains("no longer cites ghost") } == true, "\(i.release?.warnings ?? [])")
+        let create = try XCTUnwrap(br.calls.first { $0.prefix(2) == ["br", "create"] })
+        XCTAssertFalse(create[try XCTUnwrap(create.firstIndex(of: "--description")) + 1].contains("ghost"))
+    }
+
+    /// A-M4: the sheet learns of an export refusal while you review, before you press Release.
+    func testTheReviewShowsAnExportRefusalBeforeRelease() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: nil, plan: "# Pair the phone\n\n```fd-visual id=gone\nGone\n```\n",
+                                  installVisual: false)
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: releaseBr)
+        let loaded = await svc.reviewModel(id)
+        let review = try XCTUnwrap(loaded)
+        XCTAssertTrue(review.exportRefusal?.contains("gone") == true, review.exportRefusal ?? "nil")
+        XCTAssertNil(review.export)
     }
 
     /// Every plan is exported at release (D14, §12), visuals or not.

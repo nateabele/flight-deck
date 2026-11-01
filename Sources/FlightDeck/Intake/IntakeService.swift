@@ -190,9 +190,13 @@ struct ReleaseReview {
     /// Every task the graph holds, id → title, as of this read — so the sheet names the tasks
     /// an edit, reopen, follow-up or dependency touches by title instead of by raw id.
     var titles: [String: String] = [:]
-    /// What release will write to the repo and commit (spec §12, "Confirmation"): nil for a plan
-    /// with no visuals, which release exports nothing for.
+    /// What release will write to the repo and commit (spec §12, "Confirmation"), for every plan;
+    /// nil for an intake with no plan (Single task) or when the export would refuse.
     var export: PlanExportPreview?
+    /// Why release would refuse to export the plan, shown before Release is pressed (A-M4).
+    var exportRefusal: String?
+    /// What validation dropped from the change set (a citation of a removed visual or state).
+    var visualWarnings: [String] = []
 
     /// What release will treat as op `i`'s precondition: the live state for a drifted op,
     /// the triage-time `pre` otherwise.
@@ -2116,7 +2120,7 @@ final class IntakeService: ObservableObject {
     func reviewModel(_ id: UUID) async -> ReleaseReview? {
         guard let i = intake(id), let cs = i.changeSet,
               let triaged = triageGraph(id),
-              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged, knownVisuals: await knownVisuals(id)),
+              case .success(let v) = validate(cs, against: triaged, visuals: await knownVisuals(id)),
               let current = try? await graphReader.read(project: i.projectPath)
         else { return nil }
         let drift = DriftClassifier.classify(v, current: current)
@@ -2131,7 +2135,12 @@ final class IntakeService: ObservableObject {
         // The triage-time graph first, the live one over it: a task retitled since triage reads
         // as it is now, and one deleted since still has a name on its (impossible) row.
         review.titles = triaged.beads.mapValues(\.title).merging(current.beads.mapValues(\.title)) { _, now in now }
-        review.export = await releasePreview(latest)
+        review.visualWarnings = v.warnings
+        switch await releasePreview(latest) {
+        case .success(let preview)?: review.export = preview
+        case .failure(let refusal)?: review.exportRefusal = refusal.message
+        case nil: break
+        }
         return review
     }
 
@@ -2177,7 +2186,7 @@ final class IntakeService: ObservableObject {
             return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
         }
         let v: ValidatedChangeSet
-        switch ChangeSetValidator.validate(cs, against: triaged, knownVisuals: known) {
+        switch validate(cs, against: triaged, visuals: known) {
         case .success(let good): v = good
         case .failure(let errs):
             return fail(id, backTo: .review, "The change set no longer validates: "
@@ -2206,8 +2215,7 @@ final class IntakeService: ObservableObject {
         var validated: ValidatedChangeSet?, kept: [Int] = []
         for _ in 0...ops.count {
             let (sub, map) = Self.releasable(ops, skipping: skip)
-            switch ChangeSetValidator.validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current,
-                                               knownVisuals: known) {
+            switch validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current, visuals: known) {
             case .success(let good):
                 validated = good; kept = map
             case .failure(let errs):
@@ -2269,7 +2277,7 @@ final class IntakeService: ObservableObject {
         let project = i.projectPath
         let planned = DeliveryPlanner.plan(validated.changeSet, ratings: ratings,
                                            hasSession: { [hasSession] in hasSession(project, $0) })
-        var warnings: [String] = exportWarnings
+        var warnings: [String] = validated.warnings + exportWarnings
         var unnotified = Set<String>()
         for action in planned {
             guard case .mail(let to, let bead, _, _) = action, !landed.contains(bead) else { continue }

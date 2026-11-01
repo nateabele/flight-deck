@@ -784,18 +784,20 @@ final class RoundExecutorTests: XCTestCase {
         .createBead(NewBead(tempId: "t1", title: "New", description: "d", visualRefs: [VisualRef(visualID: id, states: ["default"])]))
     }
 
-    /// A plan with no visuals validates against `Set()`, not nil: a cited id is `unknownVisual`,
-    /// and goes back to the same session once, like any other validation error.
-    func testEncodeRefusesACitedVisualThePlanDoesNotHave() async throws {
+    /// A plan with no visuals validates against `Set()`, not nil: a cited id is dropped with a
+    /// warning on the round's note, never a correction or a pause (final-review ruling A-I2).
+    func testEncodeDropsACitedVisualThePlanDoesNotHave() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            call.role == "encoder" ? ok(call, "enc-1", self.changeSetReply(pre: self.existingPre, extra: [self.citing("ghost")]))
-                : ok(call, "enc-1", self.changeSetReply(pre: self.existingPre))
+            ok(call, "enc-1", self.changeSetReply(pre: self.existingPre, extra: [self.citing("ghost")]))
         }
-        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .encode, round: 0, major: true),
-                                                                    inputs(config(), tape: try refineTape())))
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .encode, round: 0, major: true),
+                                                                        inputs(config(), tape: try refineTape())))
         XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
-        let correction = try XCTUnwrap(runner.calls("correction").first)
-        XCTAssertEqual(correction.prompt, RoundPrompts.changeSetCorrection(errors: [.unknownVisual("ghost")], observedAt: now))
+        XCTAssertTrue(runner.calls("correction").isEmpty)
+        XCTAssertTrue(cp.record.note?.contains("no longer cites ghost") == true, cp.record.note ?? "nil")
+        let cs = try ChangeSet.decode(try XCTUnwrap(files["changeset.json"]))
+        guard case .createBead(let b) = cs.ops.last else { return XCTFail("\(cs.ops)") }
+        XCTAssertEqual(b.visualRefs, [])
         XCTAssertFalse(try XCTUnwrap(runner.calls("encoder").first).prompt.contains("Visuals in this plan"),
                        "no catalogue for a plan with none")
     }
@@ -820,17 +822,19 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(b.visualRefs?.map(\.visualID), ["pairing"])
     }
 
-    /// A polish patch is held to the same rule: a visual the plan does not have is refused once.
-    func testAPolishPatchCitingAnUnknownVisualIsCorrected() async throws {
+    /// A polish patch is held to the same rule: a visual the plan does not have is dropped, not
+    /// sent back.
+    func testAPolishPatchCitingAnUnknownVisualDropsIt() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
-            call.role == "polisher" ? ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.citing("ghost")])))
-                : ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.newBead])))
+            ok(call, "pol-1", self.patchReply(ChangeSetPatch(add: [self.citing("ghost")])))
         }
-        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
-                                                                    inputs(config(), tape: try polishTape())))
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                        inputs(config(), tape: try polishTape())))
         XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
-        let correction = try XCTUnwrap(runner.calls("correction").first)
-        XCTAssertTrue(correction.prompt.contains("ghost"), correction.prompt)
+        XCTAssertTrue(runner.calls("correction").isEmpty)
+        let cs = try ChangeSet.decode(try XCTUnwrap(files["changeset.json"]))
+        guard case .createBead(let b) = cs.ops.last else { return XCTFail("\(cs.ops)") }
+        XCTAssertEqual(b.visualRefs, [])
     }
 
     /// Polish reads the same catalogue encode does, and is told a null `visualRefs` in a

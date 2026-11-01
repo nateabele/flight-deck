@@ -209,7 +209,7 @@ public struct BlockState: Codable, Equatable, Sendable {
 /// (`NewBead.visualRefs`; code writes the "Fidelity references" section from these, V-R3).
 ///
 /// **`visualID` is a plain string, not a `VisualID`.** A change set comes from an agent, and one
-/// bad id must reach `ChangeSetValidator` (`unknownVisual`, which is fed back as a correction)
+/// bad id must reach `ChangeSetValidator` (which drops it with a warning)
 /// rather than fail the whole change set's decode.
 public struct VisualRef: Codable, Hashable, Sendable {
     public var visualID: String
