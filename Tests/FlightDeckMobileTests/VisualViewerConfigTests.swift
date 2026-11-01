@@ -20,17 +20,24 @@ final class VisualViewerConfigTests: XCTestCase {
         XCTAssertNotNil(rules, "a viewer that cannot compile its rules must not open")
     }
 
-    func testTheCSPIsDenyByDefault() {
+    func testTheCSPIsDenyByDefaultAndScriptComesOnlyFromTheRevision() {
         XCTAssertEqual(VisualWebConfig.contentSecurityPolicy,
-                       "default-src 'none'; img-src fdvisual:; style-src fdvisual: 'unsafe-inline'; font-src fdvisual:; "
-                       + "frame-src 'none'; base-uri 'none'; form-action 'none'; script-src 'none'")
+                       "default-src 'none'; img-src fdvisual: data:; style-src fdvisual: 'unsafe-inline'; font-src fdvisual: data:; "
+                       + "script-src fdvisual: 'unsafe-inline'; connect-src fdvisual:; media-src fdvisual:; "
+                       + "worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
     }
 
-    func testScriptIsOffTheStoreIsNotPersistentAndTheHandlerIsRegistered() {
+    func testScriptIsOnBehindTheLockdownTheStoreIsNotPersistentAndTheHandlerIsRegistered() {
         let handler = VisualSchemeHandler(cache: VisualCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent("VCfg-\(UUID())")),
                                           visualID: "flow", revision: 1, files: [])
         let config = VisualWebConfig.makeConfiguration(handler: handler, rules: nil)
-        XCTAssertFalse(config.defaultWebpagePreferences.allowsContentJavaScript)
+        XCTAssertTrue(config.defaultWebpagePreferences.allowsContentJavaScript, "interactive comps run their script")
+        XCTAssertFalse(config.preferences.javaScriptCanOpenWindowsAutomatically)
+        let scripts = config.userContentController.userScripts
+        XCTAssertEqual(scripts.count, 1)
+        XCTAssertEqual(scripts.first?.source, VisualWebConfig.lockdownScript)
+        XCTAssertEqual(scripts.first?.injectionTime, .atDocumentStart, "before any page script")
+        XCTAssertEqual(scripts.first?.isForMainFrameOnly, false, "child frames too")
         XCTAssertFalse(config.websiteDataStore.isPersistent)
         XCTAssertTrue(config.urlSchemeHandler(forURLScheme: "fdvisual") === handler)
     }

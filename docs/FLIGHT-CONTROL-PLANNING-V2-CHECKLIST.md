@@ -83,6 +83,7 @@ alternate files) are merged and listed below with the rest.
 
 - [ ] Unverified. A plan's visual block is a card the right shape before its picture arrives, then shows the snapshot with a filmstrip of states.
 - [ ] Unverified. Tapping the card opens the full-screen viewer; switching state and size works with the phone offline from the internet.
+- [ ] Unverified. A comp whose export has JavaScript (buttons, tabs, a clickable flow) responds to taps in the phone viewer, and a comp that tries to load anything from the internet shows without it.
 - [ ] Unverified. A second open of the same visual draws from the cache at once.
 - [ ] Unverified. Against a Mac without visuals, the block reads as plain text and nothing is fetched.
 

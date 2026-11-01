@@ -87,7 +87,7 @@ final class VisualSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
-        // A policy on every response too: no script, and nothing but this scheme (and data:) to load.
+        // A policy on every response too: script, styles, fonts and fetches only from this scheme.
         let headers = [
             "Content-Type": mime,
             "Content-Length": String(data.count),
@@ -105,10 +105,40 @@ final class VisualSchemeHandler: NSObject, WKURLSchemeHandler {
 }
 
 /// How the viewer's web view is locked down, in one place so a test can pin it.
+///
+/// An interactive comp runs its JavaScript. The page still reaches nothing but the revision's own
+/// bytes, by four layers that each stand alone: the content rule list (every load that is not
+/// `fdvisual:`), this policy (where script, styles and fetches may come from), the navigation
+/// rule (`VisualSchemeHandler.allowsNavigation`) and `lockdownScript` (the APIs neither of the
+/// first two can see: WebRTC, workers, the camera, and a child frame's fresh globals). Nothing in
+/// the page can call the app: no message handlers, no inspector, a store that writes nothing.
 enum VisualWebConfig {
-    /// Sent on every `fdvisual:` response.
-    static let contentSecurityPolicy = "default-src 'none'; img-src fdvisual:; style-src fdvisual: 'unsafe-inline'; font-src fdvisual:; "
-        + "frame-src 'none'; base-uri 'none'; form-action 'none'; script-src 'none'"
+    /// Sent on every `fdvisual:` response. Inline script is allowed because a comp export is
+    /// often one self-contained page; every byte it can run came from the hash-checked cache.
+    static let contentSecurityPolicy = "default-src 'none'; img-src fdvisual: data:; style-src fdvisual: 'unsafe-inline'; font-src fdvisual: data:; "
+        + "script-src fdvisual: 'unsafe-inline'; connect-src fdvisual:; media-src fdvisual:; "
+        + "worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+
+    /// Runs before any page script, in every frame. It removes the ways out that the rule list
+    /// and the policy do not cover: WebRTC (ICE and TURN traffic is not a load either of them
+    /// sees), sockets, server events and beacons (also blocked by the rules; removed so a comp
+    /// fails fast), workers, the camera, microphone and location, and the window of a child
+    /// frame, whose fresh globals would otherwise bring all of these back.
+    static let lockdownScript = """
+    (() => {
+      const gone = (o, k) => { try { Object.defineProperty(o, k, { value: undefined, writable: false, configurable: false }); } catch (e) {} };
+      for (const k of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription',
+                       'RTCIceCandidate', 'RTCRtpSender', 'RTCRtpReceiver', 'RTCRtpTransceiver',
+                       'WebSocket', 'EventSource', 'Worker', 'SharedWorker', 'ServiceWorker', 'WebTransport']) gone(window, k);
+      for (const k of ['mediaDevices', 'geolocation', 'sendBeacon', 'serviceWorker', 'getUserMedia', 'webkitGetUserMedia']) gone(Navigator.prototype, k);
+      for (const p of [HTMLIFrameElement.prototype, HTMLFrameElement.prototype, HTMLObjectElement.prototype, HTMLEmbedElement.prototype]) {
+        gone(p, 'contentWindow'); gone(p, 'contentDocument'); gone(p, 'getSVGDocument');
+      }
+    })();
+    """
+
+    /// The camera and microphone are refused without a prompt.
+    static let mediaCaptureDecision: WKPermissionDecision = .deny
 
     /// Content-blocker rules. `decidePolicyFor` only sees navigations, never an `<img>`, a
     /// stylesheet, a font or an `@import`, so this is what stops those: block every URL, then
@@ -126,12 +156,17 @@ enum VisualWebConfig {
             forIdentifier: ruleListIdentifier, encodedContentRuleList: contentRuleListJSON)
     }
 
-    /// Non-persistent store (nothing written to disk), our handler as the only source, no script.
+    /// Non-persistent store (nothing written to disk), our handler as the only source, script on
+    /// behind `lockdownScript`.
     @MainActor static func makeConfiguration(handler: VisualSchemeHandler, rules: WKContentRuleList?) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(handler, forURLScheme: VisualSchemeHandler.scheme)
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.allowsInlineMediaPlayback = true
+        config.userContentController.addUserScript(
+            WKUserScript(source: lockdownScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         if let rules { config.userContentController.add(rules) }
         return config
     }
@@ -301,8 +336,9 @@ struct VisualViewerScreen: View {
 }
 
 /// The web view. **Locked down on purpose**: a non-persistent store (nothing written to disk),
-/// the `fdvisual:` handler as its only source, no script (a comp export is static HTML and CSS),
-/// and every navigation to another scheme cancelled, new windows included.
+/// the `fdvisual:` handler as its only source, the comp's script running behind
+/// `VisualWebConfig.lockdownScript`, every navigation to another scheme cancelled, new windows
+/// included, and the camera and microphone refused.
 private struct VisualWebView: UIViewRepresentable {
     let url: URL
     let handler: VisualSchemeHandler
@@ -337,5 +373,11 @@ private struct VisualWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+
+        func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                     initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                     decisionHandler: @escaping @MainActor (WKPermissionDecision) -> Void) {
+            decisionHandler(VisualWebConfig.mediaCaptureDecision)
+        }
     }
 }
