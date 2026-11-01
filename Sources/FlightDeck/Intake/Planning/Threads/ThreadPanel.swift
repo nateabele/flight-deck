@@ -118,7 +118,7 @@ private struct ThreadIndexView: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 26)
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.secondary.opacity(0.4)))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.secondary.opacity(0.4)).allowsHitTesting(false))
             .padding(.horizontal, 8)
             .padding(.vertical, 10)
             ScrollView {
@@ -177,6 +177,7 @@ private struct ThreadIndexView: View {
                 .padding(.horizontal, 6)
                 .opacity(dim ? 0.6 : 1)
                 .accessibilityIdentifier("thread-index-row")
+                .background(ThreadPanelProbe.frame("thread-index-row"))
             }
         }
     }
@@ -266,6 +267,7 @@ private struct ThreadHeaderView: View {
                     Button("Reopen") { model.reopen(id) }.controlSize(.small).accessibilityIdentifier("thread-reopen")
                 } else {
                     Button("Resolve") { model.resolve(id) }.controlSize(.small).accessibilityIdentifier("thread-resolve")
+                        .background(ThreadPanelProbe.frame("thread-resolve"))
                 }
             }
             // Wraps: at the inspector's 300 pt minimum the three facts don't share a line.
@@ -433,7 +435,10 @@ private struct ActionBox<Content: View>: View {
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.secondary.opacity(0.35)))
+            // A stroke on top of the row, so never a hit target: drawn over the ✓ and ✗, it took their
+            // clicks (ThreadPanelClickTests). Every decorative stroke overlay here is the same.
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.secondary.opacity(0.35))
+                .allowsHitTesting(false))
     }
 }
 
@@ -451,11 +456,11 @@ private struct DiffActionRow: View {
             switch diff.state {
             case .pending:
                 Button { decide(false) } label: { Text("✗").foregroundStyle(.red) }.buttonStyle(.plain)
-                    .help("Reject this edit")
                     .accessibilityIdentifier("thread-diff-reject")
-                Button { decide(true) } label: { Text("✓").foregroundStyle(.green).fontWeight(.semibold) }.buttonStyle(.plain)
-                    .help("Apply this edit to the plan")
+                    .background(ThreadPanelProbe.frame("thread-diff-reject"))
+                Button { decide(true) } label: { Text("✓").foregroundStyle(.green).fontWeight(.semibold) }.buttonStyle(.borderless)
                     .accessibilityIdentifier("thread-diff-accept")
+                    .background(ThreadPanelProbe.frame("thread-diff-accept"))
             case .accepted: Text("accepted").font(.system(size: 11.5)).foregroundStyle(.secondary)
             case .rejected: Text("rejected").font(.system(size: 11.5)).foregroundStyle(.secondary)
             case .stale:
@@ -498,7 +503,7 @@ private struct QuestionBox: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6)).allowsHitTesting(false))
         .opacity(live ? 1 : 0.7)
     }
 }
@@ -522,7 +527,7 @@ private struct ThreadComposer: View {
                 .focused($focused)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.5)))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.5)).allowsHitTesting(false))
                 .accessibilityIdentifier("thread-composer")
             // The keys live on buttons so they work with the field focused; hidden, as the field
             // itself says what they are.
@@ -631,5 +636,27 @@ enum ThreadCitationRouter {
             if let url, FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) }
         case .intake, .issue: break
         }
+    }
+}
+
+/// Where a panel control is, in its window, for the hosted click tests (which need a real mouse
+/// event at a real control, and SwiftUI's accessibility tree is not readable in-process). Debug
+/// builds only; nil in production.
+@MainActor
+enum ThreadPanelProbe {
+    #if DEBUG
+    static var frames: [String: CGRect] = [:]
+    #endif
+
+    @ViewBuilder static func frame(_ name: String) -> some View {
+        #if DEBUG
+        GeometryReader { g in
+            Color.clear
+                .onAppear { frames[name] = g.frame(in: .global) }
+                .onChange(of: g.frame(in: .global)) { _, frame in frames[name] = frame }
+        }
+        #else
+        EmptyView()
+        #endif
     }
 }

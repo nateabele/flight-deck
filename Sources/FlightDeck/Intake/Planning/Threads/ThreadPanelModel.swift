@@ -523,7 +523,18 @@ final class ThreadPanelModel: ObservableObject {
         // A ✓ or ✗ is the one panel action whose effect lands elsewhere (the plan), so it says
         // in the log that it ran and how it ended: the evidence a "pressed, nothing happened"
         // report needs.
-        Self.logger.info("decide diff=\(diff.id, privacy: .public) accept=\(accept) edited=\(editedMarkdown != nil) refusal=\(refusal?.code ?? "none", privacy: .public)")
+        Self.logger.notice("decide diff=\(diff.id, privacy: .public) accept=\(accept) edited=\(editedMarkdown != nil) refusal=\(refusal?.code ?? "none", privacy: .public)")
+        #if DEBUG
+        // Under the UI fixture only: a file the UI test's host keeps, so a smoke run shows whether
+        // the action ran and how it ended without reading the system log.
+        if let root = PlanningUIFixture.active?.root {
+            let line = "decide diff=\(diff.id.uuidString) accept=\(accept) refusal=\(refusal?.code ?? "none")\n"
+            let url = root.appendingPathComponent("decide-breadcrumbs.log")
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close()
+            } else { try? Data(line.utf8).write(to: url) }
+        }
+        #endif
         run(refusal)
     }
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "threads")

@@ -80,7 +80,7 @@ struct DiffToolbar: View {
         .font(.system(size: 12))
         .padding(2)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)).allowsHitTesting(false))
         .fixedSize()
         .accessibilityIdentifier("diff-toolbar")
     }
@@ -158,7 +158,7 @@ struct DiffEditStrip: View {
         .padding(.vertical, 3)
         .font(.system(size: 12))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.18)).allowsHitTesting(false))
         .fixedSize()
         .accessibilityIdentifier("diff-edit-strip")
     }
