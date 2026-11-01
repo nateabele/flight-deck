@@ -96,6 +96,7 @@ struct AskCard: View {
                     Button("Re-propose", action: repropose)
                         .controlSize(.small)
                         .accessibilityIdentifier("ask-card-repropose")
+                        .background(ThreadPanelProbe.frame("ask-card-repropose"))
                 }
                 Button(action: open) { Text("Open ⤢").font(.system(size: 11.5)) }
                     .buttonStyle(.plain)

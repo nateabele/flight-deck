@@ -126,6 +126,37 @@ extension ThreadPanelClickTests {
     }
 }
 
+extension ThreadPanelClickTests {
+    /// The rail's Ask card had the same stroke overlay as the panel's diff row, over its buttons:
+    /// Re-propose (on a stale thread) must take a click, not the card's border.
+    func testAnAskCardsReproposeTakesAClick() throws {
+        ThreadPanelProbe.frames = [:]
+        var reproposed = 0, opened = 0
+        let card = AskCardModel(id: ThreadID(), title: "Is CGNAT-first right?", pill: .stale, activity: nil, excerpt: nil,
+                                pendingDiffs: 0, notes: 0, messages: 1)
+        let size = NSSize(width: 340, height: 200)
+        let host = NSHostingView(rootView: AskCard(card: card, open: { opened += 1 }, repropose: { reproposed += 1 })
+            .padding(10).frame(width: size.width, height: size.height))
+        let w = KeyWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = host
+        w.makeKeyAndOrderFront(nil)
+        defer { w.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        let f = try XCTUnwrap(ThreadPanelProbe.frames["ask-card-repropose"], "Re-propose never laid out")
+        let point = host.convert(NSPoint(x: f.midX, y: f.midY), to: nil)
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        NSApp.postEvent(try event(.leftMouseUp), atStart: false)
+        w.sendEvent(try event(.leftMouseDown))
+        if let up = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true) { w.sendEvent(up) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(reproposed, 1, "Re-propose did not take the click (opened: \(opened))")
+    }
+}
+
 /// A borderless window that can be key, as the app's window is when the panel is clicked.
 private final class KeyWindow: NSWindow {
     override var canBecomeKey: Bool { true }
