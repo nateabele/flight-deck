@@ -8,8 +8,22 @@ public struct WireVisualAlternate: Codable, Equatable, Sendable {
     public var revision: Int
     public var kind: String
     public var reason: String?
-    public init(revision: Int, kind: String, reason: String? = nil) {
-        self.revision = revision; self.kind = kind; self.reason = reason
+    /// The files the phone may fetch for this revision, as `WireVisualRef.files` lists them for the
+    /// primary. nil from a Mac that doesn't list them: the alternate is then only a chip.
+    public var files: [WireVisualFile]?
+    public init(revision: Int, kind: String, reason: String? = nil, files: [WireVisualFile]? = nil) {
+        self.revision = revision; self.kind = kind; self.reason = reason; self.files = files
+    }
+
+    private enum Key: String, CodingKey { case revision, kind, reason, files }
+
+    /// `files` is additive: a payload written before it existed decodes with nil.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        revision = try c.decode(Int.self, forKey: .revision)
+        kind = try c.decode(String.self, forKey: .kind)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        files = try c.decodeIfPresent([WireVisualFile].self, forKey: .files)
     }
 }
 
@@ -92,4 +106,22 @@ public enum WireVisualPart {
 public enum VisualLimits {
     /// The most a revision's fetch may add up to (§10). A larger one is refused `too_large`.
     public static let maxBytes = 10_485_760
+}
+
+/// The width a snapshot or page of a named size is drawn at, in points. The Mac's table
+/// (`IntakeKit.VisualSize.width`, which the Mac draws snapshots with); a hosted test pins the two
+/// together. A name is `phone`, `mac`, a bare width (`640`) or `<w>x<h>`; anything else is the
+/// default. Clamped.
+public enum VisualSizeWidth {
+    public static let defaultWidth = 760
+    public static let range = 200...2400
+
+    public static func width(_ name: String) -> Int {
+        let named: [String: Int] = ["default": defaultWidth, "phone": 390, "compact": 390, "tablet": 768,
+                                    "mac": 1024, "desktop": 1280, "wide": 1280]
+        if let w = named[name.lowercased()] { return w }
+        let head = name.lowercased().split(separator: "x", maxSplits: 1).first.map(String.init) ?? ""
+        guard let w = Int(head) else { return defaultWidth }
+        return min(max(w, range.lowerBound), range.upperBound)
+    }
 }

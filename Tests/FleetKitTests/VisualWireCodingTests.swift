@@ -32,6 +32,39 @@ final class VisualWireCodingTests: XCTestCase {
         XCTAssertEqual(Set(try object(ref).keys), ["id", "revision", "kinds", "alternates", "states"], "optionals are absent, never null")
     }
 
+    /// An alternate carries the files the phone may fetch for it (V4b), additively: a payload from
+    /// a Mac that predates the field still decodes, and writing one back adds no `files`.
+    func testAnAlternateCarriesItsFilesAndAnOldPayloadStillDecodes() throws {
+        let files = [WireVisualFile(path: "snapshot@default-wide.png", size: 9, sha256: "ab")]
+        let alt = WireVisualAlternate(revision: 2, kind: "canvas", reason: "closer", files: files)
+        XCTAssertEqual(try JSONDecoder().decode(WireVisualAlternate.self, from: JSONEncoder().encode(alt)), alt)
+        XCTAssertEqual(Set(try object(alt).keys), ["revision", "kind", "reason", "files"])
+        let old = try JSONDecoder().decode(WireVisualAlternate.self, from: Data(#"{"revision":2,"kind":"canvas"}"#.utf8))
+        XCTAssertEqual(old, WireVisualAlternate(revision: 2, kind: "canvas"))
+        XCTAssertNil(old.files)
+        XCTAssertEqual(Set(try object(old).keys), ["revision", "kind"], "an absent field stays absent, never null")
+        // A whole old ref, alternates included.
+        let ref = try JSONDecoder().decode(WireVisualRef.self, from: Data(#"{"id":"x","revision":1,"alternates":[{"revision":2,"kind":"flow","reason":"r"}]}"#.utf8))
+        XCTAssertEqual(ref.alternates.first?.files, nil)
+        XCTAssertEqual(ref.alternates.first?.reason, "r")
+    }
+
+    /// The widths a size name draws at, in points: the Mac's table (`VisualSize.width`), which a
+    /// hosted cross-check test pins to this copy.
+    func testSizeNamesDrawAtTheMacsWidths() {
+        XCTAssertEqual(VisualSizeWidth.width("phone"), 390)
+        XCTAssertEqual(VisualSizeWidth.width("compact"), 390)
+        XCTAssertEqual(VisualSizeWidth.width("tablet"), 768)
+        XCTAssertEqual(VisualSizeWidth.width("Mac"), 1024)
+        XCTAssertEqual(VisualSizeWidth.width("wide"), 1280)
+        XCTAssertEqual(VisualSizeWidth.width("default"), 760)
+        XCTAssertEqual(VisualSizeWidth.width("640"), 640)
+        XCTAssertEqual(VisualSizeWidth.width("500x900"), 500)
+        XCTAssertEqual(VisualSizeWidth.width("5"), 200, "clamped up")
+        XCTAssertEqual(VisualSizeWidth.width("99999"), 2400, "clamped down")
+        XCTAssertEqual(VisualSizeWidth.width("narrow"), 760, "not a name the Mac knows: the default")
+    }
+
     /// An older Mac's plan has no `visuals`; it decodes as nil, and writing it back adds nothing.
     func testAnOldMacsPlanPayloadWithNoVisualsDecodes() throws {
         let old = ##"{"checkpoint":2,"roundName":"Draft","editsVersion":"e1","markdown":"# P","outline":[],"notes":[]}"##
