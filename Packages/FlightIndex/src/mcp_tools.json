@@ -156,6 +156,14 @@
      "description": "Exact symbol name to search for (or regex when regex=true). Accepts aliases `symbol`, `symbol_name`, and `query`.",
      "type": "string"
     },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose recent commits were described in these words (BM25 over commit subjects and changed lines, mapped to the symbols each commit changed). Default: on when the query has a space or the name search finds nothing; true forces it, false turns it off.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
     "regex": {
      "default": null,
      "description": "If true, interpret `name` as a regex applied to indexed symbol names. Uses `regex::Regex::is_match` (find anywhere, not anchored - prepend `^` for start-anchored, `$` for end-anchored, both for full-match). Case-insensitive by default; prepend `(?-i)` to force case-sensitive. Default false (exact name lookup).",
@@ -226,6 +234,14 @@
     "query": {
      "description": "FTS5 search query. Prefix matching is anchored to the symbol name column (e.g. `Parser*` only matches symbols whose name starts with `Parser`, not file paths that happen to contain `parser`). Accepts the alias `pattern` for parity with Grep. Interpreted as a regex when regex=true.",
      "type": "string"
+    },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose recent commits were described in these words (BM25 over commit subjects and changed lines, mapped to the symbols each commit changed). Default: on when the query has a space or the name search finds nothing; true forces it, false turns it off.",
+     "type": [
+      "boolean",
+      "null"
+     ]
     },
     "regex": {
      "default": null,

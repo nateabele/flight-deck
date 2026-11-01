@@ -9,6 +9,7 @@
 
 mod analysis;
 pub mod args;
+mod history;
 pub mod mutate;
 mod nav;
 
@@ -72,6 +73,8 @@ pub struct Ctx<'a> {
     /// tool that answers from one view (`links.rs`).
     pub members: &'a [Member],
     pub cochange: &'a (dyn Fn() -> Result<Arc<CoChange>> + Sync),
+    /// The repository's history-text index (`history.rs`), for the history tier of `find`/`grep`.
+    pub history: &'a (dyn Fn() -> crate::history::HistoryState + Sync),
 }
 
 /// Strip the `qartez_` / `fdindex_` prefix an MCP client adds and return the tool's own name.

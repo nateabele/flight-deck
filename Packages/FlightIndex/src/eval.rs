@@ -110,6 +110,13 @@ impl Probe<'_> {
     /// Run one read-only tool over the graph exactly as the service would, with an unlimited
     /// token budget so nothing is cut before the metrics read it.
     pub fn tool(&self, tool: &str, args: Value) -> String {
+        let none = || crate::history::HistoryState::Unavailable("no history in eval".into());
+        self.tool_with(tool, args, &none)
+    }
+
+    /// `tool` with a history tier (`src/history.rs`): a strategy hands it the index restricted to
+    /// what the task's parent commit could have known.
+    pub fn tool_with(&self, tool: &str, args: Value, history: &(dyn Fn() -> crate::history::HistoryState + Sync)) -> String {
         let mut map = match args {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -121,7 +128,7 @@ impl Probe<'_> {
         }
         let args = Args::new(map, self.root.to_path_buf());
         let none = || -> crate::error::Result<Arc<crate::cochange::CoChange>> { Err(crate::error::Error::Msg("no co-change in eval".into())) };
-        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &none };
+        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &none, history };
         tools::run(tool, &ctx).unwrap_or_default()
     }
 
