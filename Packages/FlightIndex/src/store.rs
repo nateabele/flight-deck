@@ -57,6 +57,44 @@ pub fn db_path(store_root: &Path, repo: &Path) -> PathBuf {
     store_root.join(format!("{name}-{hash}.db"))
 }
 
+/// Every repository database under `store_root`, with the repository each records (`None` for a
+/// file that cannot be read). The retention pass uses it to find repositories whose common dir is
+/// gone, which no request will ever name again.
+pub fn list_dbs(store_root: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let Ok(rd) = std::fs::read_dir(store_root) else { return Vec::new() };
+    let mut out: Vec<(PathBuf, Option<PathBuf>)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "db"))
+        .map(|p| {
+            let repo = Connection::open_with_flags(&p, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                .ok()
+                .and_then(|c| c.query_row("SELECT value FROM meta WHERE key = 'repo'", [], |r| r.get::<_, String>(0)).ok())
+                .map(PathBuf::from);
+            (p, repo)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Delete a repository's database and its WAL files.
+pub fn remove_repo_db(store_root: &Path, repo: &Path) {
+    remove_db_files(&db_path(store_root, repo));
+}
+
+/// Bytes a repository's database occupies on disk: main file plus WAL.
+pub fn db_bytes(db: &Path) -> u64 {
+    ["", "-wal"]
+        .iter()
+        .map(|suffix| {
+            let mut p = db.as_os_str().to_owned();
+            p.push(suffix);
+            std::fs::metadata(PathBuf::from(p)).map(|m| m.len()).unwrap_or(0)
+        })
+        .sum()
+}
+
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE facts (
@@ -356,7 +394,23 @@ impl Writer {
     /// Drop what nothing references: worktrees whose directory is gone, trees no live worktree
     /// HEAD or known ref names, and facts no remaining tree or overlay names (or whose parser
     /// version is stale). Without this the store grows as worktrees come and go.
+    ///
+    /// One call does all of it, which holds the writer for as long as the deletes take. The daemon
+    /// uses `gc_roots` and `gc_facts` instead, so it can let go of the writer between chunks.
     pub fn gc(&mut self) -> Result<GcStats> {
+        let (mut stats, _) = self.gc_roots()?;
+        loop {
+            match self.gc_facts(usize::MAX)? {
+                0 => break,
+                n => stats.facts_dropped += n,
+            }
+        }
+        Ok(stats)
+    }
+
+    /// First half of `gc`: the roots. Returns what was dropped and the commits whose trees went,
+    /// so the caller can stop treating them as fully indexed.
+    pub fn gc_roots(&mut self) -> Result<(GcStats, Vec<String>)> {
         let tx = self.reader.conn.transaction()?;
         let mut stats = GcStats::default();
 
@@ -370,26 +424,46 @@ impl Writer {
         }
         stats.worktrees_dropped = gone.len();
 
-        stats.trees_dropped = tx.execute(
-            "DELETE FROM trees WHERE commit_id NOT IN (SELECT head_commit FROM worktrees WHERE head_commit IS NOT NULL)
-               AND commit_id NOT IN (SELECT commit_id FROM known_refs)",
-            [],
-        )?;
+        let dead: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT commit_id FROM trees WHERE commit_id NOT IN (SELECT head_commit FROM worktrees WHERE head_commit IS NOT NULL)
+                   AND commit_id NOT IN (SELECT commit_id FROM known_refs)",
+            )?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for c in &dead {
+            tx.execute("DELETE FROM trees WHERE commit_id = ?1", params![c])?;
+        }
+        stats.trees_dropped = dead.len();
+        tx.commit()?;
+        Ok((stats, dead))
+    }
 
-        stats.facts_dropped = tx.execute(
-            "DELETE FROM facts WHERE
-               blob_id NOT IN (SELECT blob_id FROM tree_entries)
-               AND blob_id NOT IN (SELECT blob_id FROM overlays WHERE blob_id IS NOT NULL)",
-            [],
+    /// Second half of `gc`: delete up to `limit` facts that no tree or overlay names, and every
+    /// fact of a stale parser version. Returns how many went; call until it returns 0. Each call is
+    /// its own transaction, so a collection of a large store never holds the writer for more than
+    /// one chunk (the cascade over symbols, refs and imports is what makes a delete slow).
+    pub fn gc_facts(&mut self, limit: usize) -> Result<usize> {
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut n = self.reader.conn.execute(
+            "DELETE FROM facts WHERE id IN (
+               SELECT id FROM facts WHERE
+                 blob_id NOT IN (SELECT blob_id FROM tree_entries)
+                 AND blob_id NOT IN (SELECT blob_id FROM overlays WHERE blob_id IS NOT NULL)
+               LIMIT ?1)",
+            params![limit],
         )?;
         for l in lang::all() {
-            stats.facts_dropped += tx.execute(
-                "DELETE FROM facts WHERE language = ?1 AND parser_version != ?2",
-                params![l.id(), l.parser_version()],
+            if n as i64 >= limit {
+                break;
+            }
+            n += self.reader.conn.execute(
+                "DELETE FROM facts WHERE id IN (SELECT id FROM facts WHERE language = ?1 AND parser_version != ?2 LIMIT ?3)",
+                params![l.id(), l.parser_version(), limit - n as i64],
             )?;
         }
-        tx.commit()?;
-        Ok(stats)
+        Ok(n)
     }
 
     /// Return up to `pages` free pages to the filesystem (0 = all). Returns the pages freed.
@@ -404,9 +478,14 @@ impl Writer {
         Ok(before - self.stats()?.free_pages)
     }
 
-    /// Fold the WAL back into the main file (call when idle).
+    /// Fold the WAL back into the main file and truncate it. A reader that is mid-query makes
+    /// SQLite wait, and the writer is held meanwhile, so the wait is short: a checkpoint that
+    /// cannot finish now is simply not done, and the next one will.
     pub fn checkpoint(&mut self) -> Result<()> {
-        self.reader.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        self.reader.conn.busy_timeout(std::time::Duration::from_millis(100))?;
+        let done = self.reader.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        self.reader.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        done?;
         Ok(())
     }
 }

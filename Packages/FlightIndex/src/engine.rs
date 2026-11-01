@@ -94,6 +94,18 @@ pub struct Engine {
     /// any more is freed: ten graphs of ten commits of one repository hold one copy of each blob
     /// they share, not ten.
     facts: Mutex<HashMap<(String, &'static str), SharedFacts>>,
+    /// What the store's `worktrees` row says for each worktree, so a request whose view has not
+    /// changed writes nothing (see `record_view`).
+    recorded: Mutex<HashMap<PathBuf, Recorded>>,
+}
+
+/// A worktree's view as last written to the store.
+#[derive(Clone)]
+struct Recorded {
+    repo: PathBuf,
+    commit: Option<String>,
+    stamp: String,
+    at: Instant,
 }
 
 /// A commit's indexable files, shared by every view on it.
@@ -169,6 +181,7 @@ impl Engine {
             bases: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
             facts: Mutex::new(HashMap::new()),
+            recorded: Mutex::new(HashMap::new()),
         })
     }
 
@@ -179,7 +192,7 @@ impl Engine {
     /// The view of the worktree containing `abs`, as of now. The listing of a commit this engine
     /// has seen is reused, so a warm call costs one `git status`.
     pub fn view_for_path(&self, abs: &Path) -> Result<View> {
-        let view = git::view_for_path_with(abs, &|repo, commit| self.bases.lock().unwrap().get(&(repo.to_path_buf(), commit.to_string())).cloned())?;
+        let view = git::view_for_path_with(abs, &|repo, commit, root| self.base_listing(repo, commit, root))?;
         if let Some(c) = &view.label.base_commit {
             let mut bases = self.bases.lock().unwrap();
             if bases.len() >= MAX_KNOWN_BASES {
@@ -188,6 +201,43 @@ impl Engine {
             bases.entry((view.label.repo.clone(), c.clone())).or_insert_with(|| view.base.clone());
         }
         Ok(view)
+    }
+
+    /// The file listing of `commit`, if this engine has it or can derive it cheaply: a worktree
+    /// that moved to a new commit (a commit, a checkout, a rebase step) differs from the commit it
+    /// was on by a few files, and `git diff-tree` of those is a fraction of listing the whole tree.
+    /// "Nearest" is the worktree's own previous commit, else the most recently recorded commit of
+    /// the repository. When the old commit was fully indexed and every changed file already has
+    /// facts (a commit of edits the worktree was already showing does), the new one is marked fully
+    /// indexed too, so the request that moved HEAD parses nothing and builds nothing.
+    fn base_listing(&self, repo: &Path, commit: &str, root: &Path) -> Option<BaseListing> {
+        let key = (repo.to_path_buf(), commit.to_string());
+        if let Some(b) = self.bases.lock().unwrap().get(&key) {
+            return Some(b.clone());
+        }
+        let (old, old_list) = {
+            let recorded = self.recorded.lock().unwrap();
+            let bases = self.bases.lock().unwrap();
+            let own = recorded.get(root).filter(|r| r.repo == repo).and_then(|r| r.commit.clone());
+            let nearest = own.or_else(|| {
+                recorded.values().filter(|r| r.repo == repo && r.commit.is_some()).max_by_key(|r| r.at).and_then(|r| r.commit.clone())
+            })?;
+            let list = bases.get(&(repo.to_path_buf(), nearest.clone()))?.clone();
+            (nearest, list)
+        };
+        let derived = Arc::new(git::derive_listing(root, &old_list, &old, commit).ok()??);
+        let was_complete = self.complete.lock().unwrap().contains(&(repo.to_path_buf(), old.clone()));
+        if was_complete && let Ok(reader) = self.reader(repo) {
+            let old_blobs: HashMap<&str, &str> = old_list.iter().map(|f| (f.path.as_str(), f.blob_id.as_str())).collect();
+            let all_stored = derived.iter().filter(|f| old_blobs.get(f.path.as_str()) != Some(&f.blob_id.as_str())).all(|f| {
+                let v = lang::by_id(f.language).map(|l| l.parser_version()).unwrap_or(0);
+                reader.has_facts(&f.blob_id, f.language, v).unwrap_or(false)
+            });
+            if all_stored {
+                self.complete.lock().unwrap().insert(key);
+            }
+        }
+        Some(derived)
     }
 
     /// Total blobs parsed (extractor calls) by this engine since it opened. Tests assert on deltas.
@@ -211,14 +261,116 @@ impl Engine {
         Reader::open(&self.store_root, repo)
     }
 
-    pub fn gc(&self, repo: &Path) -> Result<GcStats> {
-        // Facts may be about to go: no tree of this repository can be called complete any more.
+    /// Write the view's tree and overlay to the store, unless they are what it already holds for
+    /// this worktree. The `worktrees` row and its overlay are what garbage collection treats as
+    /// roots, so every view a request answers from must be recorded: a worktree on an indexed
+    /// commit needs no build, and without this it would never get a row, and its tree and overlay
+    /// blobs would be collected from under it.
+    pub fn record_view(&self, view: &View) -> Result<()> {
+        let stamp = overlay_stamp(view.label.base_commit.as_deref().unwrap_or(""), &view.overlay);
+        let key = view.label.worktree.clone();
+        if self.recorded.lock().unwrap().get(&key).is_some_and(|r| r.commit == view.label.base_commit && r.stamp == stamp) {
+            return Ok(());
+        }
+        let writer = self.writer(&view.label.repo)?;
+        {
+            let mut w = writer.lock().unwrap();
+            // A commit's tree never changes, so one already recorded is not rewritten (that is a
+            // delete and a few thousand inserts per request on a warm view).
+            if let Some(c) = &view.label.base_commit
+                && !w.has_tree(c)?
+            {
+                w.put_tree(c, &view.base)?;
+            }
+            w.set_worktree(&key, view.label.base_commit.as_deref(), &view.overlay)?;
+        }
+        self.recorded.lock().unwrap().insert(key, Recorded { repo: view.label.repo.clone(), commit: view.label.base_commit.clone(), stamp, at: Instant::now() });
+        Ok(())
+    }
+
+    /// A worktree whose directory is gone: drop its row and overlay, its graph, and the graph of
+    /// its commit when `commit_in_use` says no other worktree is on it. The blobs go with the next
+    /// collection.
+    pub fn release_worktree(&self, repo: &Path, worktree: &Path, commit: Option<&str>, commit_in_use: bool) {
+        self.recorded.lock().unwrap().remove(worktree);
+        {
+            let mut g = self.graphs.lock().unwrap();
+            g.map.remove(&GraphKey::Overlay(worktree.to_path_buf()));
+            if let (Some(c), false) = (commit, commit_in_use) {
+                g.map.remove(&GraphKey::Base(repo.to_path_buf(), c.to_string()));
+            }
+        }
+        self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        if let Ok(w) = self.writer(repo) {
+            let _ = w.lock().unwrap().remove_worktree(worktree);
+        }
+    }
+
+    /// Forget a repository whose common dir no longer exists: its database file goes, and every
+    /// cache entry that could name it.
+    pub fn drop_repo(&self, repo: &Path) {
+        self.writers.lock().unwrap().remove(repo);
         self.complete.lock().unwrap().retain(|(r, _)| r != repo);
-        self.writer(repo)?.lock().unwrap().gc()
+        self.bases.lock().unwrap().retain(|(r, _), _| r != repo);
+        self.recorded.lock().unwrap().retain(|_, r| r.repo != repo);
+        self.graphs.lock().unwrap().map.retain(|k, g| match k {
+            GraphKey::Base(r, _) => r != repo,
+            GraphKey::Overlay(_) => g.graph.label.repo != repo,
+        });
+        self.facts.lock().unwrap().retain(|_, (w, _)| w.strong_count() > 0);
+        crate::store::remove_repo_db(&self.store_root, repo);
+    }
+
+    /// Replace a repository's known refs with its branch heads, read from git. Trees of those
+    /// commits survive collection, so a branch tip someone looked at is still warm after the
+    /// worktree that showed it is gone.
+    pub fn refresh_known_refs(&self, repo: &Path) -> Result<usize> {
+        let refs = git::branch_heads(repo)?;
+        self.writer(repo)?.lock().unwrap().set_known_refs(&refs)?;
+        Ok(refs.len())
+    }
+
+    /// Collect one repository: its roots first, then orphan facts a chunk at a time. The writer
+    /// is released between chunks so a build or a read waiting on it is never held up for the
+    /// whole collection.
+    pub fn gc(&self, repo: &Path) -> Result<GcStats> {
+        const CHUNK: usize = 2000;
+        let writer = self.writer(repo)?;
+        let (mut stats, dead) = writer.lock().unwrap().gc_roots()?;
+        // Commits whose trees went are no longer vouched for: their facts may be next.
+        self.complete.lock().unwrap().retain(|(r, c)| r != repo || !dead.contains(c));
+        // A worktree row that went with its directory must be written again if the directory returns.
+        self.recorded.lock().unwrap().retain(|wt, r| r.repo != repo || wt.exists());
+        loop {
+            let n = writer.lock().unwrap().gc_facts(CHUNK)?;
+            stats.facts_dropped += n;
+            if n < CHUNK {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(stats)
     }
 
     pub fn incremental_vacuum(&self, repo: &Path, pages: u32) -> Result<u64> {
         self.writer(repo)?.lock().unwrap().incremental_vacuum(pages)
+    }
+
+    /// Return every free page to the filesystem, 256 pages (1 MB) at a time with the writer
+    /// released in between, then fold the WAL back so the file really shrinks. Returns pages freed.
+    pub fn vacuum(&self, repo: &Path) -> Result<u64> {
+        let writer = self.writer(repo)?;
+        let mut freed = 0;
+        loop {
+            let n = writer.lock().unwrap().incremental_vacuum(256)?;
+            freed += n;
+            if n == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let _ = writer.lock().unwrap().checkpoint();
+        Ok(freed)
     }
 
     /// Does the store already hold facts for every file of `view`? True means a request can be
@@ -256,17 +408,7 @@ impl Engine {
 
         // Record what this view needs before parsing it, so a concurrent gc treats the blobs we
         // are about to store as referenced rather than as orphans.
-        {
-            let mut w = writer.lock().unwrap();
-            // A commit's tree never changes, so one already recorded is not rewritten (that is a
-            // delete and a few thousand inserts per request on a warm view).
-            if let Some(c) = &view.label.base_commit
-                && !w.has_tree(c)?
-            {
-                w.put_tree(c, &view.base)?;
-            }
-            w.set_worktree(root, view.label.base_commit.as_deref(), &view.overlay)?;
-        }
+        self.record_view(view)?;
 
         let version = |lang: &str| lang::by_id(lang).map(|l| l.parser_version()).unwrap_or(0);
         let tree_done = view.label.base_commit.as_ref().is_some_and(|c| self.complete.lock().unwrap().contains(&(view.label.repo.clone(), c.clone())));
@@ -643,7 +785,11 @@ fn overlay_stamp(commit: &str, overlay: &[Overlay]) -> String {
     use sha1::{Digest, Sha1};
     let mut h = Sha1::new();
     h.update(commit.as_bytes());
-    for o in overlay {
+    // By path, so the same overlay hashes the same whether `git status` or the watcher produced it
+    // (they list in different orders), and a graph cached from one is reused by the other.
+    let mut sorted: Vec<&Overlay> = overlay.iter().collect();
+    sorted.sort_by(|a, b| a.path().cmp(b.path()));
+    for o in sorted {
         match o {
             Overlay::Present(f) => h.update(format!("\0+{}\0{}\0{}", f.path, f.blob_id, f.language)),
             Overlay::Deleted(p) => h.update(format!("\0-{p}")),
