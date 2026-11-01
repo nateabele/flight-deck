@@ -17,7 +17,10 @@ import os
 /// `.flightdeck-managed`, holds the digest of the files Flight Deck last wrote:
 /// - A folder that still hashes to that value is ours, and is refreshed when the app ships new
 ///   text. Files the new version no longer ships are removed with it.
-/// - A folder that hashes to anything else (an edit, or a file the user added) is left whole.
+/// - A folder that hashes to anything else (an edit, a file the user added, a planted link) is
+///   left whole. Editor and tool junk (`.DS_Store`, `__pycache__`, `.git`, `*.swp`) does not count.
+/// - A skill folder that is itself a link is never touched, and no link is ever followed. A
+///   refresh is staged in a sibling folder and swapped in, so it is all old or all new.
 /// - A sidecar with no `SKILL.md` beside it means the user deleted the skill, never undone.
 /// - A `SKILL.md` with no sidecar is the user's own. The exception is a folder whose files equal
 ///   ours exactly; it is adopted, since nothing the user wrote can be lost.
@@ -41,12 +44,16 @@ struct CodexBundledSkill: Sendable, Equatable {
     /// either clobbers a user's edit or resurrects a file they deleted.
     enum Outcome: Equatable {
         case installed, refreshed, adopted, current, userEdited, userDeleted, userOwned
+        /// The skill folder is a link or a file. Nothing was written, and nothing is ever written through it.
+        case unsafe
     }
 
     /// One file of a skill: a path relative to the skill folder, and its bytes.
     struct Entry: Equatable {
         let path: String
         let data: Data
+        /// A symbolic link (or other non-regular node): `data` is its destination.
+        var isLink = false
     }
 
     let name: String
@@ -82,11 +89,13 @@ struct CodexBundledSkill: Sendable, Equatable {
     }
 
     static func digest(_ entries: [Entry]) -> String {
-        if entries.count == 1, let only = entries.first, only.path == skillFile { return digest(only.data) }
+        if entries.count == 1, let only = entries.first, only.path == skillFile, !only.isLink {
+            return digest(only.data)
+        }
         var hasher = SHA256()
         for entry in entries.sorted(by: { $0.path < $1.path }) {
             hasher.update(data: Data(entry.path.utf8))
-            hasher.update(data: Data([0]))
+            hasher.update(data: Data([0, entry.isLink ? 76 : 70, 0]))
             hasher.update(data: Data(String(entry.data.count).utf8))
             hasher.update(data: Data([0]))
             hasher.update(data: entry.data)
@@ -94,40 +103,83 @@ struct CodexBundledSkill: Sendable, Equatable {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Every regular file under `folder`, by relative path. Finder's `.DS_Store` and the sidecar
-    /// are not part of a skill.
-    static func entries(in folder: URL) throws -> [Entry] {
-        let fm = FileManager.default
-        let root = folder.resolvingSymlinksInPath().standardizedFileURL
-        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
-        var entries: [Entry] = []
-        for case let url as URL in walker {
-            guard (try url.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true,
-                  url.lastPathComponent != ".DS_Store", url.lastPathComponent != sidecarName
-            else { continue }
-            let path = String(url.standardizedFileURL.path.dropFirst(root.path.count + 1))
-            entries.append(Entry(path: path, data: try Data(contentsOf: url)))
+    /// Names that tools and editors leave in a folder without the user having meant to change
+    /// the skill. They never count as an edit, at any depth.
+    static func isJunk(_ name: String) -> Bool {
+        name == ".DS_Store" || name == "__pycache__" || name == ".git" || name.hasSuffix(".swp")
+    }
+
+    /// What `path` is, read with `lstat` semantics: a link is reported as a link, never followed.
+    enum NodeKind { case missing, directory, file, link, other }
+
+    static func kind(of url: URL) -> NodeKind {
+        guard let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        else { return .missing }
+        switch type {
+        case .typeDirectory: return .directory
+        case .typeRegular: return .file
+        case .typeSymbolicLink: return .link
+        default: return .other
         }
-        return entries.sorted { $0.path < $1.path }
+    }
+
+    /// Every file under `folder`, by relative path, walked without following any link. A link
+    /// is an entry of its own (`isLink`, its destination as the data) so it counts in the
+    /// digest. Junk and the top-level sidecar are not part of a skill. `allowLinks: false` is
+    /// for the bundled source, which must never contain one.
+    static func entries(in folder: URL, allowLinks: Bool = true) throws -> [Entry] {
+        var entries: [Entry] = []
+        func walk(_ directory: URL, _ prefix: String) throws {
+            for name in try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() {
+                if isJunk(name) || (prefix.isEmpty && name == sidecarName) { continue }
+                let url = directory.appendingPathComponent(name)
+                let path = prefix + name
+                switch kind(of: url) {
+                case .directory: try walk(url, path + "/")
+                case .file: entries.append(Entry(path: path, data: try Data(contentsOf: url)))
+                case .link:
+                    guard allowLinks else { throw CocoaError(.fileReadUnsupportedScheme) }
+                    let destination = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+                    entries.append(Entry(path: path, data: Data(destination.utf8), isLink: true))
+                case .other:
+                    entries.append(Entry(path: path, data: Data("other".utf8), isLink: true))
+                case .missing: continue
+                }
+            }
+        }
+        try walk(folder, "")
+        return entries
     }
 
     // MARK: - Install
 
     func install(from source: URL, codexHome: URL) throws -> Outcome {
-        try install(entries: Self.entries(in: source), codexHome: codexHome)
+        try install(entries: Self.entries(in: source, allowLinks: false), codexHome: codexHome)
     }
 
-    func install(entries ours: [Entry], codexHome: URL) throws -> Outcome {
+    /// `stageFault` is a test seam: it is called after each staged file with the count so far,
+    /// and may throw to model a crash part-way through a refresh.
+    func install(entries ours: [Entry], codexHome: URL,
+                 stageFault: ((Int) throws -> Void)? = nil) throws -> Outcome {
         let ourDigest = Self.digest(ours)
         let folder = directory(codexHome: codexHome)
-        let onDisk: [Entry]? = FileManager.default.fileExists(atPath: folder.appendingPathComponent(Self.skillFile).path)
-            ? try Self.entries(in: folder) : nil
+        switch Self.kind(of: folder) {
+        case .link, .file, .other:
+            Self.logger.error("\(folder.path, privacy: .public) is not a plain folder (a link or a file); the \(name, privacy: .public) skill was not installed")
+            return .unsafe
+        case .missing, .directory: break
+        }
+        removeStaging(codexHome: codexHome)
+        let existing = Self.kind(of: folder) == .directory ? try Self.entries(in: folder) : []
+        let onDisk: [Entry]? = existing.contains { $0.path == Self.skillFile && !$0.isLink } ? existing : nil
         let recorded = (try? String(contentsOf: sidecar(codexHome: codexHome), encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch (onDisk, recorded) {
         case (nil, nil):
-            try write(ours, codexHome: codexHome, replacing: [])
+            // A folder with other content and no SKILL.md is not ours to replace.
+            guard existing.isEmpty else { return .userOwned }
+            try publish(ours, codexHome: codexHome, stageFault: stageFault)
             return .installed
         case (nil, _?):
             return .userDeleted
@@ -136,33 +188,34 @@ struct CodexBundledSkill: Sendable, Equatable {
             try writeSidecar(ourDigest, codexHome: codexHome)
             return .adopted
         case (let disk?, let hash?):
-            // Equal bytes are checked before the hash. This also heals a crash between the two
-            // writes in `write`: the files are written first, so an interrupted refresh leaves
-            // our exact bytes beside a stale sidecar, and that must read as ours, not as an edit.
+            // A folder that already equals the bundled files is ours whatever the sidecar says.
+            // That heals a crash right after a swap, and a sidecar written by another version.
             let diskDigest = Self.digest(disk)
             if diskDigest == ourDigest {
                 if hash != ourDigest { try writeSidecar(ourDigest, codexHome: codexHome) }
                 return .current
             }
             guard diskDigest == hash else { return .userEdited }
-            try write(ours, codexHome: codexHome, replacing: disk)
+            try publish(ours, codexHome: codexHome, stageFault: stageFault)
             return .refreshed
         }
     }
 
     /// Removes the skill only while it is still Flight Deck's. Returns whether anything was
     /// removed. An edited folder stays; a lone sidecar (the user already deleted SKILL.md) is
-    /// cleared, so a later install starts fresh.
+    /// cleared, so a later install starts fresh. A folder that is a link is never touched.
     @discardableResult
     func uninstall(home codexHome: URL) throws -> Bool {
         let folder = directory(codexHome: codexHome)
         let marker = sidecar(codexHome: codexHome)
-        guard let hash = (try? String(contentsOf: marker, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.kind(of: folder) == .directory,
+              let hash = (try? String(contentsOf: marker, encoding: .utf8))?
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
         else { return false }
         let fm = FileManager.default
-        if fm.fileExists(atPath: folder.appendingPathComponent(Self.skillFile).path) {
-            guard Self.digest(try Self.entries(in: folder)) == hash else { return false }
+        let existing = try Self.entries(in: folder)
+        if existing.contains(where: { $0.path == Self.skillFile && !$0.isLink }) {
+            guard Self.digest(existing) == hash else { return false }
             try fm.removeItem(at: folder)
             return true
         }
@@ -171,22 +224,47 @@ struct CodexBundledSkill: Sendable, Equatable {
         return true
     }
 
-    private func write(_ entries: [Entry], codexHome: URL, replacing old: [Entry]) throws {
+    private func stagingPrefix() -> String { ".flightdeck-\(name).staging-" }
+
+    /// Staging folders a crashed refresh left beside the skill. They are Flight Deck's by name.
+    private func removeStaging(codexHome: URL) {
+        let skills = directory(codexHome: codexHome).deletingLastPathComponent()
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: skills.path)) ?? []
+        for stale in names where stale.hasPrefix(stagingPrefix()) {
+            try? FileManager.default.removeItem(at: skills.appendingPathComponent(stale))
+        }
+    }
+
+    /// Writes the whole skill, sidecar included, into a fresh sibling folder and swaps it in, so
+    /// the skill is the old folder or the new one and never a mix. Nothing is written through the
+    /// installed folder, so a link planted inside it is never followed; a swap replaces the link.
+    private func publish(_ entries: [Entry], codexHome: URL, stageFault: ((Int) throws -> Void)?) throws {
         let fm = FileManager.default
         let folder = directory(codexHome: codexHome)
-        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let stage = folder.deletingLastPathComponent().appendingPathComponent(stagingPrefix() + UUID().uuidString)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: stage) }
+        var written = 0
         for entry in entries {
-            let target = folder.appendingPathComponent(entry.path)
+            let target = stage.appendingPathComponent(entry.path)
             try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try entry.data.write(to: target, options: .atomic)
+            try entry.data.write(to: target)
+            written += 1
+            try stageFault?(written)
         }
-        // Only files this app wrote earlier (`old` matched the sidecar) are removed; a first
-        // install never deletes anything.
-        let kept = Set(entries.map(\.path))
-        for stale in old where !kept.contains(stale.path) {
-            try? fm.removeItem(at: folder.appendingPathComponent(stale.path))
+        try Data((Self.digest(entries) + "\n").utf8).write(to: stage.appendingPathComponent(Self.sidecarName))
+        if Self.kind(of: folder) == .missing {
+            guard rename(stage.path, folder.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        } else if renamex_np(stage.path, folder.path, UInt32(RENAME_SWAP)) != 0 {
+            // No atomic swap on this volume: move the old folder aside, then the new one in.
+            let aside = stage.deletingLastPathComponent().appendingPathComponent(stagingPrefix() + "old-" + UUID().uuidString)
+            try fm.moveItem(at: folder, to: aside)
+            do { try fm.moveItem(at: stage, to: folder) } catch {
+                try? fm.moveItem(at: aside, to: folder)
+                throw error
+            }
+            try? fm.removeItem(at: aside)
         }
-        try writeSidecar(Self.digest(entries), codexHome: codexHome)
     }
 
     private func writeSidecar(_ digest: String, codexHome: URL) throws {
