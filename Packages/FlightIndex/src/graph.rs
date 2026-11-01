@@ -17,11 +17,13 @@
 //! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
 //! prove the incremental result equals a full rebuild.
 //!
-//! PageRank is recomputed from scratch on every graph (microseconds-to-milliseconds at this size)
-//! rather than reusing the base's ranks, so ranks are exact for the view.
+//! PageRank is solved for every graph to the same tolerance (see `rank`), started from a nearby
+//! graph's ranks when there is one: the base for an overlay graph, a cached commit of the same
+//! repository for a new base graph. The start changes only how many sweeps the solve takes.
 
 mod elixir;
 mod python;
+pub mod rank;
 mod swift;
 
 use crate::facts::*;
@@ -143,6 +145,8 @@ pub struct GraphData {
     pub(crate) file_rank: Vec<f64>,
     /// per file, per local symbol id
     pub(crate) symbol_rank: Vec<Vec<f64>>,
+    /// How the file and symbol ranks were solved (sweeps, warm or cold).
+    pub rank_stats: [rank::SolveStats; 2],
     resolver: Arc<Resolver>,
     elm_modules: HashMap<String, Vec<u32>>,
 }
@@ -166,6 +170,12 @@ impl std::ops::Deref for ViewGraph {
 impl ViewGraph {
     /// Resolve every file from scratch.
     pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>) -> ViewGraph {
+        Self::build_near(label, inputs, None)
+    }
+
+    /// `build`, with PageRank started from `near`'s ranks (a graph of the same repository at a
+    /// nearby commit). Resolution is unaffected; ranks agree with a cold build within tolerance.
+    pub fn build_near(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, near: Option<&ViewGraph>) -> ViewGraph {
         let root = label.worktree.clone();
         let files: Vec<FileNode> = inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone())).collect();
         let mut g = GraphData {
@@ -181,6 +191,7 @@ impl ViewGraph {
             location_sensitive: false,
             file_rank: Vec::new(),
             symbol_rank: Vec::new(),
+            rank_stats: Default::default(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
         };
@@ -188,7 +199,7 @@ impl ViewGraph {
         for f in 0..g.files.len() as u32 {
             g.res[f as usize] = g.resolve_file(f);
         }
-        g.finalize();
+        g.finalize(near.map(|n| &*n.data));
         ViewGraph { label, root, data: Arc::new(g) }
     }
 
@@ -279,7 +290,7 @@ impl ViewGraph {
                 g.res[f as usize] = g.resolve_file(f);
             }
         }
-        g.finalize();
+        g.finalize(Some(&self.data));
         ViewGraph { root: label.worktree.clone(), label, data: Arc::new(g) }
     }
 }
@@ -309,8 +320,9 @@ impl GraphData {
         }
     }
 
-    /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks.
-    fn finalize(&mut self) {
+    /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks
+    /// (warm-started from `prior` when given).
+    fn finalize(&mut self, prior: Option<&GraphData>) {
         let n = self.files.len();
         self.importers = vec![Vec::new(); n];
         for (i, r) in self.res.iter().enumerate() {
@@ -344,29 +356,7 @@ impl GraphData {
             }
         }
         self.location_sensitive |= self.resolver.probed_outside();
-        // File rank: importers vote for what they import.
-        let edges: Vec<Vec<u32>> = self.res.iter().map(|r| r.edges.clone()).collect();
-        let alive: Vec<bool> = self.files.iter().map(|f| f.alive).collect();
-        self.file_rank = pagerank(&edges, &alive);
-
-        // Symbol rank: a symbol votes, via the references inside it, for what it uses.
-        let mut offset = Vec::with_capacity(n);
-        let mut total = 0usize;
-        for f in &self.files {
-            offset.push(total);
-            total += f.facts.symbols.len();
-        }
-        let mut sedges: Vec<Vec<u32>> = vec![Vec::new(); total];
-        for (fi, r) in self.res.iter().enumerate() {
-            for (rr, fr) in r.refs.iter().zip(&self.files[fi].facts.refs) {
-                if let (Some(t), Some(e)) = (rr.target, fr.enclosing) {
-                    sedges[offset[fi] + e as usize].push((offset[t.file as usize] + t.local as usize) as u32);
-                }
-            }
-        }
-        let salive = vec![true; total];
-        let flat = pagerank(&sedges, &salive);
-        self.symbol_rank = self.files.iter().enumerate().map(|(i, f)| flat[offset[i]..offset[i] + f.facts.symbols.len()].to_vec()).collect();
+        self.rank(prior);
     }
 
 }
@@ -899,41 +889,4 @@ impl GraphData {
     }
 }
 
-/// Plain PageRank (damping 0.85, 30 iterations). Dangling nodes spread evenly; dead nodes (removed
-/// files) neither give nor receive.
-pub fn pagerank(edges: &[Vec<u32>], alive: &[bool]) -> Vec<f64> {
-    let n = edges.len();
-    let live = alive.iter().filter(|a| **a).count();
-    if live == 0 {
-        return vec![0.0; n];
-    }
-    let d = 0.85;
-    let base = (1.0 - d) / live as f64;
-    let mut rank: Vec<f64> = alive.iter().map(|a| if *a { 1.0 / live as f64 } else { 0.0 }).collect();
-    for _ in 0..30 {
-        let mut next: Vec<f64> = alive.iter().map(|a| if *a { base } else { 0.0 }).collect();
-        let mut dangling = 0.0;
-        for (i, out) in edges.iter().enumerate() {
-            if !alive[i] {
-                continue;
-            }
-            let outs: Vec<&u32> = out.iter().filter(|t| alive[**t as usize]).collect();
-            if outs.is_empty() {
-                dangling += rank[i];
-            } else {
-                let share = d * rank[i] / outs.len() as f64;
-                for t in outs {
-                    next[*t as usize] += share;
-                }
-            }
-        }
-        let spread = d * dangling / live as f64;
-        for (i, v) in next.iter_mut().enumerate() {
-            if alive[i] {
-                *v += spread;
-            }
-        }
-        rank = next;
-    }
-    rank
-}
+pub use rank::pagerank;
