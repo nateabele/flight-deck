@@ -410,6 +410,29 @@ final class IntakeThreadServiceTests: XCTestCase {
         XCTAssertEqual(shown(), accepted.replacingOccurrences(of: "A hand note.", with: "A hand note, reworded."))
     }
 
+    // MARK: - One message per draft (A-7)
+
+    /// A double press sends one message: the draft's id is its messageID, and the same id again
+    /// queues nothing. Without an id (an older caller), the same text still waiting unfolded in
+    /// the log is the same press.
+    func testADoublePressRunsOneTurn() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID()
+        try writeThread(i.id, record(t))
+        let draft = UUID().uuidString
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "Why?", messageID: draft))
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "Why?", messageID: draft))
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "And then?"))
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "And then?"))
+        let answers = [StructuredAnswer(questionID: "q1", selected: ["a"])]
+        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers))
+        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers))
+        let logged = threadCommands(i.id)
+        XCTAssertEqual(logged.count, 3, "\(logged)")
+        guard case .message(t, "Why?", draft, nil, nil, nil) = logged.first else { return XCTFail("\(logged)") }
+    }
+
     // MARK: - Trash and Discard stop ThreadRunner (A-I1)
 
     private func beat(_ id: UUID, pid: Int32, at date: Date) throws {

@@ -59,18 +59,36 @@ extension IntakeService {
         return .success(thread)
     }
 
-    func sendThreadMessage(_ id: UUID, thread: ThreadID, text: String) -> ThreadRefusal? {
+    /// `messageID` is the draft's own id (A-7): a second press of the same draft sends the same
+    /// id, and ThreadRunner runs one turn per id. Without one, the same text still unfolded in
+    /// the log for this thread is taken as the same press and queues nothing.
+    func sendThreadMessage(_ id: UUID, thread: ThreadID, text: String, messageID: String? = nil) -> ThreadRefusal? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ThreadRefusal(code: "empty_message") }
         if let refusal = openForTurns(id, thread) { return refusal }
-        return appendThread(id, [.message(thread, text: trimmed, messageID: UUID().uuidString, source: nil, elementID: nil,
-                                          subjectRevision: nil)])
+        if unfoldedThreadCommands(id).contains(where: {
+            guard case .message(thread, let queued, let queuedID, _, _, _) = $0 else { return false }
+            return messageID.map { $0 == queuedID } ?? (queued == trimmed)
+        }) { return nil }
+        return appendThread(id, [.message(thread, text: trimmed, messageID: messageID ?? UUID().uuidString, source: nil,
+                                          elementID: nil, subjectRevision: nil)])
     }
 
-    /// Answers to the questions a turn asked (`askQuestion`).
-    func answerThread(_ id: UUID, thread: ThreadID, answers: [StructuredAnswer]) -> ThreadRefusal? {
+    /// Answers to the questions a turn asked (`askQuestion`); `messageID` as for a message.
+    func answerThread(_ id: UUID, thread: ThreadID, answers: [StructuredAnswer], messageID: String? = nil) -> ThreadRefusal? {
         if let refusal = openForTurns(id, thread) { return refusal }
-        return appendThread(id, [.answer(thread, answers, messageID: UUID().uuidString)])
+        if unfoldedThreadCommands(id).contains(where: {
+            guard case .answer(thread, let queued, let queuedID) = $0 else { return false }
+            return messageID.map { $0 == queuedID } ?? (queued == answers)
+        }) { return nil }
+        return appendThread(id, [.answer(thread, answers, messageID: messageID ?? UUID().uuidString)])
+    }
+
+    /// The thread commands ThreadRunner hasn't folded yet.
+    private func unfoldedThreadCommands(_ id: UUID) -> [ThreadCommand] {
+        let directory = tapeStore(id).intakeDirectory
+        return ThreadCommandStore(intakeDirectory: directory).commands(after: ThreadStore(intakeDirectory: directory).cursor())
+            .map(\.command)
     }
 
     func setThreadAutoAccept(_ id: UUID, thread: ThreadID, _ on: Bool) -> ThreadRefusal? {
@@ -347,14 +365,15 @@ struct IntakeThreadBinding {
                                   effort: effort)
     }
 
-    func send(_ thread: ThreadID, text: String) -> ThreadRefusal? {
+    /// `messageID`: the draft's id, the same for every press of it (A-7).
+    func send(_ thread: ThreadID, text: String, messageID: String? = nil) -> ThreadRefusal? {
         guard let service else { return IntakeService.unavailable }
-        return service.sendThreadMessage(intakeID, thread: thread, text: text)
+        return service.sendThreadMessage(intakeID, thread: thread, text: text, messageID: messageID)
     }
 
-    func answer(_ thread: ThreadID, answers: [StructuredAnswer]) -> ThreadRefusal? {
+    func answer(_ thread: ThreadID, answers: [StructuredAnswer], messageID: String? = nil) -> ThreadRefusal? {
         guard let service else { return IntakeService.unavailable }
-        return service.answerThread(intakeID, thread: thread, answers: answers)
+        return service.answerThread(intakeID, thread: thread, answers: answers, messageID: messageID)
     }
 
     func setAutoAccept(_ thread: ThreadID, _ on: Bool) -> ThreadRefusal? {
