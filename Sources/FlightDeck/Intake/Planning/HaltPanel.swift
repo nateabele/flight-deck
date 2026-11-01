@@ -107,7 +107,7 @@ struct HaltPanel: View {
 
     private func slotLine(_ slot: HaltStatus.Slot) -> some View {
         HStack(spacing: 6) {
-            Text("SEAT")
+            Text("AGENT")
                 .font(.system(size: 9.5, weight: .bold))
                 .tracking(1.2)
                 .foregroundStyle(Instrument.phosphor.opacity(0.5))
@@ -247,7 +247,7 @@ struct HaltPanel: View {
     static func help(_ action: HaltStatus.Action) -> String {
         switch action {
         case .retry: "Run the round that stopped again, as it is"
-        case .retryOther: "Move the failed seat to another agent or model, then run the round again"
+        case .retryOther: "Give the failed role to another agent or model, then run the round again"
         case .toReview: "Run every remaining round, to release review"
         case .resume: "Carry on with the default play"
         case .showOutput: "The tail of what the failed agent printed"
