@@ -177,6 +177,34 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.checkpointDirectory(4).appendingPathComponent("changeset.json").path))
     }
 
+    // MARK: - Visuals (P2a V4)
+
+    /// Each checkpoint records the block states it saw (`checkpoints/<n>/visuals.json`), so an
+    /// old plan shows its visuals as they were; a later change to `block.json` does not reach it.
+    func testACheckpointRecordsTheBlockStatesItSaw() async throws {
+        let id = try VisualDiskFixture.install(store, id: "pairing", r: 1)
+        _ = try store.appendCommand(.step)
+        _ = await runner(scripted()).run()
+        let first = try IntakeJSON.decoder.decode(CheckpointBlockStates.self,
+                                                  from: Data(contentsOf: store.checkpointVisualsURL(1)))
+        XCTAssertEqual(first.states[id]?.primary.r, 1)
+
+        try VisualDiskFixture.install(store, id: "pairing", r: 2)
+        _ = try store.appendCommand(.step)
+        _ = await runner(scripted()).run()
+        let reader = DiskVisualStore(tape: store)
+        XCTAssertEqual(reader.blockState(id, checkpoint: 1)?.primary.r, 1, "checkpoint 1 keeps what it saw")
+        XCTAssertEqual(reader.blockState(id, checkpoint: 2)?.primary.r, 2)
+    }
+
+    /// An intake with no visuals writes no `visuals.json`, so its checkpoints are what they were.
+    func testACheckpointWithNoVisualsWritesNoFile() async throws {
+        _ = try store.appendCommand(.step)
+        _ = await runner(scripted()).run()
+        XCTAssertEqual(store.loadTape().checkpoints.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.checkpointVisualsURL(1).path))
+    }
+
     func testStepStopsAfterOneRound() async throws {
         _ = try store.appendCommand(.step)
         let commands = scripted()

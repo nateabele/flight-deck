@@ -395,9 +395,25 @@ private actor TapeKeeper {
         if TapePlanner.satisfies(next.target, after: cp, nextRound: TapePlanner.next(after: after, config: config)) {
             next.target = .none
         }
+        var files = files
+        if let states = Self.blockStates(store) { files[Self.visualsName] = states }
         try store.writeCheckpoint(cp, files: files, into: &next, beforeSave: hooks.beforeCheckpointSave)
         tape = next
         roundInput = nil
+    }
+
+    /// `checkpoints/<n>/visuals.json`, relative to the checkpoint.
+    static let visualsName = "visuals.json"
+
+    /// Every visual's block state as `visuals/` holds it now (ThreadRunner's, read-only here), for
+    /// the checkpoint being written (spec §7: an old plan shows its visuals as they were then).
+    /// nil when the intake has none, so a checkpoint without visuals gets no file.
+    static func blockStates(_ store: TapeStore) -> Data? {
+        let reader = DiskVisualStore(tape: store)
+        var states: [VisualID: BlockState] = [:]
+        for id in reader.visuals() { states[id] = reader.blockState(id) }
+        guard !states.isEmpty else { return nil }
+        return try? IntakeJSON.encoder.encode(CheckpointBlockStates(states: states))
     }
 
     /// The runner's last write: the final status, with `runnerPID` and `heartbeat` cleared so
