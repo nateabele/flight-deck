@@ -153,12 +153,12 @@ impl ViewGraph {
                     Some((i, w)) => (Some(&n[..i]), &n[i + w..]),
                     None => (None, n.as_str()),
                 };
-                if let Some(c) = self.name_index.get(name) {
+                if let Some(c) = self.named(name) {
                     ids.extend(c.iter().copied().filter(|id| qual.is_none_or(|q| self.qualifier_matches(*id, q))));
                 }
                 // Elixir module symbols carry dots in their own name (`Shop.Order`), so the whole
                 // string can be a definition rather than a qualified lookup.
-                if qual.is_some() && let Some(c) = self.name_index.get(n.as_str()) {
+                if qual.is_some() && let Some(c) = self.named(n.as_str()) {
                     ids.extend(c.iter().copied());
                     ids.sort();
                     ids.dedup();
@@ -276,7 +276,6 @@ impl ViewGraph {
         let mut out: Vec<RefHit> = self
             .incoming
             .get(&id)
-            .map(|v| v.as_slice())
             .unwrap_or(&[])
             .iter()
             .map(|&(fi, ri)| {
@@ -308,7 +307,7 @@ impl ViewGraph {
             let mut step: Vec<(SymId, u32, Confidence)> = Vec::new();
             match dir {
                 Direction::In => {
-                    for &(fi, ri) in self.incoming.get(&cur).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    for &(fi, ri) in self.incoming.get(&cur).unwrap_or(&[]) {
                         let f = self.file(fi);
                         let r = &f.facts.refs[ri as usize];
                         if r.kind == RefKind::Type {

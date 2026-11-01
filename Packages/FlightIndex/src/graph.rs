@@ -19,10 +19,20 @@
 //!
 //! PageRank is recomputed from scratch on every graph (microseconds-to-milliseconds at this size)
 //! rather than reusing the base's ranks, so ranks are exact for the view.
+//!
+//! Graphs of one repository built by the engine (`build_shared`) also share across commits: each
+//! file's resolution is a block hash-consed by content in the repository's `blocks::Share`, and
+//! file indices follow that share's numbering so equal blocks really are equal. A graph owns only
+//! its block pointers and its per-view indexes (`compact`) and ranks.
 
+pub mod blocks;
+mod compact;
 mod elixir;
 mod python;
 mod swift;
+
+pub use blocks::Share;
+use compact::{Incoming, NameIndex};
 
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
@@ -37,7 +47,7 @@ pub struct SymId {
     pub local: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Confidence {
     /// Resolved through the import table, a qualifier, or the same file.
     Exact,
@@ -48,13 +58,13 @@ pub enum Confidence {
 /// Where an imported name points outside the worktree: a file (relative to the worktree root, see
 /// `Resolved::External`) and the name to look up in it. The graph cannot say which symbol that is,
 /// because the file belongs to another view; `links.rs` looks it up there.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtTarget {
     pub path: PathBuf,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RefRes {
     pub target: Option<SymId>,
     pub confidence: Confidence,
@@ -65,7 +75,9 @@ pub struct RefRes {
     pub external: Option<Box<Vec<ExtTarget>>>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// One file's resolution: a *block*, shared by every graph that resolved the file the same way
+/// (see `blocks`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct FileRes {
     pub imports: Vec<Resolved>,
     pub refs: Vec<RefRes>,
@@ -80,23 +92,38 @@ pub struct FileNode {
     pub language: &'static str,
     pub facts: Arc<BlobFacts>,
     pub alive: bool,
-    names: Arc<HashMap<String, Vec<u32>>>,
+    names: Arc<NameMap>,
+}
+
+/// A file's symbols by name (local ids in source order).
+pub(crate) type NameMap = HashMap<String, Vec<u32>>;
+
+fn name_map(facts: &BlobFacts) -> NameMap {
+    let mut names: NameMap = HashMap::new();
+    for s in &facts.symbols {
+        names.entry(s.name.clone()).or_default().push(s.local_id);
+    }
+    names
+}
+
+fn name_map_bytes(n: &NameMap) -> usize {
+    use std::mem::size_of;
+    const ALLOC: usize = 16;
+    n.capacity() * (size_of::<String>() + size_of::<Vec<u32>>() + 1) + n.iter().map(|(k, v)| k.len() + v.capacity() * 4 + 2 * ALLOC).sum::<usize>()
 }
 
 impl FileNode {
-    fn new(f: &FileRef, facts: Arc<BlobFacts>) -> FileNode {
-        let mut names: HashMap<String, Vec<u32>> = HashMap::new();
-        for s in &facts.symbols {
-            names.entry(s.name.clone()).or_default().push(s.local_id);
-        }
-        FileNode {
-            path: f.path.clone(),
-            blob_id: f.blob_id.clone(),
-            language: f.language,
-            facts,
-            alive: true,
-            names: Arc::new(names),
-        }
+    fn new(f: &FileRef, facts: Arc<BlobFacts>, share: Option<&Share>) -> FileNode {
+        let names = match share {
+            Some(s) => s.names(&facts),
+            None => Arc::new(name_map(&facts)),
+        };
+        FileNode { path: f.path.clone(), blob_id: f.blob_id.clone(), language: f.language, facts, alive: true, names }
+    }
+
+    /// A slot of the repository's file numbering that this graph has no file in.
+    fn gap(empty: &Arc<BlobFacts>, names: &Arc<NameMap>) -> FileNode {
+        FileNode { path: String::new(), blob_id: String::new(), language: "", facts: empty.clone(), alive: false, names: names.clone() }
     }
 
     fn tombstone(&self) -> FileNode {
@@ -127,11 +154,12 @@ pub struct GraphData {
     pub(crate) root: PathBuf,
     pub(crate) files: Vec<FileNode>,
     pub(crate) index: HashMap<String, u32>,
-    pub(crate) res: Vec<FileRes>,
+    pub(crate) res: Vec<Arc<FileRes>>,
     pub(crate) importers: Vec<Vec<u32>>,
-    pub(crate) name_index: HashMap<String, Vec<SymId>>,
+    /// Every definition (but `impl` blocks) by name; look up with `named`.
+    name_index: NameIndex,
     /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
-    pub(crate) incoming: HashMap<SymId, Vec<(u32, u32)>>,
+    pub(crate) incoming: Incoming,
     /// External file (relative to the root, as in `Resolved::External`) -> (file, index into that
     /// file's `refs`) of every reference that may land in it.
     pub(crate) external_refs: HashMap<PathBuf, Vec<(u32, u32)>>,
@@ -145,6 +173,9 @@ pub struct GraphData {
     pub(crate) symbol_rank: Vec<Vec<f64>>,
     resolver: Arc<Resolver>,
     elm_modules: HashMap<String, Vec<u32>>,
+    /// The repository's shared numbering and block table, if the graph was built with one; the
+    /// blocks and name tables are then charged there, once, not to each graph.
+    share: Option<Arc<Share>>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -166,16 +197,39 @@ impl std::ops::Deref for ViewGraph {
 impl ViewGraph {
     /// Resolve every file from scratch.
     pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>) -> ViewGraph {
+        Self::build_in(label, inputs, None)
+    }
+
+    /// Resolve every file from scratch, numbering files the way `share`'s repository does and
+    /// taking every block and name table some other graph of the repository already holds from
+    /// there instead of keeping a copy (see `blocks`).
+    pub fn build_shared(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, share: Arc<Share>) -> ViewGraph {
+        Self::build_in(label, inputs, Some(share))
+    }
+
+    fn build_in(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>, share: Option<Arc<Share>>) -> ViewGraph {
         let root = label.worktree.clone();
-        let files: Vec<FileNode> = inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone())).collect();
+        let files: Vec<FileNode> = match &share {
+            None => inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone(), None)).collect(),
+            Some(s) => {
+                let (ids, slots) = s.layout(inputs.iter().map(|(f, _)| f.path.as_str()));
+                let (empty, no_names) = (Arc::new(BlobFacts::default()), Arc::new(NameMap::new()));
+                let mut files = vec![FileNode::gap(&empty, &no_names); slots];
+                for ((f, facts), i) in inputs.iter().zip(ids) {
+                    files[i as usize] = FileNode::new(f, facts.clone(), Some(s));
+                }
+                files
+            }
+        };
+        let empty_res = Arc::new(FileRes::default());
         let mut g = GraphData {
             root: root.clone(),
-            res: vec![FileRes::default(); files.len()],
+            res: vec![empty_res; files.len()],
             files,
             index: HashMap::new(),
             importers: Vec::new(),
-            name_index: HashMap::new(),
-            incoming: HashMap::new(),
+            name_index: NameIndex::default(),
+            incoming: Incoming::default(),
             external_refs: HashMap::new(),
             external_importers: HashMap::new(),
             location_sensitive: false,
@@ -183,10 +237,13 @@ impl ViewGraph {
             symbol_rank: Vec::new(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
+            share,
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
-            g.res[f as usize] = g.resolve_file(f);
+            if g.files[f as usize].alive {
+                g.res[f as usize] = g.intern(g.resolve_file(f));
+            }
         }
         g.finalize();
         ViewGraph { label, root, data: Arc::new(g) }
@@ -208,7 +265,7 @@ impl ViewGraph {
         for ch in changes {
             match ch {
                 FileChange::Upsert(f, facts) => {
-                    let node = FileNode::new(&f, facts);
+                    let node = FileNode::new(&f, facts, g.share.as_deref());
                     match g.index.get(&f.path).copied() {
                         Some(i) => {
                             let old = &g.files[i as usize];
@@ -233,13 +290,13 @@ impl ViewGraph {
                         structural = true;
                         old_names.extend(names_of(&g.files[i as usize]));
                         g.files[i as usize] = g.files[i as usize].tombstone();
-                        g.res[i as usize] = FileRes::default();
+                        g.res[i as usize] = Arc::default();
                         changed.insert(i);
                     }
                 }
             }
         }
-        g.res.resize(g.files.len(), FileRes::default());
+        g.res.resize(g.files.len(), Arc::default());
         let changed_names: HashSet<String> = old_names.symmetric_difference(&new_names).cloned().collect();
         g.reindex();
 
@@ -276,7 +333,7 @@ impl ViewGraph {
         }
         for f in dirty {
             if g.files[f as usize].alive {
-                g.res[f as usize] = g.resolve_file(f);
+                g.res[f as usize] = g.intern(g.resolve_file(f));
             }
         }
         g.finalize();
@@ -285,6 +342,14 @@ impl ViewGraph {
 }
 
 impl GraphData {
+    /// `r` as a block: the shared copy when another graph of the repository holds an equal one.
+    fn intern(&self, r: FileRes) -> Arc<FileRes> {
+        match &self.share {
+            Some(s) => s.block(r),
+            None => Arc::new(r),
+        }
+    }
+
     /// Rebuild the path index, resolver and name/module indexes from `files`.
     fn reindex(&mut self) {
         self.index = self.files.iter().enumerate().filter(|(_, f)| f.alive).map(|(i, f)| (f.path.clone(), i as u32)).collect();
@@ -295,18 +360,25 @@ impl GraphData {
             .map(|f| FileRef { path: f.path.clone(), blob_id: f.blob_id.clone(), language: f.language })
             .collect();
         self.resolver = Arc::new(Resolver::new(&self.root, &refs));
-        self.name_index.clear();
         self.elm_modules.clear();
+        let mut defs: Vec<SymId> = Vec::new();
         for (fi, f) in self.files.iter().enumerate().filter(|(_, f)| f.alive) {
             for s in &f.facts.symbols {
                 if s.kind != SymbolKind::Impl {
-                    self.name_index.entry(s.name.clone()).or_default().push(SymId { file: fi as u32, local: s.local_id });
+                    defs.push(SymId { file: fi as u32, local: s.local_id });
                 }
             }
             if let Some(m) = &f.facts.module_name {
                 self.elm_modules.entry(m.clone()).or_default().push(fi as u32);
             }
         }
+        let files = &self.files;
+        self.name_index = NameIndex::build(defs, |id| files[id.file as usize].symbol(id.local).name.as_str());
+    }
+
+    /// Every definition named `name` (but `impl` blocks), in file then source order.
+    pub(crate) fn named(&self, name: &str) -> Option<&[SymId]> {
+        self.name_index.get(name, |id| self.symbol(id).name.as_str())
     }
 
     /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks.
@@ -318,14 +390,15 @@ impl GraphData {
                 self.importers[t as usize].push(i as u32);
             }
         }
-        self.incoming.clear();
+        let mut pairs: Vec<(SymId, (u32, u32))> = Vec::new();
         for (fi, r) in self.res.iter().enumerate() {
             for (ri, rr) in r.refs.iter().enumerate() {
                 if let Some(t) = rr.target {
-                    self.incoming.entry(t).or_default().push((fi as u32, ri as u32));
+                    pairs.push((t, (fi as u32, ri as u32)));
                 }
             }
         }
+        self.incoming = Incoming::build(pairs);
         self.external_refs.clear();
         self.external_importers.clear();
         for (fi, r) in self.res.iter().enumerate() {
@@ -439,6 +512,12 @@ impl GraphData {
         &self.files[i as usize]
     }
 
+    /// File slots, dead ones included: indices run `0..files_len()`, and a slot whose file is not
+    /// in this view (removed, or numbered for another commit of the repository) is not `alive`.
+    pub fn files_len(&self) -> usize {
+        self.files.len()
+    }
+
     pub fn symbol(&self, id: SymId) -> &Symbol {
         self.files[id.file as usize].symbol(id.local)
     }
@@ -541,7 +620,7 @@ impl GraphData {
     }
 
     fn fallback(&self, from_file: u32, name: &str, kind: RefKind, qualified: bool) -> Option<SymId> {
-        let cands: Vec<SymId> = self.name_index.get(name)?.iter().copied().filter(|c| c.file != from_file).collect();
+        let cands: Vec<SymId> = self.named(name)?.iter().copied().filter(|c| c.file != from_file).collect();
         let type_like = |id: &SymId| {
             matches!(
                 self.symbol(*id).kind,
@@ -869,34 +948,27 @@ pub fn facts_bytes(f: &BlobFacts) -> usize {
 }
 
 impl GraphData {
-    /// Estimated heap bytes this graph owns beyond the (shared) facts of its files.
+    /// Estimated heap bytes this graph owns beyond the (shared) facts of its files, and beyond the
+    /// blocks and name tables its `Share` holds when it has one.
     pub fn own_bytes(&self) -> usize {
         use std::mem::size_of;
         const ALLOC: usize = 16;
-        let mut n = self.files.len() * size_of::<FileNode>();
+        let shared = self.share.is_some();
+        let mut n = self.files.len() * size_of::<FileNode>() + self.res.len() * size_of::<Arc<FileRes>>();
         for f in &self.files {
             n += f.path.len() + f.blob_id.len() + 2 * ALLOC;
-            n += f.names.len() * (size_of::<String>() + size_of::<Vec<u32>>() + 2 * ALLOC + 8) + f.facts.symbols.iter().map(|s| s.name.len() + 4).sum::<usize>();
+            if !shared {
+                n += name_map_bytes(&f.names);
+            }
         }
         n += self.index.len() * (size_of::<String>() + 4 + ALLOC + 8) + self.index.keys().map(|k| k.len()).sum::<usize>();
-        for r in &self.res {
-            n += r.refs.len() * size_of::<RefRes>() + r.imports.len() * size_of::<Resolved>() + r.edges.len() * 4 + 3 * size_of::<Vec<u8>>();
-            n += r
-                .imports
-                .iter()
-                .map(|x| match x {
-                    Resolved::File { path, rest } => path.len() + ALLOC + rest.iter().map(|s| s.len() + ALLOC).sum::<usize>(),
-                    Resolved::External(p) => p.as_os_str().len() + ALLOC,
-                    Resolved::Unresolved => 0,
-                })
-                .sum::<usize>();
-            n += r.refs.iter().filter_map(|x| x.external.as_deref()).flatten().map(|t| t.path.as_os_str().len() + t.name.len() + 2 * ALLOC).sum::<usize>();
+        if !shared {
+            n += self.res.iter().map(|r| blocks::block_bytes(r)).sum::<usize>();
         }
         n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
         n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
         n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
-        n += self.name_index.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<SymId>>() + v.len() * size_of::<SymId>() + 8).sum::<usize>();
-        n += self.incoming.values().map(|v| size_of::<SymId>() + size_of::<Vec<(u32, u32)>>() + v.len() * 8 + 8).sum::<usize>();
+        n += self.name_index.bytes() + self.incoming.bytes();
         n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
         n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
         // The resolver keeps every path of the view in a set.

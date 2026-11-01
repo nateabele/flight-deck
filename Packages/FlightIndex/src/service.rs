@@ -987,7 +987,7 @@ impl Service {
             "views": views, "builds": builds,
             "vm": {"resident": vm.resident, "internal": vm.internal, "reusable": vm.reusable, "compressed": vm.compressed, "footprint": vm.footprint},
             "heap_bytes": crate::alloc::live_bytes(), "heap_peak_bytes": crate::alloc::peak_bytes(),
-            "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "budget": g.budget, "evictions": g.evictions, "heap_limit": g.heap_limit},
+            "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "blocks": g.blocks, "block_bytes": g.block_bytes, "budget": g.budget, "evictions": g.evictions, "heap_limit": g.heap_limit},
             "stores": stores,
             "watch": watch, "gc": gc,
         });

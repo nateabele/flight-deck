@@ -88,7 +88,7 @@ Newline-delimited JSON over a Unix socket (mode 0600). Default path: `<store>/fd
 - Tool names may carry the `qartez_` prefix.
 - `state` is one of `UNAVAILABLE` (client-generated: the daemon cannot be reached or started), `BUILDING`, `BAD_REQUEST`, `VERSION_MISMATCH`, `ERROR`.
 - A connection answers in order. Two requests in flight need two connections. A request line over 4 MiB is refused and the connection closed.
-- `status` returns `text` and `data`: pid, uptime, RSS, request and error counts, blobs parsed, the views known (worktree, repo, base, dirty files, requests, idle seconds, whether the view is kept between requests and swept by stat, with the files and directories swept, the last sweep's milliseconds and how long ago it last found a change), builds in progress (phase, done, total), graph cache (count, charged bytes, facts bytes, budget, evictions) each repository's store file size and free pages, the ref watcher (repositories watched, events seen) and the garbage collector (runs, bytes reclaimed in total, and the last run's repositories, worktree rows, trees and facts collected, pages vacuumed, bytes before and after).
+- `status` returns `text` and `data`: pid, uptime, RSS, request and error counts, blobs parsed, the views known (worktree, repo, base, dirty files, requests, idle seconds, whether the view is kept between requests and swept by stat, with the files and directories swept, the last sweep's milliseconds and how long ago it last found a change), builds in progress (phase, done, total), graph cache (count, charged bytes, facts bytes, distinct shared blocks and their bytes, budget, evictions, heap limit) each repository's store file size and free pages, the ref watcher (repositories watched, events seen) and the garbage collector (runs, bytes reclaimed in total, and the last run's repositories, worktree rows, trees and facts collected, pages vacuumed, bytes before and after).
 - `shutdown` answers and exits.
 
 ## CLI
@@ -212,5 +212,17 @@ Measured on tessera (86 to 93 worktrees, the count grew while measuring): every 
 | `--memory-mb 1024` | 1023 / 1038 MB | 1165 MB | 810 MB | 19 | 197 / 452 | 834 / 340 / 8781 ms |
 
 Reading the latency: a hot find is 7 ms either way, and the second sweep is within noise. What costs is the mixed run, where 30 clients pick among about 95 worktrees at random: with fewer graphs cached more requests rebuild one (0.2 to 0.4 s on a quiet machine, seconds on this loaded one), and builds now queue for four slots instead of all running at once. Machines that want the old latency under that load can pass `--memory-mb 3072`.
+
+**Shared blocks.** The graphs of one repository share their per-file resolutions. Each file's resolution (imports, every reference's target and confidence, file edges) is a block, hash-consed by content in a per-repository table, so a graph of a nearby commit points at the blocks that came out the same instead of holding copies; file indices follow a per-repository numbering so that equal blocks really are equal (a path keeps its index, a graph has a dead slot for each numbered path it lacks, and a view under a quarter of the numbering's size is numbered on its own). Keyed by content, a block whose unique-name fallback answer changed is simply a different block: nothing is shared stale. Each graph's name index and incoming-reference index are sorted arrays rather than hash maps. `status` reports `graphs.blocks` and `graphs.block_bytes` (counted once, inside `graphs.bytes`). Answers are unchanged: a graph built this way has the same fingerprint as one built alone.
+
+Measured on the 42 tessera worktrees of distinct commits, queried in turn by `map` with `--graph-budget-mb 100000 --no-watch` (44 graphs: two worktrees are dirty), blobs already stored, two runs each, load average 21 to 32:
+
+| graphs cached | RSS before / after | live heap before / after | footprint before / after |
+|---|---|---|---|
+| 1 | 153 / 148 MB | 99 / 94 MB | 113 / 106 MB |
+| 11 | 611 / 400 MB | 478 / 296 MB | 486 / 271 MB |
+| 44 | 1807 / 806 MB | 1494 / 641 MB | 1473 / 505 MB |
+
+The 44 graphs hold 100,876 file resolutions, of which 18,688 are distinct (210 MB); the facts of the 42 commits are another 254 MB. A graph build costs 5 to 10% more (min of 7 builds of tessera at 81f973be6 with facts in memory: 196 to 207 ms before, 211 to 228 ms after, load 29 to 30), for hashing and comparing blocks.
 
 Where the memory went (before): 1327 MB live heap at 1512 MB charged (graphs and their facts, 12.4 million allocations); kept views of 85 worktrees 93 MB; 130 to 190 MB resident that is not live heap at all (a daemon holding one graph is at 440 MB RSS with 200 MB live); and, under concurrency, 700 MB of transient peak from builds running together plus graphs evicted from the cache while requests still held them, which freed nothing and were not counted. Allocator retention is real but not recoverable from inside the process on macOS: `malloc_zone_pressure_relief` ran 83 times without changing RSS, swapping in mimalloc (with `mi_collect`) was 200 MB worse at one graph, and the kernel's own accounting (`vm`) marks 85% of the resident pages reusable, which is why an RSS-triggered eviction loop would evict everything and free nothing.

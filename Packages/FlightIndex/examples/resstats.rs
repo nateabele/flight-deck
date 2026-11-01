@@ -12,8 +12,11 @@ fn main() {
     let g = e.graph(&v).unwrap();
     // lang -> (files, symbols, files with an out edge, edges, exact, fallback, unresolved)
     let mut by: BTreeMap<&str, [u64; 7]> = BTreeMap::new();
-    for i in 0..g.file_count() as u32 {
+    for i in 0..g.files_len() as u32 {
         let f = g.file(i);
+        if !f.alive {
+            continue;
+        }
         let r = g.resolution(i);
         let s = by.entry(f.language).or_default();
         s[0] += 1;
