@@ -38,12 +38,27 @@ final class PlanEditorKeystrokeTests: XCTestCase {
     /// On a page, as in the detail pane: the editor has no scroll view of its own and is as tall
     /// as its text, inside a scroll view's document — so each keystroke pays for the reveal
     /// through the page and the height it hands on, as it does in the app.
+    /// The sections that get a visual block above them in the plan with visuals (V1 review, M3):
+    /// three above the line typed into and two below it.
+    static let visualSections = [20, 60, 100, 140, 200]
+
+    static func addingVisuals(_ lines: [String]) -> [String] {
+        var out = lines
+        for n in visualSections.reversed() {
+            let at = out.firstIndex(of: "## \(n). Section \(n)")!
+            out.insert(contentsOf: ["```fd-visual id=v-\(n)", "Diagram \(n): what section \(n) does", "```", ""], at: at)
+        }
+        return out
+    }
+
     @MainActor
-    static func editor() -> (PlanTextView.Coordinator, PlanEditorContainer, PlanNotesController, NSWindow) {
-        let generated = plan()
-        var lines = generated.components(separatedBy: "\n")
+    static func editor(visuals: (any VisualStoreReading)? = nil) -> (PlanTextView.Coordinator, PlanEditorContainer, PlanNotesController, NSWindow) {
+        var generatedLines = plan().components(separatedBy: "\n")
+        var lines = generatedLines
         lines[402] = "Prose number 50 with a human's change."
         lines.insert("- a new item", at: 1203)
+        if visuals != nil { generatedLines = addingVisuals(generatedLines); lines = addingVisuals(lines) }
+        let generated = generatedLines.joined(separator: "\n")
         let edited = lines.joined(separator: "\n")
 
         let notes = PlanNotesController()
@@ -60,6 +75,7 @@ final class PlanEditorKeystrokeTests: XCTestCase {
             .editLayer(generated: generated)
             .churnLane(churn)
             .annotating(notes)
+            .visuals(visuals)
         let coordinator = view.makeCoordinator()
         let container = PlanEditorContainer(onShow: {})
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled],
@@ -75,6 +91,9 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         coordinator.revertButton = container.revert
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
+        // What `makeNSView` does before its first load.
+        container.textView.visualBlocks.store = visuals
+        container.textView.visualBlocks.allowsLive = false
         coordinator.load(edited)
         coordinator.notesBridge.attach(notes, to: container.textView)
         container.churnLane.update(churn)
@@ -118,6 +137,41 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         }
         let median = samples.sorted()[keys / 2]
         print("PlanEditor keystroke timing: median \(median * 1000) ms CPU over \(keys) (2000 lines, 10 notes, hot §4)")
+        XCTAssertLessThan(median, 0.016)
+    }
+
+    /// The same keystroke in the same plan with five `fd-visual` blocks (M3): each block's band is
+    /// found by `VisualBlockOverlay.refresh` on every style pass, and the first measurement of it
+    /// (4.48 ms) had no block in the plan to find. Real revisions, so each is a ready block with its
+    /// header and body, not a placeholder.
+    @MainActor
+    func testKeystrokeWithFiveVisualBlocksIsUnderBudget() throws {
+        let fixture = try VisualFixture()
+        defer { fixture.remove() }
+        for n in Self.visualSections {
+            try fixture.revision("v-\(n)", r: 1, source: n.isMultiple(of: 40) ? VisualFixture.flowchart : VisualFixture.sequence)
+        }
+        let (coordinator, container, _, window) = Self.editor(visuals: fixture.store)
+        defer { coordinator.timer?.invalidate(); container.textView.visualBlocks.tearDown(); window.close() }
+        let view = container.textView
+        view.visualBlocks.refresh()
+        XCTAssertEqual(view.visualBlocks.blocks.count, Self.visualSections.count, "all five blocks are drawn")
+        let at = (view.string as NSString).range(of: "Techs check in on arrival 130.").location
+        view.setSelectedRange(NSRange(location: at, length: 0))
+        view.insertText("w", replacementRange: view.selectedRange())
+
+        let keys = 40
+        var samples: [Double] = []
+        for i in 0..<keys {
+            let key = String(UnicodeScalar(UInt8(97 + i % 26)))
+            samples.append(threadCPUSeconds {
+                view.insertText(key, replacementRange: view.selectedRange())
+                view.displayIfNeeded()
+            })
+        }
+        let median = samples.sorted()[keys / 2]
+        print("PlanEditor keystroke timing with 5 visual blocks: median \(median * 1000) ms CPU over \(keys) (2000 lines, 10 notes, hot §4, 5 fd-visual blocks)")
+        XCTAssertEqual(view.visualBlocks.blocks.count, Self.visualSections.count, "typing did not lose a block")
         XCTAssertLessThan(median, 0.016)
     }
 

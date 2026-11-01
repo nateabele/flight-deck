@@ -378,17 +378,31 @@ public final class FleetConnector: @unchecked Sendable {
     /// `WireFileChunk` on the same table `requestFile` uses, so the err routing and the
     /// disconnect drain are already right. Only for a Mac whose detail says `visuals == true`;
     /// an older one answers `unsupported`.
+    ///
+    /// The result takes the request back: a caller that gives up (its deadline passed) calls it, and
+    /// the handler leaves the table without being called (on the connector's queue, like every request), so a Mac that never answers leaves
+    /// nothing registered, and a reply that does come late is dropped. Harmless to call twice, or
+    /// after the reply.
+    @discardableResult
     public func requestVisual(
         id: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
         then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
-    ) {
+    ) -> () -> Void {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard let winner else { return completion(.failure(.disconnected)) }
+        guard let winner else { completion(.failure(.disconnected)); return {} }
         let cid = winner.send(FleetRequest.intakeVisualFetch(
             id: id, visualID: visualID, revision: revision, part: part, offset: offset, limit: limit))
-        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        guard cid != 0 else { completion(.failure(.disconnected)); return {} }
         pendingFile[cid] = completion
+        return { [weak self] in
+            guard let self else { return }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            self.pendingFile.removeValue(forKey: cid)
+        }
     }
+
+    /// File and visual requests still waiting for their reply (a test's way to see a cancel land).
+    public var outstandingFileRequests: Int { pendingFile.count }
 
     /// Ask the Mac which addresses it can currently be reached on. Same contract as
     /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is

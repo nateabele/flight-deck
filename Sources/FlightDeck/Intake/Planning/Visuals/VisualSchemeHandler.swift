@@ -145,6 +145,7 @@ final class VisualWebView: NSObject, WKNavigationDelegate {
     /// Navigations this view refused, newest last: what a test checks the policy by.
     private(set) var cancelled: [URL] = []
     private let handler: VisualSchemeHandler
+    private var stopped = false
 
     /// `fit` scales the drawing down to the view's height (a block's body); without it the page
     /// is as tall as the drawing (a snapshot).
@@ -176,6 +177,8 @@ final class VisualWebView: NSObject, WKNavigationDelegate {
 
     /// Detaches the status relay, so the web view (which retains it) holds nothing of the block.
     func stop() {
+        guard !stopped else { return }
+        stopped = true
         view.stopLoading()
         view.configuration.userContentController.removeScriptMessageHandler(forName: "fdvisual", contentWorld: .page)
         onStatus = nil

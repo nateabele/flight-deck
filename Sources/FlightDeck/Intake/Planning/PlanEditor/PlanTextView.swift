@@ -543,8 +543,15 @@ struct PlanTextView: NSViewRepresentable {
         /// The block whose syntax shows: the caret's, and only while the editor has focus — an
         /// unfocused plan reads fully rendered, with no stray `##` where the caret last was.
         private func caretBlock() -> Int? {
-            guard let textView, textView.isFocused,
-                  let index = MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks) else { return nil }
+            guard let textView else { return nil }
+            let selection = textView.selectedRange()
+            guard let index = MarkdownStyler.blockIndex(at: selection.location, in: blocks) else { return nil }
+            if !textView.isFocused {
+                // A Find match is selected while the find field has focus. A hidden visual block
+                // has the match under its view, so it shows its source; the caret alone does not.
+                guard selection.length > 0, case .visual = blocks[index].kind else { return nil }
+                return index
+            }
             // A table never shows its source: the caret in it reveals nothing.
             return blocks[index].kind == .table ? nil : index
         }

@@ -70,4 +70,21 @@ final class MermaidRenderTests: XCTestCase {
                       "Mermaid's own message: \(message)")
         XCTAssertTrue(try hasErrorRed(shot.png), "the picture shows the error box")
     }
+
+    /// V1 review, M5: the empty drawing area kept its padding above the error box, so the message
+    /// started about 48 points down. The box now sits at the page's own margin.
+    func testTheErrorBoxStartsAtThePagesMarginNotBelowAnEmptyDrawingArea() async throws {
+        let shot = try await draw(VisualFixture.broken, "parse-error-top")
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: shot.png))
+        let scale = CGFloat(rep.pixelsWide) / CGFloat(VisualSize.defaultWidth)
+        var firstRed: Int?
+        search: for y in 0..<rep.pixelsHigh {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if c.redComponent > 0.6, c.greenComponent < 0.3, c.blueComponent < 0.3 { firstRed = y; break search }
+            }
+        }
+        let top = try XCTUnwrap(firstRed)
+        XCTAssertLessThanOrEqual(CGFloat(top) / scale, 20, "the box's border is at the 16 pt margin, not 48 pt down")
+    }
 }

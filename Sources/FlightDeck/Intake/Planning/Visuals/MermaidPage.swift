@@ -120,6 +120,8 @@ enum MermaidPage {
       var err = document.getElementById('err');
       function fail(message) {
         out.textContent = '';
+        // The drawing area keeps its padding when empty; the message starts at the page's margin.
+        out.style.display = 'none';
         document.getElementById('err-text').textContent = message;
         err.hidden = false;
         post({ status: 'error', message: message, width: Math.ceil(document.body.getBoundingClientRect().width), height: height() });

@@ -82,9 +82,11 @@ final class VisualBlockOverlayTests: XCTestCase {
         }
     }
 
-    private func editor(_ text: String, store: (any VisualStoreReading)?, height: CGFloat = 900, focused: Bool = true) -> Editor {
-        let view = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {})
+    private func editor(_ text: String, store: (any VisualStoreReading)?, height: CGFloat = 900, focused: Bool = true,
+                        generated: String? = nil) -> Editor {
+        var view = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {})
             .visuals(store)
+        if let generated { view = view.editLayer(generated: generated) }
         let coordinator = view.makeCoordinator()
         let container = PlanEditorContainer(onShow: {})
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 900, height: height), styleMask: [.borderless],
@@ -225,6 +227,90 @@ final class VisualBlockOverlayTests: XCTestCase {
         e.view.setSelectedRange(NSRange(location: e.offset("If the exchange"), length: 0))
         XCTAssertEqual(e.blocks.count, 1)
         e.assertNothingCovered("caret out")
+    }
+
+    /// V1 review, I1: Find selects its match while the find field has focus, so the editor is not
+    /// first responder and the caret rule (focused only) never revealed the block. The match sat
+    /// under the block's view and the human saw nothing.
+    func testAFindMatchInsideAHiddenBlockRevealsItsSource() throws {
+        let e = editor(Self.missingPlan, store: fixture.store, focused: false)
+        defer { e.close() }
+        XCTAssertEqual(e.blocks.count, 1)
+        let caption = e.offset("handshake: phone")
+        // The caret alone, in an editor that is not focused, reveals nothing (an unfocused plan reads rendered).
+        e.view.setSelectedRange(NSRange(location: caption, length: 0))
+        XCTAssertEqual(e.blocks.count, 1, "a bare caret in an unfocused plan reveals nothing")
+        // A match does.
+        e.view.setSelectedRange(NSRange(location: caption, length: "handshake".count))
+        XCTAssertTrue(e.blocks.isEmpty, "the match is in the block, so its source shows and the view goes")
+        let font = e.view.textStorage?.attribute(.font, at: caption, effectiveRange: nil) as? NSFont
+        XCTAssertGreaterThan(font?.pointSize ?? 0, 5, "the matched words are readable text")
+        e.assertNothingCovered("find match in the block")
+        // The match moves on to a paragraph: the block is drawn again.
+        e.view.setSelectedRange(NSRange(location: e.offset("exchange fails"), length: "exchange".count))
+        XCTAssertEqual(e.blocks.count, 1)
+        // A match in text outside a block reveals no block.
+        e.view.setSelectedRange(NSRange(location: e.offset("SPAKE2"), length: 6))
+        XCTAssertEqual(e.blocks.count, 1)
+    }
+
+    // MARK: - Concern 6: the edit layer on a block's hidden lines
+
+    private func markedPlan(captionNow: String) -> String {
+        Self.missingPlan.replacingOccurrences(of: "Pairing handshake: phone, Mac and hostd", with: captionNow)
+    }
+
+    private func visualRef(_ e: Editor) throws -> PlanVisualRef {
+        let at = e.offset("```fd-visual")
+        return try XCTUnwrap(e.view.textStorage?.attribute(.planVisual, at: at, effectiveRange: nil) as? PlanVisualRef)
+    }
+
+    func testABlockWhoseCaptionTheHumanChangedIsMarkedChangedAsAWhole() throws {
+        let e = editor(markedPlan(captionNow: "Pairing handshake, edited by hand"), store: fixture.store, focused: false,
+                       generated: Self.missingPlan)
+        defer { e.close() }
+        // The caption's words were replaced: some added, some removed, as a changed line gets both
+        // colours of the lane. Whole block, since its lines are one picture.
+        XCTAssertEqual(try visualRef(e).edit, [.inserted, .removed])
+        XCTAssertEqual(e.blocks.count, 1, "still drawn as a block")
+        // No struck-through ghost is laid out inside the hidden lines (it would stretch the block).
+        var ghosts = 0
+        let block = (e.view.string as NSString).range(of: "```fd-visual id=nowhere\nPairing handshake, edited by hand\n```")
+        e.view.textStorage?.enumerateAttribute(.planEditGhosts, in: block) { v, _, _ in if v != nil { ghosts += 1 } }
+        XCTAssertEqual(ghosts, 0, "no ghost text inside a hidden block")
+        e.assertNothingCovered("edited caption")
+        let band = try XCTUnwrap(e.blocks.first).frame.height
+        XCTAssertEqual(band, VisualBlockLayout.placeholder, accuracy: 1, "an edit does not change the block's height")
+    }
+
+    func testABlockTheHumanInsertedIsMarkedInsertedAndAnUntouchedOneIsNot() throws {
+        let withoutBlock = "# Pairing\n\nThe phone pairs with the Mac over SPAKE2 using a short code.\n\nIf the exchange fails, the phone shows the code entry again."
+        let e = editor(Self.missingPlan, store: fixture.store, focused: false, generated: withoutBlock)
+        defer { e.close() }
+        XCTAssertEqual(try visualRef(e).edit, [.inserted])
+        let same = editor(Self.missingPlan, store: fixture.store, focused: false, generated: Self.missingPlan)
+        defer { same.close() }
+        XCTAssertEqual(try visualRef(same).edit, [])
+    }
+
+    func testLinesTheHumanRemovedFromABlocksCaptionMarkItRemovedWithoutGhostText() throws {
+        let generated = markedPlan(captionNow: "Pairing handshake: phone, Mac and hostd\nand a second caption line")
+        let e = editor(Self.missingPlan, store: fixture.store, focused: false, generated: generated)
+        defer { e.close() }
+        XCTAssertEqual(try visualRef(e).edit, [.removed])
+        let block = (e.view.string as NSString).range(of: "```fd-visual id=nowhere\nPairing handshake: phone, Mac and hostd\n```")
+        var ghosts = 0
+        e.view.textStorage?.enumerateAttribute(.planEditGhosts, in: block) { v, _, _ in if v != nil { ghosts += 1 } }
+        XCTAssertEqual(ghosts, 0)
+        XCTAssertEqual(try XCTUnwrap(e.blocks.first).frame.height, VisualBlockLayout.placeholder, accuracy: 1)
+    }
+
+    func testAGhostLineJustAboveABlockStaysAboveIt() throws {
+        // The human deleted the paragraph before the block: its ghost belongs to that gap, not to the block.
+        let generated = Self.missingPlan.replacingOccurrences(of: "```fd-visual", with: "A paragraph the human deleted.\n\n```fd-visual")
+        let e = editor(Self.missingPlan, store: fixture.store, focused: false, generated: generated)
+        defer { e.close() }
+        XCTAssertEqual(try visualRef(e).edit, [], "the block itself is unchanged")
     }
 
     func testDeletingTheClosingFenceRemovesTheView() throws {

@@ -42,4 +42,14 @@ final class VisualFenceInfoCrossCheckTests: XCTestCase {
     func testTheStoreCapMatchesTheWireCap() {
         XCTAssertEqual(VisualStoreLimits.maxFileBytes, VisualLimits.maxBytes)
     }
+
+    /// The phone's size widths (FleetKit) and the Mac's (IntakeKit, what snapshots are drawn at).
+    func testBothCopiesAgreeOnTheWidthOfEverySizeName() {
+        for name in ["default", "phone", "compact", "tablet", "mac", "desktop", "wide", "Phone", "WIDE", "narrow", "", "640", "500x900",
+                     "5", "99999", "0", "x", "12x", "abc", "1e3", "-5"] {
+            XCTAssertEqual(VisualSizeWidth.width(name), VisualSize.width(name), name)
+        }
+        XCTAssertEqual(VisualSizeWidth.defaultWidth, VisualSize.defaultWidth)
+        XCTAssertEqual(VisualSizeWidth.range, VisualSize.range)
+    }
 }

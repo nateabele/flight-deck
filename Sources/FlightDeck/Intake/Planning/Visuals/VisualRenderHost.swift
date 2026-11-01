@@ -15,9 +15,15 @@ import WebKit
 /// **A parse error is a picture too.** The page draws Mermaid's message, so the snapshot shows the
 /// same text the live block does (Review Focus 3); `Snapshot.status` says which it was.
 ///
-/// One draw at a time: each is a web content process, and the plan's blocks ask for many.
+/// One draw at a time: each is a web content process, and the plan's blocks ask for many. That
+/// holds across intakes too, because every block draws through `shared` and hands it the store of
+/// the intake it is in (V1 review, M2): a host per intake would draw one picture per intake at once.
 @MainActor
 final class VisualRenderHost {
+    /// The app's one host, for pictures in memory (`VisualSnapshotCache`). It holds no intake: each
+    /// call brings its own store, so nothing stays reachable after the last draw.
+    static let shared = VisualRenderHost(store: EmptyVisualStore())
+
     struct Snapshot {
         let key: VisualSnapshotKey
         let status: VisualRenderStatus
@@ -36,6 +42,13 @@ final class VisualRenderHost {
     var timeout: Duration = .seconds(20)
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// Draws begun, and the most that were ever running together: what a test checks "one at a
+    /// time" by.
+    private(set) var drawCount = 0
+    private(set) var peakConcurrentDraws = 0
+    private var drawing = 0
+
+    func resetPeak() { peakConcurrentDraws = 0 }
 
     init(store: any VisualStoreReading, library: @escaping @Sendable (String) -> Data? = { VisualSchemeHandler.bundledLibrary($0) }) {
         self.store = store
@@ -58,15 +71,19 @@ final class VisualRenderHost {
 
     /// One picture of revision `r` in `key`'s state at `key`'s size. Waits its turn behind any
     /// draw already running.
-    func render(_ id: VisualID, r: Int, key: VisualSnapshotKey) async throws -> Snapshot {
+    func render(_ id: VisualID, r: Int, key: VisualSnapshotKey, store override: (any VisualStoreReading)? = nil) async throws -> Snapshot {
         if busy { await withCheckedContinuation { waiters.append($0) } }
         busy = true
         // Hands the turn straight to the next waiter, so `busy` never drops between two draws.
         defer { if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() } }
-        return try await draw(id, r: r, key: key)
+        drawCount += 1
+        drawing += 1
+        peakConcurrentDraws = max(peakConcurrentDraws, drawing)
+        defer { drawing -= 1 }
+        return try await draw(id, r: r, key: key, store: override ?? store)
     }
 
-    private func draw(_ id: VisualID, r: Int, key: VisualSnapshotKey) async throws -> Snapshot {
+    private func draw(_ id: VisualID, r: Int, key: VisualSnapshotKey, store: any VisualStoreReading) async throws -> Snapshot {
         guard store.revision(id, r: r) != nil else { throw Failure.noRevision }
         let width = CGFloat(VisualSize.width(key.size))
         let web = VisualWebView(store: store, frame: NSRect(x: 0, y: 0, width: width, height: 400), library: library)
@@ -137,12 +154,14 @@ final class VisualSnapshotCache {
         let id: VisualID
         let r: Int
         let snapshot: VisualSnapshotKey
+        /// The picture of a live view, fitted to the block's body, not the full-size render. Apart
+        /// from the full-size key, because the two differ in size and layout.
+        var fit = false
     }
 
     private var images: [Key: NSImage] = [:]
     private var order: [Key] = []
     private var inFlight: [Key: [(NSImage?) -> Void]] = [:]
-    private var hosts: [String: VisualRenderHost] = [:]
     let capacity = 64
 
     func image(_ key: Key) -> NSImage? { images[key] }
@@ -158,10 +177,8 @@ final class VisualSnapshotCache {
         if let image = images[key] { return done(image) }
         if inFlight[key] != nil { inFlight[key]?.append(done); return }
         inFlight[key] = [done]
-        let host = hosts[key.store] ?? VisualRenderHost(store: store)
-        hosts[key.store] = host
         Task { @MainActor in
-            let shot = try? await host.render(key.id, r: key.r, key: key.snapshot)
+            let shot = try? await VisualRenderHost.shared.render(key.id, r: key.r, key: key.snapshot, store: store)
             let image = shot.flatMap { NSImage(data: $0.png) }
             if let image { put(image, for: key) }
             let waiting = inFlight.removeValue(forKey: key) ?? []

@@ -9,12 +9,73 @@ final class PlanVisualRef: NSObject {
     let pending: Bool
     let caption: String
     let height: CGFloat
-    init(id: String, pending: Bool, caption: String, height: CGFloat) {
-        self.id = id; self.pending = pending; self.caption = caption; self.height = height
+    /// What the human's edits did to the block's lines (spec §7.2). The block is one picture, so
+    /// the edit lane marks it as a whole: `EditLayerFragment` draws a bar the block's height.
+    let edit: VisualEdit
+    init(id: String, pending: Bool, caption: String, height: CGFloat, edit: VisualEdit = []) {
+        self.id = id; self.pending = pending; self.caption = caption; self.height = height; self.edit = edit
+    }
+}
+
+/// Which marks of the edit layer fall inside a visual block's source: some of it added by the human,
+/// some of it removed. Both reads as a changed line does, green over red.
+struct VisualEdit: OptionSet, Equatable {
+    let rawValue: Int
+    static let inserted = VisualEdit(rawValue: 1)
+    static let removed = VisualEdit(rawValue: 2)
+
+    /// The marks of `edits` that land inside `block` (its source range, newline included as `whole`).
+    ///
+    /// A removal is the block's when its place is a line of the block other than the first, or
+    /// words removed from a line of it. A whole line removed at the first line's start is a line
+    /// above the block, which stays that line's ghost; one at `whole`'s end belongs to the next line.
+    static func of(_ edits: [EditMark], in block: NSRange, whole: NSRange) -> VisualEdit {
+        var out: VisualEdit = []
+        for mark in edits {
+            switch mark.kind {
+            case .inserted:
+                if NSIntersectionRange(mark.range, whole).length > 0 { out.insert(.inserted) }
+            case .deleted:
+                if owns(mark, in: whole) { out.insert(.removed) }
+            }
+        }
+        return out
+    }
+
+    /// Whether a deleted mark belongs to the block whose lines are `whole`.
+    static func owns(_ mark: EditMark, in whole: NSRange) -> Bool {
+        guard mark.kind == .deleted else { return false }
+        let at = mark.range.location
+        if mark.inline { return at >= whole.location && at < NSMaxRange(whole) }
+        return at > whole.location && at < NSMaxRange(whole)
+    }
+}
+
+/// The edit lane's bar for a whole visual block, on the block's first line (`.planVisualEdit`):
+/// `EditLayerFragment` draws it the block's height, since the block's lines are hidden and a bar
+/// per line would be a stripe.
+final class VisualEditBar: NSObject {
+    let edit: VisualEdit
+    let height: CGFloat
+    init(edit: VisualEdit, height: CGFloat) { self.edit = edit; self.height = height }
+}
+
+extension VisualEdit {
+    /// Whether a deleted mark falls inside a hidden visual block of `storage` (its ghost text
+    /// would stretch the block's lines, so the block's bar says it instead).
+    static func owns(_ mark: EditMark, in storage: NSTextStorage) -> Bool {
+        guard mark.kind == .deleted, storage.length > 0 else { return false }
+        let at = min(mark.range.location, storage.length - 1)
+        var whole = NSRange(location: 0, length: 0)
+        guard storage.attribute(.planVisual, at: at, longestEffectiveRange: &whole, in: NSRange(location: 0, length: storage.length)) != nil
+        else { return false }
+        return owns(mark, in: whole)
     }
 }
 
 extension NSAttributedString.Key {
+    /// A visual block's edit bar (`VisualEditBar`), on its first hidden line only.
+    static let planVisualEdit = NSAttributedString.Key("FlightDeck.planVisualEdit")
     /// A visual block's hidden source (`PlanVisualRef`): `VisualBlockOverlay` lays a
     /// `VisualBlockView` over exactly these lines.
     static let planVisual = NSAttributedString.Key("FlightDeck.planVisual")

@@ -683,7 +683,7 @@ enum MarkdownStyler {
             // fence (one being typed) runs to the end of the plan, and hiding that would hide
             // the rest of the plan.
             if !revealed, block.syntaxRanges.count > 1 {
-                styleVisual(storage, block, id: id, pending: pending, whole: whole, theme)
+                styleVisual(storage, block, id: id, pending: pending, whole: whole, edits: edits, theme)
             } else {
                 styleCode(storage, block, whole: whole, para: para, theme)
             }
@@ -761,7 +761,7 @@ enum MarkdownStyler {
     /// `VisualBlockOverlay` lays over them, with the block's room above and below as paragraph
     /// spacing. The plan's bytes are as typed; the block is drawing.
     private static func styleVisual(_ storage: NSTextStorage, _ block: MarkdownBlock, id: String, pending: Bool, whole: NSRange,
-                                    _ theme: PlanTheme) {
+                                    edits: [EditMark], _ theme: PlanTheme) {
         let ns = storage.mutableString
         var lines: [NSRange] = []
         var at = whole.location
@@ -775,7 +775,8 @@ enum MarkdownStyler {
         let inner = lines.count > 2 ? NSRange(location: lines[1].location, length: NSMaxRange(lines[lines.count - 2]) - lines[1].location) : nil
         let caption = inner.map { ns.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         let height = theme.visualHeight(id, pending)
-        let ref = PlanVisualRef(id: id, pending: pending, caption: caption, height: height)
+        let ref = PlanVisualRef(id: id, pending: pending, caption: caption, height: height,
+                                edit: VisualEdit.of(edits, in: block.range, whole: whole))
         let share = height / CGFloat(lines.count)
         for (i, line) in lines.enumerated() {
             let style = NSMutableParagraphStyle()
@@ -784,6 +785,7 @@ enum MarkdownStyler {
             if i == 0 { style.paragraphSpacingBefore = VisualBlockLayout.spaceBefore }
             if i == lines.count - 1 { style.paragraphSpacing = VisualBlockLayout.spaceAfter }
             storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear, .paragraphStyle: style, .planVisual: ref], range: line)
+            if i == 0, !ref.edit.isEmpty { storage.addAttribute(.planVisualEdit, value: VisualEditBar(edit: ref.edit, height: height), range: line) }
         }
     }
 

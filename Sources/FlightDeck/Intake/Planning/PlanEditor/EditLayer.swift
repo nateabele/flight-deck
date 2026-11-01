@@ -310,7 +310,7 @@ enum EditLayer {
                 }
             case .deleted:
                 // A grid's removed words and rows are laid and drawn by the grid, in its cells and rows.
-                if !PlanTableMarks.owns(mark, in: storage) { addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme) }
+                if !PlanTableMarks.owns(mark, in: storage), !VisualEdit.owns(mark, in: storage) { addGhost(mark, to: storage, ns: ns, inside: inside, theme: theme) }
             }
         }
     }
@@ -524,6 +524,17 @@ final class EditLayerFragment: NSTextLayoutFragment {
         return CGRect(x: -layoutFragmentFrame.minX, y: 0, width: width, height: layoutFragmentFrame.height)
     }
 
+    /// The bar for a hidden visual block, on its first line; nil for any other paragraph.
+    private var visualBar: VisualEditBar? {
+        guard let text = paragraphText, text.length > 0 else { return nil }
+        return text.attribute(.planVisualEdit, at: 0, effectiveRange: nil) as? VisualEditBar
+    }
+
+    private var isVisualLine: Bool {
+        guard let text = paragraphText, text.length > 0 else { return false }
+        return text.attribute(.planVisual, at: 0, effectiveRange: nil) != nil
+    }
+
     private var ghosts: [(index: Int, ghost: EditGhost)] {
         guard let text = paragraphText else { return [] }
         var out: [(Int, EditGhost)] = []
@@ -549,6 +560,10 @@ final class EditLayerFragment: NSTextLayoutFragment {
         }
         let gutterX = PlanGutter.offset(.edit) - layoutFragmentFrame.minX - 1
         bounds = bounds.union(CGRect(x: gutterX, y: bounds.minY, width: 1, height: bounds.height))
+        // The block's bar runs the block's whole height from its first line, past this fragment's own.
+        if let bar = visualBar, let top = textLineFragments.first?.typographicBounds.minY {
+            bounds = bounds.union(CGRect(x: gutterX, y: top, width: PlanGutter.editWidth + 2, height: bar.height))
+        }
         for (_, ghost) in ghosts where ghost.placement == .above || ghost.placement == .below {
             let width = ghost.lines.map { ceil(ghost.attributed($0).size().width) }.max() ?? 0
             let top = ghost.placement == .above ? (textLineFragments.first?.typographicBounds.minY ?? 0) - ghost.height : bounds.maxY
@@ -569,6 +584,11 @@ final class EditLayerFragment: NSTextLayoutFragment {
             return
         }
         super.draw(at: point, in: context)
+        // A hidden visual block: one bar for the whole block, on its first line, whatever its lines hold.
+        if isVisualLine {
+            if let bar = visualBar { drawVisualBar(bar, at: point, in: context) }
+            return
+        }
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
         let ghosts = ghosts
         var inserted = Set<Int>()
@@ -650,6 +670,23 @@ final class EditLayerFragment: NSTextLayoutFragment {
             (DiffGutterStyle.spark as NSString).draw(at: drawn.spark, withAttributes: [
                 .font: NSFont.systemFont(ofSize: 10), .foregroundColor: DiffGutterStyle.sparkColor,
             ])
+        }
+    }
+
+    /// The block's bar: green if the human added to it, red if they removed from it, green over red
+    /// if both, as a changed line of text gets.
+    private func drawVisualBar(_ bar: VisualEditBar, at point: CGPoint, in context: CGContext) {
+        guard let top = textLineFragments.first?.typographicBounds.minY else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let bottom = top + bar.height
+        switch (bar.edit.contains(.inserted), bar.edit.contains(.removed)) {
+        case (true, true):
+            drawBar(top, top + bar.height / 2, EditLayer.barColor, at: point)
+            drawBar(top + bar.height / 2, bottom, EditLayer.deletedColor, at: point)
+        case (true, false): drawBar(top, bottom, EditLayer.barColor, at: point)
+        default: drawBar(top, bottom, EditLayer.deletedColor, at: point)
         }
     }
 

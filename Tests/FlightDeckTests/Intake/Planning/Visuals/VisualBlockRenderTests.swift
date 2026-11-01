@@ -40,9 +40,10 @@ final class VisualBlockRenderTests: XCTestCase {
         var view: PlanNSTextView { container.textView }
     }
 
-    private func editor(_ text: String, appearance: NSAppearance.Name, width: CGFloat = 820) -> Editor {
+    private func editor(_ text: String, appearance: NSAppearance.Name, width: CGFloat = 820, generated: String? = nil) -> Editor {
         let store = fixture.store
-        let view = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {}).visuals(store)
+        var view = PlanTextView(text: .constant(text), editable: true, onCommit: { _ in }, incoming: nil, onShowIncoming: {}).visuals(store)
+        if let generated { view = view.editLayer(generated: generated) }
         let coordinator = view.makeCoordinator()
         let container = PlanEditorContainer(onShow: {})
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: width, height: 900), styleMask: [.borderless],
@@ -137,6 +138,23 @@ final class VisualBlockRenderTests: XCTestCase {
             let pending = editor(Self.plan("fd-visual id=pairing-flow pending", caption: "Pairing as a data flow"), appearance: appearance)
             defer { pending.view.visualBlocks.tearDown(); pending.window.close() }
             try write(pending, "block-pending-\(mode)")
+        }
+    }
+
+    /// Concern 6: the human's edits on a block's hidden lines, as one bar the block's height in the
+    /// edit lane (green: added, green over red: changed).
+    func testRenderEditedBlocks() throws {
+        try fixture.pairing()
+        let original = Self.plan("fd-visual id=pairing-handshake")
+        let edited = Self.plan("fd-visual id=pairing-handshake", caption: "Pairing handshake, as the human reworded it")
+        for (mode, appearance) in appearances {
+            let changed = editor(edited, appearance: appearance, generated: original)
+            defer { changed.view.visualBlocks.tearDown(); changed.window.close() }
+            try write(changed, "block-edited-\(mode)")
+            let inserted = editor(original, appearance: appearance,
+                                  generated: original.replacingOccurrences(of: "```fd-visual id=pairing-handshake\nPairing handshake: phone, Mac and hostd\n```\n\n", with: ""))
+            defer { inserted.view.visualBlocks.tearDown(); inserted.window.close() }
+            try write(inserted, "block-inserted-\(mode)")
         }
     }
 

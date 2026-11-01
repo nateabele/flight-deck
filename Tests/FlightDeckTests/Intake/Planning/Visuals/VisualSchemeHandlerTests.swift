@@ -209,6 +209,20 @@ final class VisualSchemeHandlerTests: XCTestCase {
         bytes[100] ^= 0x01
         try bytes.write(to: copy.appendingPathComponent(MermaidLibrary.fileName))
         XCTAssertEqual(MermaidLibrary.load(root: copy).failure, .hashMismatch)
+        // V1 review, M4: and the handler, given only what the check lets through, refuses the URL.
+        let lib = VisualScheme.url(.library(id, name: MermaidLibrary.fileName))
+        let refusing = VisualSchemeHandler(store: fixture.store, library: { name in
+            guard name == MermaidLibrary.fileName, case .success(let loaded) = MermaidLibrary.load(root: copy) else { return nil }
+            return loaded.data
+        })
+        guard case .refused = refusing.respond(to: lib) else { return XCTFail("served a library that failed its check") }
+        // The control: the same wiring over the untouched copy serves it.
+        let good = VisualSchemeHandler(store: fixture.store, library: { name in
+            guard name == MermaidLibrary.fileName, case .success(let loaded) = MermaidLibrary.load(root: source) else { return nil }
+            return loaded.data
+        })
+        guard case .ok(_, let mime) = good.respond(to: lib) else { return XCTFail("did not serve the intact library") }
+        XCTAssertEqual(mime, "text/javascript")
     }
 }
 

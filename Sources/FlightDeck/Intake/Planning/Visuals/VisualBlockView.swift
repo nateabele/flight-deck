@@ -57,6 +57,8 @@ final class VisualBlockView: NSView {
     private let addTile = VisualTile()
     private let placeholder = FlippedBox()
     private var web: VisualWebView?
+    /// Web views that left live mode and are waiting for their picture to be taken.
+    private var retiring: [VisualWebView] = []
 
     override var isFlipped: Bool { true }
 
@@ -257,7 +259,7 @@ final class VisualBlockView: NSView {
     }
 
     private func picture(_ rep: VisualBlockModel.Representation, into pane: VisualPane) {
-        pane.image = storedOrCached(rep)
+        pane.image = (pane === mainPane && !comparing ? fitted(rep) : nil) ?? storedOrCached(rep)
         if pane.image == nil { pane.message = wantsPictures ? "Drawing…" : nil }
         fetch(rep) { [weak pane] image in pane?.image = image; if image == nil { pane?.message = "No picture of this visual yet." } }
     }
@@ -267,19 +269,32 @@ final class VisualBlockView: NSView {
         fetch(rep) { [weak tile] image in tile?.image = image }
     }
 
-    private func cacheKey(_ rep: VisualBlockModel.Representation, _ store: any VisualStoreReading) -> VisualSnapshotCache.Key {
-        VisualSnapshotCache.Key(store: VisualStoreIdentity.of(store), id: rep.revision.id, r: rep.revision.r, snapshot: snapshotKey(rep))
+    private func cacheKey(_ rep: VisualBlockModel.Representation, _ store: any VisualStoreReading, fit: Bool = false) -> VisualSnapshotCache.Key {
+        VisualSnapshotCache.Key(store: VisualStoreIdentity.of(store), id: rep.revision.id, r: rep.revision.r, snapshot: snapshotKey(rep), fit: fit)
     }
 
-    /// The stored snapshot, read through the store like every other file of the revision, or
-    /// one already drawn in memory.
+    /// What the live view last drew, fitted to the body (`goSnapshot`), if it is still held.
+    private func fitted(_ rep: VisualBlockModel.Representation) -> NSImage? {
+        guard let store else { return nil }
+        return VisualSnapshotCache.shared.image(cacheKey(rep, store, fit: true))
+    }
+
+    /// The revision's picture: one already decoded or drawn, else its stored snapshot, read through
+    /// the store like every other file of the revision. A stored file is decoded once and kept in the
+    /// shared cache under its key (V1 review, M6): a block asks for each picture on every redraw
+    /// (a scroll tick, a selection, a variant change), on the main thread.
     private func storedOrCached(_ rep: VisualBlockModel.Representation) -> NSImage? {
         guard let store else { return nil }
+        let key = cacheKey(rep, store)
+        if let image = VisualSnapshotCache.shared.image(key) { return image }
         let name = snapshotKey(rep).fileName
         if rep.revision.manifest.files.contains(where: { $0.path == name }),
            let slice = store.read(rep.revision.id, r: rep.revision.r, name: name, offset: 0, limit: VisualStoreLimits.maxFileBytes),
-           let image = NSImage(data: slice.data) { return image }
-        return VisualSnapshotCache.shared.image(cacheKey(rep, store))
+           let image = NSImage(data: slice.data) {
+            VisualSnapshotCache.shared.put(image, for: key)
+            return image
+        }
+        return nil
     }
 
     private func fetch(_ rep: VisualBlockModel.Representation, done: @escaping (NSImage?) -> Void) {
@@ -304,22 +319,48 @@ final class VisualBlockView: NSView {
 
     /// Back to the picture. What the live view drew is kept as the picture when there is none
     /// yet, so the block does not go blank as it scrolls away.
+    ///
+    /// **The web view stays until its picture is taken** (V1 review, M1). `takeSnapshot` is
+    /// asynchronous and a view detached in the same turn can hand back a blank image, which then sat
+    /// in the cache as the block's picture. The picture is filed under the fitted key: the live view
+    /// is scaled to the body, so it is not the full-size render the plain key stands for.
     func goSnapshot() {
         guard isLive, let web else { return }
         isLive = false
-        if let rep = shown, let store, storedOrCached(rep) == nil, case .rendered = liveStatus {
-            let key = cacheKey(rep, store)
-            let view = web.view
-            view.takeSnapshot(with: nil) { image, _ in
-                MainActor.assumeIsolated { if let image { VisualSnapshotCache.shared.put(image, for: key) } }
-            }
-        }
-        mainPane.detachWeb()
-        web.stop()
         self.web = nil
         VisualLivePool.shared.release(self)
+        var key: VisualSnapshotCache.Key?
+        if let rep = shown, let store, case .rendered = liveStatus, fitted(rep) == nil { key = cacheKey(rep, store, fit: true) }
+        guard let key else {
+            retire(web)
+            rebuildBody()
+            return
+        }
+        retiring.append(web)
+        web.view.takeSnapshot(with: nil) { [weak self] image, _ in
+            MainActor.assumeIsolated {
+                if let image { VisualSnapshotCache.shared.put(image, for: key) }
+                guard let self else { return }
+                self.retire(web)
+                self.rebuildBody()
+            }
+        }
+        // A web view that never answers (the block left its window) must not be kept for ever.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            self?.retire(web)
+        }
         rebuildBody()
     }
+
+    private func retire(_ web: VisualWebView) {
+        retiring.removeAll { $0 === web }
+        mainPane.detachWeb(web.view)
+        web.stop()
+    }
+
+    /// Whether a web view is still attached, live or waiting for its picture to be taken (tests).
+    var holdsWebView: Bool { web != nil || !retiring.isEmpty }
 
     private func liveStatusChanged(_ status: VisualRenderStatus) {
         liveStatus = status
@@ -576,7 +617,10 @@ final class VisualPane: NSView {
         messageField.isHidden = true
     }
 
-    func detachWeb() {
+    /// Takes `view` out (nil: whichever is there). A view that was replaced by a newer one is
+    /// not this pane's any more, and is left to whoever holds it.
+    func detachWeb(_ view: NSView? = nil) {
+        if let view, view !== webView { view.removeFromSuperview(); return }
         webView?.removeFromSuperview()
         webView = nil
     }

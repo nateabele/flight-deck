@@ -104,6 +104,28 @@ final class IntakeRequestPlumbingTests: XCTestCase {
         XCTAssertEqual(planResult, .failure(.disconnected))
     }
 
+    /// V3 review 1, parked: a loader that gave up on a chunk left its handler in the connector's
+    /// table until the socket closed. Cancelling takes it out, and nothing answers it afterwards.
+    func testACancelledVisualRequestIsUnregisteredAndNeverAnswered() async throws {
+        server.onRequest = { _, _, _, _ in }   // never answered
+        let connector = try await startConnector()
+        var result: Result<WireFileChunk, FleetRequestError>?
+        let cancel = connector.requestVisual(id: UUID(), visualID: "flow", revision: 1, part: "file:export/index.html",
+                                             offset: 0, limit: 10) { result = $0 }
+        XCTAssertEqual(connector.outstandingFileRequests, 1)
+        cancel()
+        XCTAssertEqual(connector.outstandingFileRequests, 0, "the handler is gone")
+        cancel()
+        connector.stop()
+        XCTAssertNil(result, "a cancelled request is never answered, not even by the disconnect drain")
+        // One that is not cancelled is drained as before.
+        let again = try await startConnector()
+        var drained: Result<WireFileChunk, FleetRequestError>?
+        _ = again.requestVisual(id: UUID(), visualID: "flow", revision: 1, part: "file:a", offset: 0, limit: 10) { drained = $0 }
+        again.stop()
+        XCTAssertEqual(drained, .failure(.disconnected))
+    }
+
     // MARK: FleetService
 
     private func ask(_ request: FleetRequest, harness: FleetTestHarness) async throws -> ServerFrame {
