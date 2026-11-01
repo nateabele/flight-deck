@@ -102,9 +102,12 @@ pub enum FileChange {
     Remove(String),
 }
 
+/// Everything derived from a file set: shared (`Arc`) by every worktree graph that resolves to
+/// the same content, so a second worktree on an indexed commit costs a pointer, not a copy of the
+/// graph.
 #[derive(Clone)]
-pub struct ViewGraph {
-    pub label: ViewLabel,
+pub struct GraphData {
+    /// The root the resolver read manifests under when this data was built.
     pub(crate) root: PathBuf,
     pub(crate) files: Vec<FileNode>,
     pub(crate) index: HashMap<String, u32>,
@@ -120,14 +123,29 @@ pub struct ViewGraph {
     elm_modules: HashMap<String, Vec<u32>>,
 }
 
+/// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
+/// things that differ between two clean worktrees of one commit).
+#[derive(Clone)]
+pub struct ViewGraph {
+    pub label: ViewLabel,
+    pub(crate) root: PathBuf,
+    data: Arc<GraphData>,
+}
+
+impl std::ops::Deref for ViewGraph {
+    type Target = GraphData;
+    fn deref(&self) -> &GraphData {
+        &self.data
+    }
+}
+
 impl ViewGraph {
     /// Resolve every file from scratch.
     pub fn build(label: ViewLabel, inputs: Vec<(FileRef, Arc<BlobFacts>)>) -> ViewGraph {
         let root = label.worktree.clone();
         let files: Vec<FileNode> = inputs.iter().map(|(f, facts)| FileNode::new(f, facts.clone())).collect();
-        let mut g = ViewGraph {
-            label,
-            root,
+        let mut g = GraphData {
+            root: root.clone(),
             res: vec![FileRes::default(); files.len()],
             files,
             index: HashMap::new(),
@@ -144,14 +162,14 @@ impl ViewGraph {
             g.res[f as usize] = g.resolve_file(f);
         }
         g.finalize();
-        g
+        ViewGraph { label, root, data: Arc::new(g) }
     }
 
     /// A graph for `self` with `changes` applied, reusing every per-file resolution the changes
     /// cannot affect (see the module docs for the exact dirty set).
     pub fn with_changes(&self, label: ViewLabel, changes: Vec<FileChange>) -> ViewGraph {
-        let mut g = self.clone();
-        g.label = label;
+        let mut g: GraphData = (*self.data).clone();
+        g.root = label.worktree.clone();
         let old_files_len = g.files.len();
 
         let mut changed: HashSet<u32> = HashSet::new();
@@ -201,7 +219,7 @@ impl ViewGraph {
         let mut dirty: HashSet<u32> = changed.iter().copied().filter(|i| g.files[*i as usize].alive).collect();
         for &c in &changed {
             if (c as usize) < old_files_len {
-                dirty.extend(self.importers[c as usize].iter().copied());
+                dirty.extend(self.data.importers[c as usize].iter().copied());
             }
         }
         for (i, r) in g.res.iter().enumerate() {
@@ -225,9 +243,11 @@ impl ViewGraph {
             }
         }
         g.finalize();
-        g
+        ViewGraph { root: label.worktree.clone(), label, data: Arc::new(g) }
     }
+}
 
+impl GraphData {
     /// Rebuild the path index, resolver and name/module indexes from `files`.
     fn reindex(&mut self) {
         self.index = self.files.iter().enumerate().filter(|(_, f)| f.alive).map(|(i, f)| (f.path.clone(), i as u32)).collect();
@@ -294,6 +314,9 @@ impl ViewGraph {
         self.symbol_rank = self.files.iter().enumerate().map(|(i, f)| flat[offset[i]..offset[i] + f.facts.symbols.len()].to_vec()).collect();
     }
 
+}
+
+impl ViewGraph {
     // ---- accessors ---------------------------------------------------------------------
 
     pub fn file_count(&self) -> usize {
@@ -314,23 +337,7 @@ impl ViewGraph {
     /// The same graph for another worktree whose resolved content is identical (same base tree,
     /// empty overlay): only the root, label and root-dependent resolver change.
     pub fn for_worktree(&self, label: ViewLabel) -> ViewGraph {
-        let mut g = self.clone();
-        g.root = label.worktree.clone();
-        g.label = label;
-        g.reindex();
-        g
-    }
-
-    pub fn file(&self, i: u32) -> &FileNode {
-        &self.files[i as usize]
-    }
-
-    pub fn symbol(&self, id: SymId) -> &Symbol {
-        self.files[id.file as usize].symbol(id.local)
-    }
-
-    pub fn resolution(&self, file: u32) -> &FileRes {
-        &self.res[file as usize]
+        ViewGraph { root: label.worktree.clone(), label, data: self.data.clone() }
     }
 
     /// A stable text summary of every resolution, keyed by path. Two graphs of the same file set
@@ -359,7 +366,22 @@ impl ViewGraph {
         out
     }
 
+}
+
+impl GraphData {
     // ---- resolution --------------------------------------------------------------------
+
+    pub fn file(&self, i: u32) -> &FileNode {
+        &self.files[i as usize]
+    }
+
+    pub fn symbol(&self, id: SymId) -> &Symbol {
+        self.files[id.file as usize].symbol(id.local)
+    }
+
+    pub fn resolution(&self, file: u32) -> &FileRes {
+        &self.res[file as usize]
+    }
 
     fn file_of(&self, r: &Resolved) -> Option<u32> {
         match r {
@@ -717,6 +739,61 @@ impl ViewGraph {
                 (callable.len() == 1).then(|| callable[0])
             })?;
         Some(SymId { file, local: pick.local_id })
+    }
+}
+
+/// Estimated heap bytes of one blob's facts (struct sizes plus string payloads, with a flat
+/// allocator overhead per string). An estimate on purpose: it only has to rank graphs for the
+/// memory budget, and the daemon reports measured RSS next to it.
+pub fn facts_bytes(f: &BlobFacts) -> usize {
+    use std::mem::size_of;
+    const ALLOC: usize = 16;
+    let st = |s: &str| if s.is_empty() { 0 } else { s.len() + ALLOC };
+    let ost = |s: &Option<String>| s.as_deref().map(st).unwrap_or(0);
+    let mut n = size_of::<BlobFacts>() + ost(&f.module_name);
+    n += f.symbols.len() * size_of::<Symbol>() + f.symbols.iter().map(|s| st(&s.name) + ost(&s.signature)).sum::<usize>();
+    n += f.refs.len() * size_of::<Reference>() + f.refs.iter().map(|r| st(&r.name) + ost(&r.qualifier)).sum::<usize>();
+    n += f.imports.len() * size_of::<Import>()
+        + f.imports
+            .iter()
+            .map(|i| st(&i.specifier) + ost(&i.alias) + i.names.len() * size_of::<ImportName>() + i.names.iter().map(|n| st(&n.name) + ost(&n.alias)).sum::<usize>())
+            .sum::<usize>();
+    n += f.hierarchy.len() * size_of::<TypeRelation>() + f.hierarchy.iter().map(|h| st(&h.target)).sum::<usize>();
+    n
+}
+
+impl GraphData {
+    /// Estimated heap bytes this graph owns beyond the (shared) facts of its files.
+    pub fn own_bytes(&self) -> usize {
+        use std::mem::size_of;
+        const ALLOC: usize = 16;
+        let mut n = self.files.len() * size_of::<FileNode>();
+        for f in &self.files {
+            n += f.path.len() + f.blob_id.len() + 2 * ALLOC;
+            n += f.names.len() * (size_of::<String>() + size_of::<Vec<u32>>() + 2 * ALLOC + 8) + f.facts.symbols.iter().map(|s| s.name.len() + 4).sum::<usize>();
+        }
+        n += self.index.len() * (size_of::<String>() + 4 + ALLOC + 8) + self.index.keys().map(|k| k.len()).sum::<usize>();
+        for r in &self.res {
+            n += r.refs.len() * size_of::<RefRes>() + r.imports.len() * size_of::<Resolved>() + r.edges.len() * 4 + 3 * size_of::<Vec<u8>>();
+            n += r
+                .imports
+                .iter()
+                .map(|x| match x {
+                    Resolved::File { path, rest } => path.len() + ALLOC + rest.iter().map(|s| s.len() + ALLOC).sum::<usize>(),
+                    Resolved::External(p) => p.as_os_str().len() + ALLOC,
+                    Resolved::Unresolved => 0,
+                })
+                .sum::<usize>();
+            n += r.refs.iter().filter_map(|x| x.external.as_ref()).map(|p| p.as_os_str().len() + ALLOC).sum::<usize>();
+        }
+        n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
+        n += self.name_index.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<SymId>>() + v.len() * size_of::<SymId>() + 8).sum::<usize>();
+        n += self.incoming.values().map(|v| size_of::<SymId>() + size_of::<Vec<(u32, u32)>>() + v.len() * 8 + 8).sum::<usize>();
+        n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
+        n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
+        // The resolver keeps every path of the view in a set.
+        n += self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
+        n
     }
 }
 

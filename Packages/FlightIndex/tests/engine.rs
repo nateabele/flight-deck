@@ -150,3 +150,76 @@ fn non_utf8_files_are_skipped_not_fatal() {
     let again = e.build(&v, &[], |_| {}).unwrap();
     assert_eq!(again.parsed + again.skipped, 0, "a skipped blob is not retried every build");
 }
+
+/// Two commits of one repo, both built; returns the views.
+fn two_commits(e: &Engine, r: &Repo) -> (flightindex::git::View, flightindex::git::View) {
+    seed(r);
+    let v1 = e.view_for_path(&r.root).unwrap();
+    e.build(&v1, &[], |_| {}).unwrap();
+    write(&r.root, "src/B.elm", "module B exposing (b)\n\nb : Int\nb =\n    99\n");
+    commit_all(&r.root, "two");
+    let v2 = e.view_for_path(&r.root).unwrap();
+    e.build(&v2, &[], |_| {}).unwrap();
+    (v1, v2)
+}
+
+#[test]
+fn graphs_over_budget_evict_the_least_recently_used() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    let (v1, v2) = two_commits(&e, &r);
+    e.graph(&v1).unwrap();
+    assert_eq!(e.graph_cache_stats().graphs, 1);
+    e.set_graph_budget(1); // nothing fits: only the graph a request is using survives
+    e.graph(&v2).unwrap();
+    let st = e.graph_cache_stats();
+    assert_eq!((st.graphs, st.evictions), (1, 1), "the first commit's graph was dropped for the second's");
+    // The evicted graph is rebuilt on demand, not lost.
+    assert_eq!(e.graph(&v1).unwrap().stats().data.files, 6);
+}
+
+#[test]
+fn graphs_of_neighbouring_commits_share_the_facts_they_have_in_common() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    let (v1, v2) = two_commits(&e, &r);
+    let g1 = e.graph(&v1).unwrap();
+    let one = e.graph_cache_stats().facts_bytes;
+    let g2 = e.graph(&v2).unwrap();
+    let both = e.graph_cache_stats().facts_bytes;
+    // Five of six blobs are identical between the commits, so the second graph adds one blob's
+    // facts, not six.
+    assert!(both < one * 2, "facts held once: {one} -> {both}");
+    assert!(std::sync::Arc::ptr_eq(&g1.file(g1.file_idx(std::path::Path::new("web/util.ts")).unwrap()).facts, &g2.file(g2.file_idx(std::path::Path::new("web/util.ts")).unwrap()).facts));
+}
+
+#[test]
+fn a_graph_of_a_half_built_view_is_never_cached() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    seed(&r);
+    let v = e.view_for_path(&r.root).unwrap();
+    // Nothing stored yet: every file resolves as empty.
+    let partial = e.graph_partial(&v).unwrap();
+    assert_eq!(partial.stats().data.symbols, 0);
+    assert_eq!(e.graph_cache_stats().graphs, 0);
+    e.build(&v, &[], |_| {}).unwrap();
+    assert!(e.graph(&v).unwrap().stats().data.symbols > 0, "the full graph is not the cached empty one");
+}
+
+#[test]
+fn a_warm_view_needs_no_build_until_a_file_changes() {
+    let (_d, e) = engine();
+    let r = init_repo();
+    seed(&r);
+    let v = e.view_for_path(&r.root).unwrap();
+    assert!(!e.is_ready(&v).unwrap());
+    e.build(&v, &[], |_| {}).unwrap();
+    assert!(e.is_ready(&v).unwrap());
+    write(&r.root, "src/C.elm", "module C exposing (c, c2)\n\nc : Int\nc =\n    2\n\nc2 =\n    3\n");
+    let dirty = e.view_for_path(&r.root).unwrap();
+    assert!(!e.is_ready(&dirty).unwrap(), "an edited file has no facts yet");
+    let rep = e.build(&dirty, &[], |_| {}).unwrap();
+    assert_eq!((rep.parsed, rep.already_stored), (1, 5));
+    assert!(e.is_ready(&dirty).unwrap());
+}
