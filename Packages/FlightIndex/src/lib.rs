@@ -18,3 +18,4 @@ pub mod service;
 pub mod service_install;
 pub mod store;
 pub mod tools;
+pub mod watch;
