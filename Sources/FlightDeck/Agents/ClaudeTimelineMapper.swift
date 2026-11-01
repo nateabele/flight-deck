@@ -150,7 +150,7 @@ enum ClaudeTimelineMapper {
         var rest = Substring(text)
         var userText = ""
 
-        func emit(_ tag: String?, _ body: Substring, sender: String? = nil) {
+        func emit(_ tag: String?, _ body: Substring, sender: String? = nil, address: String? = nil) {
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
             // An empty wrapper — `<bash-stderr></bash-stderr>` is the common one — is a row
             // that would say nothing, so it is dropped rather than drawn blank.
@@ -159,7 +159,8 @@ enum ClaudeTimelineMapper {
                 TimelineItem(
                     id: TimelineItem.identifier(offset: offset, index: items.count),
                     kind: tag == nil ? .userTurn : .systemNotice, status: .complete,
-                    body: TimelineItem.Body(text: trimmed, tool: tag, sender: sender), at: at
+                    body: TimelineItem.Body(text: trimmed, tool: tag, sender: sender,
+                                            senderAddress: address), at: at
                 )
             )
         }
@@ -177,9 +178,11 @@ enum ClaudeTimelineMapper {
                 // the agent or a relay's second envelope — see `PeerMessageEnvelope`.
                 flushUserText()
                 let message = PeerMessageEnvelope.unwrap(
-                    String(body), sender: attribute("from-name", in: open.attributes)
+                    String(body), sender: attribute("from-name", in: open.attributes),
+                    address: attribute("from", in: open.attributes)
                 )
-                emit(open.tag, Substring(message.text), sender: message.sender)
+                emit(open.tag, Substring(message.text), sender: message.sender,
+                     address: message.address)
             } else {
                 flushUserText()
                 emit(open.tag, body, sender: attribute("from-name", in: open.attributes))

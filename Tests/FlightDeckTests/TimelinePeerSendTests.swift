@@ -52,6 +52,42 @@ final class TimelinePeerSendTests: XCTestCase {
         XCTAssertTrue(entry.item.body.isError)
     }
 
+    private func received(from name: String, at address: String, id: String) -> TimelineEntry {
+        TimelineEntry(item: TimelineItem(
+            id: id, kind: .systemNotice, status: .complete,
+            body: .init(text: "hello", tool: TimelinePeerSend.receivedTool, sender: name,
+                        senderAddress: address)
+        ), result: nil)
+    }
+
+    /// A reply goes to the socket the message came from. 40 of the 120 `SendMessage` calls in
+    /// this project's transcripts on 2026-10-31 did, and each was headed "To another session".
+    func testAReplyToASocketIsNamedByTheMessageThatCameFromIt() {
+        let socket = "uds:/tmp/cc-socks/37633.sock"
+        let entries = TimelinePeerSend.rewritten([
+            received(from: "CPU", at: socket, id: "1#0"),
+            received(from: "Phone Context", at: socket, id: "2#0"),
+            TimelineEntry(item: call("SendMessage", ["to": socket, "message": "On it."]), result: nil),
+            TimelineEntry(item: call("SendMessage", ["to": "uds:/tmp/cc-socks/1.sock", "message": "?"],
+                                     id: "41#1"), result: nil),
+        ])
+        XCTAssertEqual(entries[2].item.body.sender, "Phone Context", "the tab's name now")
+        XCTAssertEqual(entries[2].item.body.senderAddress, socket)
+        XCTAssertEqual(entries[3].item.body.sender, "another session",
+                       "a socket nothing in the feed names")
+    }
+
+    /// No envelope carries a tab id, so the fleet's list names one.
+    func testASendToATabIdIsNamedByTheFleet() {
+        let tab = UUID(uuidString: "3F5E8C01-96C1-4B3C-888F-6C389F99E006")!
+        let entries = TimelinePeerSend.rewritten(
+            [TimelineEntry(item: call("Bash", ["command": "flightdeck peer send \(tab.uuidString.lowercased()) 'Ready.'"]),
+                           result: nil)],
+            tabTitle: { $0 == tab ? "Design" : nil }
+        )
+        XCTAssertEqual(entries[0].item.body.sender, "Design")
+    }
+
     func testAnUnreadableAddressIsNamedInWords() {
         XCTAssertEqual(TimelinePeerSend.recipientName("uds:/tmp/cc-socks/37633.sock"), "another session")
         XCTAssertEqual(TimelinePeerSend.recipientName("0d861624-4e02-4f06-b36d-ca6c8558eaa6"),

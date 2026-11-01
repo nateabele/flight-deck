@@ -150,6 +150,9 @@ struct TimelineRow: View {
     /// rejected.
     private var header: some View {
         HStack(spacing: 6) {
+            // Leading, where a disclosure chevron sits everywhere else in iOS and where the eye
+            // starts the line, rather than past the time on the far edge.
+            if peerChevron { peerChevronButton }
             Image(systemName: TimelineStyle.symbol(for: item))
                 .font(.caption2)
                 .foregroundStyle(TimelineStyle.tint(for: item))
@@ -175,7 +178,6 @@ struct TimelineRow: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
-            if peerChevron { peerChevronButton }
         }
         // The whole heading line opens a peer message, not only the chevron: the chevron is a
         // caption-sized glyph, and the line it sits on is the target a thumb will actually hit.

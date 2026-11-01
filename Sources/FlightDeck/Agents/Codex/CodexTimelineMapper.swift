@@ -136,7 +136,8 @@ enum CodexTimelineMapper {
             guard !message.text.isEmpty else { return [] }
             return [
                 item(id, .systemNotice, TimelineItem.Body(
-                    text: message.text, tool: PeerMessageEnvelope.tag, sender: message.sender
+                    text: message.text, tool: PeerMessageEnvelope.tag, sender: message.sender,
+                    senderAddress: message.address
                 ), at)
             ]
 

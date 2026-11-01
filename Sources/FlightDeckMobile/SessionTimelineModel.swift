@@ -164,6 +164,10 @@ final class SessionTimelineModel {
     /// The blocked subagent's own tail, kept apart from `feed` for the reason above.
     private(set) var subagentPage: [TimelineItem] = []
 
+    /// The fleet's name for a tab, so a message sent to a tab id is headed with the tab's name.
+    /// Set once by `FleetModel`, which owns the list.
+    @ObservationIgnored var tabTitle: (UUID) -> String? = { _ in nil }
+
     /// How many times `rebuild()` has run. `@ObservationIgnored` because a busy poll must not
     /// invalidate the view merely by counting, and because the recompute-count guard test asserts
     /// on it directly — a quiet poll must add zero, one new item exactly one.
@@ -517,10 +521,14 @@ final class SessionTimelineModel {
     /// feed, one per `.delivered` entry, in send order. Each carries a `"ghost:<token>"` id that
     /// exists only in this array — never written into `TimelineFeed`, so a page reset or a
     /// reconcile cannot find it.
-    static func rendered(from items: [TimelineItem], delivered: [PromptOutboxEntry]) -> [TimelineEntry] {
+    static func rendered(
+        from items: [TimelineItem], delivered: [PromptOutboxEntry],
+        tabTitle: (UUID) -> String? = { _ in nil }
+    ) -> [TimelineEntry] {
         // A send to another session reads as the message it sent, not the tool that sent it
         // — after the fold, because whether it failed is in the result the fold attaches.
-        var entries = TimelineRender.entries(from: items).map(TimelinePeerSend.rewritten)
+        var entries = TimelinePeerSend.rewritten(TimelineRender.entries(from: items),
+                                                 tabTitle: tabTitle)
         entries.append(contentsOf: delivered.map { entry in
             TimelineEntry(
                 item: TimelineItem(
@@ -554,7 +562,8 @@ final class SessionTimelineModel {
         let start = DispatchTime.now().uptimeNanoseconds
         rendered = Self.rendered(
             from: feed.items,
-            delivered: outbox.entries.filter { $0.state == .delivered }
+            delivered: outbox.entries.filter { $0.state == .delivered },
+            tabTitle: tabTitle
         )
         let ms = PhoneLog.elapsed(since: start)
         if ms >= 30 {

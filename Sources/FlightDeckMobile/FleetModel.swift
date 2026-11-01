@@ -539,6 +539,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             model = existing
         } else {
             model = SessionTimelineModel(sessionID: id, fleet: self, cache: cache, drafts: drafts)
+            model.tabTitle = { [weak self] tab in
+                self?.fleet.projects.lazy.flatMap(\.sessions).first { $0.id == tab }?.title
+            }
             timelineModels[id] = model
         }
         evictIdleTimelineModels()

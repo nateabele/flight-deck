@@ -103,6 +103,11 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
         /// session") is the one thing the reader knows already, and the session's name is what
         /// tells them whether to read on.
         public var sender: String?
+        /// Where that peer message came from — the envelope's `from`, a `uds:` socket or a tab
+        /// id. Nil everywhere else. Not for display: a reply this session sends goes to an
+        /// address, not a name, and this is how the phone names who it went to
+        /// (`TimelinePeerSend`).
+        public var senderAddress: String?
         /// Whether this body's full text has been spilled to disk and only a first-line preview is
         /// resident. **In-memory only — never encoded, never decoded** (see the coding below), so the
         /// wire contract is untouched: a body that crosses the socket is always the real thing.
@@ -112,7 +117,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
         public init(
             text: String, summary: String? = nil, tool: String? = nil,
             callID: String? = nil, truncatedBytes: Int = 0, isError: Bool = false,
-            sender: String? = nil, isPlaceholder: Bool = false
+            sender: String? = nil, senderAddress: String? = nil, isPlaceholder: Bool = false
         ) {
             self.text = text
             self.summary = summary
@@ -121,11 +126,12 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             self.truncatedBytes = truncatedBytes
             self.isError = isError
             self.sender = sender
+            self.senderAddress = senderAddress
             self.isPlaceholder = isPlaceholder
         }
 
         enum CodingKeys: String, CodingKey {
-            case text, summary, tool, callID, truncatedBytes, isError, sender
+            case text, summary, tool, callID, truncatedBytes, isError, sender, senderAddress
         }
 
         /// Hand-written so the four rarely-set fields are ABSENT rather than null, and so
@@ -140,6 +146,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             if truncatedBytes != 0 { try c.encode(truncatedBytes, forKey: .truncatedBytes) }
             if isError { try c.encode(isError, forKey: .isError) }
             try c.encodeIfPresent(sender, forKey: .sender)
+            try c.encodeIfPresent(senderAddress, forKey: .senderAddress)
         }
 
         public init(from decoder: any Decoder) throws {
@@ -151,6 +158,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             truncatedBytes = try c.decodeIfPresent(Int.self, forKey: .truncatedBytes) ?? 0
             isError = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
             sender = try c.decodeIfPresent(String.self, forKey: .sender)
+            senderAddress = try c.decodeIfPresent(String.self, forKey: .senderAddress)
         }
 
         /// A first-line preview cheap enough to keep resident for a spilled row's skeleton.
@@ -166,7 +174,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             Body(
                 text: Self.placeholderPreview(of: text), summary: summary, tool: tool,
                 callID: callID, truncatedBytes: truncatedBytes, isError: isError, sender: sender,
-                isPlaceholder: true
+                senderAddress: senderAddress, isPlaceholder: true
             )
         }
     }

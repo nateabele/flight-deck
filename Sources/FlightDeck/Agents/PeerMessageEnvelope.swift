@@ -17,6 +17,8 @@ enum PeerMessageEnvelope {
     struct Message: Equatable {
         var sender: String?
         var text: String
+        /// The envelope's `from`: the address a reply to this message goes to.
+        var address: String? = nil
     }
 
     static let tag = "cross-session-message"
@@ -30,15 +32,18 @@ enum PeerMessageEnvelope {
     /// the second.
     static let transportNotePrefixes = ["[Peer transport:", "[Relayed by Flight Deck:"]
 
-    /// `body` is what sat between the wrapper's tags, `sender` the wrapper's own `from-name`.
-    /// A relayed envelope inside is unwrapped, and its `from-name` wins: that is who wrote it.
-    static func unwrap(_ body: String, sender: String?) -> Message {
+    /// `body` is what sat between the wrapper's tags, `sender` and `address` the wrapper's own
+    /// `from-name` and `from`. A relayed envelope inside is unwrapped, and its attributes win:
+    /// that is who wrote it.
+    static func unwrap(_ body: String, sender: String?, address: String? = nil) -> Message {
         var text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         var sender = sender
+        var address = address
         while true {
             text = droppingTransportNotes(text)
             guard let inner = leadingEnvelope(text) else { break }
             sender = inner.sender ?? sender
+            address = inner.address ?? address
             text = inner.body.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         // The envelope escapes a nested closing tag so it cannot end the outer one early, and
@@ -46,7 +51,7 @@ enum PeerMessageEnvelope {
         text = text
             .replacingOccurrences(of: "<\\/\(tag)", with: "</\(tag)")
             .replacingOccurrences(of: "<\\\(tag)", with: "<\(tag)")
-        return Message(sender: sender, text: text)
+        return Message(sender: sender, text: text, address: address)
     }
 
     /// A whole envelope at the start of `text`, or `nil` when `text` does not open with one.
@@ -121,7 +126,9 @@ enum PeerMessageEnvelope {
     /// `text` as exactly one envelope, opening tag first and closing tag last, plain or escaped.
     /// Anything after the closing tag means `text` is more than a relayed message, so it is
     /// left alone rather than cut.
-    private static func leadingEnvelope(_ text: String) -> (sender: String?, body: Substring)? {
+    private static func leadingEnvelope(
+        _ text: String
+    ) -> (sender: String?, address: String?, body: Substring)? {
         let text = Substring(text)
         guard let open = openingTag(at: text) else { return nil }
         let rest = text[open.end...]
@@ -129,7 +136,8 @@ enum PeerMessageEnvelope {
             .compactMap { rest.range(of: $0, options: .backwards) }
             .max { $0.lowerBound < $1.lowerBound }
         guard let close, rest[close.upperBound...].allSatisfy(\.isWhitespace) else { return nil }
-        return (attribute("from-name", in: open.attributes), rest[..<close.lowerBound])
+        return (attribute("from-name", in: open.attributes), attribute("from", in: open.attributes),
+                rest[..<close.lowerBound])
     }
 
     private static func openingTag(

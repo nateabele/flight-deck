@@ -546,6 +546,7 @@ final class CodexTimelineMapperTests: XCTestCase {
         XCTAssertEqual(output[0].at, "2026-10-26T12:43:10.100Z")
         XCTAssertEqual(output[0].body.tool, "cross-session-message")
         XCTAssertEqual(output[0].body.sender, "The Plan")
+        XCTAssertEqual(output[0].body.senderAddress, "uds:/tmp/cc-socks/97590.sock")
         XCTAssertEqual(output[0].body.text, "The Plan: your `mix test` is waiting.\n\nNo action needed.")
         XCTAssertNil(output[0].body.callID, "nothing is left for it to fold into")
     }

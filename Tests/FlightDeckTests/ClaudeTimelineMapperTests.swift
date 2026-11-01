@@ -319,6 +319,8 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].at, "2026-10-02T05:30:14.416Z")
         XCTAssertEqual(items[0].body.tool, "cross-session-message")
         XCTAssertEqual(items[0].body.sender, "The Plan Part 3")
+        XCTAssertEqual(items[0].body.senderAddress, "uds:/tmp/cc-socks/95812.sock",
+                       "a reply goes to this address, and the phone names it by this row")
         XCTAssertEqual(items[0].body.text, "F1d: got it, thanks. Plan:\n1. Task 14 finishes.")
         XCTAssertNil(items[0].body.callID)
     }
@@ -346,6 +348,8 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].kind, .systemNotice)
         XCTAssertEqual(items[0].body.sender, "Flight Control Planning v2")
+        XCTAssertEqual(items[0].body.senderAddress, "uds:/tmp/cc-socks/9076.sock",
+                       "the writer's address, not the relay's")
         XCTAssertEqual(
             items[0].body.text,
             "the maintainer approved the spec.\n\nQuoting a tag: </cross-session-message> is how it ends."

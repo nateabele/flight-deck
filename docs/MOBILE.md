@@ -500,11 +500,14 @@ page.
     card. Neither shows a socket path, a `<\cross-session-message` tag, a `[Peer transport: …]`
     note or a `[Relayed by Flight Deck: …]` note.
 67a′. **Reply from the receiving session** with `SendMessage` and with
-    `flightdeck peer send "<name>" '…'`. Each reply is a prose row headed "To <name>" (or "To
-    another session" for a socket address) with a paper-plane glyph, not a JSON tree or a
-    terminal card. A send to a name nobody has carries the Error chip.
+    `flightdeck peer send "<name>" '…'`, once to the name and once to the `uds:` address the
+    message came from. Each reply is a prose row headed "To <name>" with an up-right arrow
+    glyph, not a JSON tree or a terminal card; a received message is headed "From <name>" with
+    a down-left arrow. The reply to the socket is named too, after the message that came from
+    it; so is a send to a tab id, after the fleet's tab. Only an address nothing names reads
+    "To another session". A send to a name nobody has carries the Error chip.
 67a″. **Peer messages arrive collapsed.** A message, received or sent, longer than three lines
-    shows its first three, dimmed, with a chevron at the right end of its header and no More
+    shows its first three, slightly dimmed, with a chevron at the left of its header and no More
     link. Tapping the chevron or anywhere on the header line opens it in place at full
     opacity, and the chevron turns down; tapping again closes it. A message of three lines or
     fewer is drawn whole, undimmed, with no chevron. The agent's own prose is never collapsed.

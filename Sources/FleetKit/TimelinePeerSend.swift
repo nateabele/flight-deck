@@ -21,18 +21,50 @@ public enum TimelinePeerSend {
     /// The notice tag of a rewritten row. Its `sender` is the recipient.
     public static let tool = "sent-cross-session-message"
 
-    public static func rewritten(_ entry: TimelineEntry) -> TimelineEntry {
+    /// The notice tag of a message another session sent this one (`PeerMessageEnvelope.tag`).
+    public static let receivedTool = "cross-session-message"
+
+    /// Every send in `entries` rewritten, each recipient named.
+    ///
+    /// **Named from the feed itself.** A reply goes to the address the message came from, and
+    /// in this project's transcripts on 2026-10-31 a third of all `SendMessage` calls (40 of
+    /// 120) named a `uds:` socket, which the phone drew as "To another session". Every one of
+    /// those sockets had sent a message earlier in the same transcript, under a name. The
+    /// latest name wins, so a tab renamed mid-conversation is called what it is now. A tab id
+    /// is named by `tabTitle`, the fleet's list, because no envelope carries one.
+    public static func rewritten(
+        _ entries: [TimelineEntry], tabTitle: (UUID) -> String? = { _ in nil }
+    ) -> [TimelineEntry] {
+        var directory: [String: String] = [:]
+        for entry in entries {
+            let body = entry.item.body
+            guard entry.item.kind == .systemNotice, body.tool == receivedTool,
+                  let address = body.senderAddress, let name = body.sender, !name.isEmpty
+            else { continue }
+            directory[address] = name
+        }
+        return entries.map { rewritten($0) { address in
+            directory[address] ?? UUID(uuidString: address).flatMap(tabTitle)
+        } }
+    }
+
+    /// One entry, its recipient named by `name` where that knows the address.
+    public static func rewritten(
+        _ entry: TimelineEntry, name: (String) -> String? = { _ in nil }
+    ) -> TimelineEntry {
         let item = entry.item
         guard item.kind == .toolCall, !item.body.isPlaceholder, item.body.truncatedBytes == 0,
-              let sent = message(in: item)
+              var sent = message(in: item)
         else { return entry }
+        let address = sent.recipient
+        sent.recipient = name(address) ?? recipientName(address)
         let failed = item.body.isError || entry.result.map(isFailure) == true
         return TimelineEntry(
             item: TimelineItem(
                 id: item.id, kind: .systemNotice, status: item.status,
                 body: TimelineItem.Body(
                     text: sent.text, tool: tool, callID: item.body.callID,
-                    isError: failed, sender: sent.recipient
+                    isError: failed, sender: sent.recipient, senderAddress: address
                 ),
                 at: item.at
             ),
@@ -40,6 +72,7 @@ public enum TimelinePeerSend {
         )
     }
 
+    /// `recipient` is the address as written: a name, a tab id, a socket.
     public struct Sent: Equatable {
         public var recipient: String
         public var text: String
@@ -56,7 +89,7 @@ public enum TimelinePeerSend {
                   let text = input["message"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return nil }
-            return Sent(recipient: recipientName(to), text: text)
+            return Sent(recipient: to, text: text)
         case "Bash":
             guard item.body.text.contains("flightdeck peer send "),
                   let command = object(item.body.text)?["command"] as? String
@@ -71,8 +104,8 @@ public enum TimelinePeerSend {
         (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
     }
 
-    /// A `SendMessage` address as a reader would say it. A socket path names no one, and a
-    /// sub-agent's id is long enough to wrap the heading.
+    /// An address nothing in the feed or the fleet names, as a reader would say it. A socket
+    /// path names no one, and a sub-agent's id is long enough to wrap the heading.
     static func recipientName(_ to: String) -> String {
         // A tab id names a session as precisely as a socket does, and as unreadably.
         if to.hasPrefix("uds:") || UUID(uuidString: to) != nil { return "another session" }
@@ -118,7 +151,7 @@ public enum TimelinePeerSend {
         guard !words[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               command[start.upperBound...].range(of: marker) == nil
         else { return nil }
-        return Sent(recipient: recipientName(words[0]), text: words[1])
+        return Sent(recipient: words[0], text: words[1])
     }
 
     /// Only `cd <one word>` statements, so a command that runs something else first is still

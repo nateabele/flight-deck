@@ -138,12 +138,14 @@ final class TimelineStyleTests: XCTestCase {
         )
     }
 
-    /// Headed by the session that sent it. "Cross session message" answers a question the
-    /// reader never had; which session is talking is the one they do.
+    /// Headed by the session that sent it, and as arriving. "Cross session message" answers a
+    /// question the reader never had; which session is talking, and which way, are the ones
+    /// they do.
     func testAPeerMessageIsHeadedBySenderAndFallsBackToAWord() {
-        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "The Plan Part 3")
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "From The Plan Part 3")
         XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi", sender: nil)),
-                       "Another session")
+                       "From another session")
+        XCTAssertEqual(TimelineStyle.symbol(for: peerMessage("hi")), "arrow.down.left.circle.fill")
         XCTAssertNotEqual(TimelineStyle.symbol(for: peerMessage("hi")), "gearshape.fill",
                           "an agent talking is not the harness")
     }
@@ -168,10 +170,10 @@ final class TimelineStyleTests: XCTestCase {
             body: .init(text: "1. Ready\n2. `make`", tool: TimelinePeerSend.tool, sender: "Publish")
         )
         XCTAssertEqual(TimelineStyle.heading(for: sent), "To Publish")
-        XCTAssertEqual(TimelineStyle.symbol(for: sent), "paperplane.fill")
+        XCTAssertEqual(TimelineStyle.symbol(for: sent), "arrow.up.right.circle.fill")
         XCTAssertTrue(TimelineStyle.rendersMarkdown(sent))
         XCTAssertFalse(TimelineStyle.opensDetail(sent))
-        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "The Plan Part 3",
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "From The Plan Part 3",
                        "a received message is still headed by its sender")
     }
 

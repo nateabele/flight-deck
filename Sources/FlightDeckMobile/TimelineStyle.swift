@@ -54,10 +54,10 @@ enum TimelineStyle {
             // message" answers a different one. A Mac too old to send `sender` still gets a
             // word rather than the wrapper's name.
             let named = item.body.sender.flatMap { $0.isEmpty ? nil : $0 }
-            // A message this session sent says who it went to, so the two halves of an
-            // exchange read as one, each headed with the other party's name.
-            if isSentPeerMessage(item) { return "To \(named ?? "another session")" }
-            return named ?? "Another session"
+            // Each half of an exchange says which way it went and names the other party, so
+            // a column of them reads as one conversation.
+            let party = named ?? "another session"
+            return isSentPeerMessage(item) ? "To \(party)" : "From \(party)"
         case .systemNotice:
             // The wrapper's own name, humanised — "Task notification", "System reminder".
             // Named rather than lumped under one word because the reader's first question
@@ -96,8 +96,10 @@ enum TimelineStyle {
         case .thinking: return "brain"
         case .toolCall, .toolResult: return symbol(forTool: item.body.tool)
         case .prompt: return "questionmark.circle.fill"
-        case .systemNotice where isSentPeerMessage(item): return "paperplane.fill"
-        case .systemNotice where isPeerMessage(item): return "bubble.left.and.bubble.right.fill"
+        // Arrows, not a bubble and a plane: the two glyphs a reader tells apart at a glance
+        // are the same shape pointing opposite ways.
+        case .systemNotice where isSentPeerMessage(item): return "arrow.up.right.circle.fill"
+        case .systemNotice where isPeerMessage(item): return "arrow.down.left.circle.fill"
         case .systemNotice: return "gearshape.fill"
         case .unknown: return "circle.dotted"
         }
@@ -145,7 +147,7 @@ enum TimelineStyle {
     /// the other way, so it gets every rule here and a heading of its own.
     static func isPeerMessage(_ item: TimelineItem) -> Bool {
         item.kind == .systemNotice
-            && (item.body.tool == "cross-session-message" || item.body.tool == TimelinePeerSend.tool)
+            && (item.body.tool == TimelinePeerSend.receivedTool || item.body.tool == TimelinePeerSend.tool)
     }
 
     static func isSentPeerMessage(_ item: TimelineItem) -> Bool {
@@ -449,7 +451,8 @@ enum TimelineStyle {
 
     /// The opacity of a collapsed peer message, so it reads as secondary to the agent's own
     /// prose beside it while still being legible at a glance.
-    static let collapsedPeerOpacity = 0.6
+    /// 0.6 read as disabled on the phone (2026-10-31); 0.8 still recedes.
+    static let collapsedPeerOpacity = 0.8
 
     /// The line budget a collapsed row of this item is cut to.
     static func collapsedCeiling(for item: TimelineItem) -> Int {
