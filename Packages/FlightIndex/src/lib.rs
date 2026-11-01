@@ -22,6 +22,8 @@ pub mod service_install;
 pub mod session_start;
 pub mod store;
 pub mod sweep;
+pub mod switchover;
+pub mod textedit;
 pub mod tools;
 pub mod watch;
 pub mod refresh;

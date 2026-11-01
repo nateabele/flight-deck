@@ -31,6 +31,7 @@ use flightindex::mcp;
 use flightindex::error::{Error, Result};
 use flightindex::guard;
 use flightindex::session_start;
+use flightindex::switchover;
 use flightindex::proto::state;
 use flightindex::runtime::Paths;
 use flightindex::service::Config;
@@ -207,6 +208,24 @@ fn run() -> Result<i32> {
             let verdict = guard::decide(&read_stdin(), &settings, &guard::Env::current(), std::time::SystemTime::now(), &mut guard::Socket { paths });
             print!("{}", verdict.stdout);
             eprint!("{}", verdict.stderr);
+            return Ok(0);
+        }
+        "switchover" => {
+            let home = cli.args.get("home").and_then(Value::as_str).map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).ok_or_else(|| Error::Msg("HOME is not set (pass --home)".into()))?;
+            if cli.args.contains_key("list_old_dbs") {
+                let roots: Vec<PathBuf> = if cli.positional.is_empty() { vec![home.join("Projects")] } else { cli.positional.iter().map(PathBuf::from).collect() };
+                print!("{}", switchover::list_old_dbs(&roots));
+                return Ok(0);
+            }
+            let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Error::Msg(format!("cannot find my own executable: {e}")))?;
+            let opts = switchover::Options { home, exe, store: cli.store.clone(), paths, label, service: !cli.args.contains_key("no_service") };
+            if cli.args.contains_key("rollback") {
+                print!("{}", switchover::rollback(&opts, None)?);
+            } else if cli.args.contains_key("apply") {
+                print!("{}", switchover::apply(&opts)?);
+            } else {
+                print!("{}", switchover::render(&opts, &switchover::plan(&opts)?));
+            }
             return Ok(0);
         }
         "session-start" => {
