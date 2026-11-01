@@ -10,6 +10,7 @@ pub mod facts;
 pub mod git;
 pub mod graph;
 pub mod guard;
+pub mod indexstore;
 pub mod lang;
 pub mod links;
 pub mod mcp;

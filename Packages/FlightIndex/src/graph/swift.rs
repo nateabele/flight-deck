@@ -39,6 +39,24 @@ const LIBRARY_MEMBERS: &[&str] = &[
 ];
 
 impl GraphData {
+    /// A Swift file's dependencies: the files its references resolve into (Swift has no file
+    /// imports). A member matched only by its unique name on a receiver nothing typed stays a
+    /// labelled reference but is no dependency: such guesses measured 0.79 precise against the
+    /// compiler's index, typed ones 0.995 at file level.
+    pub(super) fn swift_edges(&self, f: u32, refs: &[RefRes]) -> Vec<u32> {
+        let mut edges: Vec<u32> = Vec::new();
+        for (rr, fr) in refs.iter().zip(&self.files[f as usize].facts.refs) {
+            let guess = rr.confidence == Confidence::Fallback && fr.qualifier.as_deref().is_some_and(is_receiver);
+            if let (Some(t), false) = (rr.target, guess)
+                && t.file != f
+                && !edges.contains(&t.file)
+            {
+                edges.push(t.file);
+            }
+        }
+        edges
+    }
+
     /// Module keys visible from file `f`, its own first: the files of those directories are what
     /// an unqualified name can mean.
     pub(super) fn swift_keys(&self, f: u32) -> Vec<String> {

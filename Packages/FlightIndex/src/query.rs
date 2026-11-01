@@ -380,7 +380,7 @@ impl ViewGraph {
         let (mut exact, mut fallback, mut none) = (0, 0, 0);
         for r in self.res.iter().flat_map(|r| &r.refs) {
             match (r.target, r.confidence) {
-                (Some(_), Confidence::Exact | Confidence::Inferred) => exact += 1,
+                (Some(_), Confidence::Exact | Confidence::Inferred | Confidence::Precise) => exact += 1,
                 (Some(_), Confidence::Fallback) => fallback += 1,
                 (None, _) => none += 1,
             }

@@ -21,6 +21,7 @@
 //! rather than reusing the base's ranks, so ranks are exact for the view.
 
 mod elixir;
+mod precise;
 mod python;
 mod swift;
 mod swift_types;
@@ -47,6 +48,8 @@ pub enum Confidence {
     /// A member looked up on a receiver whose type the file's own declarations give (a parameter,
     /// a `let x = T(...)`, a property's declared type): typed by declaration, not by a compiler.
     Inferred,
+    /// The compiler's answer, read from the build's index store (`crate::indexstore`).
+    Precise,
 }
 
 /// Where an imported name points outside the worktree: a file (relative to the worktree root, see
@@ -711,15 +714,11 @@ impl GraphData {
         }
         // No import is needed to call `Shop.Order.total()` or to use a type from the same Swift
         // module, so for these languages a resolved reference is itself the dependency.
-        // A Swift member matched only by its unique name on a receiver nothing typed stays a
-        // labelled reference, but is no dependency: such guesses measured 0.79 precise against
-        // the compiler's index, typed ones 0.995 at file level.
-        if matches!(lang, "elixir" | "swift") {
-            for (rr, fr) in refs.iter().zip(&facts.refs) {
-                let guess = lang == "swift" && rr.confidence == Confidence::Fallback && fr.qualifier.as_deref().is_some_and(swift::is_receiver);
-                if let (Some(t), false) = (rr.target, guess) {
-                    add_edge(&mut edges, t.file);
-                }
+        if lang == "swift" {
+            edges = self.swift_edges(f, &refs);
+        } else if lang == "elixir" {
+            for t in refs.iter().filter_map(|rr| rr.target) {
+                add_edge(&mut edges, t.file);
             }
         }
         FileRes { imports, refs, edges }
