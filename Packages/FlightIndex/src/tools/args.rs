@@ -67,6 +67,13 @@ impl Args {
     pub fn has(&self, names: &[&str]) -> bool {
         self.get(names).is_some()
     }
+
+    /// The same arguments with `key` set: how the service hands a tool what only it knows (the
+    /// worktree's modified files) through the one channel every tool already reads.
+    pub fn with(mut self, key: &str, value: Value) -> Args {
+        self.map.insert(key.to_string(), value);
+        self
+    }
 }
 
 /// Make `p` absolute against `cwd`, collapse `.` and `..`, and resolve symlinks in the part that

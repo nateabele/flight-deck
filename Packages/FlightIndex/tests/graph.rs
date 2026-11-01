@@ -322,3 +322,52 @@ fn overlay_deleting_and_renaming_files_matches_a_rebuild() {
     // Elm resolves an import by path, so a file whose declaration disagrees still answers it.
     assert!(deps.iter().any(|d| d.path.ends_with("src/Expression/Node.elm")), "{deps:?}");
 }
+
+/// A four-file import chain a -> b -> c -> d beside a hub that three files import, so the hub
+/// tops the global rank and the chain does not.
+fn ppr_fixture() -> Repo {
+    let r = init_repo();
+    write(&r.root, "a.ts", "import { bee } from './b';\nexport function aye() { return bee(); }\n");
+    write(&r.root, "b.ts", "import { sea } from './c';\nexport function bee() { return sea(); }\n");
+    write(&r.root, "c.ts", "import { dee } from './d';\nexport function sea() { return dee(); }\n");
+    write(&r.root, "d.ts", "export function dee() { return 1; }\n");
+    write(&r.root, "hub.ts", "export function hubFn() { return 2; }\n");
+    for x in ["x1", "x2", "x3"] {
+        write(&r.root, &format!("{x}.ts"), &format!("import {{ hubFn }} from './hub';\nexport function {x}() {{ return hubFn(); }}\n"));
+    }
+    commit_all(&r.root, "init");
+    r
+}
+
+#[test]
+fn personalized_rank_seeded_at_a_chain_file_lifts_its_importer_and_its_import_over_the_hub() {
+    let r = ppr_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    let fi = |p: &str| g.file_idx(Path::new(p)).unwrap();
+    let plain = g.personalized_file_rank(&[], 20.0);
+    assert!(plain[fi("hub.ts") as usize] > plain[fi("b.ts") as usize], "the hub leads the global rank: {plain:?}");
+    let seeded = g.personalized_file_rank(&[(fi("c.ts"), 1.0)], 20.0);
+    let hub = seeded[fi("hub.ts") as usize];
+    for p in ["b.ts", "d.ts"] {
+        assert!(seeded[fi(p) as usize] > hub, "{p} must outrank the hub when c.ts seeds the walk: {seeded:?}");
+    }
+    // Two hops out still beats a file the seed never reaches.
+    assert!(seeded[fi("a.ts") as usize] > hub, "{seeded:?}");
+    // The importer is reached only through the reverse edge: a forward-only walk (Aider's) never
+    // leaves what the seed uses.
+    let forward = g.personalized_file_rank(&[(fi("c.ts"), 1.0)], 0.0);
+    assert!(forward[fi("b.ts") as usize] < forward[fi("d.ts") as usize] / 10.0, "{forward:?}");
+}
+
+#[test]
+fn personalized_rank_with_no_seed_is_exactly_the_plain_file_rank() {
+    let r = ppr_fixture();
+    let (_d, _e, g) = graph_of(&r);
+    let old: Vec<f64> = ["a.ts", "b.ts", "c.ts", "d.ts", "hub.ts", "x1.ts"].iter().map(|p| g.file_rank_of(Path::new(p)).unwrap()).collect();
+    let fi = |p: &str| g.file_idx(Path::new(p)).unwrap() as usize;
+    for seeds in [vec![], vec![(u32::MAX, 1.0)], vec![(0, 0.0)]] {
+        let ranks = g.personalized_file_rank(&seeds, 20.0);
+        let got: Vec<f64> = ["a.ts", "b.ts", "c.ts", "d.ts", "hub.ts", "x1.ts"].iter().map(|p| ranks[fi(p)]).collect();
+        assert_eq!(got, old, "seeds {seeds:?} name no live file, so the rank is the plain one");
+    }
+}

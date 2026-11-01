@@ -391,6 +391,7 @@ impl Service {
         };
         let members = self.finish_members(begun, wait);
         let cochange = || self.cochange_for(&view);
+        let args = with_diff_files(tool, args, &view);
         let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange };
         let body = tools::run(tool, &ctx)?;
         if tool == "impact" {
@@ -1035,6 +1036,33 @@ struct PlannedMember {
 }
 
 /// `linked view: <header> via elm.json`: the line that names a view a result also draws on.
+/// Files modified in a worktree beyond which its diff stops saying what the task is (a branch
+/// switch with untracked build output, a formatter pass): `map` then stays unseeded. The eval's
+/// tasks touch at most twelve.
+const MAX_DIFF_SEEDS: usize = 50;
+
+/// `map` with no `boost_files` is seeded by the worktree's uncommitted changes (`diff_files`), the
+/// best guess at what the caller is working on. Only the paths: injecting the identifiers the
+/// hunks touched as well measured 8-10 pp worse on tessera. A tree with no git has no diff (all of
+/// it is "overlay"), so it is never seeded.
+fn with_diff_files(tool: &str, args: Args, view: &View) -> Args {
+    if tool != "map" || !view.label.is_git || args.has(&["boost_files", "diff_files"]) {
+        return args;
+    }
+    let files: Vec<Value> = view
+        .overlay
+        .iter()
+        .filter_map(|o| match o {
+            git::Overlay::Present(f) => Some(Value::String(view.abs(&f.path).display().to_string())),
+            git::Overlay::Deleted(_) => None,
+        })
+        .collect();
+    if files.is_empty() || files.len() > MAX_DIFF_SEEDS {
+        return args;
+    }
+    args.with("diff_files", Value::Array(files))
+}
+
 fn member_line(m: &Member) -> String {
     let h = tools::header(&m.graph.label, m.dirty_files, m.building);
     let what = if m.role == Role::Linked { "linked view" } else { "dependent view" };

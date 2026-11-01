@@ -379,3 +379,68 @@ fn an_edit_is_visible_even_while_other_clients_hammer_the_same_worktree() {
     }
     assert!(missed.is_empty(), "edits not visible to the next query: {missed:?}");
 }
+
+/// A chain a -> b -> c -> d, a hub six files import (so it tops the plain rank), and a test of c.
+fn ppr_project() -> Repo {
+    let r = init_repo();
+    write(&r.root, "src/a.ts", "import { bee } from './b';\nexport function aye() { return bee(); }\n");
+    write(&r.root, "src/b.ts", "import { sea } from './c';\nexport function bee() { return sea(); }\n");
+    write(&r.root, "src/c.ts", "import { dee } from './d';\nexport function sea() { return dee(); }\n");
+    write(&r.root, "src/d.ts", "export function dee() { return 1; }\n");
+    write(&r.root, "src/hub.ts", "export function hubFn() { return 2; }\n");
+    for x in ["x1", "x2", "x3", "x4", "x5", "x6"] {
+        write(&r.root, &format!("src/{x}.ts"), &format!("import {{ hubFn }} from './hub';\nexport function {x}() {{ return hubFn(); }}\n"));
+    }
+    write(&r.root, "tests/c.test.ts", "import { sea } from '../src/c';\nexport function checksSea() { return sea(); }\n");
+    commit_all(&r.root, "init");
+    r
+}
+
+/// Map rows (the `# | File` table) as paths relative to the root, best first.
+fn map_rows(root: &Path, text: &str) -> Vec<String> {
+    let prefix = format!("{}/", root.display());
+    text.lines()
+        .filter_map(|l| l.split(" | ").nth(1).filter(|_| l.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit())).map(|p| p.trim_start_matches(&prefix).to_string()))
+        .collect()
+}
+
+#[test]
+fn map_with_boost_files_ranks_by_what_the_seed_reaches_and_lists_the_seed_apart() {
+    let (_d, svc) = service();
+    let r = ppr_project();
+    let plain = map_rows(&r.root, &ok(&svc, &r.root, "map", json!({"top_n": 0})));
+    assert_eq!(plain[0], "src/hub.ts", "{plain:?}");
+    let t = ok(&svc, &r.root, "map", json!({"top_n": 4, "boost_files": ["src/c.ts"]}));
+    let rows = map_rows(&r.root, &t);
+    assert!(!rows.contains(&"src/c.ts".to_string()), "the seed is context, not a finding: {t}");
+    assert!(t.contains(&format!("Seeds: {}", r.root.join("src/c.ts").display())), "{t}");
+    for p in ["src/b.ts", "src/d.ts", "tests/c.test.ts"] {
+        assert!(rows.contains(&p.to_string()), "{p} (an importer, an import, a test of the seed) is in the top four: {t}");
+    }
+    assert!(!rows.contains(&"src/hub.ts".to_string()), "the hub the seed never reaches drops out: {t}");
+}
+
+#[test]
+fn boost_terms_alone_do_not_seed_the_walk() {
+    let (_d, svc) = service();
+    let r = ppr_project();
+    let t = ok(&svc, &r.root, "map", json!({"top_n": 0, "boost_terms": ["dee"]}));
+    assert!(!t.contains("Seeds:"), "{t}");
+    assert!(!map_rows(&r.root, &t).contains(&"tests/c.test.ts".to_string()), "test files stay hidden on an unseeded map: {t}");
+}
+
+#[test]
+fn map_on_a_dirty_worktree_is_seeded_by_its_modified_files_unless_personalize_is_off() {
+    let (_d, svc) = service();
+    let r = ppr_project();
+    write(&r.root, "src/c.ts", "import { dee } from './d';\nexport function sea() { return dee() + 1; }\n");
+    let t = ok(&svc, &r.root, "map", json!({"top_n": 4}));
+    assert!(t.contains(&format!("Seeds: {}", r.root.join("src/c.ts").display())), "{t}");
+    let rows = map_rows(&r.root, &t);
+    assert!(rows.contains(&"src/b.ts".to_string()) && rows.contains(&"src/d.ts".to_string()) && !rows.contains(&"src/c.ts".to_string()), "{t}");
+    let off = ok(&svc, &r.root, "map", json!({"top_n": 4, "personalize": false}));
+    assert!(!off.contains("Seeds:") && map_rows(&r.root, &off)[0] == "src/hub.ts", "{off}");
+    // A caller's own boost_files replace the diff as the seed.
+    let own = ok(&svc, &r.root, "map", json!({"top_n": 4, "boost_files": ["src/x1.ts"]}));
+    assert!(own.contains(&format!("Seeds: {}\n", r.root.join("src/x1.ts").display())) && map_rows(&r.root, &own)[0] == "src/hub.ts", "{own}");
+}
