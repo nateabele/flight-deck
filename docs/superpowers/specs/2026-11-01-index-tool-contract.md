@@ -14,6 +14,7 @@ Every MCP tool is named `qartez_<verb>`, so existing skills, hooks and habits ke
 - **Build state.** While the view is still building, the header adds ` index: building, N of M files` after the closing parenthesis. N and M count files of the view whose facts are stored.
 - **add_root and workspace.** `qartez_add_root` and `qartez_workspace add` are accepted as hints that start a build early. They never change scope. `workspace remove` is accepted and does nothing.
 - **Daemon down.** Every tool returns `state: UNAVAILABLE` plus a one-line reason. It never answers from a private index. (The CLI prints `state: UNAVAILABLE` and the reason to stderr and exits 3.)
+- **Sandboxed client (Codex).** Under `codex exec -s read-only` and `-s workspace-write` (macOS seatbelt) `connect()` to the daemon socket fails with EPERM. A client treats `PermissionDenied` as a sandbox, not a missing daemon: it does not spawn one and reports `state: UNAVAILABLE` with `cannot connect to <socket>: Operation not permitted - a sandbox is blocking Unix sockets (for Codex: -s workspace-write -c sandbox_workspace_write.network_access=true, or run outside the sandbox); fall back to rg`. The MCP shim and `fdindex guard` (which still allows) say the same. `--no-start` / `FLIGHTDECK_INDEX_NO_START` is honoured by every client verb (query verbs, `mcp`, `session-start`); `status` never starts.
 
 ## Shared params
 - `format`: `detailed` (the default), `concise` or `mermaid`. Only `deps` and `calls` honour `mermaid`. Every other tool rejects it with a clear error.

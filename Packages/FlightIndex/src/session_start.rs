@@ -11,7 +11,7 @@
 //! project, is silent. It never fails and never takes longer than `BUDGET`: the exit status is 0
 //! whatever happened.
 
-use crate::client::connect_or_start;
+use crate::client::{connect_only, connect_or_start};
 use crate::runtime::Paths;
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -21,7 +21,7 @@ const BUDGET: Duration = Duration::from_secs(4);
 
 /// The text the hook prints (possibly empty). `input` is the hook's stdin, `project_dir` is
 /// `$CLAUDE_PROJECT_DIR`, `process_cwd` the hook process's own directory.
-pub fn run(paths: &Paths, daemon_args: &[String], input: &str, project_dir: Option<String>, process_cwd: String) -> String {
+pub fn run(paths: &Paths, daemon_args: &[String], auto_start: bool, input: &str, project_dir: Option<String>, process_cwd: String) -> String {
     let cwd = serde_json::from_str::<Value>(input)
         .ok()
         .and_then(|v| v["cwd"].as_str().map(str::to_string))
@@ -33,13 +33,14 @@ pub fn run(paths: &Paths, daemon_args: &[String], input: &str, project_dir: Opti
     let (paths, daemon_args) = (paths.clone(), daemon_args.to_vec());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(start_and_warm(&paths, &daemon_args, &cwd));
+        let _ = tx.send(start_and_warm(&paths, &daemon_args, auto_start, &cwd));
     });
     rx.recv_timeout(BUDGET).unwrap_or_else(|_| "fdindex: the index daemon did not answer within 4 s. Index tools may say `state: UNAVAILABLE`; fall back to rg and reading files until `fdindex status` is healthy.\n".into())
 }
 
-fn start_and_warm(paths: &Paths, daemon_args: &[String], cwd: &str) -> String {
-    let mut client = match connect_or_start(paths, daemon_args) {
+fn start_and_warm(paths: &Paths, daemon_args: &[String], auto_start: bool, cwd: &str) -> String {
+    let connected = if auto_start { connect_or_start(paths, daemon_args) } else { connect_only(paths) };
+    let mut client = match connected {
         Ok(c) => c,
         Err(e) => return format!("fdindex: the index daemon is not running and could not be started ({e}). Index tools will say `state: UNAVAILABLE`; fall back to rg and reading files.\n"),
     };

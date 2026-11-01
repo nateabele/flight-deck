@@ -33,7 +33,7 @@
 //!   does not build those.
 
 use crate::ack;
-use crate::client::Client;
+use crate::client::{unreachable_message, Client};
 use crate::runtime::Paths;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -110,7 +110,7 @@ pub struct Socket {
 
 impl Index for Socket {
     fn lookup(&mut self, cwd: &str, file: Option<&str>) -> Result<Value, String> {
-        let mut client = Client::connect(&self.paths.socket).map_err(|e| format!("the index daemon is not running ({e})"))?;
+        let mut client = Client::connect(&self.paths.socket).map_err(|e| unreachable_message(&self.paths.socket, &e))?;
         client.set_timeout(DAEMON_TIMEOUT).map_err(|e| e.to_string())?;
         let mut args = Map::new();
         args.insert("build_wait_ms".into(), json!(BUILD_WAIT_MS));

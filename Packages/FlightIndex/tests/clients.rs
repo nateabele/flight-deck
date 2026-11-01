@@ -166,3 +166,78 @@ fn service_status_reports_a_stopped_daemon_and_never_starts_one() {
     let text = String::from_utf8_lossy(&o.stdout);
     assert!(o.status.success() && text.contains("daemon:   running, pid ") && text.contains("views:"), "{text}");
 }
+
+/// A directory nobody can enter: a connect through it fails with EACCES, as a sandbox's EPERM does.
+struct Sealed {
+    dir: PathBuf,
+}
+
+impl Sealed {
+    fn new(env: &Env) -> Sealed {
+        let dir = env.store.parent().unwrap().join("sealed");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+        Sealed { dir }
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.dir.join("d.sock")
+    }
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.dir, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+    }
+}
+
+const SANDBOX: &str = "a sandbox is blocking Unix sockets";
+
+#[test]
+fn a_socket_the_sandbox_forbids_is_reported_as_that_and_no_daemon_is_started() {
+    let env = Env::new();
+    let sealed = Sealed::new(&env);
+    let out = Command::new(BIN).args(["--store", env.store.to_str().unwrap(), "--socket", sealed.socket().to_str().unwrap(), "find", "entry"]).current_dir(&env.repo.root).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.starts_with("state: UNAVAILABLE\ncannot connect to ") && err.contains(SANDBOX) && err.contains("fall back to rg"), "{err}");
+    assert!(!err.contains("exited on startup"), "{err}");
+    assert!(!env.store.exists(), "no daemon was spawned to find out");
+
+    // The MCP shim says the same, with auto-start on.
+    let mut child = Command::new(BIN).args(["--store", env.store.to_str().unwrap(), "--socket", sealed.socket().to_str().unwrap(), "mcp"]).current_dir(&env.repo.root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "qartez_find", "arguments": {"name": "entry"}}})).unwrap();
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(line.contains("state: UNAVAILABLE") && line.contains(SANDBOX), "{line}");
+    assert!(!env.store.exists());
+
+    // The guard still allows, and says why the index is out.
+    let mut guard = Command::new(BIN).args(["--store", env.store.to_str().unwrap(), "--socket", sealed.socket().to_str().unwrap(), "guard"]).env_remove("QARTEZ_GUARD_DISABLE").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let input = json!({"tool_name": "Edit", "tool_input": {"file_path": env.repo.root.join("web/a.ts")}, "cwd": env.repo.root}).to_string();
+    guard.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let g = guard.wait_with_output().unwrap();
+    assert!(g.status.success() && g.stdout.is_empty(), "{}", String::from_utf8_lossy(&g.stdout));
+    assert!(String::from_utf8_lossy(&g.stderr).contains(SANDBOX), "{}", String::from_utf8_lossy(&g.stderr));
+}
+
+#[test]
+fn no_start_is_honoured_by_every_query_verb() {
+    let env = Env::new();
+    for (flags, env_var) in [(vec!["--no-start", "find", "entry"], false), (vec!["find", "entry", "--no-start"], false), (vec!["find", "entry"], true), (vec!["--no-start", "map"], false)] {
+        let mut c = env.base(BIN);
+        c.args(&flags).current_dir(&env.repo.root);
+        if env_var {
+            c.env("FLIGHTDECK_INDEX_NO_START", "1");
+        }
+        let out = c.output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{flags:?}: {err}");
+        assert!(err.starts_with("state: UNAVAILABLE\n") && err.contains("auto-start is disabled"), "{flags:?}: {err}");
+        assert!(!env.socket.exists() && !env.store.exists(), "{flags:?} started a daemon");
+    }
+}

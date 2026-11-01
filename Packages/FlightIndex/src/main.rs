@@ -25,7 +25,7 @@
 //! the first positional argument fills the tool's required parameter.
 
 use flightindex::alias;
-use flightindex::client::{connect_or_start, Client};
+use flightindex::client::{connect_only, connect_or_start};
 use flightindex::daemon;
 use flightindex::mcp;
 use flightindex::error::{Error, Result};
@@ -231,19 +231,19 @@ fn run() -> Result<i32> {
         "session-start" => {
             let project_dir = std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|v| !v.is_empty());
             let here = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            print!("{}", session_start::run(&paths, &daemon_args(&cli), &read_stdin(), project_dir, here));
+            print!("{}", session_start::run(&paths, &daemon_args(&cli), auto_start(&cli), &read_stdin(), project_dir, here));
             return Ok(0);
         }
         "mcp" => {
             let cwd = absolute_cwd(&cli)?;
-            let auto_start = !cli.args.contains_key("no_start") && std::env::var_os("FLIGHTDECK_INDEX_NO_START").is_none();
-            mcp::run(mcp::Options { paths, cwd, auto_start, daemon_args: daemon_args(&cli) })?;
+            mcp::run(mcp::Options { paths, cwd, auto_start: auto_start(&cli), daemon_args: daemon_args(&cli) })?;
             return Ok(0);
         }
         _ => {}
     }
 
     let mut args = cli.args.clone();
+    args.remove("no_start");
     if let Some(params) = mutator_positionals(&cli.verb) {
         if cli.positional.len() > params.len() {
             return Err(Error::Msg(format!("{} takes {} (got {} positional arguments)", cli.verb, params.join(" then "), cli.positional.len())));
@@ -261,9 +261,9 @@ fn run() -> Result<i32> {
     }
     let cwd = absolute_cwd(&cli)?;
 
-    let connected = if cli.verb == "status" {
-        // Asking is not a reason to start it.
-        Client::connect(&paths.socket).map_err(|e| Error::Msg(format!("the index daemon is not running ({e})")))
+    // Asking `status` is not a reason to start it, and `--no-start` forbids it for every verb.
+    let connected = if cli.verb == "status" || !auto_start(&cli) {
+        connect_only(&paths).map_err(|e| if cli.verb == "status" { e } else { Error::Msg(format!("{e}; auto-start is disabled")) })
     } else {
         connect_or_start(&paths, &daemon_args(&cli))
     };
@@ -294,6 +294,11 @@ fn run() -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// Whether a client may start the daemon: not under `--no-start` or `FLIGHTDECK_INDEX_NO_START`.
+fn auto_start(cli: &Cli) -> bool {
+    !cli.args.contains_key("no_start") && std::env::var_os("FLIGHTDECK_INDEX_NO_START").is_none()
 }
 
 /// The hook's stdin, or nothing when it is a terminal (a person running the hook by hand).

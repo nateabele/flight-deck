@@ -61,12 +61,40 @@ impl Client {
     }
 }
 
+/// Connect to a daemon that is already running; never starts one (`--no-start`, hooks, `status`).
+pub fn connect_only(paths: &Paths) -> Result<Client> {
+    let mut c = Client::connect(&paths.socket).map_err(|e| Error::Msg(unreachable_message(&paths.socket, &e)))?;
+    c.handshake()?;
+    Ok(c)
+}
+
+/// Why a connect failed, in words an agent can act on. `PermissionDenied` (EPERM or EACCES) on a
+/// socket that exists is a sandbox, not a missing daemon.
+pub fn unreachable_message(socket: &Path, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "cannot connect to {}: {e} - a sandbox is blocking Unix sockets (for Codex: -s workspace-write -c sandbox_workspace_write.network_access=true, or run outside the sandbox); fall back to rg",
+            socket.display()
+        )
+    } else {
+        format!("the index daemon is not running ({e})")
+    }
+}
+
 /// Connect to the daemon for `paths`, starting it detached if nothing is listening. Starting is
 /// idempotent (a second daemon exits on the lock), so concurrent clients may all try.
 pub fn connect_or_start(paths: &Paths, extra_daemon_args: &[String]) -> Result<Client> {
-    if let Ok(mut c) = Client::connect(&paths.socket) {
-        c.handshake()?;
-        return Ok(c);
+    let first = match Client::connect(&paths.socket) {
+        Ok(mut c) => {
+            c.handshake()?;
+            return Ok(c);
+        }
+        Err(e) => e,
+    };
+    // A sandbox that forbids the socket forbids it for a daemon spawned here too, which would exit
+    // and be reported as "exited on startup": say what is actually wrong instead.
+    if first.kind() == std::io::ErrorKind::PermissionDenied {
+        return Err(Error::Msg(unreachable_message(&paths.socket, &first)));
     }
     paths.check_socket_len()?;
     let exe = std::env::current_exe().map_err(|e| Error::Msg(format!("cannot find my own executable to start the daemon: {e}")))?;

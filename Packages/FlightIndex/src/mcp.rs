@@ -7,7 +7,7 @@
 //! The tool list (`mcp_tools.json`) is the qartez v0.11.0 schema set captured from the installed
 //! binary, so agent habits keep working; only the path and add_root/workspace wording differ.
 
-use crate::client::{connect_or_start, Client};
+use crate::client::{connect_only, connect_or_start, Client};
 use crate::error::Result;
 use crate::proto::state;
 use crate::runtime::Paths;
@@ -150,7 +150,7 @@ impl Shim {
         let attempt = if self.opts.auto_start {
             connect_or_start(&self.opts.paths, &self.opts.daemon_args)
         } else {
-            Client::connect(&self.opts.paths.socket).map_err(|e| crate::error::Error::Msg(format!("the index daemon is not running ({e}) and auto-start is disabled"))).and_then(|mut c| c.handshake().map(|_| c))
+            connect_only(&self.opts.paths).map_err(|e| crate::error::Error::Msg(format!("{e}; auto-start is disabled")))
         };
         match attempt {
             Ok(c) => {

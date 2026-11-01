@@ -848,6 +848,14 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
   answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
   (a symlink, installed at switch-over) it is the qartez alias with the same tool names.
+  `--no-start` (or `FLIGHTDECK_INDEX_NO_START`) forbids starting the daemon for every client verb.
+  **Codex needs the socket allowed.** Under `codex exec -s read-only` or `-s workspace-write` the
+  macOS seatbelt refuses `connect()` to a Unix socket with EPERM (measured). A client that gets
+  `PermissionDenied` does not spawn a daemon (it would die in the same sandbox); it answers
+  `state: UNAVAILABLE` with `cannot connect to <socket>: Operation not permitted - a sandbox is
+  blocking Unix sockets (for Codex: -s workspace-write -c sandbox_workspace_write.network_access=true,
+  or run outside the sandbox); fall back to rg`. `fdindex guard` still allows. With that flag the
+  same call answers from the daemon (verified).
 - **Freshness.** A request sees every edit made before it, by whatever tool, because it looks at
   the file system itself: the daemon keeps each active worktree's view and, per request, `stat`s
   every indexed file and every non-ignored directory (~2 ms on tessera, against 14 to 20 ms for the
