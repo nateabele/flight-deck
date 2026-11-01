@@ -335,8 +335,8 @@ final class ProviderSandboxTests: XCTestCase {
     /// it keeps stdout open. The run still ends on time, cleans up, and the holder is dead.
     func testEscapedPipeHolderIsKilledAndTheRunEndsOnTime() async throws {
         let marker = "\(Int.random(in: 7_000_000...7_999_999))"
-        defer { CommandRunnerTests.pkill(marker) }
-        let rescue = Task { try await Task.sleep(nanoseconds: 20_000_000_000); CommandRunnerTests.pkill(marker) }
+        defer { Self.pkill(marker) }
+        let rescue = Task { try await Task.sleep(nanoseconds: 20_000_000_000); Self.pkill(marker) }
         defer { rescue.cancel() }
         let perl = "exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec '/bin/sleep', '\(marker)'"
         let start = Date()
@@ -346,7 +346,25 @@ final class ProviderSandboxTests: XCTestCase {
         XCTAssertEqual(result, .timedOut)
         XCTAssertLessThan(Date().timeIntervalSince(start), 1 + 3)
         XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("runs").path)) ?? [], [])
-        XCTAssertFalse(CommandRunnerTests.alive(marker), "the escaped holder outlived the run")
+        XCTAssertFalse(Self.alive(marker), "the escaped holder outlived the run")
+    }
+
+    /// `CommandRunnerTests` moved to the window-free logic lane (IntakeKitTests), which this hosted
+    /// target cannot see, so its two process helpers are kept here too.
+    private static func alive(_ marker: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-f", "sleep \(marker)"]
+        p.standardOutput = FileHandle.nullDevice
+        try? p.run(); p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
+    private static func pkill(_ marker: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-9", "-f", "sleep \(marker)"]
+        try? p.run(); p.waitUntilExit()
     }
 
     private static func appears(_ url: URL, within seconds: Double) async throws -> Bool {
