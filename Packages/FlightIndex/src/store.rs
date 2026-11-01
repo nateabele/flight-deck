@@ -18,13 +18,14 @@ use crate::error::{Error, Result};
 use crate::facts::*;
 use crate::git::{FileRef, Overlay};
 use crate::lang;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::types::Value;
+use rusqlite::{params, CachedStatement, Connection, OpenFlags, OptionalExtension, Transaction};
 use sha1::{Digest, Sha1};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 /// Bump when the table layout changes. A mismatch rebuilds the file.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Where the index lives by default: `~/Library/Application Support/FlightDeck/index` on macOS,
 /// `$XDG_DATA_HOME/flightdeck/index` (else `~/.local/share/flightdeck/index`) elsewhere.
@@ -136,11 +137,18 @@ CREATE TABLE hierarchy (
     symbol INTEGER NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL,
     PRIMARY KEY (facts_id, idx)
 ) WITHOUT ROWID;
-CREATE TABLE trees (commit_id TEXT PRIMARY KEY, indexed_at INTEGER NOT NULL);
+-- Tree maps. Every commit repeats most of its neighbours' paths and blobs, so a row holds only
+-- integers: the path, blob id and language are interned once per store. `blobs.oid` holds a hex
+-- git object id as its raw bytes (20 for SHA-1, 32 for SHA-256; no length is assumed) and
+-- anything else as text. Orphan paths and blobs are deleted by `gc_roots`.
+CREATE TABLE paths (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
+CREATE TABLE blobs (id INTEGER PRIMARY KEY, oid BLOB NOT NULL UNIQUE);
+CREATE TABLE languages (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE trees (id INTEGER PRIMARY KEY, commit_id TEXT NOT NULL UNIQUE, indexed_at INTEGER NOT NULL);
 CREATE TABLE tree_entries (
-    commit_id TEXT NOT NULL REFERENCES trees(commit_id) ON DELETE CASCADE,
-    path TEXT NOT NULL, blob_id TEXT NOT NULL, language TEXT NOT NULL,
-    PRIMARY KEY (commit_id, path)
+    tree INTEGER NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
+    path INTEGER NOT NULL, blob INTEGER NOT NULL, language INTEGER NOT NULL,
+    PRIMARY KEY (tree, path)
 ) WITHOUT ROWID;
 CREATE TABLE worktrees (path TEXT PRIMARY KEY, head_commit TEXT, last_seen INTEGER NOT NULL);
 CREATE TABLE overlays (
@@ -150,7 +158,7 @@ CREATE TABLE overlays (
 ) WITHOUT ROWID;
 CREATE TABLE known_refs (name TEXT PRIMARY KEY, commit_id TEXT NOT NULL);
 CREATE INDEX facts_blob ON facts(blob_id);
-CREATE INDEX tree_entries_blob ON tree_entries(blob_id);
+CREATE INDEX tree_entries_blob ON tree_entries(blob);
 ";
 
 /// What the parse step hands the writer. `facts` is `None` when the blob was skipped (not UTF-8).
@@ -230,6 +238,57 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// A blob id as stored in `blobs.oid`: lowercase hex of even length (a git object id) as its raw
+/// bytes, anything else as text, so `oid_string` gives back exactly what came in.
+fn oid_value(blob_id: &str) -> Value {
+    let b = blob_id.as_bytes();
+    let nibble = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    if b.is_empty() || !b.len().is_multiple_of(2) {
+        return Value::Text(blob_id.to_string());
+    }
+    let mut out = Vec::with_capacity(b.len() / 2);
+    for pair in b.chunks_exact(2) {
+        match (nibble(pair[0]), nibble(pair[1])) {
+            (Some(h), Some(l)) => out.push(h << 4 | l),
+            _ => return Value::Text(blob_id.to_string()),
+        }
+    }
+    Value::Blob(out)
+}
+
+fn oid_string(v: Value) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    match v {
+        Value::Blob(bytes) => bytes.iter().flat_map(|b| [HEX[(b >> 4) as usize] as char, HEX[(b & 15) as usize] as char]).collect(),
+        Value::Text(s) => s,
+        other => format!("{other:?}"),
+    }
+}
+
+/// Look up a value's id in an intern table, inserting it on first sight.
+struct Interner<'t> {
+    select: CachedStatement<'t>,
+    insert: CachedStatement<'t>,
+}
+
+impl<'t> Interner<'t> {
+    fn new(tx: &'t Transaction, select: &str, insert: &str) -> Result<Self> {
+        Ok(Interner { select: tx.prepare_cached(select)?, insert: tx.prepare_cached(insert)? })
+    }
+
+    fn id(&mut self, tx: &Transaction, v: Value) -> Result<i64> {
+        if let Some(id) = self.select.query_row(params![v], |r| r.get(0)).optional()? {
+            return Ok(id);
+        }
+        self.insert.execute(params![v])?;
+        Ok(tx.last_insert_rowid())
+    }
 }
 
 impl Writer {
@@ -338,11 +397,30 @@ impl Writer {
     pub fn put_tree(&mut self, commit: &str, files: &[FileRef]) -> Result<()> {
         let tx = self.reader.conn.transaction()?;
         tx.execute("DELETE FROM trees WHERE commit_id = ?1", params![commit])?;
-        tx.execute("INSERT INTO trees VALUES (?1, ?2)", params![commit, now()])?;
+        let tree: i64 = tx.query_row(
+            "INSERT INTO trees (commit_id, indexed_at) VALUES (?1, ?2) RETURNING id",
+            params![commit, now()],
+            |r| r.get(0),
+        )?;
         {
+            let mut paths = Interner::new(&tx, "SELECT id FROM paths WHERE path = ?1", "INSERT INTO paths (path) VALUES (?1)")?;
+            let mut blobs = Interner::new(&tx, "SELECT id FROM blobs WHERE oid = ?1", "INSERT INTO blobs (oid) VALUES (?1)")?;
+            let mut langs =
+                Interner::new(&tx, "SELECT id FROM languages WHERE name = ?1", "INSERT INTO languages (name) VALUES (?1)")?;
+            let mut lang_ids: Vec<(&str, i64)> = Vec::new();
             let mut ins = tx.prepare_cached("INSERT INTO tree_entries VALUES (?1, ?2, ?3, ?4)")?;
             for f in files {
-                ins.execute(params![commit, f.path, f.blob_id, f.language])?;
+                let path = paths.id(&tx, Value::Text(f.path.clone()))?;
+                let blob = blobs.id(&tx, oid_value(&f.blob_id))?;
+                let language = match lang_ids.iter().find(|(n, _)| *n == f.language) {
+                    Some(&(_, id)) => id,
+                    None => {
+                        let id = langs.id(&tx, Value::Text(f.language.to_string()))?;
+                        lang_ids.push((f.language, id));
+                        id
+                    }
+                };
+                ins.execute(params![tree, path, blob, language])?;
             }
         }
         tx.commit()?;
@@ -436,6 +514,14 @@ impl Writer {
             tx.execute("DELETE FROM trees WHERE commit_id = ?1", params![c])?;
         }
         stats.trees_dropped = dead.len();
+        // Interned values never shrink on their own. The sweep scans every tree row (about 10 ms
+        // on a 190k-row store), so it runs only when a tree went. A value orphaned by `put_tree`
+        // replacing a commit (the engine never does) waits for the next such pass; until then an
+        // extra row in `blobs` only keeps facts alive longer, never drops a rooted one.
+        if !dead.is_empty() {
+            tx.execute("DELETE FROM paths WHERE id NOT IN (SELECT path FROM tree_entries)", [])?;
+            tx.execute("DELETE FROM blobs WHERE id NOT IN (SELECT blob FROM tree_entries)", [])?;
+        }
         tx.commit()?;
         Ok((stats, dead))
     }
@@ -449,7 +535,9 @@ impl Writer {
         let mut n = self.reader.conn.execute(
             "DELETE FROM facts WHERE id IN (
                SELECT id FROM facts WHERE
-                 blob_id NOT IN (SELECT blob_id FROM tree_entries)
+                 -- `blobs` is every blob a tree named as of the last orphan sweep in `gc_roots`:
+                 -- a superset of the live trees' blobs, so a rooted fact is never dropped.
+                 blob_id NOT IN (SELECT CASE typeof(oid) WHEN 'blob' THEN lower(hex(oid)) ELSE oid END FROM blobs)
                  AND blob_id NOT IN (SELECT blob_id FROM overlays WHERE blob_id IS NOT NULL)
                LIMIT ?1)",
             params![limit],
@@ -603,15 +691,20 @@ impl Reader {
         if !self.has_tree(commit)? {
             return Ok(None);
         }
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT path, blob_id, language FROM tree_entries WHERE commit_id = ?1 ORDER BY path")?;
-        let rows = st.query_map(params![commit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut st = self.conn.prepare_cached(
+            "SELECT p.path, b.oid, l.name FROM trees t
+               JOIN tree_entries e ON e.tree = t.id
+               JOIN paths p ON p.id = e.path
+               JOIN blobs b ON b.id = e.blob
+               JOIN languages l ON l.id = e.language
+             WHERE t.commit_id = ?1 ORDER BY p.path",
+        )?;
+        let rows = st.query_map(params![commit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Value>(1)?, r.get::<_, String>(2)?)))?;
         let mut out = Vec::new();
         for r in rows {
-            let (path, blob_id, language) = r?;
+            let (path, oid, language) = r?;
             if let Some(l) = lang::by_id(&language) {
-                out.push(FileRef { path, blob_id, language: l.id() });
+                out.push(FileRef { path, blob_id: oid_string(oid), language: l.id() });
             }
         }
         Ok(Some(out))

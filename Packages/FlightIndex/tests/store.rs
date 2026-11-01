@@ -167,3 +167,106 @@ fn incremental_vacuum_returns_freed_pages() {
     w.incremental_vacuum(0).unwrap();
     assert_eq!(w.stats().unwrap().free_pages, 0);
 }
+
+// ---- tree maps: interned paths, blobs and languages (schema 2) ----
+
+const OID_A: &str = "0123456789abcdef0123456789abcdef01234567";
+const OID_B: &str = "fedcba9876543210fedcba9876543210fedcba98";
+const OID_C: &str = "00000000000000000000000000000000000000ff";
+
+fn raw(root: &Path, repo: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(db_path(root, repo)).unwrap()
+}
+
+fn count(c: &rusqlite::Connection, sql: &str) -> i64 {
+    c.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn a_tree_round_trips_paths_blobs_and_languages() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    let files = vec![
+        FileRef { path: "src/Ünïcode/Módulo.elm".into(), blob_id: OID_A.into(), language: "elm" },
+        FileRef { path: "src/lib.rs".into(), blob_id: OID_B.into(), language: "rust" },
+        FileRef { path: "web/app.ts".into(), blob_id: OID_A.into(), language: "typescript" },
+    ];
+    w.put_tree("c1", &files).unwrap();
+    let r = Reader::open(root.path(), repo).unwrap();
+    let mut want = files.clone();
+    want.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(r.get_tree("c1").unwrap().unwrap(), want);
+    assert!(r.has_tree("c1").unwrap());
+    assert!(!r.has_tree("c2").unwrap());
+}
+
+#[test]
+fn tree_rows_intern_paths_and_store_blob_ids_as_raw_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    let t1 = [FileRef { path: "a.elm".into(), blob_id: OID_A.into(), language: "elm" }, FileRef { path: "b.elm".into(), blob_id: OID_B.into(), language: "elm" }];
+    let t2 = [FileRef { path: "a.elm".into(), blob_id: OID_A.into(), language: "elm" }, FileRef { path: "b.elm".into(), blob_id: OID_C.into(), language: "elm" }];
+    w.put_tree("c1", &t1).unwrap();
+    w.put_tree("c2", &t2).unwrap();
+    let c = raw(root.path(), repo);
+    assert_eq!(count(&c, "SELECT count(*) FROM paths"), 2, "a path shared by two trees is stored once");
+    assert_eq!(count(&c, "SELECT count(*) FROM blobs"), 3);
+    assert_eq!(count(&c, "SELECT count(*) FROM blobs WHERE typeof(oid) = 'blob' AND length(oid) = 20"), 3, "hex ids are stored as 20 raw bytes");
+    assert_eq!(count(&c, "SELECT count(*) FROM tree_entries"), 4);
+    assert_eq!(count(&c, "SELECT count(*) FROM pragma_table_info('tree_entries') WHERE type <> 'INTEGER'"), 0, "tree rows hold integers only");
+}
+
+#[test]
+fn putting_the_same_commit_twice_replaces_its_tree() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    w.put_tree("c1", &[FileRef { path: "a.elm".into(), blob_id: OID_A.into(), language: "elm" }]).unwrap();
+    w.put_tree("c1", &[FileRef { path: "b.rs".into(), blob_id: OID_B.into(), language: "rust" }]).unwrap();
+    assert_eq!(w.get_tree("c1").unwrap().unwrap(), vec![FileRef { path: "b.rs".into(), blob_id: OID_B.into(), language: "rust" }]);
+    assert_eq!(w.stats().unwrap().trees, 1);
+    assert_eq!(count(&raw(root.path(), repo), "SELECT count(*) FROM tree_entries"), 1);
+}
+
+#[test]
+fn gc_drops_dead_trees_with_their_orphan_paths_and_blobs() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    let mut w = Writer::open(root.path(), repo).unwrap();
+    let live = tempfile::tempdir().unwrap();
+    let f = |p: &str, b: &str| FileRef { path: p.into(), blob_id: b.into(), language: "elm" };
+    w.put_facts(&[OID_A, OID_B, OID_C].map(|b| parsed(b, Some(sample())))).unwrap();
+    w.put_tree("head", &[f("shared.elm", OID_A)]).unwrap();
+    w.put_tree("dead", &[f("shared.elm", OID_B), f("only-dead.elm", OID_C)]).unwrap();
+    // OID_B is also in the live overlay, so its facts survive even though its tree goes.
+    w.set_worktree(live.path(), Some("head"), &[Overlay::Present(f("x.elm", OID_B))]).unwrap();
+
+    let stats = w.gc().unwrap();
+    assert_eq!(stats, GcStats { worktrees_dropped: 0, trees_dropped: 1, facts_dropped: 1 });
+    assert!(w.has_facts(OID_A, "elm", 1).unwrap(), "rooted by a live tree");
+    assert!(w.has_facts(OID_B, "elm", 1).unwrap(), "rooted by an overlay");
+    assert!(!w.has_facts(OID_C, "elm", 1).unwrap(), "rooted by nothing");
+    assert!(w.get_tree("dead").unwrap().is_none());
+    let c = raw(root.path(), repo);
+    assert_eq!(count(&c, "SELECT count(*) FROM tree_entries"), 1, "a dead tree's rows cascade");
+    assert_eq!(count(&c, "SELECT count(*) FROM paths"), 1, "only-dead.elm is no longer named");
+    assert_eq!(count(&c, "SELECT count(*) FROM blobs"), 1, "only OID_A is still in a tree");
+}
+
+#[test]
+fn a_schema_1_file_is_rebuilt() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = Path::new("/x/app/.git");
+    {
+        let mut w = Writer::open(root.path(), repo).unwrap();
+        w.put_facts(&[parsed("b1", Some(sample()))]).unwrap();
+    }
+    raw(root.path(), repo).execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'", []).unwrap();
+    assert!(Reader::open(root.path(), repo).is_err(), "schema 1 is stale");
+    let w = Writer::open(root.path(), repo).unwrap();
+    assert_eq!(w.stats().unwrap().facts, 0, "the old file was dropped");
+    assert_eq!(count(&raw(root.path(), repo), "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'"), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 2);
+}
