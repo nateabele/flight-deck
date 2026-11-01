@@ -7,6 +7,7 @@ use crate::facts::{RefKind, SymbolKind};
 use crate::graph::{Confidence, SymId};
 use crate::query::{CallEntry, Direction, SymbolHit};
 use crate::links::Views;
+use crate::near::Near;
 use crate::resolve::Resolved;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
@@ -293,9 +294,18 @@ pub fn impact(c: &Ctx) -> ToolResult {
     let at = |v: usize, p: &Path| format!("{}{}", p.display(), views.tag(v).map(|t| format!("  [view: {t}]")).unwrap_or_default());
     let mut direct: Vec<(usize, PathBuf)> = views.importers(0, fi).into_iter().map(|(v, f)| (v, views.graph(v).abs(f))).filter(|(v, p)| keep(*v, p)).collect();
     direct.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
+    let mut radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
+    let near = Near::of(c);
+    if let Some(n) = &near {
+        let local = |v: usize, p: &Path| if v == 0 { g.file_idx(p) } else { None };
+        n.sort_by_file(&mut direct, |r| local(r.0, &r.1));
+        n.sort_by_file(&mut radius, |r| local(r.0, &r.1.path));
+    }
 
     let mut out = format!("Impact analysis: {}\n", path.display());
+    if let Some(n) = &near {
+        let _ = writeln!(out, "{}", n.note());
+    }
     let _ = writeln!(out, "Direct importers ({}):", direct.len());
     let rows = shown(&direct, |r| r.0, LIST_CAP);
     for (v, p) in rows.iter().map(|r| &**r) {
@@ -343,11 +353,16 @@ pub fn refs(c: &Ctx) -> ToolResult {
     let include_tests = c.args.flag(&["include_tests"], true);
     let transitive = c.args.flag(&["transitive"], false);
     let file = c.args.path(super::args::FILE);
-    let defs = c.definitions(&name, c.kind()?, file.as_deref());
+    let mut defs = c.definitions(&name, c.kind()?, file.as_deref());
     if defs.is_empty() {
         return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
     }
+    let near = Near::of(c);
     let mut out = String::new();
+    if let Some(n) = &near {
+        n.sort_hits(c.graph, &mut defs);
+        let _ = writeln!(out, "{}", n.note());
+    }
     if defs.len() > 1 {
         let _ = writeln!(out, "{} matches for name '{name}'; refs reports each candidate in order. Pass file_path or kind to narrow.", defs.len());
     }
@@ -366,7 +381,10 @@ pub fn refs(c: &Ctx) -> ToolResult {
         } else {
             let _ = writeln!(out, "References ({} in {} file(s)):", refs.len(), by_file.len());
         }
-        let files: Vec<((usize, &Path), Vec<&crate::query::RefHit>)> = by_file.into_iter().collect();
+        let mut files: Vec<((usize, &Path), Vec<&crate::query::RefHit>)> = by_file.into_iter().collect();
+        if let Some(n) = &near {
+            n.sort_by_file(&mut files, |f| if (f.0).0 == 0 { c.graph.file_idx((f.0).1) } else { None });
+        }
         let listed = shown(&files, |f| (f.0).0, usize::MAX);
         let omitted = files.len() - listed.len();
         for ((v, p), rs) in listed.into_iter().map(|f| (&f.0, &f.1)) {
@@ -457,8 +475,19 @@ pub fn calls(c: &Ctx) -> ToolResult {
         }
         edges
     };
-    let callers = if want_callers { walk(Direction::In) } else { Vec::new() };
-    let callees = if want_callees { walk(Direction::Out) } else { Vec::new() };
+    let mut callers = if want_callers { walk(Direction::In) } else { Vec::new() };
+    let mut callees = if want_callees { walk(Direction::Out) } else { Vec::new() };
+    // Nearest first within each depth, so `limit` keeps the near rows; depth order stays, which
+    // keeps every row after the one its `via` names.
+    let near = Near::of(c);
+    if let Some(n) = &near {
+        for rows in [&mut callers, &mut callees] {
+            let scores = n.hit_scores(c.graph, &rows.iter().map(|r| &r.1.hit).collect::<Vec<_>>());
+            let mut keyed: Vec<(f64, (SymbolHit, CallEntry))> = scores.into_iter().zip(rows.drain(..)).collect();
+            keyed.sort_by(|a, b| (a.1).1.depth.cmp(&(b.1).1.depth).then(b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
+            rows.extend(keyed.into_iter().map(|(_, r)| r));
+        }
+    }
 
     if c.format == Format::Mermaid {
         let mut ids: BTreeMap<(usize, SymId), usize> = BTreeMap::new();
@@ -489,6 +518,9 @@ pub fn calls(c: &Ctx) -> ToolResult {
     }
 
     let mut out = format!("Call hierarchy for {} ({}) @ {}:L{}-{}{}\n", target.name, target.kind.as_str(), target.path.display(), target.start_line, target.end_line, tag_suffix(&views, target.view));
+    if let Some(n) = &near {
+        let _ = writeln!(out, "{}", n.note());
+    }
     for (title, rows) in [("Callers", &callers), ("Callees", &callees)] {
         if (title == "Callers" && !want_callers) || (title == "Callees" && !want_callees) {
             continue;

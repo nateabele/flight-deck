@@ -71,6 +71,10 @@ pub struct Ctx<'a> {
     /// The views linked to `graph`'s (or depending on it) that the request pulled in; empty for a
     /// tool that answers from one view (`links.rs`).
     pub members: &'a [Member],
+    /// Absolute paths of what the agent is working on in this worktree: its changed files, then
+    /// the files it read last. The default seed set of `near` (`near.rs`); empty in tests and
+    /// in the eval harness, whose views are clean commits nobody read.
+    pub recent: &'a [PathBuf],
     pub cochange: &'a (dyn Fn() -> Result<Arc<CoChange>> + Sync),
 }
 

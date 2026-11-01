@@ -156,6 +156,16 @@
      "description": "Exact symbol name to search for (or regex when regex=true). Accepts aliases `symbol`, `symbol_name`, and `query`.",
      "type": "string"
     },
+    "near": {
+     "description": "Files (absolute, or relative to the caller's working directory) or symbol names the caller is working on. Rows are ordered nearest first by graph distance from them, mixed with PageRank. Default: the worktree's changed files plus the files read last. Pass [] to keep the plain order.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
     "regex": {
      "default": null,
      "description": "If true, interpret `name` as a regex applied to indexed symbol names. Uses `regex::Regex::is_match` (find anywhere, not anchored - prepend `^` for start-anchored, `$` for end-anchored, both for full-match). Case-insensitive by default; prepend `(?-i)` to force case-sensitive. Default false (exact name lookup).",
@@ -220,6 +230,16 @@
      "minimum": 0,
      "type": [
       "integer",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Files (absolute, or relative to the caller's working directory) or symbol names the caller is working on. Rows are ordered nearest first by graph distance from them, mixed with PageRank. Default: the worktree's changed files plus the files read last. Pass [] to keep the plain order.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
       "null"
      ]
     },
@@ -545,6 +565,16 @@
       "null"
      ]
     },
+    "near": {
+     "description": "Files (absolute, or relative to the caller's working directory) or symbol names the caller is working on. Rows are ordered nearest first by graph distance from them, mixed with PageRank. Default: the worktree's changed files plus the files read last. Pass [] to keep the plain order.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
     "token_budget": {
      "default": null,
      "description": "Approximate token budget for output (default: 4000)",
@@ -602,6 +632,16 @@
      "description": "Include refs from test files in the listing. Default true for back-compat. Set false when investigating production usages of a hub symbol whose test imports would otherwise dominate the output.",
      "type": [
       "boolean",
+      "null"
+     ]
+    },
+    "near": {
+     "description": "Files (absolute, or relative to the caller's working directory) or symbol names the caller is working on. Rows are ordered nearest first by graph distance from them, mixed with PageRank. Default: the worktree's changed files plus the files read last. Pass [] to keep the plain order.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
       "null"
      ]
     },
@@ -734,6 +774,16 @@
     "name": {
      "description": "Function/method name to analyze call hierarchy for. Accepts aliases `symbol` and `symbol_name`.",
      "type": "string"
+    },
+    "near": {
+     "description": "Files (absolute, or relative to the caller's working directory) or symbol names the caller is working on. Rows are ordered nearest first by graph distance from them, mixed with PageRank. Default: the worktree's changed files plus the files read last. Pass [] to keep the plain order.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
     },
     "token_budget": {
      "default": null,

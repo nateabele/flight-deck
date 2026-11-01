@@ -13,6 +13,7 @@ pub mod git;
 pub mod graph;
 pub mod guard;
 pub mod lang;
+pub mod near;
 pub mod links;
 pub mod mcp;
 pub mod proto;
