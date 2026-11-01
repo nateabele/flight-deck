@@ -77,6 +77,7 @@ struct ThreadPanel: View {
                 Button { narrowShowsIndex.toggle() } label: { Image(systemName: "list.bullet") }
                     .buttonStyle(.borderless)
                     .help(narrowShowsIndex ? "Back to the conversation" : "All threads")
+                    .accessibilityIdentifier("thread-index-toggle")
             }
         }
         .font(.callout)
@@ -420,8 +421,10 @@ private struct DiffActionRow: View {
             case .pending:
                 Button { decide(false) } label: { Text("✗").foregroundStyle(.red) }.buttonStyle(.plain)
                     .help("Reject this edit")
+                    .accessibilityIdentifier("thread-diff-reject")
                 Button { decide(true) } label: { Text("✓").foregroundStyle(.green).fontWeight(.semibold) }.buttonStyle(.plain)
                     .help("Apply this edit to the plan")
+                    .accessibilityIdentifier("thread-diff-accept")
             case .accepted: Text("accepted").font(.system(size: 11.5)).foregroundStyle(.secondary)
             case .rejected: Text("rejected").font(.system(size: 11.5)).foregroundStyle(.secondary)
             case .stale:

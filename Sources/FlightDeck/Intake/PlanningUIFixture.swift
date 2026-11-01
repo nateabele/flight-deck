@@ -15,6 +15,11 @@ import IntakeKit
 /// two drafts, a synthesis that read notes written on the drafts, and two refines, each version
 /// a long plan of paragraphs and tables (`NotesToolbarUITests`).
 ///
+/// `-FlightDeckPlanningFixture threads` seeds the `shaping` plan with one ask thread that has
+/// already answered with a pending diff on the plan's opening sentence (`AskThreadUITests`). No
+/// ThreadRunner is started under it (`startsThreadRunner`): a turn would run a real agent CLI on
+/// the UI-test Mac and spend tokens, so an Ask sent in the test stays queued.
+///
 /// Debug-only and gated on the reset flag like every other UI fixture, so a stray default can
 /// never point a real launch's intakes at a scratch directory.
 enum PlanningUIFixture {
@@ -22,10 +27,10 @@ enum PlanningUIFixture {
     static let active: Root? = {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "FlightDeckResetState"),
-              let state = defaults.string(forKey: "FlightDeckPlanningFixture"), ["shaping", "synthesized"].contains(state) else { return nil }
+              let state = defaults.string(forKey: "FlightDeckPlanningFixture"), ["shaping", "synthesized", "threads"].contains(state) else { return nil }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlightDeck-planning-fixture-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
-        let fixture = Root(root: root, synthesized: state == "synthesized")
+        let fixture = Root(root: root, synthesized: state == "synthesized", threads: state == "threads")
         do { try fixture.seed() } catch { return nil }
         return fixture
     }()
@@ -33,6 +38,9 @@ enum PlanningUIFixture {
     struct Root {
         let root: URL
         var synthesized = false
+        var threads = false
+        /// False under the `threads` fixture: see the type's comment.
+        var startsThreadRunner: Bool { !threads }
         var project: URL { root.appendingPathComponent("planning-fixture", isDirectory: true) }
         var projectPath: String { project.standardizedFileURL.path }
         var intakesRoot: URL { root.appendingPathComponent("intakes", isDirectory: true) }
@@ -57,6 +65,7 @@ enum PlanningUIFixture {
             tape.pendingNotes = (1...3).map { PlanNote(note: "Fixture note \($0): say more about the rollout and who signs it off.") }
             tape.status = .paused
             try tapes.saveTape(tape)
+            if threads { try PlanningUIFixture.seedThread(in: tapes.intakeDirectory) }
         }
     }
 
@@ -99,6 +108,33 @@ enum PlanningUIFixture {
             text += "\n"
         }
         return text
+    }
+
+    static let threadTitle = "Is the opening sentence right?"
+    static let threadReply = "It undersells the fixture. I propose saying what the plan is for."
+    static let threadOld = "A synthetic plan for the planning inspector UI test."
+    static let threadNew = "A synthetic plan that an ask thread has edited."
+
+    /// One thread, as ThreadRunner leaves it after a turn: the record, one answered turn, and a
+    /// pending diff on the plan's opening sentence (which occurs once).
+    private static func seedThread(in intake: URL) throws {
+        let store = ThreadStore(intakeDirectory: intake)
+        let id = ThreadID()
+        let anchor = NoteAnchor(checkpoint: 1, selecting: plan.range(of: threadOld)!, in: plan)
+        let record = ThreadRecord(id: id, title: threadTitle, anchor: ThreadAnchor(note: anchor), status: .needsYou,
+                                  agent: .claude, model: "fixture", effort: "high", followsCheckpoint: 1, createdAt: Date())
+        let dir = store.directory(id)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("diffs"), withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(record).write(to: dir.appendingPathComponent("thread.json"), options: .atomic)
+        let line = JSONEncoder()
+        line.dateEncodingStrategy = IntakeJSON.encoder.dateEncodingStrategy
+        let turn = ThreadTurn(seq: 1, messageID: "fixture-1", you: "Is this the right way to open the plan?", reply: threadReply,
+                              decision: "Say what the plan is for.",
+                              actions: [.proposeDiff(ProposedThreadDiff(checkpoint: 1, quote: threadOld, replacement: threadNew))],
+                              checkpoint: 1, startedAt: Date(), endedAt: Date())
+        try (line.encode(turn) + Data("\n".utf8)).write(to: dir.appendingPathComponent("turns.jsonl"), options: .atomic)
+        let diff = ThreadDiff(thread: id, turn: 1, checkpoint: 1, anchor: anchor, old: threadOld, new: threadNew)
+        try IntakeJSON.encoder.encode(diff).write(to: dir.appendingPathComponent("diffs/\(diff.id.uuidString).json"), options: .atomic)
     }
 
     /// After the store exists: a tab in the project (so the sidebar lists it), its plan

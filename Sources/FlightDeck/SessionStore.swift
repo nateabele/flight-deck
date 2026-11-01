@@ -2504,9 +2504,14 @@ final class SessionStore: ObservableObject {
                                             runnerSecret: controlSecret)
         // The intake's ask threads (spec §5): the same detached mechanism and the same runner
         // token, on its own `threads-<uuid>.sock`. It resolves no accounts (`RunnerKind`).
-        let threadRunner = IntakeRunnerController(daemon: daemon, control: daemonControl,
+        var threadRunner: IntakeRunnerController? = IntakeRunnerController(daemon: daemon, control: daemonControl,
                                                   spawner: FdAbducoRunnerSpawner(), intakesRoot: root,
                                                   runnerSecret: controlSecret, kind: .threads)
+        #if DEBUG
+        // The ask-thread UI fixture: a turn would run a real agent on the UI-test Mac.
+        if PlanningUIFixture.active?.intakesRoot.standardizedFileURL == root.standardizedFileURL,
+           PlanningUIFixture.active?.startsThreadRunner == false { threadRunner = nil }
+        #endif
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,
