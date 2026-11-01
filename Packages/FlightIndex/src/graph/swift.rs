@@ -21,6 +21,17 @@ fn is_type_qualifier(q: &str) -> bool {
     q.split('.').all(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')) && last.starts_with(|c: char| c.is_uppercase())
 }
 
+/// Member names the standard library and Foundation define on nearly every receiver. When a
+/// repository also defines exactly one member of such a name, `x.contains(..)` is still almost
+/// certainly the library's, so a unique-name guess would be wrong more often than right.
+const LIBRARY_MEMBERS: &[&str] = &[
+    "decode", "encode", "contains", "map", "compactMap", "flatMap", "filter", "forEach", "reduce", "sorted", "sort",
+    "first", "last", "append", "insert", "remove", "removeAll", "merge", "withLock", "joined", "split", "reversed",
+    "min", "max", "count", "isEmpty", "prefix", "suffix", "dropFirst", "dropLast", "firstIndex", "lastIndex",
+    "enumerated", "hasPrefix", "hasSuffix", "write", "read", "close", "reset", "cancel", "send", "next", "value",
+    "keys", "values", "items", "add", "get", "set", "update", "run", "start", "stop",
+];
+
 impl ViewGraph {
     /// Module keys visible from file `f`, its own first: the files of those directories are what
     /// an unqualified name can mean.
@@ -87,19 +98,43 @@ impl ViewGraph {
         // Last resorts shared by every branch: a unique member name in scope, then a unique name
         // anywhere in the view. Both are guesses and say so.
         let unique_member = || -> Option<RefRes> {
+            if LIBRARY_MEMBERS.contains(&r.name.as_str()) && r.qualifier.is_some() {
+                return None;
+            }
             let members: Vec<_> = cands.iter().copied().filter(|(id, _)| sym(*id).parent.is_some() && sym(*id).kind != SymbolKind::Extension).collect();
             (members.len() == 1).then(|| guess(members[0].0))
         };
-        let global = |qualified: bool| -> RefRes {
-            match self.fallback(f, &r.name, r.kind, qualified) {
-                Some(id) => guess(id),
-                None => none.clone(),
+        // A name nothing in scope defines. Only test targets may look view-wide: an Xcode test
+        // bundle compiles other targets' sources straight in (`CLIRunner` with no `import`), but
+        // anywhere else a view-wide match is a platform name colliding with an unrelated type
+        // (`Task`, `Error`) and would draw an edge from a library into the app. Only top-level
+        // definitions qualify: a nested one is nameable only through its parent.
+        let global = |_qualified: bool| -> RefRes {
+            let key = &keys[0];
+            if !(key.starts_with("Tests") || key.contains("/Tests/") || key.starts_with("UITests")) {
+                return none.clone();
             }
+            let pool: Vec<SymId> = self
+                .name_index
+                .get(&r.name)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| id.file != f && self.files[id.file as usize].language == "swift" && sym(*id).kind != SymbolKind::Extension && sym(*id).parent.is_none())
+                .collect();
+            if pool.len() == 1 { guess(pool[0]) } else { none.clone() }
         };
 
         match r.qualifier.as_deref() {
             None if r.name.starts_with(|c: char| c.is_uppercase()) => {
-                let types: Vec<_> = cands.iter().copied().filter(|(id, _)| is_type_kind(sym(*id).kind)).collect();
+                // A nested type (`Store.Kind`) is nameable bare only from inside its parent, so
+                // an `Error` or `Entry` nested somewhere else is not what a bare `Error` means.
+                let types: Vec<_> = cands
+                    .iter()
+                    .copied()
+                    .filter(|(id, _)| is_type_kind(sym(*id).kind))
+                    .filter(|(id, _)| parent_name(*id).is_none_or(|p| enclosing_chain.contains(&p)))
+                    .collect();
                 match best(types) {
                     Some((id, ambiguous)) => {
                         let top_level = sym(id).parent.is_none();
