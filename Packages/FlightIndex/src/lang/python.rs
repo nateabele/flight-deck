@@ -174,10 +174,8 @@ impl<'a> Walker<'a> {
                 if let Some(a) = n.named_child(0) {
                     match a.kind() {
                         "assignment" => handled = self.assignment(n, a, parent, scope),
-                        "augmented_assignment" => {
-                            if a.child_by_field_name("left").is_some_and(|l| text(l, src) == "__all__") {
-                                self.read_dunder_all(a);
-                            }
+                        "augmented_assignment" if a.child_by_field_name("left").is_some_and(|l| text(l, src) == "__all__") => {
+                            self.read_dunder_all(a);
                         }
                         _ => {}
                     }

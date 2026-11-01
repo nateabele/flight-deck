@@ -10,6 +10,7 @@ impl ViewGraph {
     /// name, imported names as `locals`, and `from pkg import submodule` as a module of its own.
     /// `from pkg import name` cannot tell a submodule from an attribute without looking, so the
     /// submodule file is tried first, as the import system does.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn python_bindings(
         &self,
         from: &str,

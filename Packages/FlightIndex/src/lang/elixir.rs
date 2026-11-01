@@ -369,10 +369,10 @@ impl<'a> Walker<'a> {
         }
         // The head's argument patterns (`%Foo{}`), its guard, then the keyword body and `do` block.
         // The head's own name is the definition, not a call.
-        if head.kind() == "call" {
-            if let Some(ha) = Self::args(head) {
-                self.walk_children(ha, inner);
-            }
+        if head.kind() == "call"
+            && let Some(ha) = Self::args(head)
+        {
+            self.walk_children(ha, inner);
         }
         if let Some(guard) = guard {
             self.walk(guard, inner);
@@ -484,7 +484,7 @@ impl<'a> Walker<'a> {
                 }
             }
             "import" | "require" | "use" => {
-                if !matches!(first.kind(), "alias") && !(first.kind() == "identifier" && text(first, src) == "__MODULE__") {
+                if first.kind() != "alias" && !(first.kind() == "identifier" && text(first, src) == "__MODULE__") {
                     return;
                 }
                 let spec = self.expand(text(first, src));
