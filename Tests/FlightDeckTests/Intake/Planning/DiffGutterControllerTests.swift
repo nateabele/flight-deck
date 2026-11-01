@@ -157,6 +157,42 @@ final class DiffGutterControllerTests: XCTestCase {
         XCTAssertEqual(c.editing?.anchor, NSRange(location: expected.location + 2, length: expected.length + 2))
     }
 
+    /// ⌘Z after Edit takes the inserted words back out: the plan reads as before Edit, so there is
+    /// no edit to accept. The session ends with it; left open, Accept edited recorded an accept of
+    /// an unchanged plan.
+    func testUndoingTheEditInsertEndsTheSession() {
+        let (c, storage, observer) = wired(plan)
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let a = diff("Alpha beta gamma.", new: "Alpha beta gamma, changed.")
+        c.update([a], in: plan)
+        c.edit(a)
+        let anchor = try! XCTUnwrap(c.editing).anchor
+        storage.replaceCharacters(in: anchor, with: "Alpha beta gamma.")   // what undo does
+        XCTAssertEqual(storage.string, plan)
+        XCTAssertNil(c.editing)
+        var decided = 0
+        c.onDecide = { _, _, _ in decided += 1 }
+        c.acceptEdited()
+        XCTAssertEqual(decided, 0)
+    }
+
+    /// A paste over the edge of the inserted words (some before them, some inside): where the
+    /// passage starts is no longer known, so Cancel can't put the original back by range without
+    /// eating the pasted words outside it. The session ends and the text stays as typed.
+    func testAPasteOverTheEdgeOfTheEditEndsTheSessionAndCancelTouchesNothing() {
+        let (c, storage, observer) = wired(plan)
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let a = diff("Alpha beta gamma.", new: "Alpha beta gamma, changed.")
+        c.update([a], in: plan)
+        c.edit(a)
+        let anchor = try! XCTUnwrap(c.editing).anchor
+        storage.replaceCharacters(in: NSRange(location: anchor.location - 2, length: 7), with: "PASTED TEXT")
+        let typed = storage.string
+        XCTAssertNil(c.editing)
+        c.cancelEdit()
+        XCTAssertEqual(storage.string, typed)
+    }
+
     func testEditingEndsWhenTheDiffGoesAway() {
         let c = controller()
         let a = diff("Alpha beta gamma.")

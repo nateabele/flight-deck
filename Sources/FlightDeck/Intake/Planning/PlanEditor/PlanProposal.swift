@@ -25,6 +25,12 @@ struct PlanProposal: Equatable {
             edit.shift(p.block).map { PlanProposal(diff: p.diff, block: $0, source: p.source, old: p.old, hovered: p.hovered) }
         }
     }
+
+    /// The same after a pass of several character edits, in the order the storage reported them
+    /// (each range is in the text after its own edit, so they compose in turn).
+    static func moved(_ proposals: [PlanProposal], by edits: [TextEdit]) -> [PlanProposal] {
+        edits.reduce(proposals) { moved($0, by: $1) }
+    }
 }
 
 /// The proposed block and the old one, each laid out on a scratch text system with the plan's

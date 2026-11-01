@@ -337,6 +337,9 @@ struct PlanTextView: NSViewRepresentable {
         /// (a paste-and-undo in one event), which falls back to a full restyle.
         private var pendingEdit: (range: NSRange, delta: Int)?
         private var editCount = 0
+        /// Every character edit of the pass, in order: a pass of several still moves the
+        /// proposals in this same pass (`PlanProposal.moved(_:by:)`), as a single edit does.
+        private var passEdits: [TextEdit] = []
         /// The edit layer: the agents' plan it was diffed against, the marks drawn, and the
         /// hunks Revert puts back — all as of the text in the view.
         private var layerBase: String?
@@ -399,6 +402,7 @@ struct PlanTextView: NSViewRepresentable {
             style(storage, indices: nil, reveal: revealed)
             pendingEdit = nil
             editCount = 0
+            passEdits = []
             taking = nil
             MainActor.assumeIsolated { notesBridge.textChanged() }
             textView.layOutWholePlan()
@@ -974,6 +978,7 @@ struct PlanTextView: NSViewRepresentable {
             guard editedMask.contains(.editedCharacters) else { return }
             editCount += 1
             pendingEdit = (editedRange, delta)
+            passEdits.append(TextEdit(range: editedRange, delta: delta))
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -1003,12 +1008,15 @@ struct PlanTextView: NSViewRepresentable {
                     style(storage, indices: changed + layered + [revealed, next].compactMap { $0 }, reveal: next)
                 } else {
                     blocks = fresh
+                    // Left at the old ranges, the proposals would show their source for a turn.
+                    proposals = PlanProposal.moved(proposals, by: passEdits)
                     diffEditLayer(base: layerBase, text: textView.string)
                     style(storage, indices: nil, reveal: next)
                 }
                 revealed = next
                 pendingEdit = nil
                 editCount = 0
+                passEdits = []
                 foldsFollowEdit()
                 if let edit = single, let memory = scrolling.memory, let anchor = memory.anchor {
                     memory.anchor = anchor.shifted(by: TextEdit(range: edit.range, delta: edit.delta))

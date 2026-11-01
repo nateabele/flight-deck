@@ -194,6 +194,9 @@ final class DiffGutterController {
         let original: String
         var anchor: NSRange
         let checkpoint: Int?
+        /// The whole plan before Edit: reading as this again (⌘Z took the insert back out), there
+        /// is no edit left to accept.
+        let before: String
     }
     private(set) var editing: EditSession?
     private var checkpoint: Int?
@@ -423,12 +426,19 @@ final class DiffGutterController {
         onEdit(diff, range)
         // After the insert, so the insert's own edit notification does not move the anchor.
         editing = EditSession(diff: diff, original: original,
-                              anchor: NSRange(location: range.location, length: (diff.new as NSString).length), checkpoint: checkpoint)
+                              anchor: NSRange(location: range.location, length: (diff.new as NSString).length), checkpoint: checkpoint,
+                              before: text as String)
         showStrip()
     }
 
     /// Keeps the edited range on the inserted words as the plan changes (the bridge feeds every
     /// character edit here): an edit above moves it, one inside or touching either end grows it.
+    ///
+    /// Two edits end the session, words left as typed: one that brings the plan back to what it
+    /// read before Edit (⌘Z took the insert out — Accept edited would record an unchanged plan),
+    /// and one over the passage's edge (a paste half before it, half inside), after which where
+    /// the passage starts is a guess — and Cancel, which restores by range, would eat the pasted
+    /// words outside it.
     func textEdited(_ edit: TextEdit) {
         guard var session = editing else { return }
         let a = session.anchor
@@ -437,8 +447,9 @@ final class DiffGutterController {
         } else if let moved = edit.shift(a) {
             session.anchor = moved
         } else {
-            session.anchor = edit.stretch(a)
+            return finishEdit()
         }
+        if currentText() == session.before { return finishEdit() }
         editing = session
         placeStrip()
     }

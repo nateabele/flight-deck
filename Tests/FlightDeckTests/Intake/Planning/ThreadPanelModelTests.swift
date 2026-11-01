@@ -476,6 +476,24 @@ final class ThreadPanelModelTests: XCTestCase {
         XCTAssertEqual(m.openQuestions(asked.id).count, 1)
     }
 
+    /// The notes controller tells the editor when the panel moves to another thread (`$selected`),
+    /// so a half-made Edit on the last thread is let go; the same thread again, and the first
+    /// binding, are not a switch.
+    func testThePanelMovingToAnotherThreadIsReportedOnce() async throws {
+        let controller = PlanNotesController()
+        var switched = 0
+        controller.onThreadSwitched = { switched += 1 }
+        controller.threads = IntakeThreadBinding(intakeID: UUID(), reader: EmptyThreadStore(), service: nil)
+        let panel = try XCTUnwrap(controller.threadPanel)
+        let a = ThreadID(), b = ThreadID()
+        panel.open(a)
+        panel.open(a)
+        panel.open(b)
+        // The controller hops to the next main-actor turn before it calls out.
+        for _ in 0..<20 where switched < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(switched, 2)
+    }
+
     func testRefusalsReadAsWordsNotCodes() {
         for code in ["unknown_thread", "unknown_diff", "diff_stale", "empty_message", "not_allowed", "no_agents"] {
             let words = ThreadPanelModel.words(for: ThreadRefusal(code: code))

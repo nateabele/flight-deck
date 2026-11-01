@@ -26,6 +26,21 @@ final class PlanProposalTests: XCTestCase {
         return PlanProposal(diff: UUID(), block: block.range, source: new, old: (text as NSString).substring(with: block.range))
     }
 
+    /// A pass with several character edits (a paste the system then autocorrects) moves each
+    /// proposal by every edit in order, as one edit does, so typing above a proposal never shows
+    /// its source for a run-loop turn; one an edit lands inside is dropped, to be laid again.
+    func testAPassOfSeveralEditsMovesProposalsByEachInTurn() {
+        let p = PlanProposal(diff: UUID(), block: NSRange(location: 20, length: 10), source: "new", old: "old")
+        let q = PlanProposal(diff: UUID(), block: NSRange(location: 50, length: 5), source: "n", old: "o")
+        let edits = [TextEdit(range: NSRange(location: 0, length: 3), delta: 3),     // 3 typed at the top
+                     TextEdit(range: NSRange(location: 5, length: 2), delta: -1),    // 3 replaced by 2 below it
+                     TextEdit(range: NSRange(location: 55, length: 4), delta: 4)]    // typed inside q, now at 52
+        let moved = PlanProposal.moved([p, q], by: edits)
+        XCTAssertEqual(moved.map(\.block), [NSRange(location: 22, length: 10)])
+        XCTAssertEqual(moved.map(\.diff), [p.diff])
+        XCTAssertEqual(PlanProposal.moved([p], by: [edits[0]]), PlanProposal.moved([p], by: edits[0]))
+    }
+
     func testAParagraphWithAProposalIsHiddenAndHeldToTheProposedHeight() throws {
         let blocks = MarkdownStyler.blocks(text)
         let p = proposal(for: blocks, new: "A shorter paragraph.")
