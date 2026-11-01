@@ -180,6 +180,25 @@ actor ThreadKeeper {
         }
         switch envelope.command {
         case .stop: return
+        case .reopenDiff(_, let diffID, let afterSeq, let note):
+            // N1: the human's typing took this accept back. Pending again, with the reason in
+            // the thread, once per take-back (its tape seq names the note).
+            guard var diff = store.diff(id, diffID) else { return }
+            diff.state = .pending
+            diff.reopenedAfter = max(diff.reopenedAfter ?? 0, afterSeq)
+            try store.save(diff)
+            let messageID = "reopened:\(diffID.uuidString):\(afterSeq)"
+            var turns = store.turns(id)
+            if !turns.contains(where: { $0.messageID == messageID }) {
+                let at = now()
+                turns.append(ThreadTurn(seq: (turns.map(\.seq).max() ?? 0) + 1, messageID: messageID, reply: note,
+                                        checkpoint: diff.checkpoint, startedAt: at, endedAt: at))
+                try store.save(turns: turns, of: id)
+            }
+            try mutate(id) { [store] record in
+                guard record.status != .resolved, !self.running.contains(id) else { return }
+                record.status = Self.restingStatus(store.turns(id), store.diffs(id))
+            }
         case .open(_, let anchor, let title, let agent, let model, let effort):
             guard store.thread(id) == nil else { return }
             let head = tapeStore.headPlanCheckpoint(in: tapeStore.loadTape()) ?? 0
@@ -611,7 +630,7 @@ private struct TurnContext: Sendable {
             do {
                 try tapeStore.appendCommand(composing: { commands in
                     // A crash after the append: it is on the tape already.
-                    if commands.contains(where: { if case .applyThreadDiff(_, diff.id, _, _) = $0.command { true } else { false } }) {
+                    if ThreadAccept.queuedSeq(of: candidate, in: commands) != nil {
                         result = .already
                         return nil
                     }

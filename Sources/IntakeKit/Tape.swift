@@ -346,6 +346,9 @@ public enum TapeCommand: Codable, Equatable, Sendable {
     case note(PlanNote), removeNote(UUID), editPlan(checkpoint: Int, markdown: String)
     case setNoteKind(UUID, NoteKind)
     case applyThreadDiff(thread: ThreadID, diff: UUID, checkpoint: Int, markdown: String)
+    /// N1: an accepted diff whose change the human's typing replaced before it landed. The runner
+    /// drops its source from `checkpoint`'s `plan.user.threads.json`; the plan is the typing's.
+    case withdrawThreadEdit(thread: ThreadID, diff: UUID, checkpoint: Int)
 
     /// The old free-text ✎ — now an unanchored comment. Its id is derived from the text (see
     /// `PlanNote.legacy`), so it equals itself however many times it is built or decoded.
@@ -354,7 +357,7 @@ public enum TapeCommand: Codable, Equatable, Sendable {
     /// `annotate` is decode-only: a `commands.jsonl` written before `PlanNote` may still hold one.
     private enum Kind: String, Codable {
         case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan, setNoteKind
-        case applyThreadDiff
+        case applyThreadDiff, withdrawThreadEdit
     }
     private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown, noteKind, thread, diff }
 
@@ -379,6 +382,10 @@ public enum TapeCommand: Codable, Equatable, Sendable {
                                     diff: try c.decode(UUID.self, forKey: .diff),
                                     checkpoint: try c.decode(Int.self, forKey: .checkpoint),
                                     markdown: try c.decode(String.self, forKey: .markdown))
+        case .withdrawThreadEdit:
+            self = .withdrawThreadEdit(thread: try c.decode(ThreadID.self, forKey: .thread),
+                                       diff: try c.decode(UUID.self, forKey: .diff),
+                                       checkpoint: try c.decode(Int.self, forKey: .checkpoint))
         case .extend:
             self = .extend(try c.decode(Stage.self, forKey: .stage), by: try c.decode(Int.self, forKey: .by))
         case .trim:
@@ -414,6 +421,11 @@ public enum TapeCommand: Codable, Equatable, Sendable {
             try c.encode(diff, forKey: .diff)
             try c.encode(checkpoint, forKey: .checkpoint)
             try c.encode(markdown, forKey: .markdown)
+        case .withdrawThreadEdit(let thread, let diff, let checkpoint):
+            try c.encode(Kind.withdrawThreadEdit, forKey: .kind)
+            try c.encode(thread, forKey: .thread)
+            try c.encode(diff, forKey: .diff)
+            try c.encode(checkpoint, forKey: .checkpoint)
         case .extend(let stage, let by):
             try c.encode(Kind.extend, forKey: .kind)
             try c.encode(stage, forKey: .stage)

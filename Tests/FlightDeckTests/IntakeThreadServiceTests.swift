@@ -289,8 +289,54 @@ final class IntakeThreadServiceTests: XCTestCase {
         router.env = PlanEditRouter.Env(tape: { svc.tapes[id] ?? .empty },
                                         loadFile: { svc.checkpointFile(id, checkpoint: $0, $1) },
                                         send: { svc.send(id, $0) },
-                                        queued: { svc.queuedPlan(id, checkpoint: $0) })
+                                        queued: { svc.queuedPlan(id, checkpoint: $0) },
+                                        typingWon: { svc.typingWon(id, checkpoint: $0, plan: $1) })
         return router
+    }
+
+    /// A ThreadRunner that answers nothing: folding the log is all these tests need of it.
+    private struct NoAgent: ThreadTurnExecuting {
+        func run(_ r: ThreadTurnRequest) async throws -> ThreadTurnOutcome { .malformed("no agent in this test", sessionID: nil) }
+    }
+
+    /// N1: ✓, then typing on the same line inside the commit window. The typing wins, and the
+    /// accept is not dropped silently: the diff is pending again with a note in its thread, and
+    /// the tape withdraws its source, so `plan.user.threads.json` agrees.
+    func testTypingOnTheSameLineTakesTheAcceptBackToPending() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        svc.pollTapes()
+        let router = editorRouter(svc, i.id)
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        let typed = Self.plan.replacingOccurrences(of: "We ship on Friday.", with: "We ship on Friday, maybe Thursday.")
+        router.commit(typed, typedOn: 1, loaded: Self.plan, editable: true)
+        await router.settle()
+        try fold(i.id)
+        XCTAssertEqual(headPlan(i.id), typed, "the typing wins")
+
+        await ThreadRunner(root: root, intakeID: i.id, executor: NoAgent(), pollInterval: .milliseconds(10)).run()
+        let threads = ThreadStore(intakeDirectory: directory(i.id))
+        XCTAssertEqual(threads.diff(t, d.id)?.state, .pending)
+        XCTAssertTrue(threads.turns(t).contains { $0.reply == ThreadAccept.typingWonNote })
+        XCTAssertTrue(TapeStore(intakeDirectory: directory(i.id)).threadEditSources(checkpoint: 1).isEmpty)
+
+        // Pending again, its old accept no longer counts: a ✗ is allowed, and a ✓ would be new.
+        let reopened = try XCTUnwrap(threads.diff(t, d.id))
+        XCTAssertNil(ThreadAccept.queuedSeq(of: reopened, in: TapeStore(intakeDirectory: directory(i.id)).commands(after: 0)))
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: false))
+    }
+
+    /// N3: a ✗ for a diff whose ✓ is already on the tape is refused, not recorded against it.
+    func testARejectAfterAnAcceptOnTheTapeIsRefused() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        XCTAssertEqual(svc.decideDiff(i.id, thread: t, diff: d.id, accept: false)?.code, "already_accepted")
+        XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
     }
 
     /// What IntakeRunner does with the queued plan commands: each one, in order, becomes the
@@ -305,6 +351,8 @@ final class IntakeThreadServiceTests: XCTestCase {
             case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
                 try tapes.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
                 try tapes.recordThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
+            case .withdrawThreadEdit(let thread, let diff, let checkpoint):
+                try tapes.withdrawThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
             default: break
             }
             tape.ackedCommandSeq = envelope.seq
@@ -423,13 +471,14 @@ final class IntakeThreadServiceTests: XCTestCase {
         let draft = UUID().uuidString
         XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "Why?", messageID: draft))
         XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "Why?", messageID: draft))
-        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "And then?"))
-        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "And then?"))
+        // N5: without a messageID nothing is deduped — a deliberate second "yes" is a message.
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "yes"))
+        XCTAssertNil(svc.sendThreadMessage(i.id, thread: t, text: "yes"))
         let answers = [StructuredAnswer(questionID: "q1", selected: ["a"])]
-        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers))
-        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers))
+        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers, messageID: "a1"))
+        XCTAssertNil(svc.answerThread(i.id, thread: t, answers: answers, messageID: "a1"))
         let logged = threadCommands(i.id)
-        XCTAssertEqual(logged.count, 3, "\(logged)")
+        XCTAssertEqual(logged.count, 4, "\(logged)")
         guard case .message(t, "Why?", draft, nil, nil, nil) = logged.first else { return XCTFail("\(logged)") }
     }
 

@@ -276,6 +276,17 @@ final class PhoneThreadCommandTests: XCTestCase {
         XCTAssertEqual(tapeCommands(i.id).filter { if case .applyThreadDiff = $0 { true } else { false } }.count, 1)
     }
 
+    /// N3: the phone's ✗ after its own ✓ reached the tape (the decision not folded yet) is
+    /// refused, so the thread can't record a rejection of an edit the plan keeps.
+    func testARejectAfterAQueuedAcceptIsRefused() async throws {
+        let i = try seed(); let svc = await makeService(); let t = ThreadID(); let d = diff(t)
+        let reader = FakeThreadReader(records: [record(t)], diffsByThread: [t: [d]])
+        XCTAssertNil(svc.applyPhoneDiffDecide(i.id, token: UUID(), threadID: t.raw, diffID: d.id, accept: true, reader: reader))
+        XCTAssertEqual(svc.applyPhoneDiffDecide(i.id, token: UUID(), threadID: t.raw, diffID: d.id, accept: false, reader: reader),
+                       "already_accepted")
+        XCTAssertEqual(threadCommands(i.id), [.decideDiff(t, diff: d.id, accept: true)])
+    }
+
     func testRejectWritesOnlyTheDecision() async throws {
         let i = try seed(); let svc = await makeService(); let t = ThreadID(); let d = diff(t)
         let reader = FakeThreadReader(records: [record(t)], diffsByThread: [t: [d]])

@@ -1221,7 +1221,7 @@ final class IntakeService: ObservableObject {
             publishTape(id, read: latestTapes[id] ?? tapeStore(id).loadTape())
         }
         switch command {
-        case .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff: return
+        case .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: return
         // A pause or stop withdraws the play that was starting: left pending, a runner that
         // reads the stop first and exits without a beat would leave "starting" up for good.
         case .pause:
@@ -1254,7 +1254,7 @@ final class IntakeService: ObservableObject {
     private static func startsRounds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview: true
-        case .pause, .stop, .extend, .trim, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff: false
+        case .pause, .stop, .extend, .trim, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: false
         }
     }
 

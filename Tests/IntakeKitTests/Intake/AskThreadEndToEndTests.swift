@@ -178,6 +178,55 @@ final class AskThreadEndToEndTests: XCTestCase {
         """), reviewer)
     }
 
+    /// N2: Accept-edited composes on every accept still queued: the editor's text predates
+    /// diff A's accept, so A is put back into it. When the editor's text changed A's own line,
+    /// A cannot be composed: the edited text wins, and A is withdrawn and reopened (N1's rule).
+    func testAnEditedAcceptComposesOnQueuedAccepts() async throws {
+        _ = try tapeStore.appendCommand(.step)
+        let drafted = await round(ScriptedHarnessRunner(Self.seats))
+        XCTAssertEqual(drafted, .paused)
+        let plan = "# Plan\n\n## Scope\nOne\n\n## Risks\nNone\n"
+        _ = try tapeStore.appendCommand(.editPlan(checkpoint: 1, markdown: plan))
+        let thread = ThreadID()
+        let threads = ThreadStore(intakeDirectory: directory)
+        let a = ThreadDiff(thread: thread, turn: 1, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "None"), old: "None", new: "Some")
+        let b = ThreadDiff(thread: thread, turn: 1, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "One"), old: "One", new: "Two")
+        try threads.save(a); try threads.save(b)
+        XCTAssertEqual(try ThreadAccept.append(a, editedMarkdown: nil, to: tapeStore), .appended)
+
+        // Edited B, typed on the plan from before A's accept.
+        XCTAssertEqual(try ThreadAccept.append(b, editedMarkdown: "# Plan\n\n## Scope\nTwo, edited\n\n## Risks\nNone\n", to: tapeStore),
+                       .appended)
+        guard case .applyThreadDiff(_, b.id, 1, let composed) = try XCTUnwrap(tapeStore.commands(after: 0).last).command
+        else { return XCTFail("expected B's edit") }
+        XCTAssertEqual(composed, "# Plan\n\n## Scope\nTwo, edited\n\n## Risks\nSome\n", "A is kept")
+
+        // Another edited accept, whose text rewrote A's line: A can't be composed.
+        var c = b
+        c.id = UUID()
+        try threads.save(c)
+        XCTAssertEqual(try ThreadAccept.append(c, editedMarkdown: "# Plan\n\n## Scope\nTwo, edited\n\n## Risks\nA few\n", to: tapeStore),
+                       .appended)
+        let tail = tapeStore.commands(after: 0).suffix(2).map(\.command)
+        guard case .applyThreadDiff(_, c.id, 1, "# Plan\n\n## Scope\nTwo, edited\n\n## Risks\nA few\n") = tail.first
+        else { return XCTFail("the edited text wins: \(tail)") }
+        XCTAssertEqual(tail.last, .withdrawThreadEdit(thread: thread, diff: a.id, checkpoint: 1))
+        let reopen = ThreadCommandStore(intakeDirectory: directory).commands(after: 0).map(\.command).last
+        guard case .reopenDiff(thread, a.id, _, ThreadAccept.typingWonNote) = reopen else { return XCTFail("\(String(describing: reopen))") }
+    }
+
+    /// N1: the runner folds a withdraw by dropping the source from the checkpoint's record.
+    func testAWithdrawDropsTheThreadsSource() throws {
+        var tape = tapeStore.loadTape()
+        try tapeStore.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date()),
+                                      files: ["plan.md": Data("One\n".utf8)], into: &tape)
+        let source = ThreadEditSource(thread: ThreadID(), diff: UUID())
+        try tapeStore.writeUserEdits(checkpoint: 1, markdown: "Two\n")
+        try tapeStore.recordThreadEdit(checkpoint: 1, source)
+        try tapeStore.withdrawThreadEdit(checkpoint: 1, source)
+        XCTAssertEqual(tapeStore.threadEditSources(checkpoint: 1), [])
+    }
+
     /// An accept composes on the newest version there is under the commands lock: a hand edit
     /// still queued for the head is kept, a diff from an older checkpoint applies to the head
     /// only where its passage still is, and an edited accept carries the human's text as it is,

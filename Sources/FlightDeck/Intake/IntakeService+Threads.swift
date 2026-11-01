@@ -68,7 +68,7 @@ extension IntakeService {
         if let refusal = openForTurns(id, thread) { return refusal }
         if unfoldedThreadCommands(id).contains(where: {
             guard case .message(thread, let queued, let queuedID, _, _, _) = $0 else { return false }
-            return messageID.map { $0 == queuedID } ?? (queued == trimmed)
+            return messageID == queuedID
         }) { return nil }
         return appendThread(id, [.message(thread, text: trimmed, messageID: messageID ?? UUID().uuidString, source: nil,
                                           elementID: nil, subjectRevision: nil)])
@@ -79,7 +79,7 @@ extension IntakeService {
         if let refusal = openForTurns(id, thread) { return refusal }
         if unfoldedThreadCommands(id).contains(where: {
             guard case .answer(thread, let queued, let queuedID) = $0 else { return false }
-            return messageID.map { $0 == queuedID } ?? (queued == answers)
+            return messageID == queuedID
         }) { return nil }
         return appendThread(id, [.answer(thread, answers, messageID: messageID ?? UUID().uuidString)])
     }
@@ -133,10 +133,13 @@ extension IntakeService {
         case .stale:
             // Stale is the runner's word that the passage moved: refused, as for the phone,
             // unless an earlier ✓ already put the edit on the tape (and so made it stale).
-            if !(accept && threadDiffQueued(id, diffID)) { return ThreadRefusal(code: "diff_stale") }
+            if !(accept && threadDiffQueued(id, diff)) { return ThreadRefusal(code: "diff_stale") }
         case .pending:
             break
         }
+        // N3: a ✗ after a ✓ that is already on the tape (its decision not folded yet) would
+        // record a rejection of an edit the plan keeps.
+        if !accept, threadDiffQueued(id, diff) { return ThreadRefusal(code: "already_accepted") }
         if accept {
             if let refusal = acceptOnTape(id, diff, editedMarkdown: editedMarkdown) { return refusal }
         }
@@ -181,6 +184,16 @@ extension IntakeService {
         if threadEditStamps[id] != newest { threadEditStamps[id] = newest }
     }
 
+    /// N1: the human's typing won a same-line conflict on `checkpoint` and `plan` is now sent for
+    /// it. Each accept it replaced, queued or folded there, is taken back: the diff goes back to
+    /// pending with a note in its thread, and its source is withdrawn from the plan's record.
+    func typingWon(_ id: UUID, checkpoint: Int, plan: String) {
+        guard notShaping(id) == nil else { return }
+        try? ThreadAccept.takeBackLost(in: plan, checkpoint: checkpoint, tapeStore: tapeStore(id))
+        refreshThreadEditStamp(id)
+        kickThreads(id)
+    }
+
     // MARK: - Shared by the Mac's and the phone's ops
 
     /// `applyThreadDiff` for `diff`, composed on the newest version of the head under the
@@ -199,10 +212,9 @@ extension IntakeService {
     }
 
     /// Whether an `applyThreadDiff` for `diff` is already on the tape.
-    func threadDiffQueued(_ id: UUID, _ diff: UUID) -> Bool {
-        tapeStore(id).commands(after: 0).contains {
-            if case .applyThreadDiff(_, diff, _, _) = $0.command { true } else { false }
-        }
+    /// Counts only an accept the human's typing has not taken back since (N1, `reopenedAfter`).
+    func threadDiffQueued(_ id: UUID, _ diff: ThreadDiff) -> Bool {
+        ThreadAccept.queuedSeq(of: diff, in: tapeStore(id).commands(after: 0)) != nil
     }
 
     /// Appends `commands` to the intake's thread log, in order, and makes sure a ThreadRunner

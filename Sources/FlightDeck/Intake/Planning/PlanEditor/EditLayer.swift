@@ -879,6 +879,8 @@ struct PlanEditHooks {
     /// The newest thread accept queued and not yet folded (`IntakeService.threadEditStamp`), so the
     /// editor reloads on an accept, which changes the plan without a new checkpoint.
     var acceptedStamp: Int?
+    /// N1: typing won a same-line conflict on a checkpoint (`IntakeService.typingWon`).
+    var typingWon: (_ checkpoint: Int, _ plan: String) -> Void = { _, _ in }
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

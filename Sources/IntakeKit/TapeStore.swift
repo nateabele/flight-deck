@@ -295,6 +295,16 @@ public struct TapeStore: Sendable {
         try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
     }
 
+    /// Runner-only (N1): `source`'s accept was taken back by the human's typing; it no longer
+    /// names a change in `checkpoint`'s layer.
+    public func withdrawThreadEdit(checkpoint: Int, _ source: ThreadEditSource) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        guard let data = try? Data(contentsOf: url),
+              var sources = try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data), sources.contains(source) else { return }
+        sources.removeAll { $0 == source }
+        try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
+    }
+
     /// Runner-only, after a hand edit lands on `checkpoint` (A-6): drops each thread source whose
     /// change the edit reverted — its passage reads as the old text again and the new text is
     /// gone — so the next round is not told "Its change is already in the plan" about a change

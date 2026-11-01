@@ -20,7 +20,7 @@ enum TapeOverlay {
     static func folds(_ command: TapeCommand) -> Bool {
         switch command {
         case .step, .nextMajor, .toReview, .pause, .extend, .trim: true
-        case .stop, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff: false
+        case .stop, .note, .removeNote, .setNoteKind, .editPlan, .applyThreadDiff, .withdrawThreadEdit: false
         }
     }
 

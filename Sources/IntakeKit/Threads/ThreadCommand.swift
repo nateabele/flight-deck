@@ -30,6 +30,10 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
     case reopen(ThreadID)
     case repropose(ThreadID, diff: UUID)
     case decideDiff(ThreadID, diff: UUID, accept: Bool)
+    /// N1: the human's typing replaced an accepted diff's change before it landed. The diff goes
+    /// back to pending with `note` in the thread; an `applyThreadDiff` for it at or before
+    /// `afterSeq` (a tape seq) no longer counts as its accept.
+    case reopenDiff(ThreadID, diff: UUID, afterSeq: Int, note: String)
     case stop
 
     /// The `messageID` of the first message in a thread the phone opened with `token` (see
@@ -40,18 +44,19 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
     public var thread: ThreadID? {
         switch self {
         case .open(let t, _, _, _, _, _), .message(let t, _, _, _, _, _), .answer(let t, _, _), .setAutoAccept(let t, _),
-             .setAgent(let t, _, _, _), .resolve(let t), .reopen(let t), .repropose(let t, _), .decideDiff(let t, _, _):
+             .setAgent(let t, _, _, _), .resolve(let t), .reopen(let t), .repropose(let t, _), .decideDiff(let t, _, _),
+             .reopenDiff(let t, _, _, _):
             t
         case .stop: nil
         }
     }
 
     private enum Kind: String, Codable {
-        case open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff, stop
+        case open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff, stop, reopenDiff
     }
     private enum CodingKeys: String, CodingKey {
         case kind, thread, anchor, title, agent, model, effort, text, messageID, source, elementID, subjectRevision
-        case answers, on, diff, accept
+        case answers, on, diff, accept, afterSeq
     }
 
     public init(from decoder: Decoder) throws {
@@ -84,6 +89,9 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
         case .repropose: self = .repropose(thread, diff: try c.decode(UUID.self, forKey: .diff))
         case .decideDiff:
             self = .decideDiff(thread, diff: try c.decode(UUID.self, forKey: .diff), accept: try c.decode(Bool.self, forKey: .accept))
+        case .reopenDiff:
+            self = .reopenDiff(thread, diff: try c.decode(UUID.self, forKey: .diff), afterSeq: try c.decode(Int.self, forKey: .afterSeq),
+                               note: try c.decode(String.self, forKey: .text))
         }
     }
 
@@ -130,6 +138,11 @@ public enum ThreadCommand: Codable, Equatable, Sendable {
             try c.encode(Kind.decideDiff, forKey: .kind)
             try c.encode(diff, forKey: .diff)
             try c.encode(accept, forKey: .accept)
+        case .reopenDiff(_, let diff, let afterSeq, let note):
+            try c.encode(Kind.reopenDiff, forKey: .kind)
+            try c.encode(diff, forKey: .diff)
+            try c.encode(afterSeq, forKey: .afterSeq)
+            try c.encode(note, forKey: .text)
         }
     }
 }

@@ -281,6 +281,29 @@ final class ThreadRunnerTests: XCTestCase {
         XCTAssertEqual(store.diff(id, pending.id)?.state, .accepted, "the human's ✓ stands")
     }
 
+    /// N1: a `reopenDiff` puts an accepted diff back to pending, marks the tape seq it was
+    /// taken back at, and leaves the human a note in the thread; the thread needs them again.
+    func testAReopenedDiffIsPendingAgainWithANote() async throws {
+        let id = try open()
+        let keeper = ThreadKeeper(store: store, tapeStore: tapeStore, commands: commands, now: Date.init)
+        await keeper.fold()
+        let d = ThreadDiff(thread: id, turn: 1, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "Use SQLite for the queue."),
+                           old: "Use SQLite for the queue.", new: "Use a file queue.")
+        await keeper.save(d)
+        try commands.append(.decideDiff(id, diff: d.id, accept: true))
+        try commands.append(.reopenDiff(id, diff: d.id, afterSeq: 7, note: ThreadAccept.typingWonNote))
+        await keeper.fold()
+
+        let reopened = try XCTUnwrap(store.diff(id, d.id))
+        XCTAssertEqual(reopened.state, .pending)
+        XCTAssertEqual(reopened.reopenedAfter, 7)
+        XCTAssertEqual(store.turns(id).last?.reply, ThreadAccept.typingWonNote)
+        XCTAssertEqual(store.thread(id)?.status, .needsYou)
+        try commands.append(.reopenDiff(id, diff: d.id, afterSeq: 7, note: ThreadAccept.typingWonNote))
+        await keeper.fold()
+        XCTAssertEqual(store.turns(id).filter { $0.reply == ThreadAccept.typingWonNote }.count, 1, "a refold adds no second note")
+    }
+
     // MARK: - One turn
 
     func testAMessageRunsOneTurnAndStoresTheReply() async throws {

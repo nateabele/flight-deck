@@ -321,6 +321,8 @@ private actor TapeKeeper {
                 if applyEdit(checkpoint: checkpoint, markdown: markdown) {
                     try? store.recordThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
                 }
+            case .withdrawThreadEdit(let thread, let diff, let checkpoint):
+                try? store.withdrawThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
             }
             tape.ackedCommandSeq = envelope.seq
         }

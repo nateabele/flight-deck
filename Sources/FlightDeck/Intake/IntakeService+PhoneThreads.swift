@@ -187,9 +187,8 @@ extension IntakeService {
         let tape = tapeStore(id)
         // An edit already on the tape means an earlier ✓ got this far: the diff may have gone
         // stale BECAUSE the edit changed its passage, and the retry must still record the decision.
-        let alreadyQueued = tape.commands(after: 0).contains {
-            if case .applyThreadDiff(_, let queued, _, _) = $0.command { queued == diffID } else { false }
-        }
+        // Not one the human's typing took back since (N1).
+        let alreadyQueued = ThreadAccept.queuedSeq(of: diff, in: tape.commands(after: 0)) != nil
         switch diff.state {
         case .stale:
             if !(doAccept && alreadyQueued) { return refuse("diff_stale", id) }
@@ -202,6 +201,8 @@ extension IntakeService {
             return refuse("diff_decided", id)
         case .pending: break
         }
+        // N3: a ✗ after this phone's own ✓ reached the tape (its decision not folded yet).
+        if !doAccept, alreadyQueued { return refuse("already_accepted", id) }
 
         // Composed on the newest version of the head under the commands lock, as the Mac's ✓ is
         // (`acceptOnTape`): built on the diff's own checkpoint instead, it would replace a hand

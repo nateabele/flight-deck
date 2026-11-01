@@ -33,6 +33,9 @@ final class PlanEditRouter {
         /// edit or a thread's accepted diff, whoever sent it (`IntakeService.queuedPlan`). Nil
         /// (renders, tests) falls back to this router's own `sent`.
         var queued: ((Int) -> String?)?
+        /// N1: typing on the head won a same-line conflict with what was queued or folded
+        /// there — `IntakeService.typingWon` takes back the accepts it replaced.
+        var typingWon: (_ checkpoint: Int, _ plan: String) -> Void = { _, _ in }
     }
 
     var env = Env()
@@ -185,6 +188,9 @@ final class PlanEditRouter {
                 // with the banner, as a conflict at the merge would have left it.
                 let lost = carried.removeValue(forKey: head)
                 direct(head, markdown)
+                // An accept the typing replaced is taken back to pending, never dropped without
+                // a word (N1).
+                env.typingWon(head, markdown)
                 if let lost {
                     stuck.insert(lost.from)
                     direct(lost.from, lost.markdown)

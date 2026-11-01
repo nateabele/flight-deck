@@ -165,6 +165,9 @@ public struct ThreadDiff: Codable, Equatable, Sendable {
     public var old: String
     public var new: String
     public var state: DiffState
+    /// N1: the tape seq at which the human's typing took this diff's accept back. An
+    /// `applyThreadDiff` for it at or before this seq is not its accept any more. Nil if never.
+    public var reopenedAfter: Int?
 
     public init(id: UUID = UUID(), thread: ThreadID, turn: Int? = nil, checkpoint: Int, anchor: NoteAnchor, old: String,
                 new: String, state: DiffState = .pending) {

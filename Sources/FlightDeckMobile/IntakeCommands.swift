@@ -49,6 +49,7 @@ enum CommandCopy {
             case "empty_note": return "Write something first."
             case "diff_stale": return "That change no longer fits the plan. Ask the agent to propose it again."
             case "diff_decided": return "That change was already decided."
+            case "already_accepted": return "You already accepted that change."
             case "unknown_diff", "unknown_thread": return "That thread is no longer on your Mac."
             case "thread_resolved": return "This thread is resolved."
             case "empty_message": return "Write something first."
