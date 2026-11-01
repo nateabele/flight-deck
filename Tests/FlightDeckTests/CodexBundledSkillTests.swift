@@ -179,6 +179,10 @@ final class CodexBundledSkillTests: XCTestCase {
         _ = try skill.install(from: source, codexHome: home)
         let stale = home.appendingPathComponent("skills/.flightdeck-demo.staging-dead")
         try put("old", at: stale.appendingPathComponent("SKILL.md"))
+        // Fresh: another process may be mid-install, so it must survive.
+        XCTAssertEqual(try skill.install(from: source, codexHome: home), .current)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path), "a live staging folder is not ours to remove")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -1200)], ofItemAtPath: stale.path)
         XCTAssertEqual(try skill.install(from: source, codexHome: home), .current)
         XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
     }
@@ -198,7 +202,6 @@ final class CodexBundledSkillTests: XCTestCase {
         _ = try skill.install(from: source, codexHome: home)
         try put("x", at: installed(".DS_Store"))
         try put("x", at: installed("__pycache__/a.pyc"))
-        try put("x", at: installed(".git/HEAD"))
         try put("x", at: installed("SKILL.md.swp"))
         XCTAssertEqual(try skill.install(from: source, codexHome: home), .current)
         try put("x", at: installed("templates/.flightdeck-managed"))
@@ -218,5 +221,27 @@ final class CodexBundledSkillTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent(".flightdeck-managed"), encoding: .utf8),
                        CodexDelegateSkill.digest(bundled) + "\n")
         XCTAssertEqual(try CodexBundledSkill.delegate.install(from: folder, codexHome: home), .current)
+    }
+
+    func testAUserGitFolderFreezesTheSkillAndIsNeverDeleted() throws {
+        _ = try skill.install(from: source, codexHome: home)
+        try put("ref: main", at: installed(".git/HEAD"))
+        try put("skill v2", at: source.appendingPathComponent("SKILL.md"))
+        XCTAssertEqual(try skill.install(from: source, codexHome: home), .userEdited)
+        XCTAssertEqual(try text(".git/HEAD"), "ref: main")
+        XCTAssertEqual(try text("SKILL.md"), "skill v1")
+    }
+
+    func testAPlantedSidecarLinkIsReplacedNotWrittenThrough() throws {
+        _ = try skill.install(from: source, codexHome: home)
+        let target = root.appendingPathComponent("outside.txt")
+        try put("precious", at: target)
+        // A folder equal to ours with a stale sidecar takes the heal path, which rewrites it.
+        try put("skill v2", at: source.appendingPathComponent("SKILL.md"))
+        try put("skill v2", at: installed("SKILL.md"))
+        try FileManager.default.removeItem(at: installed(".flightdeck-managed"))
+        try FileManager.default.createSymbolicLink(at: installed(".flightdeck-managed"), withDestinationURL: target)
+        _ = try skill.install(from: source, codexHome: home)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "precious")
     }
 }

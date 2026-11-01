@@ -18,7 +18,7 @@ import os
 /// - A folder that still hashes to that value is ours, and is refreshed when the app ships new
 ///   text. Files the new version no longer ships are removed with it.
 /// - A folder that hashes to anything else (an edit, a file the user added, a planted link) is
-///   left whole. Editor and tool junk (`.DS_Store`, `__pycache__`, `.git`, `*.swp`) does not count.
+///   left whole. Editor and tool junk (`.DS_Store`, `__pycache__`, `*.swp`) does not count.
 /// - A skill folder that is itself a link is never touched, and no link is ever followed. A
 ///   refresh is staged in a sibling folder and swapped in, so it is all old or all new.
 /// - A sidecar with no `SKILL.md` beside it means the user deleted the skill, never undone.
@@ -106,7 +106,7 @@ struct CodexBundledSkill: Sendable, Equatable {
     /// Names that tools and editors leave in a folder without the user having meant to change
     /// the skill. They never count as an edit, at any depth.
     static func isJunk(_ name: String) -> Bool {
-        name == ".DS_Store" || name == "__pycache__" || name == ".git" || name.hasSuffix(".swp")
+        name == ".DS_Store" || name == "__pycache__" || name.hasSuffix(".swp")
     }
 
     /// What `path` is, read with `lstat` semantics: a link is reported as a link, never followed.
@@ -227,11 +227,17 @@ struct CodexBundledSkill: Sendable, Equatable {
     private func stagingPrefix() -> String { ".flightdeck-\(name).staging-" }
 
     /// Staging folders a crashed refresh left beside the skill. They are Flight Deck's by name.
-    private func removeStaging(codexHome: URL) {
+    private func removeStaging(codexHome: URL, olderThan age: TimeInterval = 600) {
         let skills = directory(codexHome: codexHome).deletingLastPathComponent()
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: skills.path)) ?? []
+        let fm = FileManager.default
+        let names = (try? fm.contentsOfDirectory(atPath: skills.path)) ?? []
         for stale in names where stale.hasPrefix(stagingPrefix()) {
-            try? FileManager.default.removeItem(at: skills.appendingPathComponent(stale))
+            let url = skills.appendingPathComponent(stale)
+            // A younger folder may be another process's install in flight (a shared CODEX_HOME,
+            // or a copy that outlived the 2 s race); removing it would fail that install.
+            guard let modified = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date,
+                  Date().timeIntervalSince(modified) > age else { continue }
+            try? fm.removeItem(at: url)
         }
     }
 
@@ -268,6 +274,10 @@ struct CodexBundledSkill: Sendable, Equatable {
     }
 
     private func writeSidecar(_ digest: String, codexHome: URL) throws {
+        // Foundation's atomic write resolves a link and replaces its target, so a planted
+        // sidecar link is removed first and the write lands on the sidecar itself.
+        let marker = sidecar(codexHome: codexHome)
+        if Self.kind(of: marker) == .link { try FileManager.default.removeItem(at: marker) }
         try Data((digest + "\n").utf8).write(to: sidecar(codexHome: codexHome), options: .atomic)
     }
 
