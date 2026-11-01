@@ -6,6 +6,8 @@ pub mod daemon;
 pub mod edit;
 pub mod engine;
 pub mod error;
+#[cfg(feature = "eval")]
+pub mod eval;
 pub mod facts;
 pub mod git;
 pub mod graph;
