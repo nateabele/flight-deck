@@ -359,7 +359,12 @@ impl Service {
         };
         let members = self.finish_members(begun, wait);
         let cochange = || self.cochange_for(&view);
-        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange };
+        let base = || -> crate::error::Result<Option<tools::Baseline>> {
+            let Some(graph) = self.engine.base_graph(&view, building.is_none())? else { return Ok(None) };
+            let root = view.label.worktree.clone();
+            Ok(Some(tools::Baseline { graph, text: Box::new(move |id| git::blob_text(&root, id)) }))
+        };
+        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, cochange: &cochange, base: &base };
         let body = tools::run(tool, &ctx)?;
         if tool == "impact" {
             self.acknowledge(&graph, &args);

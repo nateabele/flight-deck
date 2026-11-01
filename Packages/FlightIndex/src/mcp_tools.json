@@ -507,7 +507,7 @@
  },
  {
   "name": "qartez_impact",
-  "description": "MUST call before modifying any file with exports. Shows direct importers, transitive dependents, and co-change partners \u2014 the full set of files that could break.",
+  "description": "MUST call before modifying any file with exports. Shows direct importers, transitive dependents, and co-change partners \u2014 the full set of files that could break. With pending=true: the call sites the worktree's diff still owes an edit.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -545,6 +545,14 @@
       "null"
      ]
     },
+    "pending": {
+     "default": null,
+     "description": "Instead of one file's blast radius, follow up the worktree's uncommitted diff: list every symbol whose call shape changed (parameters added, dropped or retyped; renamed or deleted) and the call sites, references and implementers the diff has not edited yet, with the line. file_path is optional and narrows to one changed file. include_tests defaults to true here.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
     "token_budget": {
      "default": null,
      "description": "Approximate token budget for output (default: 4000)",
@@ -556,9 +564,6 @@
      ]
     }
    },
-   "required": [
-    "file_path"
-   ],
    "type": "object"
   },
   "annotations": {

@@ -11,6 +11,7 @@ mod analysis;
 pub mod args;
 pub mod mutate;
 mod nav;
+pub mod pending;
 
 use crate::cochange::CoChange;
 use crate::error::Result;
@@ -23,6 +24,8 @@ use args::Args;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+pub use pending::Baseline;
 
 pub const TOOLS: &[&str] = &["map", "find", "grep", "read", "outline", "deps", "stats", "impact", "refs", "calls"];
 
@@ -72,6 +75,9 @@ pub struct Ctx<'a> {
     /// tool that answers from one view (`links.rs`).
     pub members: &'a [Member],
     pub cochange: &'a (dyn Fn() -> Result<Arc<CoChange>> + Sync),
+    /// The view's base commit, for `impact pending=true`; `None` when there is no base commit or
+    /// nothing differs from it. Built only when a tool asks.
+    pub base: &'a (dyn Fn() -> Result<Option<Baseline>> + Sync),
 }
 
 /// Strip the `qartez_` / `fdindex_` prefix an MCP client adds and return the tool's own name.
@@ -107,7 +113,9 @@ pub struct Anchor {
 
 pub fn anchor(tool: &str, args: &Args) -> std::result::Result<Anchor, ToolError> {
     let file = args.path(args::FILE);
-    let requires_file = matches!(tool, "outline" | "deps" | "impact");
+    // `impact pending=true` follows the worktree's diff, so it needs no file.
+    let pending = tool == "impact" && args.flag(&["pending"], false);
+    let requires_file = matches!(tool, "outline" | "deps" | "impact") && !pending;
     if requires_file && file.is_none() {
         return Err(ToolError::bad(format!("{tool} requires file_path")));
     }
