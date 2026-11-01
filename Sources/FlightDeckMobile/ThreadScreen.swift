@@ -130,6 +130,8 @@ struct ThreadScreen: View {
             if let q = s.anchor?.quote { Text("“\(q)”").font(.subheadline).italic().foregroundStyle(.secondary) }
             else { Text("The whole plan").font(.subheadline).foregroundStyle(.secondary) }
             Text(ThreadStyle.statusWords(s.status)).font(.caption.weight(.semibold)).foregroundStyle(ThreadStyle.statusTone(s.status))
+            // As the Mac's header says it: this agent answers from the files alone, no `git log`.
+            if s.readsFilesOnly == true { Text("reads files only").font(.caption).foregroundStyle(.secondary) }
         }
     }
 

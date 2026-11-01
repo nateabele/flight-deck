@@ -61,6 +61,18 @@ final class IntakeThreadProjectionTests: XCTestCase {
         XCTAssertEqual(s?.anchor?.block, blocks.blocks.first { $0.text.contains("Friday") }?.index)
     }
 
+    /// The phone's thread screen says "reads files only" as the Mac's header does: true for an
+    /// agent with no shell (grok, opencode), absent for one that runs read commands.
+    func testTheSummarySaysWhenTheAgentReadsFilesOnly() {
+        for agent in AgentID.allCases {
+            var r = record(ThreadID(), status: .open)
+            r.agent = agent
+            let s = IntakeThreadProjection.summary(r, reader: FakeThreadReader(records: [r]), blocks: PlanBlocks.split(markdown))
+            XCTAssertEqual(s.readsFilesOnly, HeadlessCommand.threadReadsFilesOnly(agent) ? true : nil, "\(agent)")
+        }
+        XCTAssertTrue([AgentID.grok, .opencode].allSatisfy(HeadlessCommand.threadReadsFilesOnly))
+    }
+
     func testWholePlanThreadHasNoAnchor() {
         let (reader, _, b) = fixture()
         let s = IntakeThreadProjection.threads(reader: reader, blocks: PlanBlocks.split(markdown)).first { $0.id == b.raw }

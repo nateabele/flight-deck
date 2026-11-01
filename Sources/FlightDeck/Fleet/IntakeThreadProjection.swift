@@ -3,7 +3,7 @@ import Foundation
 import IntakeKit
 
 /// Ask threads as the phone reads them (spec §10). Every function takes the reader and the
-/// plan's blocks, so it is pure: Stream A's on-disk store, or a fake, supplies the threads.
+/// plan's blocks, so it is pure: ThreadRunner's on-disk `ThreadStore`, or a fake, supplies the threads.
 /// Block indices are `PlanBlocks.split` of the plan the phone is reading, the same function
 /// the phone runs, so an index names the same block on both ends.
 enum IntakeThreadProjection {
@@ -47,7 +47,8 @@ enum IntakeThreadProjection {
             id: record.id.raw, title: record.title, anchor: anchor, status: record.status.rawValue,
             counts: WireThreadCounts(turns: turns.count, pendingDiffs: reader.diffs(record.id).filter(isLive).count,
                                      openQuestions: openQuestions(turns).count),
-            excerpt: excerpt(turns))
+            excerpt: excerpt(turns),
+            readsFilesOnly: HeadlessCommand.threadReadsFilesOnly(record.agent) ? true : nil)
     }
 
     static func threads(reader: any ThreadStoreReading, blocks: PlanBlocks) -> [WireThreadSummary] {

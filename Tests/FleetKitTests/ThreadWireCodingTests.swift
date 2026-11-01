@@ -3,7 +3,7 @@ import FleetKit
 
 /// Ask threads on the fleet wire (P1 Task 0): the ops, the reply and the projection fields, as
 /// bytes. Pure FleetKit, nothing from the app, so the local logic lane can take this file whole.
-/// What the Mac does with the ops is `ThreadStubRefusalTests`.
+/// What the Mac does with the ops is `IntakeThreadServiceTests`.
 final class ThreadWireCodingTests: XCTestCase {
     private let intake = UUID()
     private let thread = UUID()
@@ -104,6 +104,17 @@ final class ThreadWireCodingTests: XCTestCase {
         unplaced.blockIndex = nil
         XCTAssertNil(try object(unplaced)["blockIndex"])
         XCTAssertEqual(try JSONDecoder().decode(WirePendingDiff.self, from: JSONEncoder().encode(unplaced)), unplaced)
+    }
+
+    /// "reads files only" rides on the summary for the phone's header: true for an agent with no
+    /// shell, absent otherwise, so an old phone's bytes are unchanged and an old Mac's decode nil.
+    func testReadsFilesOnlyIsAbsentUnlessTrue() throws {
+        XCTAssertNil(try object(Self.summary)["readsFilesOnly"])
+        var grok = Self.summary
+        grok.readsFilesOnly = true
+        XCTAssertEqual(try object(grok)["readsFilesOnly"] as? Bool, true)
+        XCTAssertEqual(try JSONDecoder().decode(WireThreadSummary.self, from: JSONEncoder().encode(grok)), grok)
+        XCTAssertNil(try JSONDecoder().decode(WireThreadSummary.self, from: JSONEncoder().encode(Self.summary)).readsFilesOnly)
     }
 
     /// A status a later Mac invents still decodes: it is a string on the wire for that reason.

@@ -34,7 +34,9 @@ public struct WireThreadCounts: Codable, Equatable, Sendable {
 
 /// One thread's index row, carried on `WireIntakePlan.threads`. `status` is a `ThreadStatus`
 /// raw value (open, answering, needsYou, stale, resolved); `excerpt` the latest reply's first
-/// words, nil before the first reply.
+/// words, nil before the first reply. `readsFilesOnly` is true when the thread's agent has no
+/// shell (grok, opencode: `HeadlessCommand.threadReadsFilesOnly`), so the thread screen can say
+/// so as the Mac's header does; nil otherwise, and from a Mac that predates it.
 public struct WireThreadSummary: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var title: String
@@ -42,11 +44,12 @@ public struct WireThreadSummary: Codable, Equatable, Sendable, Identifiable {
     public var status: String
     public var counts: WireThreadCounts
     public var excerpt: String?
+    public var readsFilesOnly: Bool?
 
     public init(id: UUID, title: String, anchor: WireThreadAnchor? = nil, status: String,
-                counts: WireThreadCounts = WireThreadCounts(), excerpt: String? = nil) {
+                counts: WireThreadCounts = WireThreadCounts(), excerpt: String? = nil, readsFilesOnly: Bool? = nil) {
         self.id = id; self.title = title; self.anchor = anchor; self.status = status
-        self.counts = counts; self.excerpt = excerpt
+        self.counts = counts; self.excerpt = excerpt; self.readsFilesOnly = readsFilesOnly
     }
 }
 
