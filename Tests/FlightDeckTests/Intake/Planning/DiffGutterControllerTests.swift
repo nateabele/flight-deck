@@ -225,4 +225,42 @@ final class DiffGutterControllerTests: XCTestCase {
         c.panelSwitchedThread()
         XCTAssertNil(c.editing)
     }
+    /// B-I4: the proposal is drawn, not text, and its toolbar comes only under a pointer. So each
+    /// located diff is an accessibility element that reads the proposed words, with Accept edit,
+    /// Reject edit, Edit and Open thread as custom actions: VoiceOver and keyboard users reach them.
+    func testEachProposalIsAnAccessibilityElementWithItsActions() throws {
+        let c = controller()
+        let a = diff("Alpha beta gamma.", new: "Alpha beta gamma, revised.")
+        c.update([a], in: plan)
+        var decided: [Bool] = []
+        var opened = 0
+        c.onDecide = { _, accept, _ in decided.append(accept) }
+        c.onOpenThread = { _ in opened += 1 }
+        let elements = c.accessibilityElements()
+        XCTAssertEqual(elements.count, 1)
+        let element = try XCTUnwrap(elements.first)
+        XCTAssertTrue(element.accessibilityLabel()?.contains("Alpha beta gamma, revised.") == true, element.accessibilityLabel() ?? "")
+        let actions = element.accessibilityCustomActions() ?? []
+        XCTAssertEqual(actions.map(\.name), ["Accept edit", "Reject edit", "Edit", "Open thread"])
+        _ = actions[0].handler?()
+        _ = actions[1].handler?()
+        _ = actions[3].handler?()
+        XCTAssertEqual(decided, [true, false])
+        XCTAssertEqual(opened, 1)
+    }
+
+    /// B-I2: a refusal of a ✓ or ✗ made from the plan shows beside that diff's passage for a moment,
+    /// not only in the panel's composer, which may not be on screen.
+    func testARefusalFromThePlansToolbarShowsBesideTheDiff() {
+        let c = controller()
+        let a = diff("Alpha beta gamma."), b = diff("Delta epsilon zeta.")
+        c.update([a, b], in: plan)
+        ThreadPanelModel.announceRefusal(diff: b.id, words: "A round rewrote that passage.")
+        XCTAssertEqual(c.refusal?.diff, b.id)
+        XCTAssertEqual(c.refusal?.words, "A round rewrote that passage.")
+        ThreadPanelModel.announceRefusal(diff: UUID(), words: "Not ours.")
+        XCTAssertEqual(c.refusal?.diff, b.id, "a refusal for a diff not in this plan is not shown here")
+        c.clearRefusal()
+        XCTAssertNil(c.refusal)
+    }
 }

@@ -453,6 +453,22 @@ final class ThreadPanelModel: ObservableObject {
     // MARK: Index
 
     /// "§2 Session lifetime" for "## 2. Session lifetime"; an unnumbered heading is its words.
+    /// B-I4: a diff row's words: where, then what it would say.
+    static func diffRowText(_ diff: ThreadDiff) -> String {
+        let place = diff.anchor.section.map(sectionLabel) ?? "Plan"
+        let line = diff.new.split(whereSeparator: \.isNewline).first.map(String.init) ?? diff.new
+        return "\(place) · “\(line.trimmingCharacters(in: .whitespaces))”"
+    }
+
+    /// Posted when a ✓ or ✗ is refused, wherever it was pressed: `userInfo` holds "diff" (UUID)
+    /// and "words". The plan's diff toolbar shows it beside the passage (B-I2), since the
+    /// panel's composer, where `notice` shows, may not be on screen.
+    static let diffRefused = Notification.Name("ThreadPanelModel.diffRefused")
+
+    static func announceRefusal(diff: UUID, words: String) {
+        NotificationCenter.default.post(name: diffRefused, object: nil, userInfo: ["diff": diff, "words": words])
+    }
+
     static func sectionLabel(_ heading: String) -> String {
         let label = ConvergenceSeries.label(heading)
         let name = HeatmapModel.name(heading)
@@ -610,6 +626,7 @@ final class ThreadPanelModel: ObservableObject {
             } else { try? Data(line.utf8).write(to: url) }
         }
         #endif
+        if let refusal { Self.announceRefusal(diff: diff.id, words: Self.words(for: refusal)) }
         run(refusal)
     }
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "threads")

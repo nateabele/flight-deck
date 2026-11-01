@@ -39,6 +39,11 @@ final class DiffGutterView: NSView {
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// The proposals as VoiceOver reads them (`DiffGutterController.accessibilityElements`).
+    var accessibleProposals: () -> [NSAccessibilityElement] = { [] }
+    override func isAccessibilityElement() -> Bool { false }
+    override func accessibilityChildren() -> [Any]? { accessibleProposals() }
+
     override func draw(_ dirtyRect: NSRect) {
         let viewport = self.viewport()
         for mark in marks {
@@ -69,12 +74,15 @@ struct DiffToolbar: View {
         HStack(spacing: 2) {
             Button(action: accept) { Text("✓ Accept").fontWeight(.semibold).foregroundStyle(.green) }
                 .help("Apply this edit to the plan")
+                .accessibilityLabel("Accept edit")
             Button(action: reject) { Text("✗").foregroundStyle(.red) }
                 .help("Reject this edit")
+                .accessibilityLabel("Reject edit")
             Button(action: edit) { Text("Edit").foregroundStyle(.tint) }
                 .help("Put the new text in the plan to change by hand")
             Button(action: openThread) { Text("✦").foregroundStyle(.tint) }
                 .help("Open the thread that proposed this")
+                .accessibilityLabel("Open thread")
         }
         .buttonStyle(ToolbarButtonStyle())
         .font(.system(size: 12))
@@ -93,6 +101,21 @@ struct DiffToolbar: View {
                 .background(configuration.isPressed ? Color.primary.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
         }
+    }
+}
+
+/// A refused ✓ or ✗, said beside the passage for a moment (B-I2).
+struct DiffRefusalNote: View {
+    let words: String
+    var body: some View {
+        Text(words)
+            .font(.system(size: 11.5))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .fixedSize()
+            .accessibilityIdentifier("diff-refusal")
     }
 }
 
@@ -227,6 +250,67 @@ final class DiffGutterController {
         diffs.compactMap { diff in located[diff.id].map { (diff, $0) } }
     }
 
+    // MARK: Accessibility (B-I4) and refusals (B-I2)
+
+    /// One element per located diff: the proposed words as its label, and the toolbar as custom
+    /// actions. The proposal is drawn, not text, and the toolbar appears only under a pointer, so
+    /// without these VoiceOver read the old sentence and keyboard users had no Accept at all.
+    func accessibilityElements() -> [NSAccessibilityElement] {
+        locatedDiffs.map { diff, range in
+            let frame = segments(range).reduce(CGRect.null) { $0.union($1) }
+            let element = NSAccessibilityElement.element(
+                withRole: .group, frame: frame.isNull ? .zero : frame,
+                label: "Proposed change: \(diff.new). Replaces: \(diff.old)", parent: view) as! NSAccessibilityElement
+            element.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Accept edit") { [weak self] in self?.decide(diff, accept: true); return true },
+                NSAccessibilityCustomAction(name: "Reject edit") { [weak self] in self?.decide(diff, accept: false); return true },
+                NSAccessibilityCustomAction(name: "Edit") { [weak self] in self?.edit(diff); return true },
+                NSAccessibilityCustomAction(name: "Open thread") { [weak self] in self?.onOpenThread(diff.thread); return true },
+            ])
+            return element
+        }
+    }
+
+    /// A ✓ or ✗ refused, beside its passage until `refusalLinger` passes (B-I2).
+    private(set) var refusal: (diff: UUID, words: String)?
+    static let refusalLinger: TimeInterval = 4
+    private var refusalHost: NSHostingView<DiffRefusalNote>?
+    private var refusalWork: DispatchWorkItem?
+    private var refusalObserver: NSObjectProtocol?
+
+    private func listenForRefusals() {
+        guard refusalObserver == nil else { return }
+        refusalObserver = NotificationCenter.default.addObserver(forName: ThreadPanelModel.diffRefused, object: nil, queue: nil) { [weak self] note in
+            guard let id = note.userInfo?["diff"] as? UUID, let words = note.userInfo?["words"] as? String else { return }
+            MainActor.assumeIsolated { self?.showRefusal(diff: id, words: words) }
+        }
+    }
+
+    private func showRefusal(diff id: UUID, words: String) {
+        guard let range = located[id] else { return }
+        refusal = (id, words)
+        refusalHost?.removeFromSuperview()
+        if let textView, let first = segments(range).first {
+            let host = NSHostingView(rootView: DiffRefusalNote(words: words))
+            host.setFrameSize(host.fittingSize)
+            host.setFrameOrigin(NSPoint(x: max(first.minX, 0), y: max(first.minY - host.frame.height - 2, 0)))
+            textView.addSubview(host, positioned: .above, relativeTo: nil)
+            refusalHost = host
+        }
+        refusalWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.clearRefusal() } }
+        refusalWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.refusalLinger, execute: work)
+    }
+
+    func clearRefusal() {
+        refusal = nil
+        refusalHost?.removeFromSuperview()
+        refusalHost = nil
+        refusalWork?.cancel()
+        refusalWork = nil
+    }
+
     func attach(_ textView: PlanNSTextView) {
         self.textView = textView
         view.segments = { [weak self] in self?.segments($0) ?? [] }
@@ -246,6 +330,8 @@ final class DiffGutterController {
     /// The pending diffs to draw, found in `text`. A diff whose passage is no longer there is not
     /// drawn: it is stale, and the thread's card says so.
     func update(_ next: [ThreadDiff], in text: String, checkpoint: Int? = nil) {
+        listenForRefusals()
+        view.accessibleProposals = { [weak self] in self?.accessibilityElements() ?? [] }
         self.checkpoint = checkpoint
         diffs = next
         // The Edit is let go when the plan moved on under it (a round landed), or its diff is no

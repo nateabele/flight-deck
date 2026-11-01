@@ -465,15 +465,18 @@ private struct DiffActionRow: View {
     var body: some View {
         ActionBox {
             ThreadPillView("diff", tone: .diff)
-            Text((diff.anchor.section.map(ThreadPanelModel.sectionLabel) ?? "Plan") + (diff.state == .pending ? " · shown inline in the plan" : ""))
-                .font(.system(size: 12)).lineLimit(1)
+            Text(ThreadPanelModel.diffRowText(diff))
+                .font(.system(size: 12)).lineLimit(2)
+                .help(diff.new)
             Spacer(minLength: 0)
             switch diff.state {
             case .pending:
                 Button { decide(false) } label: { Text("✗").foregroundStyle(.red) }.buttonStyle(.plain)
+                    .accessibilityLabel("Reject edit")
                     .accessibilityIdentifier("thread-diff-reject")
                     .background(ThreadPanelProbe.frame("thread-diff-reject"))
                 Button { decide(true) } label: { Text("✓").foregroundStyle(.green).fontWeight(.semibold) }.buttonStyle(.borderless)
+                    .accessibilityLabel("Accept edit")
                     .accessibilityIdentifier("thread-diff-accept")
                     .background(ThreadPanelProbe.frame("thread-diff-accept"))
             case .accepted: Text("accepted").font(.system(size: 11.5)).foregroundStyle(.secondary)

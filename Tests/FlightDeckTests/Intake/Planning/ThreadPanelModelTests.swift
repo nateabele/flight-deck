@@ -141,6 +141,28 @@ final class ThreadPanelModelTests: XCTestCase {
         }
     }
 
+    /// B-I4: the panel's diff row says what the change is: its section and the new words.
+    func testADiffRowShowsTheNewText() {
+        let d = ThreadDiff(thread: ThreadID(), turn: 1, checkpoint: 2,
+                           anchor: NoteAnchor(checkpoint: 2, quote: "old", section: "## 3. Revocation"),
+                           old: "old", new: "Revoked tokens stop working within one second.")
+        XCTAssertEqual(ThreadPanelModel.diffRowText(d), "§3 Revocation · “Revoked tokens stop working within one second.”")
+    }
+
+    /// A decision refused from anywhere is announced, so the plan's toolbar can say it too (B-I2).
+    func testARefusedDecisionIsAnnounced() {
+        let d = ThreadDiff(thread: ThreadID(), turn: 1, checkpoint: 2, anchor: NoteAnchor(checkpoint: 2, quote: "old"),
+                           old: "old", new: "new")
+        var heard: [String] = []
+        let token = NotificationCenter.default.addObserver(forName: ThreadPanelModel.diffRefused, object: nil, queue: nil) { note in
+            heard.append(note.userInfo?["words"] as? String ?? "")
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        let m = model(.init(decide: { _, _, _, _ in ThreadRefusal(code: "diff_stale") }))
+        m.decide(d, accept: true)
+        XCTAssertEqual(heard, [ThreadPanelModel.words(for: ThreadRefusal(code: "diff_stale"))])
+    }
+
     // MARK: A thread just started
 
     /// Concern 2: after ✦ Ask's first send the thread exists only as a queued open until
