@@ -75,4 +75,35 @@ final class VisualBlockGateTests: XCTestCase {
         XCTAssertNil(VisualBlockStyle.size(for: WireVisualRef(id: "f", revision: 1)))
         XCTAssertEqual(VisualBlockStyle.state(for: ref), "a")
     }
+
+    /// The names the Mac draws sizes with are `phone`, `mac`, `wide`, a width: `narrow` is only
+    /// one an agent may happen to write. A phone takes the narrowest of what is listed.
+    func testThePhoneTakesThePhoneSizeOrTheNarrowestListed() {
+        func size(_ sizes: [String]) -> String? { VisualBlockStyle.size(for: WireVisualRef(id: "f", revision: 1, sizes: sizes)) }
+        XCTAssertEqual(size(["wide", "phone"]), "phone")
+        XCTAssertEqual(size(["mac", "compact", "narrow"]), "compact")
+        XCTAssertEqual(size(["wide", "tablet", "mac"]), "tablet")
+        XCTAssertEqual(size(["default", "640"]), "640")
+        XCTAssertEqual(size(["default"]), "default")
+    }
+
+    /// An alternate whose files the Mac listed opens like the primary does; one without is a chip.
+    func testAnAlternateWithFilesIsARefTheViewerCanOpen() {
+        let files = [WireVisualFile(path: "snapshot@idle-wide.png", size: 1, sha256: "a"),
+                     WireVisualFile(path: "snapshot@idle-phone.png", size: 1, sha256: "b"),
+                     WireVisualFile(path: "snapshot@failed-wide.png", size: 1, sha256: "c")]
+        let alt = WireVisualAlternate(revision: 4, kind: "component", reason: "owns each step", files: files)
+        let ref = WireVisualRef(id: "flow", revision: 3, kinds: ["flow"], alternates: [alt], states: ["idle", "failed", "gone"],
+                                sizes: ["wide", "phone", "tablet"], aspect: 2, files: [])
+        let opened = VisualBlockStyle.ref(opening: alt, of: ref)
+        XCTAssertEqual(opened?.id, "flow")
+        XCTAssertEqual(opened?.revision, 4)
+        XCTAssertEqual(opened?.files, files)
+        XCTAssertEqual(opened?.states, ["idle", "failed"], "the states this revision has pictures of")
+        XCTAssertEqual(opened?.sizes, ["wide", "phone"])
+        XCTAssertEqual(opened?.aspect, 2)
+        XCTAssertEqual(opened?.alternates, [], "an alternate has no alternates of its own")
+        XCTAssertNil(VisualBlockStyle.ref(opening: WireVisualAlternate(revision: 5, kind: "flow"), of: ref), "no files: only a chip")
+        XCTAssertNil(VisualBlockStyle.ref(opening: WireVisualAlternate(revision: 5, kind: "flow", files: []), of: ref))
+    }
 }

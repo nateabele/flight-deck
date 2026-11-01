@@ -6,10 +6,13 @@ import SwiftUI
 /// (`intake.visual.fetch`). `FleetModel` is the real one.
 @MainActor
 protocol VisualFetching: AnyObject {
+    /// Returns the request's cancel: called when the caller gives up, it unregisters the completion
+    /// (which then never runs). Calling it after the reply is harmless.
+    @discardableResult
     func fetchVisual(
         intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
         then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
-    )
+    ) -> () -> Void
 }
 
 extension EnvironmentValues {
@@ -83,22 +86,23 @@ final class VisualLoader {
         return await task.value
     }
 
-    /// A snapshot at `state` and `size` (the ref's first of each when nil). nil when the ref does
-    /// not list that snapshot's file.
+    /// A snapshot at `state` and `size` (the ref's first of each when nil). The size is the one asked
+    /// for when the Mac drew it, else the size it drew that state at (`VisualBlockStyle.snapshotFile`).
+    /// nil when the ref does not list a picture of that state at all.
     func snapshot(intake: UUID, ref: WireVisualRef, state: String?, size: String?) async -> Data? {
         guard let files = Self.validFiles(ref) else { return nil }
-        let name: String
+        let file: WireVisualFile
         let part: String
-        if let state, let size {
-            name = "snapshot@\(state)-\(size).png"
-            part = WireVisualPart.snapshot(state: state, size: size)
+        if let state {
+            guard let pick = VisualBlockStyle.snapshotFile(in: files, ref: ref, state: state, size: size) else { return nil }
+            file = pick.file
+            part = WireVisualPart.snapshot(state: state, size: pick.size)
         } else if let first = files.first(where: { $0.path.hasPrefix("snapshot") }) {
-            name = first.path
+            file = first
             part = WireVisualPart.snapshot
         } else {
             return nil
         }
-        guard let file = files.first(where: { $0.path == name }) else { return nil }
         return await data(intake: intake, visualID: ref.id, revision: ref.revision, file: file, part: part)
     }
 
@@ -127,9 +131,15 @@ final class VisualLoader {
             let deadline = chunkDeadline
             let result: Result<WireFileChunk, FleetRequestError>? = await withCheckedContinuation { continuation in
                 let once = ResumeOnce(continuation)
-                let timer = Task { try? await Task.sleep(for: deadline); once.resume(nil) }
-                fetcher.fetchVisual(intake: intake, visualID: visualID, revision: revision, part: part,
-                                    offset: offset, limit: chunkSize) { once.resume($0); timer.cancel() }
+                let slot = CancelSlot()
+                // On the deadline the request is taken back too, so a Mac that never answers does not
+                // leave its handler registered with the connector until the socket closes.
+                let timer = Task { @MainActor in
+                    try? await Task.sleep(for: deadline)
+                    if once.resume(nil) { slot.cancel() }
+                }
+                slot.cancel = fetcher.fetchVisual(intake: intake, visualID: visualID, revision: revision, part: part,
+                                                  offset: offset, limit: chunkSize) { _ = once.resume($0); timer.cancel() }
             }
             // The reply must be for what was asked: this file, this offset, no more than the
             // limit, and the size the manifest promised.
@@ -151,8 +161,17 @@ private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T?, Never>?
     init(_ continuation: CheckedContinuation<T?, Never>) { self.continuation = continuation }
-    func resume(_ value: T?) {
+    /// True if this call was the one that resumed it.
+    @discardableResult
+    func resume(_ value: T?) -> Bool {
         let c = lock.withLock { () -> CheckedContinuation<T?, Never>? in defer { continuation = nil }; return continuation }
         c?.resume(returning: value)
+        return c != nil
     }
+}
+
+/// Holds the cancel of a request that is not made yet when its deadline is armed.
+@MainActor
+private final class CancelSlot {
+    var cancel: () -> Void = {}
 }

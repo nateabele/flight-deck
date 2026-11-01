@@ -650,13 +650,14 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
 
     /// Forwarded exactly as `readFile` is; `.disconnected` synchronously with no connector. Only
     /// the visual loader calls this, and only for a plan whose detail says `visuals == true`.
+    @discardableResult
     func fetchVisual(
         intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
         then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void
-    ) {
-        guard let connector else { return completion(.failure(.disconnected)) }
-        connector.requestVisual(id: intake, visualID: visualID, revision: revision, part: part,
-                                offset: offset, limit: limit, then: completion)
+    ) -> () -> Void {
+        guard let connector else { completion(.failure(.disconnected)); return {} }
+        return connector.requestVisual(id: intake, visualID: visualID, revision: revision, part: part,
+                                       offset: offset, limit: limit, then: completion)
     }
 
     /// Ask the Mac to type something into a session's agent.

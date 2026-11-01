@@ -18,11 +18,53 @@ enum VisualBlockStyle {
         return min(max(a, minAspect), maxAspect)
     }
 
+    /// Sizes a phone is drawn at, best first: the Mac's names for a phone-width picture
+    /// (`VisualSize`), and `narrow`, which an agent may write.
+    static let phoneSizes = ["phone", "compact", "narrow"]
+
     /// A phone shows the narrow snapshot when there is one: the wide one is drawn for a desktop
-    /// and would be a thumbnail here.
+    /// and would be a thumbnail here. A phone-width name if the visual has one, else the narrowest
+    /// of the sizes it lists (by the width the Mac draws that name at), the first on a tie.
     static func size(for ref: WireVisualRef) -> String? {
         let sizes = ref.sizes ?? []
-        return sizes.contains("narrow") ? "narrow" : sizes.first
+        if let named = phoneSizes.first(where: sizes.contains) { return named }
+        return sizes.enumerated().min { a, b in
+            let (wa, wb) = (VisualSizeWidth.width(a.element), VisualSizeWidth.width(b.element))
+            return wa != wb ? wa < wb : a.offset < b.offset
+        }?.element
+    }
+
+    /// The snapshot file for `state` that the ref lists, as near `size` as the Mac drew it.
+    ///
+    /// The Mac draws every state at the first size and only the first state at the others
+    /// (`VisualSnapshotPlan`), so a later state has no picture at the phone's size: its picture is the
+    /// one at the size it was drawn. Preference: `size`, then the ref's sizes in order, then any.
+    static func snapshotFile(in files: [WireVisualFile], ref: WireVisualRef, state: String, size: String?)
+        -> (file: WireVisualFile, size: String)? {
+        let prefix = "snapshot@\(state)-", suffix = ".png"
+        var drawn: [String: WireVisualFile] = [:]
+        var order: [String] = []
+        for file in files where file.path.hasPrefix(prefix) && file.path.hasSuffix(suffix) && file.path.count > prefix.count + suffix.count {
+            let z = String(file.path.dropFirst(prefix.count).dropLast(suffix.count))
+            if drawn[z] == nil { drawn[z] = file; order.append(z) }
+        }
+        let preferred = (size.map { [$0] } ?? []) + (ref.sizes ?? []) + order
+        guard let z = preferred.first(where: { drawn[$0] != nil }), let file = drawn[z] else { return nil }
+        return (file, z)
+    }
+
+    /// An alternate as a ref the viewer opens, when the Mac listed its files; nil for a chip that
+    /// has nothing to fetch. Its states and sizes are those of the primary that it has pictures of.
+    static func ref(opening alternate: WireVisualAlternate, of ref: WireVisualRef) -> WireVisualRef? {
+        guard let files = alternate.files, !files.isEmpty else { return nil }
+        func has(_ prefix: String? = nil, _ suffix: String? = nil) -> Bool {
+            files.contains { ($0.path.hasPrefix(prefix ?? "snapshot@")) && $0.path.hasSuffix(suffix ?? ".png") }
+        }
+        return WireVisualRef(
+            id: ref.id, revision: alternate.revision, kinds: [alternate.kind], alternates: [],
+            states: ref.states.filter { has("snapshot@\($0)-") },
+            sizes: ref.sizes.map { $0.filter { z in has(nil, "-\(z).png") } },
+            aspect: ref.aspect, files: files)
     }
 
     /// The first state is the default (the manifest's own rule).
@@ -48,6 +90,8 @@ struct VisualBlockCard: View {
     @State private var selected: String?
     @State private var images: [String: UIImage] = [:]
     @State private var viewing = false
+    /// The alternate whose viewer is open, if one is.
+    @State private var viewingAlternate: WireVisualRef?
 
     private static let thumbHeight: CGFloat = 52
 
@@ -63,6 +107,9 @@ struct VisualBlockCard: View {
         .task(id: ref?.revision) { await loadSnapshots() }
         .fullScreenCover(isPresented: $viewing) {
             if let ref { VisualViewerScreen(intake: intake, ref: ref, initialState: current(ref)) }
+        }
+        .fullScreenCover(item: $viewingAlternate) { alternate in
+            VisualViewerScreen(intake: intake, ref: alternate, initialState: VisualBlockStyle.state(for: alternate))
         }
     }
 
@@ -117,14 +164,19 @@ struct VisualBlockCard: View {
                     .accessibilityLabel("State \(state)")
                     .accessibilityAddTraits(on ? .isSelected : [])
                 }
-                // Alternates are other revisions; their files are not in this ref, so they are
-                // named here and open from the viewer once the Mac lists them.
+                // Alternates are other revisions. One whose files the Mac listed opens in the viewer;
+                // one without is only named.
                 ForEach(Array(ref.alternates.enumerated()), id: \.offset) { _, alt in
-                    Text(alt.kind).font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 8).frame(height: Self.thumbHeight)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.orange.opacity(0.15)))
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.orange.opacity(0.6), lineWidth: 1))
-                        .accessibilityLabel("Alternate: \(alt.kind)\(alt.reason.map { ", \($0)" } ?? "")")
+                    let opens = VisualBlockStyle.ref(opening: alt, of: ref)
+                    Button { if let opens { viewingAlternate = opens } } label: {
+                        Text(alt.kind).font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8).frame(height: Self.thumbHeight)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.orange.opacity(0.15)))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.orange.opacity(0.6), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Alternate: \(alt.kind)\(alt.reason.map { ", \($0)" } ?? "")")
+                    .accessibilityHint(opens == nil ? "Not available yet" : "Opens this view full screen")
                 }
             }
         }

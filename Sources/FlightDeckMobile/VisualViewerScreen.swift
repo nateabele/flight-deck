@@ -166,25 +166,36 @@ final class VisualViewerModel {
         self.loader = loader
     }
 
-    /// The file the web view opens: the state's own page when the export has one
-    /// (`export/<state>.html`), else `export/index.html`, else the first html file; nil when the
-    /// revision has none.
-    nonisolated static func entryPath(in files: [WireVisualFile], state: String?) -> String? {
-        let paths = files.map(\.path)
-        if let state, paths.contains("export/\(state).html") { return "export/\(state).html" }
-        if paths.contains("export/index.html") { return "export/index.html" }
-        return paths.first { $0.lowercased().hasSuffix(".html") }
+    /// The file the web view opens: the export's `index.html`, else the first html file under
+    /// `export/` by name, else the first html file by name; nil when the revision has none (a
+    /// diagram: its snapshot is the viewer).
+    ///
+    /// This is the layout V1 and V2 write: a comp's `export/` folder with its `index.html`, and
+    /// snapshots named `snapshot@<state>-<size>.png`. Nothing writes a page per state, so a state is
+    /// never a file here, only the fragment on the one page.
+    nonisolated static func entryPath(in files: [WireVisualFile]) -> String? {
+        let pages = files.map(\.path).filter { $0.lowercased().hasSuffix(".html") }.sorted()
+        if pages.contains("export/index.html") { return "export/index.html" }
+        return pages.first { $0.hasPrefix("export/") } ?? pages.first
     }
 
-    var entryPath: String? { ref.files.flatMap { Self.entryPath(in: $0, state: state) } }
+    var entryPath: String? { ref.files.flatMap { Self.entryPath(in: $0) } }
 
     var entryURL: URL? {
         guard let path = entryPath else { return nil }
-        // A state without its own page is a fragment on the shared one, which the page's CSS can
-        // key off (`:target`); a size is a query it may read. Neither changes the file served.
-        let ownPage = path == "export/\(state ?? "").html"
-        return VisualSchemeHandler.url(visualID: ref.id, revision: ref.revision, path: path,
-                                       fragment: ownPage ? nil : state, query: size.map { "size=\($0)" })
+        // The state is a fragment on the page, which its CSS can key off (`:target`); the size is a
+        // query it may read. Neither changes the file served.
+        return VisualSchemeHandler.url(visualID: ref.id, revision: ref.revision, path: path, fragment: state,
+                                       query: size.map { "size=\($0)" })
+    }
+
+    /// How wide the page is held for `size`, or nil for the whole screen: a size name the Mac draws
+    /// at 390 points (`phone`) is centred at 390 on a wider screen, and one as wide as the screen or
+    /// wider fills it.
+    nonisolated static func pageWidth(size: String?, screen: CGFloat) -> CGFloat? {
+        guard let size else { return nil }
+        let width = CGFloat(VisualSizeWidth.width(size))
+        return width < screen ? width : nil
     }
 
     func handler() -> VisualSchemeHandler? {
@@ -264,8 +275,9 @@ struct VisualViewerScreen: View {
         case .live:
             if let url = model.entryURL, let handler = model.handler() {
                 VisualWebView(url: url, handler: handler, rules: model.rules)
-                    // The size switch: narrow is a phone-width page centred, wide the full screen.
-                    .frame(maxWidth: model.size == "narrow" ? 390 : .infinity)
+                    // The size switch: a size narrower than the screen is that wide and centred, a wider one
+                    // the full screen.
+                    .frame(maxWidth: VisualViewerModel.pageWidth(size: model.size, screen: UIScreen.main.bounds.width) ?? .infinity)
             }
         }
     }

@@ -709,12 +709,13 @@ private final class RenderVisualFetcher: VisualFetching {
     init(files: [String: Data]) { self.files = files }
 
     func fetchVisual(intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
-                     then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) {
+                     then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) -> () -> Void {
         let path = part.hasPrefix("snapshot@") ? part + ".png" : (WireVisualPart.filePath(in: part) ?? "")
-        guard let bytes = files[path] else { return completion(.failure(.server(code: "unknown_file"))) }
+        guard let bytes = files[path] else { completion(.failure(.server(code: "unknown_file"))); return {} }
         let start = min(Int(offset), bytes.count)
         let end = min(bytes.count, start + limit)
         completion(.success(WireFileChunk(path: path, size: Int64(bytes.count), offset: offset, data: bytes.subdata(in: start..<end))))
+        return {}
     }
 }
 

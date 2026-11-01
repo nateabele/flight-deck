@@ -147,6 +147,41 @@ final class VisualLoaderTests: XCTestCase {
         XCTAssertEqual(fetcher.requests.count, 2, "the retry made its own request, not joining the dead one")
     }
 
+    /// V3 review 1, parked: the timed-out request was still registered with the connector, so a
+    /// Mac that never answered left a handler there until the socket closed.
+    func testATimedOutChunkIsCancelledSoItsHandlerIsUnregistered() async {
+        let bytes = Data("hello".utf8)
+        let fetcher = FakeFetcher(files: ["export/a.html": bytes], chunk: 100)
+        fetcher.silent = true
+        let l = loader(fetcher, deadline: .milliseconds(50))
+        let got = await l.data(intake: intake, visualID: "flow", revision: 1, file: wire("export/a.html", bytes))
+        XCTAssertNil(got)
+        XCTAssertEqual(fetcher.cancelled, 1)
+        // A request that is answered is not cancelled afterwards.
+        fetcher.silent = false
+        _ = await l.data(intake: intake, visualID: "flow", revision: 1, file: wire("export/a.html", bytes))
+        XCTAssertEqual(fetcher.cancelled, 1)
+    }
+
+    /// The Mac draws every state at the first size, and the first state at the others
+    /// (`VisualSnapshotPlan`), so a phone-sized picture of a later state does not exist.
+    func testASnapshotOfALaterStateFallsBackToTheSizeTheMacDrewIt() async {
+        let idlePhone = Data([1]), failedWide = Data([2]), idleWide = Data([3])
+        let fetcher = FakeFetcher(files: ["snapshot@idle-phone.png": idlePhone, "snapshot@failed-wide.png": failedWide,
+                                          "snapshot@idle-wide.png": idleWide], chunk: 100)
+        let l = loader(fetcher)
+        let ref = WireVisualRef(id: "flow", revision: 1, states: ["idle", "failed"], sizes: ["wide", "phone"],
+                                files: [wire("snapshot@idle-wide.png", idleWide), wire("snapshot@failed-wide.png", failedWide),
+                                        wire("snapshot@idle-phone.png", idlePhone)])
+        let exact = await l.snapshot(intake: intake, ref: ref, state: "idle", size: "phone")
+        XCTAssertEqual(exact, idlePhone)
+        let fallback = await l.snapshot(intake: intake, ref: ref, state: "failed", size: "phone")
+        XCTAssertEqual(fallback, failedWide, "failed was only drawn at the first size")
+        XCTAssertEqual(fetcher.requests.last?.part, "snapshot@failed-wide")
+        let none = await l.snapshot(intake: intake, ref: ref, state: "ghost", size: "phone")
+        XCTAssertNil(none, "a state with no picture at any size")
+    }
+
     func testEnsureAllFetchesEveryListedFileOnce() async {
         let a = Data("a".utf8), b = Data("bb".utf8)
         let fetcher = FakeFetcher(files: ["export/a.html": a, "export/b.css": b], chunk: 100)
@@ -171,14 +206,19 @@ private final class FakeFetcher: VisualFetching {
     var pathOverride: String?
     init(files: [String: Data], chunk: Int) { self.files = files; self.chunk = chunk }
 
+    /// How many requests were abandoned (the loader gave up and said so).
+    var cancelled = 0
+
     func fetchVisual(intake: UUID, visualID: String, revision: Int, part: String, offset: Int64, limit: Int,
-                     then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) {
+                     then completion: @escaping (Result<WireFileChunk, FleetRequestError>) -> Void) -> () -> Void {
         requests.append(Request(part: part, offset: offset, revision: revision))
+        let cancel: () -> Void = { [weak self] in self?.cancelled += 1 }
         let path = WireVisualPart.filePath(in: part) ?? (part.hasPrefix("snapshot@") ? part + ".png" : "")
-        if silent { return }
-        guard let bytes = files[path] else { return completion(.failure(.server(code: "unknown_file"))) }
+        if silent { return cancel }
+        guard let bytes = files[path] else { completion(.failure(.server(code: "unknown_file"))); return cancel }
         let start = Int(offset)
         let end = overLength ? bytes.count : min(bytes.count, start + min(chunk, limit))
         completion(.success(WireFileChunk(path: pathOverride ?? path, size: Int64(bytes.count), offset: offset, data: bytes.subdata(in: start..<end))))
+        return cancel
     }
 }

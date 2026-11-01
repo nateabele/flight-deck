@@ -71,13 +71,27 @@ final class VisualSchemeHandlerTests: XCTestCase {
         XCTAssertFalse(VisualSchemeHandler.allowsNavigation(to: nil))
     }
 
-    func testTheEntryAndStateUrls() {
+    /// V1 and V2 write `snapshot@<state>-<size>.png` and a comp's `export/` folder with an
+    /// `index.html`; nothing writes a page per state, so a state is always a fragment on the one page.
+    @MainActor func testTheEntryIsTheExportsIndexAndAStateIsAFragmentOnIt() {
         let files = [file("export/index.html", html), file("export/checkout.html", html), file("snapshot@default-wide.png", html)]
-        XCTAssertEqual(VisualViewerModel.entryPath(in: files, state: nil), "export/index.html")
-        XCTAssertEqual(VisualViewerModel.entryPath(in: files, state: "checkout"), "export/checkout.html")
-        XCTAssertEqual(VisualViewerModel.entryPath(in: files, state: "ghost"), "export/index.html")
-        XCTAssertNil(VisualViewerModel.entryPath(in: [file("snapshot@default-wide.png", html)], state: nil), "no html: snapshot only")
+        XCTAssertEqual(VisualViewerModel.entryPath(in: files), "export/index.html")
+        XCTAssertEqual(VisualViewerModel.entryPath(in: [file("export/b.html", html), file("export/a.html", html)]), "export/a.html",
+                       "no index: the first export page by name")
+        XCTAssertEqual(VisualViewerModel.entryPath(in: [file("page.html", html), file("export/z.html", html)]), "export/z.html")
+        XCTAssertNil(VisualViewerModel.entryPath(in: [file("snapshot@default-wide.png", html)]), "no html: snapshot only")
+        let ref = WireVisualRef(id: "flow", revision: 2, states: ["default", "checkout"], sizes: ["wide", "phone"], files: files)
+        let model = VisualViewerModel(intake: UUID(), ref: ref, state: "checkout", loader: nil)
+        XCTAssertEqual(model.entryURL?.absoluteString, "fdvisual://flow/r2/export/index.html?size=phone#checkout")
         let u = VisualSchemeHandler.url(visualID: "flow", revision: 2, path: "export/index.html", fragment: "checkout")
         XCTAssertEqual(u.absoluteString, "fdvisual://flow/r2/export/index.html#checkout")
+    }
+
+    @MainActor func testTheViewerPageIsAsWideAsItsSizeNameAndNoWiderThanTheScreen() {
+        XCTAssertEqual(VisualViewerModel.pageWidth(size: "phone", screen: 430), 390)
+        XCTAssertNil(VisualViewerModel.pageWidth(size: "phone", screen: 390), "as wide as the screen: no frame")
+        XCTAssertNil(VisualViewerModel.pageWidth(size: "wide", screen: 430), "wider than the screen: the screen")
+        XCTAssertNil(VisualViewerModel.pageWidth(size: nil, screen: 430))
+        XCTAssertEqual(VisualViewerModel.pageWidth(size: "300", screen: 430), 300)
     }
 }
