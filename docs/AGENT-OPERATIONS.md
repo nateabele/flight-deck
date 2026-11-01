@@ -117,6 +117,11 @@ never touched, so nothing needs restoring beyond that.
 | `FD_SWAP_CHECK_ONLY=1` | Runs every pre-swap check (executable, `Info.plist`, `codesign --verify`, flavor) and exits before staging — nothing touched. This is the pre-flight. |
 | `FD_SWAP_ALLOW_DEBUG=1` | Escape hatch: installs a Debug or unknown-flavor bundle anyway, logging `FD_SWAP_ALLOW_DEBUG=1 — installing a Debug bundle anyway, override recorded` (or the unknown-flavor equivalent). Essentially never use it — it is exactly what forks the fleet across daemon roots, above. |
 
+These variables never reach the relaunched app: the script launches it with `env -u FD_SWAP_*`,
+and Flight Deck itself unsets script-only overrides (`FD_SWAP_*`, `FD_HOSTD_*`, `FD_UITEST_*`, ...;
+`LaunchLocale.scriptOnlyPrefixes`) at startup, so no tab inherits them. Set them per command, as
+shown below, never `export` them.
+
 Pre-flight, before arming a swap:
 
 ```bash

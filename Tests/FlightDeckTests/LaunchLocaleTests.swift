@@ -17,6 +17,22 @@ final class LaunchLocaleTests: XCTestCase {
 
     private let identity: (String) -> String = { $0.replacingOccurrences(of: "-", with: "_") }
 
+    /// A stale `FD_SWAP_NEW_APP` inherited by the app is inherited by every tab and aborts a plain
+    /// `swap-release.sh`; script-only overrides are unset at launch, everything else is untouched.
+    func testScriptOnlyOverridesAreUnsetAndOthersKept() {
+        let changes = LaunchLocale.changes(
+            environment: ["LANG": "en_US.UTF-8", "FD_SWAP_NEW_APP": "/gone", "FD_SWAP_ALLOW_DEBUG": "1",
+                          "FD_HOSTD_ASSET_BASE": "x", "FD_UITEST_HOST": "h", "FD_TEST_LOCAL": "1",
+                          "FD_OUTLOG_BUDGET": "1", "HOME": "/Users/x"],
+            cocoa: .init(languageCode: "en", countryCode: "US", preferredLanguages: []),
+            resolve: resolver(valid: ["en_US.UTF-8"]),
+            canonicalize: identity
+        )
+        XCTAssertEqual(Set(changes.keys), ["FD_SWAP_NEW_APP", "FD_SWAP_ALLOW_DEBUG", "FD_HOSTD_ASSET_BASE",
+                                           "FD_UITEST_HOST", "FD_TEST_LOCAL"])
+        XCTAssertTrue(changes.values.allSatisfy { $0 == .some(nil) })
+    }
+
     /// The common case, and the crash's: a launchd-started app (Dock, Finder, XCUITest) has no
     /// LANG, so `ensureLocale` would `setenv` LANG and LANGUAGE from Cocoa.
     func testAnUnsetLangIsSetFromCocoaWithLanguageAlongside() {
