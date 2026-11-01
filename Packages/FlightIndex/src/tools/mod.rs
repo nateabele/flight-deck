@@ -244,7 +244,8 @@ pub fn status(h: &SymbolHit) -> &'static str {
     if h.exported { "exported" } else { "private" }
 }
 
-fn repo_name(label: &crate::git::ViewLabel) -> String {
+/// The repository's short name, as the header prints it.
+pub fn repo_name(label: &crate::git::ViewLabel) -> String {
     if label.is_git {
         let r = label.repo.as_path();
         let base = if r.file_name().is_some_and(|n| n == ".git") { r.parent().unwrap_or(r) } else { r };

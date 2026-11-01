@@ -265,6 +265,18 @@ fn gc_without_a_path_collects_the_store_and_status_reports_it() {
 }
 
 #[test]
+fn a_status_row_names_the_repo_as_the_header_does() {
+    let (_d, svc) = service();
+    let r = project();
+    let header = ok(&svc, &r.root, "find", json!({"name": "a"}));
+    let name = header.split("(repo ").nth(1).and_then(|s| s.split(',').next()).unwrap().to_string();
+    let status = call(&svc, &r.root, "status", json!({})).data.unwrap();
+    let v = &status["views"][0];
+    assert_eq!(v["repo"], name.as_str(), "{v}");
+    assert!(v["repo_path"].as_str().unwrap().ends_with(".git"), "the path stays available: {v}");
+}
+
+#[test]
 fn with_freshness_off_every_request_still_reads_git() {
     let (_d, svc) = service_with(false);
     let r = project();

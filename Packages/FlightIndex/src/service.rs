@@ -87,6 +87,8 @@ enum Readiness {
 
 struct ViewInfo {
     repo: PathBuf,
+    /// What the header calls the repo (`tessera`), not its git dir.
+    repo_name: String,
     is_git: bool,
     base: Option<String>,
     dirty_files: usize,
@@ -716,6 +718,7 @@ impl Service {
         let mut views = self.views.lock().unwrap();
         let e = views.entry(view.label.worktree.clone()).or_insert_with(|| ViewInfo {
             repo: view.label.repo.clone(),
+            repo_name: tools::repo_name(&view.label),
             is_git: view.label.is_git,
             base: view.label.base_commit.clone(),
             dirty_files: 0,
@@ -897,7 +900,7 @@ impl Service {
                     let k = self.freshness.kept_info(wt);
                     let ago = |t: SystemTime| now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
                     json!({
-                        "worktree": wt, "repo": i.repo, "base": i.base, "dirty_files": i.dirty_files, "requests": i.requests,
+                        "worktree": wt, "repo": i.repo_name, "repo_path": i.repo, "base": i.base, "dirty_files": i.dirty_files, "requests": i.requests,
                         "idle_seconds": ago(i.last_used),
                         // Kept between requests and swept by stat, or read from `git status` each time.
                         "kept": k.is_some(),
