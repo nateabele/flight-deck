@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Tails the shared hook-event log and reports each session's `ComposerReadiness`.
@@ -35,17 +36,58 @@ final class HookEventWatcher {
     private var hasChosenStart: Bool
     private var readiness: [UUID: ComposerReadiness] = [:]
 
+    // MARK: Compaction
+    //
+    // **The log is a pipe, not a history, so compacting it needs no fold.** Nothing ever reads
+    // a line twice: the first look starts at the end (see the type doc), and every reader of a
+    // line — the readiness fold here and `DialogAttribution` — keeps what it derived in memory.
+    // So a line this watcher has read is dead weight, and the whole compaction is: once a
+    // drain has caught up and the file is past `rotationThreshold`, rename it aside, read
+    // whatever a hook appended in the instant before the rename, and delete it. New lines go
+    // to a fresh file, which a writer creates on its next append (`HookEventLine.append`
+    // opens with `O_CREAT` per line). Before this the file was never touched and reached
+    // 3.5 GB; pared lines are ~200 bytes, so 1 MiB is a few thousand events.
+    //
+    // **A writer holds the file for microseconds** (open, one `write(2)`, close), so the only
+    // line rotation can lose is one whose writer opened the old file before the rename and
+    // wrote more than a full tick (500 ms) after it.
+
+    /// Past this size, a caught-up drain rotates the log away.
+    let rotationThreshold: UInt64
+    /// The file renamed aside, and how far into it this watcher had read. Finished and deleted
+    /// on the next drain.
+    private var rotated: (url: URL, offset: UInt64)?
+    /// The file `offset` is an offset into. A different file at the same path — rotated by
+    /// this watcher, or by another instance sharing the directory — is all news, so it is read
+    /// from byte 0 rather than treated as a shrink and skipped to its end.
+    private var inode: UInt64?
+
+    private var rotatedURL: URL {
+        url.deletingLastPathComponent().appendingPathComponent(HookEventLine.fileName + ".rotated")
+    }
+
+    private static func fileStat(_ url: URL) -> (inode: UInt64, size: UInt64)? {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return nil }
+        return (UInt64(info.st_ino), UInt64(info.st_size))
+    }
+
     init(
         directory: URL,
         clock: WatchClock?,
+        rotationThreshold: UInt64 = 1 << 20,
         onChange: @escaping ([UUID: ComposerReadiness]) -> Void,
         onDialog: @escaping ([DialogAttribution.Change]) -> Void = { _ in }
     ) {
-        let url = directory.appendingPathComponent("events.ndjson")
+        let url = directory.appendingPathComponent(HookEventLine.fileName)
         self.url = url
         self.clock = clock
+        self.rotationThreshold = rotationThreshold
         self.onChange = onChange
         self.onDialog = onDialog
+        // A file left aside by a run that quit mid-rotation is history, which is never read.
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(HookEventLine.fileName + ".rotated"))
 
         // The first look, taken now rather than deferred to the first drain() — see the
         // type doc comment. `hasChosenStart: false` is what makes TailReader treat any
@@ -57,6 +99,7 @@ final class HookEventWatcher {
         )
         self.offset = firstLook.offset
         self.hasChosenStart = firstLook.hasChosenStart
+        self.inode = Self.fileStat(url)?.inode
     }
 
     func start() {
@@ -102,15 +145,41 @@ final class HookEventWatcher {
     /// Reads everything appended since the last call. Synchronous, so tests need no
     /// expectations — the seam `TranscriptWatcher.drain()` establishes.
     func drain() {
+        var lines: [String] = []
+
+        // The rotated file first: its last lines predate everything in the fresh one.
+        if let aside = rotated {
+            lines += TailReader.read(
+                url: aside.url, offset: aside.offset, hasChosenStart: true, truncation: .resumeAtEnd
+            ).lines
+            try? FileManager.default.removeItem(at: aside.url)
+            rotated = nil
+        }
+
+        let current = Self.fileStat(url)
+        if hasChosenStart, let known = inode, let current, current.inode != known { offset = 0 }
         let tail = TailReader.read(
             url: url, offset: offset, hasChosenStart: hasChosenStart, truncation: .resumeAtEnd
         )
         offset = tail.offset
         hasChosenStart = tail.hasChosenStart
+        if let current { inode = current.inode }
+        lines += tail.lines
+
+        // Caught up and past the threshold: set the file aside. Bytes a hook appends between
+        // the size check and the rename land past `offset` in the renamed file, which the next
+        // drain reads before deleting it.
+        if offset >= rotationThreshold, Self.fileStat(url)?.size == offset,
+           rename(url.path, rotatedURL.path) == 0 {
+            rotated = (rotatedURL, offset)
+            offset = 0
+            inode = nil
+            hasChosenStart = true
+        }
 
         var changes: [UUID: ComposerReadiness] = [:]
         var dialogChanges: [DialogAttribution.Change] = []
-        for line in tail.lines {
+        for line in lines {
             guard let record = HookEventRecord.decode(line) else { continue }
             if let change = attribution.apply(record) { dialogChanges.append(change) }
             let current = readiness[record.sessionID] ?? .unknown

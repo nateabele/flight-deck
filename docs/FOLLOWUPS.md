@@ -1324,26 +1324,18 @@ rather than fixed alongside the daemon wiring.
 
 ## Hook-fed composer state (2026-09-19)
 
-- **`events.ndjson` grows without bound, and faster than "log file" suggests.** Nothing ever
-  removes or rotates it. Launch-time truncation was considered and rejected on its merits
-  (ledger Ruling E): a shrink under a concurrently-running second instance would make that
-  instance's `HookEventWatcher` resume at the new end and miss everything in between, so
-  truncation trades a disk-space problem for a correctness one. What the ruling underweighted
-  is the rate. `PreToolUse` and `PostToolUse` payloads carry `tool_input` and `tool_response`
-  verbatim, and `record.sh` writes the whole payload, so a busy fleet writes **megabytes per
-  minute** — not the kilobytes-per-day a lifecycle log sounds like. Two candidate answers, both
-  deferred: size-triggered rotation (the watcher's `TailTruncationPolicy.resumeAtEnd` already
-  survives a shrink correctly, so this is mostly a question of who rotates and when), or
-  trimming the payload in `record.sh` to the two fields the decoder actually reads
-  (`session_id`, `hook_event_name`) — cheaper, and it shrinks the line rather than the file.
-  Trimming at the writer is probably the better first move: `HookEventRecord.decode` reads
-  nothing else, and it also removes tool arguments and tool output from a file that currently
-  accumulates them in plain text.
-
-- **`HookEventWatcher.drain()` decodes that delta synchronously on `@MainActor`, every
-  500 ms.** Harmless at today's line sizes and directly compounded by the entry above: the
-  bigger the per-tick delta, the more JSON parsing happens on the main thread. Trimming the
-  payload addresses both at once.
+- **RESOLVED 2026-11-01: `events.ndjson` grew without bound and kept every payload.** It had
+  reached 3.5 GB, holding every prompt and every tool's input and output in plain text. Both
+  halves are fixed. **Trimmed at the writer:** `record.sh` pipes each payload to
+  `flightdeck hook-record`, which writes only `session_id`, `hook_event_name`, `agent_id`,
+  `tool_use_id`, `tool_name` and a SHA-256 `tool_input_digest` (`HookEventLine`), to an
+  owner-only file. The digest is what `DialogAttribution` compares; legacy raw lines digest the
+  same way. The system perl was rejected as the parser: 381 ms on a 2 MB payload, in a hook
+  the agent waits on. **Rotated by the reader:** nothing reads a line twice, so once a drain
+  has caught up past 1 MiB, `HookEventWatcher` renames the file aside, finishes it on the next
+  drain, and deletes it. Ruling E's second-instance concern is met by tracking the inode: a
+  different file at the path is read from byte 0, not skipped as a shrink. Main-actor decoding
+  per tick is now of ~200-byte lines.
 
 - **A never-anchored claude tab sits at `.unknown` until its next turn, not "one beat".**
   `applyRegistry` demotes readiness whenever no status-registry row names a tab's conversation,

@@ -13,6 +13,18 @@ func writeStderr(_ line: String) {
 
 let env = ProcessInfo.processInfo.environment
 
+// Claude's hook plugin (`scripts/record.sh`) pipes every lifecycle payload here. Hidden from
+// help: no person runs it. It pares the payload to what Flight Deck reads (`HookEventLine`)
+// and appends that one line, touching no socket. Exits 0 on every path, because a hook that
+// fails blocks the agent, and reads stdin to its end so claude never meets a closed pipe.
+if CommandLine.arguments.dropFirst().first == "hook-record" {
+    let payload = FileHandle.standardInput.readDataToEndOfFile()
+    if let dir = env["FLIGHT_DECK_EVENT_DIR"], !dir.isEmpty, let line = HookEventLine.pare(payload) {
+        HookEventLine.append(line, toDirectory: URL(fileURLWithPath: dir, isDirectory: true))
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.dropFirst().first == "peer" {
     PeerToolEntry.run(Array(CommandLine.arguments.dropFirst(2)), environment: env)
 }
