@@ -2511,6 +2511,39 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     event stream is worth a transport spike ([FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md)
     already ruled it out as FD's own runner).
 
+## Ask threads, planning v2 P1 (2026-10-31)
+
+**Out of scope for planning v2** (spec §2), recorded here as P1 lands:
+- d2-language and image-model providers;
+- pins on the phone;
+- a live MCP front end for thread actions;
+- re-running a planning stage from a thread;
+- checking a built UI against its comp after implementation;
+- moving a note forward onto text that replaced its quote.
+
+**Open, from the P1 reviews and rulings:**
+- **Confine every adapter's reads to the repo and the workspace.** Today codex and gemini shells,
+  round seats included, can read anywhere the user can. Thread agents keep round-seat parity
+  (ruling); OpenCode threads have no bash at all. A thread that reads hostile repo content with
+  an agent that has network can exfiltrate any readable file. A cross-cutting change: round seats
+  too.
+- **`.invalid` callers pass every command at the `.full` scope level**, as a tab does. Accepted:
+  `.full` is the user's explicit grant to all callers. A thread agent and a round seat carry
+  `thread-agent:none` (`.invalid`), so under `.full` they reach what any tab reaches.
+- **Triage agents carry no `FLIGHT_DECK_CALLER`.** The app spawns them with its own environment,
+  so on the socket they read as the human, unscoped. Give them the fail-closed value too.
+- **ThreadRunner resolves no accounts.** Turns bill what the round runner's `accounts.json`
+  says; an agent the round config does not use runs on its built-in home, and no pool lease is
+  held for a turn while no round runner is live.
+- **A pending diff moves onto a newer round only on its thread's next turn.** An accept before
+  then lands on the head when the passage is still there exactly once, and is `diff_stale`
+  otherwise. ThreadRunner could rebase pending diffs when it sees the head move, turn or not.
+- **The child-process test harness** (`LockedAppendTests`'s two appending processes) finds its
+  helper through the xctest host's bundle layout; a change to how test-unit.sh loads the bundle
+  breaks it before it breaks anything real.
+- **Runner refusals of `viewing` and `host.list`** (Stream B): revisit if a runner ever needs a read.
+- **The P1 GUI is unverified** until the maintainer runs `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P1.
+
 ## Plan comments from the phone (2026-09-30)
 
 - **Phone comments never reached the agent — FIXED.** Plannotator's `POST /api/deny` gives the

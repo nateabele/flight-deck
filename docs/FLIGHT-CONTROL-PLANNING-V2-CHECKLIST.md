@@ -21,6 +21,39 @@ unverified until someone has run it and written the date beside it.
 - [ ] Unverified. Choose some answers, force quit the app, and open the intake again. The answers you chose are still selected.
 - [ ] Unverified. Against a Mac without this feature, the phone still says "Answer on your Mac for now".
 
+## P1: ask threads
+
+Every item is unverified until the maintainer checks it in the GUI.
+
+### Mac
+
+- [ ] Unverified. Select a passage and press ✦ Ask (last on the selection toolbar). The panel opens on a new thread anchored there, composer focused. With no selection, the thread is on the whole plan.
+- [ ] Unverified. The selection toolbar no longer offers the Question note kind; old Question notes still show.
+- [ ] Unverified. ⌘↩ sends. The card and panel show live activity ("reading §3…", "thinking"), then the reply with citation chips that open what they name.
+- [ ] Unverified. ⌘⇧↩ sends and resolves. A resolved thread moves to Resolved and refuses a message until Reopen.
+- [ ] Unverified. ⌘[ and ⌘] move between threads while the panel has focus.
+- [ ] Unverified. A proposed diff reads in place as prose with a green bar; hover shows the old text struck through with ✓ ✗ Edit ✦.
+- [ ] Unverified. ✓ changes the plan as a human edit; the diff goes away. ✗ leaves the plan as it was.
+- [ ] Unverified. Edit, change the words, Accept edited: the plan keeps your words. Edit then Cancel: the passage is as before. Edit then ⌘Z: the strip goes away.
+- [ ] Unverified. The auto-accept switch applies the next diff without asking.
+- [ ] Unverified. A grok or OpenCode thread's header says "reads files only".
+- [ ] Unverified. Notes the agent made show "✦ from thread …" and can be withdrawn.
+- [ ] Unverified. Quit Flight Deck mid-turn and relaunch: the reply arrives, and no turn runs twice.
+- [ ] Unverified. After a round lands, the thread shows "Now reading <round>", and a diff whose passage the round rewrote is stale with Re-propose.
+- [ ] Unverified. The next round after an accepted diff keeps the change (its prompt carries the thread's decision).
+- [ ] Unverified. A Send of structured answers that the Mac refuses shows why under the form.
+
+### Phone
+
+- [ ] Unverified. Ask in the reader's selection menu opens a thread screen; the reply arrives while it is open.
+- [ ] Unverified. A pending diff shows as a green bar beside the proposed text, in the plan's serif. Tapping shows the old text struck through, with Accept and ✗.
+- [ ] Unverified. A stale diff is a tinted card under its passage.
+- [ ] Unverified. An unsent note and an unsent ask both sit full width under their passage.
+- [ ] Unverified. The fleet row shows a "needs you" count for a thread waiting on you.
+- [ ] Unverified. A grok or OpenCode thread says "reads files only".
+- [ ] Unverified. Pop the intake screen while answers are "Sending…", let the Mac move on, push it again: it is not stuck on "Sending…".
+- [ ] Unverified. Against a Mac without threads, the reader offers no Ask.
+
 ## P3 core: visual providers
 
 Needs a real Mac. Settings → Flight Control → Providers, a repo with `.flightdeck/visual-providers/`, a terminal and Codex.
@@ -67,3 +100,4 @@ Needs a real Mac. Settings → Flight Control → Providers, a repo with `.fligh
 - [ ] Unverified. `git init` inside the installed folder freezes it.
 - [ ] Unverified. `delegate` and `peer-messaging` still install and work as before.
 - [ ] Unverified. A Claude session loads `visual-provider` from the bundled plugin.
+

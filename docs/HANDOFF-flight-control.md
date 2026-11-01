@@ -49,6 +49,7 @@ not cover it.
 | Agents | `Sources/IntakeKit/AgentID.swift`, `Agents/*Profile.swift`, `Headless.swift`, `ModelOptions.swift` |
 | App orchestration | `Sources/FlightDeck/Intake/IntakeService.swift` (`@MainActor`, about 2,500 lines). It is the only part of the app that starts triage, spawns runners and releases. |
 | Runner process | `flightdeck intake run <id> --root` (`Sources/FlightDeckTool/main.swift`), spawned by `IntakeRunnerController.swift` |
+| Ask threads (planning v2 P1) | Engine: `Sources/IntakeKit/Threads/` (`ThreadRunner`, `ThreadStore`, `ThreadCommand(Store)`, `ThreadTurnExecutor`, `ThreadWorkspace`, `ProvenanceIndex`, `ActionValidator`, `ThreadAccept`, `ThreadDecisions`). Process: `flightdeck intake threads <id> --root`, spawned by a second `IntakeRunnerController` (`kind: .threads`). App: `Intake/IntakeService+Threads.swift`, `+PhoneThreads.swift`. Mac UI: `Intake/Planning/Threads/`. Phone: `ThreadScreen.swift`, `ThreadOutbox.swift`, `PhoneDiffGutter.swift`. See 2.11. |
 | Mac UI | `Sources/FlightDeck/ProjectView.swift`, `Sources/FlightDeck/Intake/*.swift`, `Intake/Planning/*.swift`, `Intake/Planning/PlanEditor/*.swift` |
 | Phone projection (Mac side) | `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift`, `IntakePlanProjection.swift`; dispatch in `Fleet/FleetService.swift` |
 | Wire | `Sources/FleetKit/IntakeWire.swift`, `Frames.swift`, `TimelineFrames.swift`, `PlanBlocks.swift` |
@@ -118,12 +119,16 @@ Triage runs in the app process, not in the runner. `IntakeService.runTriage` use
 - **`Triage.normalize`** makes duplicate or empty ids unique, drops `recommended` ids that are
   not options, turns a choice with too few options into text (the options become hints), and sets
   `allowOther` on every single and multi question.
-  - `HeadlessSession` (`Intake.swift`) is stored under the JSON key `harness`. The key is legacy; do not rename it.
+- **`HeadlessSession`** (`Intake.swift`) is stored under the JSON key `harness`. The key is legacy;
+  do not rename it.
 - **Files:** `<intake>/triage/{graph.json, bv.json, schema.json}`. Unsent answers go to
   `<intake>/answer-drafts.json`, written with a 400 ms debounce. The file holds the round index,
   the round's digest and the `structured` answers beside the old strings. Drafts for another
   round or digest are deleted. A file without a digest or `structured` still loads while its
-  round and question texts match.
+  round and question texts match. On load, each answer's `selected` is filtered to the
+  question's own option ids, so a stray id can't make the round refuse the send.
+- **A refused send is shown.** `answer(_:structured:)` returns an `AnswerRefusal`; the Mac's
+  form shows it in words (`IntakeDetailView.words`) under the questions until the next edit.
 - **Validation:** a change set that fails validation gets one correction turn. A second failure
   sets the intake to `failed`.
 
@@ -240,7 +245,9 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
 | `intake.json`, `archived` (marker), `answer-drafts.json`, `accounts.json`, `triage/` | app |
 | `commands.jsonl` | app and phone (append only) |
 | `tape.json`, `runner.lock`, `checkpoints/<n>/` | runner |
-| `checkpoints/<n>/`: `drafts/<i>.md`, `plan.md`, `plan.user.md`, `changes.json`, `verdicts.json`, `crosscheck.json`, `changeset.json`, `graph.json` | runner |
+| `checkpoints/<n>/`: `drafts/<i>.md`, `plan.md`, `plan.user.md`, `plan.user.threads.json`, `changes.json`, `verdicts.json`, `crosscheck.json`, `changeset.json`, `graph.json` | runner |
+| `threads/commands.jsonl` | app and phone (append only, under the same `flock` as `commands.jsonl`) |
+| `threads/` (everything else: `cursor`, `runner.json`, `runner.lock`, `<thread>/thread.json`, `turns.jsonl`, `diffs/`, `activity.json`, `workspace/`, `runs/`) | ThreadRunner (2.11) |
 | `work/` (with `carry/`, `shadow/`), `runs/<stage>-<round>-<role>…/` (`run.json`, `stdout`, `stderr`, `activity.json`, `result.json`) | executor |
 | `intakes/model-lists/<agent>-<key>.json` (shared, not per intake) | app |
 
@@ -291,6 +298,50 @@ The data lives in `~/Library/Application Support/Flight Deck/intakes/<uuid>/`. A
   4. `BeadWriter` (`Sources/FlightDeck/Intake/BeadWriter.swift`) runs the `br` CLI with `--actor flightdeck-intake:<id>` and stops at the first failure.
   5. `DeliveryPlanner` and `IntakeDelivery` tell the holders of in-progress tasks: `am mail send`, prompt injection into a live session, or reclaim. A delivery failure is only a warning.
   6. `ReleaseRecord` is saved into the intake.
+
+### 2.11 Ask threads (planning v2 P1)
+
+Spec §5, §6, §10, §11, with the plan's rulings R1–R9 and the ledger's rulings (spec "Errata").
+
+- **One ThreadRunner per shaping intake**, `flightdeck intake threads <id> --root`, detached under
+  `fd-abduco` on `threads-<uuid>.sock`, beside the round runner. `IntakeService.kickThreads`
+  starts it after every thread append; `pollThreads` brings it back each tick when a command is
+  past the cursor or a turn is queued, and collects its daemon once idle. The work check is
+  memoized on the thread files' stamps. `threads/runner.lock` (`flock`) makes a second runner exit
+  at once. It carries the intake's runner token in `FLIGHT_DECK_CALLER` and resolves no accounts:
+  turns bill what the round runner's `accounts.json` says.
+- **Single writers.** ThreadRunner is the only writer of `threads/` (except `commands.jsonl`). It
+  appends to the tape only a thread's notes and its auto-accepted diffs. The app and the phone
+  only append: thread commands to `threads/commands.jsonl` (R8), an accepted diff's
+  `applyThreadDiff` to the tape's `commands.jsonl`.
+- **A turn** is one resumed headless run (`ThreadTurnExecutor`) with `.threadRead` access (R1),
+  cwd the repo, the workspace readable, and the `ThreadActions` schema. Its CLI carries
+  `FLIGHT_DECK_CALLER = ThreadTurnExecutor.agentCaller` ("thread-agent:none"), which the socket
+  reads as `.invalid`. Round seats carry the same value (`RoundExecutor`), never the runner's token.
+  Grok and OpenCode read files only (`HeadlessCommand.threadReadsFilesOnly`; OpenCode has no bash).
+  At most 2 turns run at once per intake (R3). Actions are validated (R6) and retried twice.
+- **Accepting a diff** (`ThreadAccept.append`, used by the Mac's `decideDiff` and the phone's
+  `phoneDiffDecide`): `applyThreadDiff` is composed on the newest version of the head — the last
+  edit still queued for it, else its effective plan — inside the commands lock
+  (`TapeStore.appendCommand(composing:)`). A diff from an older checkpoint applies when its
+  passage is found exactly once on the head, else it is `diff_stale`. Edit then Accept edited sends
+  `editedMarkdown`, which is the `applyThreadDiff` markdown and an accept (ruling). Order: the
+  tape's `applyThreadDiff` first, then the thread's `decideDiff`, so a half-failed accept leaves the
+  edit and a retry adds only the decision.
+- **IntakeRunner applies `applyThreadDiff`** like `editPlan` (`plan.user.md`), and records
+  `{thread, diff}` in `checkpoints/<n>/plan.user.threads.json` (`TapeStore.threadEditSources`).
+- **Rounds read the decisions** (spec §11): `RoundPrompts.steering` adds "What the human decided in
+  ask threads since the last round" — each unresolved thread with a turn that ended after the head
+  checkpoint landed: title, anchor, latest `decision`, and whether its change is among the human's
+  edits (`ThreadDecisions.since`). Resolved threads never feed rounds.
+- **Runner callers get least privilege** (ruling): `ControlScope` refuses an `.intakeRunner` caller
+  every command and request (`out_of_scope`), its own intake's included, as on the canvas branch.
+- **Tests:** `AskThreadEndToEndTests` (logic lane) runs Ask → reply → accept → next round with the
+  real ThreadRunner, ThreadAccept and IntakeRunner. `ThreadRunnerTests`, `ThreadStore*Tests`,
+  `ActionValidatorTests`, `IntakeThreadServiceTests`, `PhoneThreadCommandTests`. The UI flow is
+  `AskThreadUITests` (`FD_UITEST_ONLY=FlightDeckUITests/AskThreadUITests ./scripts/smoke-remote.sh`)
+  on `-FlightDeckPlanningFixture threads`: a seeded thread with a reply and a pending diff, and no
+  ThreadRunner (a turn would spend real tokens on the UI-test Mac), so the Ask it sends stays queued.
 
 ---
 
@@ -453,9 +504,28 @@ the heatmap.
 - **Links** (`PlanLinks.swift`): ⌘-click opens a link. Holding ⌘ shows a tip with the target. `:42` and `#L42` suffixes are stripped. In-document `#anchor` links are not supported.
 - **Outline and breadcrumb:** `PlanReadingPosition` shows "§ Title" in the pinned board's footer, and a click jumps there. `PlanFocus` is how a heatmap cell asks for a Diff at a section.
 
-### 3.8 The notes rail
+### 3.8 The notes rail and ask threads
 
-See section 6. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
+See section 6 for notes. Files: `PlanEditor/NotesRail.swift` and `SelectionToolbar.swift`.
+
+Ask threads (spec §6, files under `Intake/Planning/Threads/`):
+- **✦ Ask** is the last button on `SelectionToolbar`: on a selection it opens the panel on a new
+  thread anchored there; with none, on the whole plan. The Question note kind is gone from the
+  toolbar (old Question notes still read and feed rounds).
+- **Ask cards** (`AskCard.swift`) sit in the rail's aligned lane beside their quote: title, live
+  activity, excerpt, counts, Open ⤢, and a stale pill with Re-propose.
+- **The thread panel** (`ThreadPanel.swift`, `ThreadPanelModel.swift`) replaces the rail in the
+  inspector (R7): an index (Open by section, Needs you, Resolved; a filter; "＋ New thread on
+  whole plan") and the conversation. The header has the title, Resolve, the agent menu, the
+  auto-accept switch, the version followed, and "reads files only" for grok and opencode. ⌘↩
+  sends, ⌘⇧↩ sends and resolves, ⌘[ ⌘] move between threads. The model polls the binding's reader
+  (`IntakeThreadBinding`), and its refusals read as words (`ThreadPanelModel.words`).
+- **Diffs in the plan** (`DiffGutter.swift`, D17 option B): the proposed text drawn in place of
+  its paragraph (`PlanProposal`) with a green bar; on hover the old text struck through and ✓ ✗ Edit
+  ✦. Edit puts the words in the plan; Accept edited sends the whole plan as the accept, Cancel
+  restores the passage by range. Undoing the insert, or a paste over the passage's edge, ends the
+  edit session (words left as typed). Switching thread in the panel lets the edit go.
+- The panel's open thread and width are remembered per intake for the session.
 
 ### 3.9 Release review
 
@@ -535,16 +605,18 @@ fidelity". Several working plans get a line each.
 | Note sheet | `NoteSheet.swift`, `NoteComposer.swift` (`NoteComposer`, `NoteOutbox`) | Quote, kind chips, text. The outbox keeps sent notes visible until the plan shows them. |
 | Clarifications | `ClarificationsScreen.swift` | Answered Q&A, read-only |
 | Model | `FlightControlModel.swift`, `IntakeCommands.swift` | Banners, one detail and one command model per intake, a plan cache of 4. Commands time out after 10 s and reuse their token within 60 s. |
-| Answer form | `AnswerFormModel.swift`, `AnswerDraftStore.swift` | One per intake. Decides when the form shows, when it reads "Sending…", and when it starts again, all keyed on the round's digest. Chosen answers persist per intake and digest in UserDefaults until a send is acked. |
+| Answer form | `AnswerFormModel.swift`, `AnswerDraftStore.swift` | One per intake. Decides when the form shows, when it reads "Sending…", and when it starts again, all keyed on the round's digest. Chosen answers persist per intake and digest in UserDefaults until a send is acked. The intake screen settles the sent marker on every appearance (`observe` in `onAppear`), so a round that moved on while the screen was popped does not stay "Sending…". |
+| Ask threads | `ThreadScreen.swift`, `ThreadOutbox.swift`, `PhoneDiffGutter.swift`, `ThreadGate` | Ask in the reader's selection menu (and "Ask about the whole plan") opens a thread; the thread screen shows the conversation (fetched with `intake.thread.get`, polled while open), inline questions, "reads files only" for grok and opencode, and a composer. Pending diffs draw as a green bar beside the proposed text (in the plan's serif); a diff that can't be placed is a tinted card under its block. Tapping shows the old text struck through with Accept / ✗. Unsent notes and asks sit full width under their passage. The fleet row shows a "needs you" count. All of it only when the detail's `threads` flag is true. |
 
 `PlanReviewScreen` and `PlanReviewModel` are the Plannotator plan gate for sessions, not Flight
 Control.
 
 ### 4.2 Wire (`Sources/FleetKit/`)
 
-- **Requests** (`TimelineFrames.swift`): `intake.detail(id, ifNot: etag)` and
-  `intake.plan(id, checkpoint?, changes)`. A request is safe on any Mac: an unknown request gets
-  `err unsupported`.
+- **Requests** (`TimelineFrames.swift`): `intake.detail(id, ifNot: etag)`,
+  `intake.plan(id, checkpoint?, changes)` and `intake.thread.get(id, threadID, since?)` (answered
+  by `ServerFrame.intakeThread` with a `WireThreadPage`). A request is safe on any Mac: an unknown
+  request gets `err unsupported`.
 - **Replies:** `WireIntakeDetail` and `WireIntakePlan`.
 - **Event:** `project.intakes`, which carries `WireProject.intakes`.
 - **Commands** (`Frames.swift`, `FleetCommand`):
@@ -560,21 +632,30 @@ Control.
 | `intake.start` | preset, config, base | `editRounds` |
 | `intake.rounds` | config, base | `editRounds` |
 | `intake.answer` | id, token, round, digest, answers | `structuredQuestions` |
+| `intake.thread.send` | id, token, threadID?, anchor?, text | `threads` |
+| `intake.thread.answer` | id, token, threadID, answers | `threads` |
+| `intake.thread.resolve` | id, token, threadID | `threads` |
+| `intake.diff.decide` | id, token, threadID, diffID, accept | `threads` |
 
 - **Wire types** (`IntakeWire.swift`):
   - The core: `WireIntakeSummary`, `WireIntakeDetail`, `WireBoard`, `WireControls`, `WireRound`, `WireNote` (with optional `checkpoint` and `version`).
   - Rounds: `WireRoundConfig`, `WireRoundsMenu`, `WireRoundsLock`, `RoundsRefusal`.
   - Questions: `WireQuestions` (with `round`, `structured` and `digest` for the open round), `WireStructuredQuestion`, `WireOption`, `WireStructuredAnswer`.
-  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan`.
+  - Others: `WireChoice`, `WireFailure`, `WireIntakePlan` (with `threads` and `pendingDiffs`).
+  - Threads (`ThreadWire.swift`): `WireThreadSummary` (with `readsFilesOnly`), `WireThreadAnchor`,
+    `WireThreadCounts`, `WireThreadTurn`, `WirePendingDiff`, `WireThreadPage`;
+    `WireIntakeSummary.threadsNeedingYou`.
 - **Capability flags** are all on `WireIntakeDetail`:
-  - The flags are `steer`, `choose`, `noteKind`, `editRounds` and `structuredQuestions`.
+  - The flags are `steer`, `choose`, `noteKind`, `editRounds`, `structuredQuestions` and `threads`.
   - The payloads are `roundConfig`, `roundsMenu` (while choosing or shaping) and `roundsLock` (while shaping).
-  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (around line 148).
-  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make` and `AnswerFormModel.openRound`.
-- **Handlers** (`IntakeService.phone*`, about lines 1206 to 1427, dispatched from `FleetService.swift`):
+  - The Mac sets them in `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift` (around line 155).
+  - The phone checks them in `TransportKeys`, `NoteComposer.notesAllowed` and `canRetype`, `FidelityChooser.options`, `RoundEditing.make`, `AnswerFormModel.openRound` and `ThreadGate`.
+- **Handlers** (`IntakeService.phone*`, about lines 1332 to 1524, dispatched from `FleetService.swift`;
+  the thread ops are `IntakeService+PhoneThreads.swift`):
   - The handlers are `phoneTape`, `phoneDefaultPlay`, `phoneChoose`, `phoneStart`, `phoneRounds`, `phoneNote`, `phoneRemoveNote`, `phoneSetNoteKind` and `phoneAnswer`.
   - `phoneAnswer` refuses `stale_questions` when the round or digest is not the open round's, or the round is already answered. Otherwise it passes on `answer(_:structured:)`'s code: `unknown_question` (a missing, unknown or repeated question id) or `invalid_answer` (an incomplete answer, or one `accepts` refuses). An unknown intake is `unknown_intake`.
   - Each returns nil (ack) or an error code. Codes: `unknown_intake`, `intake_moved_on`, `not_allowed`, `unknown_command`, `unknown_mode`, `unknown_preset`, `no_agents`, `rounds_changed`, `invalid_config`, `unknown_kind`, `empty_note`, `unknown_checkpoint`, `unknown_block`, `note_consumed`, `stale_questions`, `unknown_question`, `invalid_answer`, and `refused: <sentence>`.
+  - The thread ops add `empty_message`, `unknown_thread`, `thread_resolved`, `no_agent`, `unknown_diff`, `diff_stale`, `diff_decided` and `write_failed`. A new thread from the phone is named by its token (`ThreadID.opened(byToken:)`), so a retry opens no second thread. An older Mac answered every thread op `threads_unavailable`; the phone still has words for it.
   - Each handler remembers the last 16 tokens, so a retry is idempotent.
   - The phone's words for each code are in `CommandCopy.message`.
 
@@ -911,6 +992,11 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
   - the Mac takes structured answers (`59ddd44b`) and answers by choosing (`49d97c84`);
   - `intake.answer` and the phone form (`4348e14d`, `5d792468`);
   - fixes: option ids checked (`86dc144e`); rounds named by digest on the Mac (`3d1d9709`) and on the wire (`570e90d4`); phone token, form and drafts per round (`24b0114f`); refusal words (`ecfaefdf`); Other takes file drops (`ff9478c4`).
+- **Planning v2 P1, ask threads** (branch `planning-v2-p1`, 2.11, 3.8, 4.1): the shapes and the
+  locked append (Task 0, Stream B), ThreadRunner (Stream A), the Mac UI (Stream C), the phone
+  (Stream D), the window-free logic test lane (Stream E), and the integration: the runner is
+  spawned and kept alive, the stubs are gone, accepted diffs carry their thread, rounds read the
+  decisions, and runner tokens reach nothing on the socket.
 - **Gemini** read-only seats run under an FD-owned agy project, so reads work again (`3416e35e`).
 - **Tests:** the unit suite runs on the UI-test Mac by default (`412f9a25`).
 
@@ -927,6 +1013,15 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 - **Idea:** `commands.jsonl` grows without bound.
 - **Gap:** there has been no live whole-tape run with Claude seats, and the main-thread cost during a run has not been measured.
 - **Ideas:** branches and rewind, an oracle seat, per-round agent overrides, a task graph review tab.
+- **Gap (threads):** a ThreadRunner resolves no accounts. Its turns bill whatever the round runner's
+  `accounts.json` says, an agent the round config does not use runs on its built-in home, and no
+  pool lease is held for a turn while no round runner is live.
+- **Gap (threads):** a pending diff is carried onto a newer round only by its thread's next turn. Until
+  then an accept lands it on the head when its passage is still there exactly once, and refuses it
+  `diff_stale` otherwise.
+- **Gap (threads):** codex and gemini thread agents, like round seats, can read files anywhere
+  (FOLLOWUPS, "Ask threads"). Triage agents, which the app spawns, carry no `FLIGHT_DECK_CALLER` and
+  read as the human on the socket.
 
 ### 7.4 Mac UI
 
@@ -943,6 +1038,7 @@ Already merged; their worktrees could be removed: `rounds-timeline-editor`, `rou
 - **Gap:** fresh eyes and dedup have no row in the Rounds timeline editor.
 - **Gap:** the live slot does not grow, and BILLED covers only the current round.
 - **Gap:** there is no UI to turn Flight Control off for a project (`ProjectHeaderRow.swift` has an inert button).
+- **Gap:** the ask-thread UI (P1) is unverified in the GUI: `FLIGHT-CONTROL-PLANNING-V2-CHECKLIST.md`, P1.
 - **Gap:** about 13 behaviours have never been checked by a person in the GUI. They are listed under FOLLOWUPS "Unverified in the GUI", "Inspector modes" and "Rounds timeline editor". The pinned notes rail and the newer table editing are not on that list but are in the same position.
 - **Gap:** stale comments.
   - `ProjectView`'s doc comment still promises a task-graph tab "with the next plan".

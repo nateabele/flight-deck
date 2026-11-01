@@ -2339,7 +2339,7 @@ the runner:
 | File | Writer | What |
 |---|---|---|
 | `intake.json` | app | intent, Q&A, `chosenPreset`, `roundConfig`, state, the final change set |
-| `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; the runner acks by `seq` in the tape |
+| `commands.jsonl` | app, phone path, ThreadRunner (append-only, under `LockedAppend`'s `flock`) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; an accepted thread diff (`applyThreadDiff`, also the whole plan) from the app, the phone or auto-accept; a thread's notes from ThreadRunner. The runner acks by `seq` in the tape |
 | `tape.json` | runner | status, target, checkpoints (each record lists the notes its round consumed), `roundInProgress`, `pendingNotes`, extensions, heartbeat |
 | `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; refine and synthesis also keep `changes.json` (the proposals, `[]` when there were none) and `verdicts.json` (the integrator's per-change verdicts, only when it gave them); `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
@@ -2666,6 +2666,56 @@ already visible on its own. Every intake state except `.releasing` has a way off
 Discard, or Dismiss once released — and Dismiss is the only thing that stops a
 `.partiallyReleased` intake counting (it hides the intake; its `ReleaseRecord` stays on disk).
 
+### Ask threads (planning v2 P1, `Sources/IntakeKit/Threads/`)
+
+Select a passage, press ✦ Ask, and a live agent answers with citations into the plan's own
+history; what it proposes — diffs, notes, questions — is acted on in the plan, from the Mac or
+the phone. Spec: [planning v2](superpowers/specs/2026-10-31-flight-control-planning-v2-design.md)
+§5–§6, §10–§11, and its errata.
+
+**A second detached runner per intake.** `ThreadRunner` (`flightdeck intake threads <id> --root`)
+runs beside `IntakeRunner`, under `fd-abduco` on `threads-<uuid>.sock`, spawned and reaped by a
+second `IntakeRunnerController` (`kind: .threads`). Its liveness is its own heartbeat
+(`threads/runner.json`), not the tape's; `threads/runner.lock` keeps a second one out. The app
+starts it when it appends a thread command and on any tick that finds work it has not done (a
+command past `threads/cursor`, or a queued turn), and it exits when idle after a late look, as
+`IntakeRunner` does. It carries the intake's runner token, which the control socket answers with
+`out_of_scope` for everything: neither runner uses the socket.
+
+*One writer per file, threads:*
+
+| File | Writer | What |
+|---|---|---|
+| `threads/commands.jsonl` | app, phone path (append-only, same `flock` helper) | `ThreadCommand` lines: open, message, answer, setAutoAccept, setAgent, resolve, reopen, repropose, decideDiff (R8: IntakeRunner never reads them) |
+| `threads/cursor`, `threads/runner.json`, `threads/runner.lock` | ThreadRunner | the last command seq folded; pid and heartbeat; one runner per intake |
+| `threads/<id>/thread.json`, `turns.jsonl`, `diffs/<diff>.json` | ThreadRunner | the thread, its turns (rewritten whole when one lands), its diffs and their state |
+| `threads/<id>/activity.json`, `workspace/`, `runs/<seq>-<n>/` | ThreadRunner | the running turn's live activity (R2); the workspace rebuilt per turn (outline, sections, anchor, provenance, intake); each run's stdout, stderr and schema |
+| `checkpoints/<n>/plan.user.threads.json` | IntakeRunner | which threads' accepted diffs are in `plan.user.md` |
+
+**A turn** is one resumed headless run of the thread's agent through `HeadlessCommand` with
+`.threadRead` access: the repo is the working directory, the workspace is readable, and the
+answer is the `ThreadActions` schema. Claude gets a read-command allow-list, codex and gemini
+keep their sandboxes, grok and OpenCode read files only. The agent CLI carries a
+`FLIGHT_DECK_CALLER` the socket reads as invalid; round seats now carry the same. A turn is
+written to `turns.jsonl` before the cursor moves past its command and keeps its seq for good,
+so a turn rerun after a crash makes the same note and diff ids, and nothing lands twice.
+`ActionValidator` refuses a diff whose quote is not found exactly once; two retries, then
+"couldn't apply". When a round lands, the next turn draws a divider, rebases pending diffs onto
+the new head (`PlanRebase`) or marks them stale.
+
+**Accepting a diff.** `applyThreadDiff` carries the whole plan, so `ThreadAccept` composes it on
+the newest version of the head — the last edit still queued for it, else its effective plan —
+inside the commands lock, and auto-accept does the same: no edit can land between the read and
+the append. The tape's edit is appended before the thread's `decideDiff`, so a half-failed accept
+leaves the edit and a retry adds only the decision. IntakeRunner applies it as a human edit and
+records the thread and diff beside the layer; the next round's steering lists each thread's
+decision since the last round, so a refine round keeps the change.
+
+**Reading.** The Mac's panel and the phone projection read `ThreadStore`, cached per file on
+(inode, size, mtime), so a poll of unchanged threads costs a stat per file. The phone gets
+summaries and pending diffs on `intake.plan`, the conversation on demand (`intake.thread.get`),
+and sends `intake.thread.*` and `intake.diff.decide` only while the detail's `threads` flag is set.
+
 ## Visual providers (`Packages/HostKit/.../Providers/`, `Sources/ProviderKit/`)
 
 A provider is a folder with `provider.toml`. P3 core is the loader, trust, sandbox, checker and
@@ -2743,6 +2793,7 @@ providers:
 **Settings and the skill.** Providers section in the Flight Control tab, rows keyed by source and
 folder. See HANDOFF §5.5. `CodexBundledSkill(name:)` copies a skill folder and keeps a
 `.flightdeck-managed` digest sidecar.
+
 
 ## Not yet built (design, not code)
 

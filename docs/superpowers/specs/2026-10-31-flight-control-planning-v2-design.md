@@ -550,6 +550,50 @@ The pure-logic unit tests cover:
 5. **Comps need the app running**, as snapshots do, because the canvas engine runs inside the app (§8). Accepted; a comp job fails visibly when the app is closed.
 6. **Live threads cost tokens.** Each message is a resumed headless turn. The thread header shows the agent and model. The default is the integrator's, and the person can choose a cheaper one per thread.
 
+## 17. Errata from P1 (what was built where the spec differs)
+
+These bind over the sections above. R1–R9 are the P1 plan's rulings
+([plan](../plans/2026-10-31-planning-v2-p1-ask-threads.md)); the rest are rulings made during the
+build.
+
+- **R1, read-only Bash (§5).** Only codex and gemini can confine a shell to reading. Claude gets a
+  read-command allow-list (`rg`, `git log/show/diff/blame/grep`, `ls`, `cat`, `head`, `wc`,
+  `find`); codex and gemini keep their sandboxes; grok gets Read/Grep/Glob only. **OpenCode thread
+  agents get no bash at all** (`permission.bash {"*":"deny"}`; path-argument filtering proved
+  unreliable) and read/grep/glob/list only. Grok and OpenCode threads say "reads files only".
+  Claude, codex and gemini threads keep round-seat parity for reads outside the repo.
+- **R2, streaming (§5).** The reply lands when the turn ends; during the turn the card and panel
+  show live activity ("reading §3", "running rg …", "thinking").
+- **R3, concurrency.** ThreadRunner's own cap: 2 concurrent turns per intake.
+- **R4, rebase.** `PlanRebase.retarget` (IntakeKit) replaces `EditLayer.retarget` for the runner.
+- **R5, liveness.** ThreadRunner has its own `threads/runner.json` heartbeat,
+  `threads-<uuid>.sock` and `threads/cursor`.
+- **R6, exactly once.** A diff whose quote matches more than once is refused ("ambiguous: quote
+  more context"). Section ids are `s<n>` in outline order, per checkpoint.
+- **R7, the panel** replaces the rail inside the inspector at up to 640 pt.
+- **R8, thread commands (§5 "Commands").** Thread-only commands go to `threads/commands.jsonl`,
+  read only by ThreadRunner, not to the tape. Only `applyThreadDiff` and `note` reach the tape's
+  `commands.jsonl`. `applyThreadDiff` carries the whole edited plan, like `editPlan`; there is also
+  `ThreadCommand.decideDiff` to record ✓ and ✗.
+- **R9, canvas inbox.** `ThreadCommand.message` carries optional `source`, `messageID`,
+  `elementID`, `subjectRevision`; ThreadRunner dedupes on `messageID`. Conformance is P2b's.
+- **No `threads` capability in `tape.json` (§5).** ThreadRunner is the same `flightdeck` binary as
+  IntakeRunner in the same bundle, so no older runner can meet the command.
+- **Accept (§5).** An edited accept (`editedMarkdown`) is an accept, and its markdown is the
+  `applyThreadDiff` markdown. The app appends `applyThreadDiff` before `decideDiff`, composed on the
+  newest queued edit of the head under the commands lock (`TapeStore.appendCommand(composing:)`);
+  auto-accept composes the same way. IntakeRunner records the thread and diff on the edit
+  (`plan.user.threads.json`). A diff from an older checkpoint applies when its passage is still
+  on the head exactly once; otherwise it is stale.
+- **Turn seqs never change; dividers display before the first turn that read their version.** A
+  divider gets the next free seq, once per head; display order puts it before the first turn whose
+  checkpoint is at or past its head.
+- **Runner callers get least privilege.** A runner's token is refused every command and request
+  (`out_of_scope`), its own intake's included. Agents a runner spawns — thread agents and round
+  seats — carry a caller value the socket reads as invalid, never the runner's token and never none.
+- **Rounds read thread decisions (§11)** as "What the human decided in ask threads since the last
+  round": each unresolved thread with a turn that ended after the head checkpoint landed.
+
 ## Errata: P3 core (2026-11-01)
 
 What was built differs from §9 in these ways. The code and `docs/ARCHITECTURE.md` ("Visual providers") are the truth.
@@ -567,3 +611,4 @@ What was built differs from §9 in these ways. The code and `docs/ARCHITECTURE.m
 - **K-R5, skill install.** `CodexDelegateSkill` is generalized to `CodexBundledSkill(name:)`, which copies a folder with a `.flightdeck-managed` digest sidecar and installs `delegate`, `peer-messaging` and `visual-provider`. It never follows a link and swaps a refresh in whole. A `.git` inside an installed skill folder counts as a user edit and freezes the folder, because a refresh would destroy a repo. Such a folder gets no auto-upgrade.
 - **K-R6, `provider check`.** It is local, intercepted before the transport. It also checks that each `entry` exists. A generator runs only with an explicit **`--run-samples`**, and the argv is printed first, against `samples/<kind>/`. It does not make a sample visual with a cheap model (§9, last bullet): that step needs ProviderHost and is deferred. Exit codes are 0 valid, 1 problems, 2 usage.
 - **Deferred from §9:** `ProviderHost` (providers are not called by planning yet), the bundled provider folder and `fd.comp.canvas`.
+
