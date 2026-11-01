@@ -159,7 +159,8 @@ fn impact_lists_co_change_partners_from_git_history() {
         commit_all(&r.root, &format!("both {i}"));
     }
     let t = ok(&svc, &r.root, "impact", json!({"file_path": "web/a.ts"}));
-    assert!(t.contains(&format!("{} (changed together 4×)", r.root.join("lib.rs").display())), "{t}");
+    // web/a.ts changed in 4 commits (init and 3), lib.rs in all 4 of them: confidence 4/4.
+    assert!(t.contains(&format!("{}  (co-changed 4/4)", r.root.join("lib.rs").display())), "{t}");
 }
 
 #[test]

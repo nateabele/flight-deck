@@ -58,7 +58,7 @@ fn tool_and_parameter_names_stay_the_qartez_set() {
         ("qartez_outline", vec!["file_path", "format", "offset", "token_budget"]),
         ("qartez_deps", vec!["file_path", "format", "token_budget"]),
         ("qartez_stats", vec!["file_path"]),
-        ("qartez_impact", vec!["file_path", "format", "include_tests", "token_budget"]),
+        ("qartez_impact", vec!["file_path", "format", "include_tests", "seed_diff", "token_budget"]),
         ("qartez_refs", vec!["format", "include_tests", "symbol", "token_budget", "transitive"]),
         ("qartez_calls", vec!["depth", "direction", "file_path", "format", "include_tests", "kind", "limit", "name", "token_budget"]),
         ("qartez_replace_symbol", vec!["apply", "file_path", "kind", "new_code", "symbol"]),

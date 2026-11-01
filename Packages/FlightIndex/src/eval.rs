@@ -121,7 +121,7 @@ impl Probe<'_> {
         }
         let args = Args::new(map, self.root.to_path_buf());
         let none = || -> crate::error::Result<Arc<crate::cochange::CoChange>> { Err(crate::error::Error::Msg("no co-change in eval".into())) };
-        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &none };
+        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], cochange: &none, diff: &[] };
         tools::run(tool, &ctx).unwrap_or_default()
     }
 

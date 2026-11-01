@@ -18,7 +18,7 @@ Navigation and reading: `qartez_map` (ranked structure), `qartez_find` (definiti
 `qartez_grep` (symbol names; `search_bodies=true` searches function bodies), `qartez_read` (a symbol
 or a file range), `qartez_outline` (a file's symbols), `qartez_stats` (metrics).
 
-Analysis and risk: `qartez_impact` (importers, blast radius, co-change partners, hot symbols; also
+Analysis and risk: `qartez_impact` (importers and co-change partners ranked together, the linked tests, blast radius, hot symbols; also
 the acknowledgement for the edit guard), `qartez_deps` (imports and importers), `qartez_refs`
 (usages), `qartez_calls` (callers and callees).
 

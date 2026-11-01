@@ -521,7 +521,7 @@
  },
  {
   "name": "qartez_impact",
-  "description": "What a change to a file could break: direct importers, transitive dependents, files that change with it in git, its hot symbols. Call before editing a widely imported file (the edit guard asks for it). One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
+  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), the linked tests, then transitive dependents and hot symbols. Call before editing a widely imported file (the edit guard asks for it). One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -553,7 +553,15 @@
     },
     "include_tests": {
      "default": null,
-     "description": "Count test files as dependents (default false).",
+     "description": "Count test files in the ranked list and blast radius (default false). The Tests group lists linked tests either way.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "seed_diff": {
+     "default": null,
+     "description": "Also rank co-change partners of files the worktree changed, not just file_path (default true).",
      "type": [
       "boolean",
       "null"
