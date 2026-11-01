@@ -1,7 +1,7 @@
 [
  {
   "name": "qartez_map",
-  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. With boost_files, or uncommitted changes, ranks by what those files reach. To locate a known name use qartez_find; boost_terms ranks around words.",
+  "description": "Files ranked by PageRank with their exports and blast radius (by=symbols ranks symbols). Use first in an unfamiliar repo. With boost_files, or uncommitted changes, ranks by what those files reach. A known name: qartez_find; boost_terms ranks around words.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -26,7 +26,7 @@
     },
     "boost_files": {
      "default": null,
-     "description": "Files you are working on: what they reach ranks first, seeds listed apart. personalize=false: x10 boost instead.",
+     "description": "Files you work on: what they reach ranks first. personalize=false: x10 boost instead.",
      "items": {
       "type": "string"
      },
@@ -70,7 +70,7 @@
     },
     "personalize": {
      "default": null,
-     "description": "Seed the rank from boost_files or the worktree's changed files (default true). False: plain PageRank.",
+     "description": "Seed the rank from boost_files or changed files (default true). False: plain PageRank.",
      "type": [
       "boolean",
       "null"
@@ -117,7 +117,7 @@
  },
  {
   "name": "qartez_find",
-  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private. Takes qualified names (Type.method, Module.fn, stem::fn). No exact match lists the closest by words. For part of a name use qartez_grep; for its uses, qartez_refs.",
+  "description": "Definition of a symbol by exact name: file, line range, signature, exported or private, and an id (path:Type.name) other tools accept. Takes qualified names (Type.method, stem::fn). No exact match lists the closest by words. Part of a name: qartez_grep; its uses: qartez_refs.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -152,7 +152,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max matches (default 100).",
+     "description": "Max matches (default 50), most important first.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -161,11 +161,11 @@
      ]
     },
     "name": {
-     "description": "Exact or qualified name, or a regex with regex=true. Aliases: symbol, symbol_name.",
+     "description": "Exact or qualified name, a regex with regex=true, or an id path:Type.name. Aliases: symbol, symbol_name.",
      "type": "string"
     },
     "near": {
-     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -176,7 +176,7 @@
     },
     "history": {
      "default": null,
-     "description": "Also list symbols whose recent commit messages match (BM25). Default: on for several words or no name hit; false = off.",
+     "description": "Also list symbols whose commit messages match (BM25). Default: on for several words or no name hit.",
      "type": [
       "boolean",
       "null"
@@ -187,6 +187,14 @@
      "description": "Treat name as an unanchored, case-insensitive regex.",
      "type": [
       "boolean",
+      "null"
+     ]
+    },
+    "detail": {
+     "default": null,
+     "description": "full: a block per match with its id. rows: one line each. Default: full up to 10 hits, rows past that.",
+     "type": [
+      "string",
       "null"
      ]
     }
@@ -206,7 +214,7 @@
  },
  {
   "name": "qartez_grep",
-  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Several words, or rank=true, rank by words (BM25). Use for a partial or unsure name; for an exact name qartez_find is shorter. search_bodies=true finds text inside function bodies instead.",
+  "description": "Symbols whose name starts with a prefix (case-insensitive): kind, file, lines, exported or private. Several words, or rank=true, rank by words (BM25). For a partial or unsure name; an exact name: qartez_find. search_bodies=true finds text in function bodies instead.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -241,7 +249,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows (default 200; 20 ranked).",
+     "description": "Max rows (default 50; 20 ranked), most important files first.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -250,7 +258,7 @@
      ]
     },
     "near": {
-     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -265,7 +273,7 @@
     },
     "history": {
      "default": null,
-     "description": "Also list symbols whose recent commit messages match (BM25). Default: on for several words or no name hit; false = off.",
+     "description": "Also list symbols whose commit messages match (BM25). Default: on for several words or no name hit.",
      "type": [
       "boolean",
       "null"
@@ -304,6 +312,14 @@
       "integer",
       "null"
      ]
+    },
+    "detail": {
+     "default": null,
+     "description": "full: adds each signature under its row. rows: rows only. Default: full up to 5 hits, rows past that.",
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "required": [
@@ -321,7 +337,7 @@
  },
  {
   "name": "qartez_read",
-  "description": "Source of one or more symbols, or a file's line range, with line numbers. Use after qartez_find or qartez_grep instead of reading whole files. For a file's list of symbols use qartez_outline.",
+  "description": "Source of one or more symbols (names or ids path:Type.name), or a file's line range, with line numbers. A long file alone gives its outline and first 100 lines. Use after qartez_find or qartez_grep, not whole files. A file's symbol list: qartez_outline.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -346,7 +362,7 @@
      ]
     },
     "file_path": {
-     "description": "Alone: read this file (or start_line..end_line). With a symbol: pick it from this file. Aliases: file, path.",
+     "description": "Alone: the file (long source: outline + first 100 lines; more: start_line, limit, max_bytes). With a symbol: its file. Aliases: file, path.",
      "type": [
       "string",
       "null"
@@ -364,7 +380,7 @@
     },
     "max_bytes": {
      "default": null,
-     "description": "Output cap in bytes (default 25000).",
+     "description": "Output cap in bytes (default 25000); a cut says where to read on. Alone with file_path: reads the whole file.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -383,7 +399,7 @@
      ]
     },
     "symbol_name": {
-     "description": "One symbol to read. Aliases: symbol, name.",
+     "description": "One symbol to read: a name, or an id path:Type.name as find prints. Aliases: symbol, name.",
      "type": [
       "string",
       "null"
@@ -391,7 +407,7 @@
     },
     "symbols": {
      "default": null,
-     "description": "Several symbols to read in one call.",
+     "description": "Several symbols (names or ids) to read in one call.",
      "items": {
       "type": "string"
      },
@@ -402,7 +418,7 @@
     },
     "with": {
      "default": null,
-     "description": "[\"callers\"] adds up to 5 callers with signature and call-site line, saving a calls + read round trip. Off by default.",
+     "description": "[\"callers\"] adds up to 5 callers with signature and call-site line, saving a calls + read round trip.",
      "items": {
       "enum": [
        "callers"
@@ -521,7 +537,7 @@
        "type": "null"
       }
      ],
-     "description": "concise: paths. detailed (default): with import specifiers. mermaid: a diagram, only if asked for one."
+     "description": "concise: paths. detailed (default): with specifiers. mermaid: a diagram, only if asked."
     },
     "token_budget": {
      "default": null,
@@ -573,7 +589,7 @@
  },
  {
   "name": "qartez_impact",
-  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), linked tests, transitive dependents. Call before editing a widely imported file (the edit guard asks for it). pending=true: call sites the diff still owes an edit. One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
+  "description": "What a change to a file could break: importers and co-change partners ranked together (seeded from the worktree diff), linked tests, transitive dependents. Call before editing a widely imported file. pending=true: call sites the diff still owes an edit. One symbol's uses: qartez_refs; direct imports only: qartez_deps.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -605,7 +621,7 @@
     },
     "include_tests": {
      "default": null,
-     "description": "Count test files in the ranked list and blast radius (default false). The Tests group lists linked tests either way.",
+     "description": "Count tests in the ranked list and blast radius (default false); the Tests group lists linked tests anyway.",
      "type": [
       "boolean",
       "null"
@@ -621,14 +637,14 @@
     },
     "pending": {
      "default": null,
-     "description": "Follow up the worktree diff: changed call shapes and the call sites it has not edited yet. file_path optional; tests included.",
+     "description": "Follow up the worktree diff: changed call shapes and call sites not yet edited. file_path optional; tests included.",
      "type": [
       "boolean",
       "null"
      ]
     },
     "near": {
-     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -695,7 +711,7 @@
      ]
     },
     "near": {
-     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -705,7 +721,7 @@
      ]
     },
     "symbol": {
-     "description": "Symbol name; Type.member narrows. Aliases: name, symbol_name.",
+     "description": "Symbol name; Type.member narrows; or an id path:Type.name. Aliases: name, symbol_name.",
      "type": "string"
     },
     "token_budget": {
@@ -803,7 +819,7 @@
        "type": "null"
       }
      ],
-     "description": "concise: names. detailed (default): with paths and lines. mermaid: a diagram, only if asked for one."
+     "description": "concise: names. detailed (default): with paths and lines. mermaid: a diagram, only if asked."
     },
     "include_tests": {
      "default": null,
@@ -822,7 +838,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max rows per section (default 50).",
+     "description": "Max rows per section (default 50), nearest the target first; a cut names how to narrow.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -831,11 +847,11 @@
      ]
     },
     "name": {
-     "description": "Function or method name. Aliases: symbol, symbol_name.",
+     "description": "Function or method name, or an id path:Type.name. Aliases: symbol, symbol_name.",
      "type": "string"
     },
     "near": {
-     "description": "Working-set files/symbols: graph neighbours rank first. Default: changed and recently read files; [] = off.",
+     "description": "Working set: its graph neighbours rank first. Default: changed and recently read files; [] = off.",
      "items": {
       "type": "string"
      },
@@ -876,7 +892,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -890,7 +906,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -927,7 +943,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -941,7 +957,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -978,7 +994,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -992,7 +1008,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -1037,7 +1053,7 @@
     },
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -1051,7 +1067,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -1088,7 +1104,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -1102,7 +1118,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -1139,7 +1155,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -1161,7 +1177,7 @@
      ]
     },
     "kind": {
-     "description": "Kind of the symbol (function, method, …), if the name is ambiguous.",
+     "description": "Symbol kind, if the name is ambiguous.",
      "type": [
       "string",
       "null"
@@ -1193,7 +1209,7 @@
    "properties": {
     "apply": {
      "default": null,
-     "description": "true writes the change; default false shows the diff only.",
+     "description": "true writes; false (default) previews.",
      "type": [
       "boolean",
       "null"
@@ -1224,7 +1240,7 @@
  },
  {
   "name": "qartez_add_root",
-  "description": "Start indexing a directory now so later queries need not wait. Optional: any path is indexed when first asked about.",
+  "description": "Start indexing a directory now so later queries need not wait. Optional: a path is indexed when first asked about.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {

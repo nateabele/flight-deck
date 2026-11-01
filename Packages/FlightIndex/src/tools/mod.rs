@@ -12,6 +12,7 @@ mod calltree;
 mod impact;
 pub mod args;
 mod history;
+pub mod caps;
 pub mod mutate;
 mod nav;
 pub mod pending;
@@ -119,6 +120,7 @@ pub struct Anchor {
     /// Paths to parse first when the view is not built yet.
     pub priority: Vec<PathBuf>,
     /// `read` of a plain file range needs no index, only the file; it must not wait for a build.
+    /// A whole-file read waits for the file's own slice, for the outline it leads with.
     pub needs_index: bool,
     /// The answer depends only on the requested files and their direct imports, so the build's
     /// priority slice is enough. Tools that look at who imports or calls what need the whole view.
@@ -126,7 +128,8 @@ pub struct Anchor {
 }
 
 pub fn anchor(tool: &str, args: &Args) -> std::result::Result<Anchor, ToolError> {
-    let file = args.path(args::FILE);
+    // A symbol id (`path:Type.name`) names its file, so the view is the one that holds it.
+    let file = args.path(args::FILE).or_else(|| args.str(args::SYMBOL).and_then(|s| caps::parse_symbol_id(&s, &args.cwd).1));
     // `impact pending=true` follows the worktree's diff, so it needs no file.
     let pending = tool == "impact" && args.flag(&["pending"], false);
     let requires_file = matches!(tool, "outline" | "deps" | "impact") && !pending;
@@ -134,7 +137,13 @@ pub fn anchor(tool: &str, args: &Args) -> std::result::Result<Anchor, ToolError>
         return Err(ToolError::bad(format!("{tool} requires file_path")));
     }
     let by_symbol = args.has(args::SYMBOL) || args.has(&["symbols"]);
-    let needs_index = tool != "read" || by_symbol;
+    // A whole-file `read` (no range, no `max_bytes`) of a long source file leads with its outline,
+    // so it waits for the priority slice that parses that one file; a ranged read never waits.
+    // A file no language module handles has no outline to wait for.
+    let whole_file = tool == "read"
+        && !args.has(&["start_line", "offset", "start", "end_line", "end", "limit", "max_bytes"])
+        && args.path(args::FILE).is_some_and(|f| crate::lang::for_path(&f).is_some());
+    let needs_index = tool != "read" || by_symbol || whole_file;
     let slice_ok = matches!(tool, "outline" | "read");
     Ok(match file {
         Some(f) => Anchor { priority: vec![f.clone()], path: f, needs_index, slice_ok },
@@ -208,6 +217,14 @@ impl Ctx<'_> {
     /// The answering view and the views linked to it.
     pub fn views(&self) -> Views<'_> {
         Views::new(self.graph, self.members)
+    }
+
+    /// The symbol argument and the file that narrows it: an explicit `file_path`, or the path
+    /// part of a symbol id (`path:Type.name`).
+    pub fn symbol_arg(&self) -> Option<(String, Option<PathBuf>)> {
+        let raw = self.args.str(args::SYMBOL)?;
+        let (name, from_id) = caps::parse_symbol_id(&raw, &self.args.cwd);
+        Some((name, self.args.path(args::FILE).or(from_id)))
     }
 
     /// Definitions of `name`, optionally of one kind and in one file: the answering view's first,
