@@ -52,7 +52,9 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build-libghostty.sh   # once, ~10 min — builds GhosttyKit.xcframework
 ./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
-./scripts/test-unit.sh          # unit suite, run on the UI-test Mac (opens windows; FD_TEST_LOCAL=1 for this Mac) — your normal TDD loop
+./scripts/test-unit.sh          # the full gate: runs test-logic.sh here FIRST (fails if it fails), then the app-hosted
+                                # suite on the UI-test Mac (opens windows; FD_TEST_LOCAL=1 for this Mac). With
+                                # FD_TEST_FILTER it is your TDD loop and skips the logic lane (FD_SKIP_LOGIC=1 skips it too)
 ./scripts/test-logic.sh        # pure IntakeKit/FleetKit tests on THIS Mac: no app, no window, no remote lock
                                 # (Tests/IntakeKitTests, Tests/FleetKitTests); exits non-zero on failure
                                 # FD_TEST_FILTER=ClassA,ClassB/testX; use it first for model/wire/store logic

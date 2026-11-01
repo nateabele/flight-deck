@@ -10,6 +10,17 @@ cd "$(dirname "$0")/.."
 # the LOCAL path: FD_TEST_LOCAL=1. test-unit-remote.sh sets it for the copy it runs ON the
 # UI-test Mac, which is also what keeps the hand-off from recursing. The remote script fails
 # outright when the host is unreachable rather than falling through to here.
+# A full, unfiltered run is the whole gate: the window-free logic lane (scripts/test-logic.sh,
+# Tests/IntakeKitTests and Tests/FleetKitTests, ~1300 tests that moved out of this bundle) runs
+# first, on THIS Mac, and a failure there fails this script before the app-hosted suite starts.
+# A filtered run (FD_TEST_FILTER) is a TDD loop and skips it. FD_SKIP_LOGIC=1 skips it too;
+# test-unit-remote.sh sets it for the copy it runs on the UI-test Mac, which already ran it here.
+if [ -z "${FD_TEST_FILTER:-}" ] && [ "${FD_SKIP_LOGIC:-}" != 1 ]; then
+  echo "[unit] logic lane first (scripts/test-logic.sh)…"
+  ./scripts/test-logic.sh || { echo "UNIT FAIL: the logic lane failed (DerivedData/fd-logic-test.log)" >&2; exit 1; }
+  export FD_SKIP_LOGIC=1
+fi
+
 if [ "${FD_TEST_LOCAL:-}" != 1 ]; then
   exec ./scripts/test-unit-remote.sh "$@"
 fi

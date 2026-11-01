@@ -111,8 +111,14 @@ the last, which is opt-in and the user's to run.
 
 ```bash
 ./scripts/test-unit.sh
-# → all FlightDeckTests pass (count grows over time; see the script's own output)
+# → the logic lane (scripts/test-logic.sh: IntakeKitTests + FleetKitTests) runs first on this Mac and
+#   fails the run if it fails; then all FlightDeckTests pass (count grows; see the script's output)
 ```
+
+A full, unfiltered `test-unit.sh` is the whole unit gate: the window-free IntakeKit and FleetKit
+classes (wire coding included) live in the logic lane, not in `FlightDeckTests`, so the hosted
+suite alone skips them. A filtered run (`FD_TEST_FILTER=…`) runs only the classes named and skips
+the logic lane; run `scripts/test-logic.sh` yourself for those classes.
 
 **Smoke test** (the UI suite, on the UI-test Mac):
 
