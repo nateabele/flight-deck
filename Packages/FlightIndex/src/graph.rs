@@ -20,6 +20,8 @@
 //! PageRank is recomputed from scratch on every graph (microseconds-to-milliseconds at this size)
 //! rather than reusing the base's ranks, so ranks are exact for the view.
 
+mod python;
+
 use crate::facts::*;
 use crate::git::{FileRef, ViewLabel};
 use crate::resolve::{Resolved, Resolver};
@@ -546,6 +548,9 @@ impl ViewGraph {
                         qualifiers.insert(last, r.clone());
                     }
                 }
+                "python" => {
+                    self.python_bindings(&node.path, imp, &r, &mut edges, &mut qualifiers, &mut locals, &mut globs);
+                }
                 _ => {
                     if let Some(a) = &imp.alias {
                         qualifiers.insert(a.clone(), r.clone());
@@ -631,7 +636,7 @@ impl ViewGraph {
                 }
             }
             Some(q) => {
-                if matches!(q, "self" | "Self" | "this") {
+                if matches!(q, "self" | "Self" | "this" | "cls") {
                     if let Some(id) = self.member_of_enclosing(f, r.enclosing, &r.name) {
                         return exact(id);
                     }

@@ -10,6 +10,8 @@
 //! (`../tessera/designer/src`) resolves to an absolute path and is reported as `External`; nothing
 //! follows it yet.
 
+mod python;
+
 use crate::facts::Import;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -59,6 +61,7 @@ impl Resolver {
         use crate::facts::ImportKind;
         match language {
             "elm" => self.elm_module(from, &imp.specifier),
+            "python" => self.python_module(from, &imp.specifier),
             "typescript" | "tsx" | "javascript" => self.ts_specifier(from, &imp.specifier),
             "rust" => {
                 if imp.kind == ImportKind::ModDecl {

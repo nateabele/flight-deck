@@ -7,6 +7,7 @@
 mod ecma;
 mod elm;
 mod javascript;
+mod python;
 mod rust;
 mod typescript;
 pub(crate) mod util;
@@ -31,6 +32,7 @@ static REGISTRY: &[&dyn Language] = &[
     &typescript::TypeScript,
     &typescript::Tsx,
     &javascript::JavaScript,
+    &python::Python,
 ];
 
 pub fn all() -> &'static [&'static dyn Language] {
