@@ -1,3 +1,4 @@
+import HostKit
 import XCTest
 @testable import FlightDeck
 
@@ -267,6 +268,20 @@ final class ClaudePluginPayloadTests: XCTestCase {
         let script = try String(contentsOf: root.appendingPathComponent(ClaudeStatusLine.scriptPath), encoding: .utf8)
         XCTAssertTrue(script.contains("FLIGHT_DECK_USAGE_DIR"))
         XCTAssertTrue(script.contains(ClaudeStatusLine.userCommandVariable))
+    }
+
+    /// The authoring skill ships as a folder (claude reads it through the plugin, codex through
+    /// `CodexBundledSkill`), and its template manifest must be one `provider check` accepts.
+    func testTheVisualProviderSkillShipsWithATemplateThatParses() throws {
+        let folder = try pluginRoot().appendingPathComponent("skills/visual-provider")
+        let skill = try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8)
+        XCTAssertTrue(skill.hasPrefix("---\nname: visual-provider\ndescription: "))
+        XCTAssertTrue(skill.contains("flightdeck provider check"))
+        let templates = folder.appendingPathComponent("templates")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: templates.appendingPathComponent("kinds/example.md").path))
+        let parsed = try ProviderManifestParser.load(folder: templates)
+        XCTAssertEqual(parsed.manifest.kinds.count, 1)
+        XCTAssertTrue(parsed.issues.isEmpty, "the template must not teach a key the parser warns about")
     }
 
     override func tearDownWithError() throws {

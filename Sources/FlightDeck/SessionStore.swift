@@ -4317,7 +4317,8 @@ final class SessionStore: ObservableObject {
             // a file written into their codex home. It also runs before any of this account's
             // tabs spawns its TUI, so even the first tab starts with the skill on disk. It is
             // off-main and bounded; see `installBundledOffMainActor`.
-            await CodexDelegateSkill.installBundledOffMainActor(codexHome: stack.transport.home)
+            await CodexBundledSkill.installOffMainActor(
+                skills: [.delegate, .visualProvider], codexHome: stack.transport.home)
             if CodexVersionProbe.isAtLeast(version, minimum: "0.163.0") {
                 try await stack.transport.startShared()
                 stack.adapter.sharedSocketPath = stack.transport.sharedSocketPath
