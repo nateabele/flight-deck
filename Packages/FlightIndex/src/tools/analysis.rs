@@ -2,20 +2,20 @@
 //! `refs`, `calls`.
 
 use super::args::SYMBOL;
-use super::{is_test_path, range, Ctx, Format, ToolError, ToolResult};
+use super::{impact, is_test_path, range, Ctx, Format, ToolError, ToolResult};
 use crate::facts::{RefKind, SymbolKind};
 use crate::graph::{Confidence, SymId};
 use crate::query::{CallEntry, Direction, SymbolHit};
 use crate::links::Views;
 use crate::resolve::Resolved;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 const MAP_DEFAULT_TOP: usize = 20;
 const MAP_SIGNATURES_PER_FILE: usize = 6;
 const MAX_CANDIDATES: usize = 10;
-/// Rows of one list in `impact` and `refs`. The sections after a long list (co-change, hot
+/// Rows of one list in `impact` and `refs`. The sections after a long list (the tests group, hot
 /// symbols) are worth more than its tail, so each list is capped before the token budget can cut
 /// those sections off.
 const LIST_CAP: usize = 30;
@@ -288,14 +288,110 @@ pub fn impact(c: &Ctx) -> ToolResult {
     let g = c.graph;
     let include_tests = c.args.flag(&["include_tests"], false);
     let views = c.views();
-    let keep = |v: usize, p: &Path| include_tests || !is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
+    let is_test = |v: usize, p: &Path| is_test_path(&p.strip_prefix(&views.graph(v).root).unwrap_or(p).to_string_lossy());
+    let keep = |v: usize, p: &Path| include_tests || !is_test(v, p);
     // Importers in this view and in the views linked to it, the latter labelled with their view.
     let at = |v: usize, p: &Path| format!("{}{}", p.display(), views.tag(v).map(|t| format!("  [view: {t}]")).unwrap_or_default());
     let mut direct: Vec<(usize, PathBuf)> = views.importers(0, fi).into_iter().map(|(v, f)| (v, views.graph(v).abs(f))).filter(|(v, p)| keep(*v, p)).collect();
     direct.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let radius: Vec<_> = views.blast_radius(0, fi).into_iter().filter(|(v, e)| keep(*v, &e.path)).collect();
+    let all_radius = views.blast_radius(0, fi);
+    let radius: Vec<_> = all_radius.iter().filter(|(v, e)| keep(*v, &e.path)).cloned().collect();
+
+    // Seeds: the file asked about, then what the worktree has changed (`seed_diff=false` drops
+    // those). Co-change is seeded by all of them; importers by the file asked about.
+    let rel = g.file(fi).path.clone();
+    let mut seeds: Vec<&str> = vec![rel.as_str()];
+    if c.args.flag(&["seed_diff"], true) {
+        seeds.extend(c.diff.iter().map(String::as_str).filter(|d| *d != rel));
+    }
+    let seed_paths: HashSet<PathBuf> = seeds.iter().map(|s| g.root.join(s)).collect();
+    let mut reasons: impact::Reasons<(usize, PathBuf)> = impact::Reasons::default();
+    let cochanged = |p: &impact::Partner| impact::Why::CoChanged { together: p.together, of: p.of, with: (p.seed != rel).then(|| p.seed.clone()) };
+    // List A: every transitive importer, nearest first, then by PageRank (`blast_radius` order).
+    let mut by_depth: Vec<&(usize, crate::query::RadiusEntry)> = all_radius.iter().collect();
+    by_depth.sort_by_key(|(_, e)| e.depth);
+    let mut importers: Vec<(usize, PathBuf)> = Vec::new();
+    for (v, e) in &by_depth {
+        let k = (*v, e.path.clone());
+        reasons.add(&k, impact::Why::Importer { depth: e.depth });
+        if keep(*v, &e.path) && !seed_paths.contains(&e.path) {
+            importers.push(k);
+        }
+    }
+    // List B: co-change partners by confidence, among the files this view has.
+    let co = (c.cochange)();
+    let partners: Vec<impact::Partner> = match &co {
+        Ok(co) => impact::ranked_partners(co, &seeds, impact::MIN_SUPPORT).into_iter().filter(|p| g.file_idx(Path::new(&p.path)).is_some()).collect(),
+        Err(_) => Vec::new(),
+    };
+    let mut partner_keys: Vec<(usize, PathBuf)> = Vec::new();
+    for p in &partners {
+        let k = (0, g.root.join(&p.path));
+        reasons.add(&k, cochanged(p));
+        if keep(0, &k.1) {
+            partner_keys.push(k);
+        }
+    }
+    let ranked = impact::interleave(&importers, &partner_keys);
 
     let mut out = format!("Impact analysis: {}\n", path.display());
+    if seeds.len() > 1 {
+        let _ = writeln!(out, "Seeds: {}, and the worktree diff: {}", seeds[0], seeds[1..].join(", "));
+    }
+    match &co {
+        Ok(co) => {
+            let _ = writeln!(out, "Ranked impact ({}: importers and co-change partners interleaved; co-change from the last {} commits):", ranked.len(), co.commits_scanned);
+        }
+        Err(e) => {
+            let _ = writeln!(out, "Ranked impact ({}: importers only; co-change unavailable: {e}):", ranked.len());
+        }
+    }
+    let rows = shown(&ranked, |r| r.0, LIST_CAP);
+    for k in rows.iter().map(|r| &**r) {
+        let _ = writeln!(out, "  {}  ({})", at(k.0, &k.1), reasons.label(k));
+    }
+    if rows.len() < ranked.len() {
+        let _ = writeln!(out, "  … {} more", ranked.len() - rows.len());
+    }
+
+    // Tests: every one linked to a seed, uncapped and whatever `include_tests` says.
+    let seed_keys: HashSet<(String, &str)> = seeds.iter().filter_map(|s| g.file_idx(Path::new(s)).map(|i| (impact::source_key(s), g.file(i).language))).collect();
+    let mut name_matches: Vec<(usize, PathBuf)> = Vec::new();
+    if !seed_keys.is_empty() {
+        // A stem such as `index` or `types` names many sources; a test can only be matched to one
+        // of them by name when its stem is unique among the sources of that language.
+        let mut sources: HashMap<(String, &str), usize> = HashMap::new();
+        let live: Vec<u32> = (0..g.files.len() as u32).filter(|i| g.file(*i).alive).collect();
+        for i in &live {
+            let f = g.file(*i);
+            if !is_test_path(&f.path) {
+                *sources.entry((impact::source_key(&f.path), f.language)).or_default() += 1;
+            }
+        }
+        for i in &live {
+            let f = g.file(*i);
+            // Only the file asked about is left out: a test the diff already edits is one to run.
+            if !is_test_path(&f.path) || *i == fi {
+                continue;
+            }
+            if let Some(subject) = impact::test_subject(&f.path) {
+                let k = (subject, f.language);
+                if seed_keys.contains(&k) && sources.get(&k) == Some(&1) {
+                    name_matches.push((0, g.abs(*i)));
+                }
+            }
+        }
+    }
+    let test_importers: Vec<((usize, PathBuf), u32)> =
+        by_depth.iter().filter(|(v, e)| e.depth == 1 && is_test(*v, &e.path)).map(|(v, e)| ((*v, e.path.clone()), e.depth)).collect();
+    let test_partners: Vec<((usize, PathBuf), impact::Why)> =
+        partners.iter().map(|p| ((0, g.root.join(&p.path)), cochanged(p))).filter(|(k, _)| is_test(0, &k.1)).collect();
+    let tests = impact::order_tests(&name_matches, &test_importers, &test_partners, &mut reasons);
+    let _ = writeln!(out, "Tests ({}):", tests.len());
+    for k in &tests {
+        let _ = writeln!(out, "  {}  ({})", at(k.0, &k.1), reasons.label(k));
+    }
+
     let _ = writeln!(out, "Direct importers ({}):", direct.len());
     let rows = shown(&direct, |r| r.0, LIST_CAP);
     for (v, p) in rows.iter().map(|r| &**r) {
@@ -311,21 +407,6 @@ pub fn impact(c: &Ctx) -> ToolResult {
     }
     if rows.len() < radius.len() {
         let _ = writeln!(out, "… {} more (`deps` and `refs transitive=true` list the chain)", radius.len() - rows.len());
-    }
-
-    match (c.cochange)() {
-        Ok(co) => {
-            let rel = &g.file(fi).path;
-            let partners: Vec<(PathBuf, u32)> =
-                co.partners_of(rel, 2).into_iter().filter(|(p, _)| g.file_idx(Path::new(p)).is_some()).map(|(p, n)| (g.root.join(p), n)).filter(|(p, _)| keep(0, p)).take(10).collect();
-            let _ = writeln!(out, "Co-change partners ({}, from the last {} commits):", partners.len(), co.commits_scanned);
-            for (p, n) in partners {
-                let _ = writeln!(out, "  {} (changed together {n}×)", p.display());
-            }
-        }
-        Err(e) => {
-            let _ = writeln!(out, "Co-change partners: unavailable ({e})");
-        }
     }
 
     let mut hot: Vec<SymbolHit> = g.file(fi).facts.symbols.iter().filter(|s| !matches!(s.kind, SymbolKind::Field | SymbolKind::Impl)).map(|s| g.hit(SymId { file: fi, local: s.local_id })).collect();

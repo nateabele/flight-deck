@@ -8,6 +8,7 @@
 //! a pure function of a graph that tests can drive without a daemon.
 
 mod analysis;
+mod impact;
 pub mod args;
 pub mod mutate;
 mod nav;
@@ -72,6 +73,9 @@ pub struct Ctx<'a> {
     /// tool that answers from one view (`links.rs`).
     pub members: &'a [Member],
     pub cochange: &'a (dyn Fn() -> Result<Arc<CoChange>> + Sync),
+    /// Worktree-relative paths the view's worktree changed against its base commit (its overlay,
+    /// deletions included): what `impact` seeds co-change with besides the file asked about.
+    pub diff: &'a [String],
 }
 
 /// Strip the `qartez_` / `fdindex_` prefix an MCP client adds and return the tool's own name.

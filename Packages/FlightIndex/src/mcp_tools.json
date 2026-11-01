@@ -507,7 +507,7 @@
  },
  {
   "name": "qartez_impact",
-  "description": "MUST call before modifying any file with exports. Shows direct importers, transitive dependents, and co-change partners \u2014 the full set of files that could break.",
+  "description": "MUST call before modifying any file with exports. Ranks importers and co-change partners together, lists the tests that go with the file, then direct importers and transitive dependents \u2014 the full set of files that could break.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -539,7 +539,15 @@
     },
     "include_tests": {
      "default": null,
-     "description": "Include test files in the transitive blast radius (default: false)",
+     "description": "Include test files in the ranked list and the transitive blast radius (default: false). The Tests group lists the linked tests either way.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "seed_diff": {
+     "default": null,
+     "description": "Also rank co-change partners of the files the worktree has changed, not only of file_path (default: true)",
      "type": [
       "boolean",
       "null"
