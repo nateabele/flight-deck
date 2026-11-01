@@ -23,7 +23,8 @@ A strategy is `Fn(&Probe, &Task) -> Option<Ranking>`. `Probe` holds the parent's
 | `map_open` | `map` with `boost_files` = the first gold file (the simulated open file). It applies only to tasks with 2 or more gold files. The seed file is removed from the ranking and from the gold set. |
 | `find` | `find name=<term>` per term, merged round-robin. |
 | `grep` | `grep query=<term>` (prefix) per term, merged round-robin. |
-| `bm25` | Harness-side reference: BM25 (k1 1.2, b 0.75) over one document per symbol. The document is the symbol's name, its parent's name, its file path and its Elm module, all split on camelCase, snake_case and separators. It is the report's tier 3, as a yardstick for `find` and `grep`. |
+| `bm25` | The graph's word index (`src/words.rs`, the ranking `grep` gives a sentence) queried directly: BM25F (k1 1.2, b 0.75 per field) over one document per symbol except impls and fields, with fields for the symbol's name, its parent's name, and its file path plus Elm module, all split on camelCase, snake_case and separators and lightly stemmed. Files in first-mention order of the best 200 symbols. |
+| `grep_words` | `grep query=<whole task text> rank=true limit=200`: the same ranking through the tool's text, as an agent sees it. |
 
 **Terms** are the identifier-shaped words of the task text: 3 or more characters, not stopwords, de-duplicated without regard to case, at most 12.
 

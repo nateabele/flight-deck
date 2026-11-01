@@ -145,6 +145,8 @@ pub struct GraphData {
     pub(crate) symbol_rank: Vec<Vec<f64>>,
     resolver: Arc<Resolver>,
     elm_modules: HashMap<String, Vec<u32>>,
+    /// BM25 over symbol words (`crate::words`), built on the first ranked query, not here.
+    pub(crate) words: std::sync::OnceLock<Arc<crate::words::WordIndex>>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -183,6 +185,7 @@ impl ViewGraph {
             symbol_rank: Vec::new(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
             elm_modules: HashMap::new(),
+            words: std::sync::OnceLock::new(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -197,6 +200,7 @@ impl ViewGraph {
     pub fn with_changes(&self, label: ViewLabel, changes: Vec<FileChange>) -> ViewGraph {
         let mut g: GraphData = (*self.data).clone();
         g.root = label.worktree.clone();
+        g.words = std::sync::OnceLock::new(); // the base's word index describes the base's symbols
         let old_files_len = g.files.len();
 
         let mut changed: HashSet<u32> = HashSet::new();
@@ -893,6 +897,7 @@ impl GraphData {
         n += self.incoming.values().map(|v| size_of::<SymId>() + size_of::<Vec<(u32, u32)>>() + v.len() * 8 + 8).sum::<usize>();
         n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
         n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
+        n += self.words_if_built().map_or(0, |w| w.bytes());
         // The resolver keeps every path of the view in a set.
         n += self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
         n

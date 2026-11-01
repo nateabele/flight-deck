@@ -109,7 +109,7 @@
  },
  {
   "name": "qartez_find",
-  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, and visibility for every match. Use kind filter to disambiguate (e.g., kind='struct').",
+  "description": "Locate a symbol definition by exact name. Returns file path, line range, signature, and visibility for every match. Use kind filter to disambiguate (e.g., kind='struct'). When nothing has that exact name, appends the 10 closest symbols ranked by the words of the name (camelCase/snake_case split).",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -180,7 +180,7 @@
  },
  {
   "name": "qartez_grep",
-  "description": "Search indexed symbols by name, kind, or file path using FTS5. Prefix matching is anchored to the symbol name column (e.g. 'Config*' matches symbols whose name starts with 'Config', not file paths that happen to contain it). Use the `kind` param to filter results by symbol kind (function / struct / method / etc.). Returns symbol locations with export status. Faster than Grep because it searches the pre-built index, not disk.",
+  "description": "Search indexed symbols by name. A single word is a prefix match anchored to the symbol name (e.g. 'Config*' matches symbols whose name starts with 'Config', not file paths that happen to contain it); with no prefix match it falls back to the closest symbols by words. A query with spaces (a sentence such as 'export preview refuses release'), or rank=true, is ranked by words instead: BM25 over the camelCase/snake_case-split words of each symbol's name, its enclosing type and its file path, best first. Use the `kind` param to filter results by symbol kind (function / struct / method / etc.). Returns symbol locations with export status; a ranked search with 3 or fewer matches also shows their code. Faster than Grep because it searches the pre-built index, not disk.",
   "inputSchema": {
    "$defs": {
     "Format": {
@@ -215,7 +215,7 @@
     },
     "limit": {
      "default": null,
-     "description": "Max number of results (default: 200). The active governor is `token_budget`; raise `limit` only if you need more than 200 rows.",
+     "description": "Max number of results (default: 200; 20 for a ranked search). The active governor is `token_budget`; raise `limit` only if you need more rows.",
      "format": "uint32",
      "minimum": 0,
      "type": [
@@ -224,8 +224,16 @@
      ]
     },
     "query": {
-     "description": "FTS5 search query. Prefix matching is anchored to the symbol name column (e.g. `Parser*` only matches symbols whose name starts with `Parser`, not file paths that happen to contain `parser`). Accepts the alias `pattern` for parity with Grep. Interpreted as a regex when regex=true.",
+     "description": "A symbol-name prefix (`Parser*` only matches symbols whose name starts with `Parser`, not file paths that happen to contain `parser`), or several words to rank symbols by (any query with a space). Accepts the alias `pattern` for parity with Grep. Interpreted as a regex when regex=true.",
      "type": "string"
+    },
+    "rank": {
+     "default": null,
+     "description": "If true, rank symbols by the words of the query (BM25 over split names, parents and paths) even for a single word. A query with spaces is ranked without it. Default false.",
+     "type": [
+      "boolean",
+      "null"
+     ]
     },
     "regex": {
      "default": null,

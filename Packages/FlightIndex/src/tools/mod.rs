@@ -11,6 +11,7 @@ mod analysis;
 pub mod args;
 pub mod mutate;
 mod nav;
+mod ranked;
 
 use crate::cochange::CoChange;
 use crate::error::Result;

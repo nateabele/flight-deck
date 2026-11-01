@@ -21,7 +21,12 @@ pub fn find(c: &Ctx) -> ToolResult {
     let views = c.views();
     let hits = views.find_symbols(&matcher, kind);
     if hits.is_empty() {
-        return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
+        let mut out = format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match.");
+        if !regex && let Some(rows) = super::ranked::find_fallback(c, &name, kind) {
+            out.push('\n');
+            out.push_str(&rows);
+        }
+        return Ok(out);
     }
     let mut out = format!("Found {} match(es) for '{name}':\n", hits.len());
     for h in hits.iter().take(limit) {
@@ -51,10 +56,14 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let query = c.args.str(&["query", "pattern"]).ok_or_else(|| ToolError::bad("grep requires `query` (alias: pattern)"))?;
     let kind = c.kind()?;
     let regex = c.args.flag(&["regex"], false);
-    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT);
     if c.args.flag(&["search_bodies"], false) {
-        return grep_bodies(c, &query, regex, limit);
+        return grep_bodies(c, &query, regex, c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT));
     }
+    // A sentence is a ranked search by words: no symbol name has a space in it.
+    if c.args.flag(&["rank"], false) || (!regex && query.trim().contains(char::is_whitespace)) {
+        return super::ranked::grep(c, &query, kind, c.args.num(&["limit"]));
+    }
+    let limit = c.args.num(&["limit"]).unwrap_or(DEFAULT_GREP_LIMIT);
     // A symbol-name search: `Foo` and `Foo*` both mean "names starting with Foo", so a file path
     // that merely contains the text never matches.
     let re = if regex { compile_regex(&query)? } else { compile_regex(&format!("^{}", regex::escape(query.trim_end_matches('*'))))? };
@@ -62,6 +71,9 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let mut hits = views.find_symbols(&NameMatch::Regex(re), kind);
     hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.path.cmp(&b.path)).then(a.start_line.cmp(&b.start_line)));
     if hits.is_empty() {
+        if !regex && let Some(rows) = super::ranked::prefix_fallback(c, &query, kind) {
+            return Ok(c.fit(rows));
+        }
         return Ok(format!("No symbols match `{query}`"));
     }
     let mut out = format!("Found {} result(s) for `{query}`:\n", hits.len());
@@ -123,7 +135,7 @@ fn grep_bodies(c: &Ctx, query: &str, regex: bool, limit: usize) -> ToolResult {
     Ok(c.fit(out))
 }
 
-fn is_body(k: SymbolKind) -> bool {
+pub(super) fn is_body(k: SymbolKind) -> bool {
     matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Macro | SymbolKind::Const)
 }
 

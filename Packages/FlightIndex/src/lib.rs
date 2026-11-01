@@ -28,5 +28,6 @@ pub mod switchover;
 pub mod textedit;
 pub mod tools;
 pub mod watch;
+pub mod words;
 pub mod refresh;
 pub mod retention;
