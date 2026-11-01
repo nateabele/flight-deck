@@ -45,7 +45,15 @@ echo "== simulator $UDID ($DEVICE_TYPE), created for this run =="
 # by every red run is how a machine ends up with forty of them.
 trap 'xcrun simctl delete "$UDID" >/dev/null 2>&1 || true' EXIT
 
+# FD_IOS_ONLY=ClassA,ClassB runs only those FlightDeckMobileTests classes (for RED and GREEN runs);
+# unset, the whole suite runs.
+ONLY=()
+if [ -n "${FD_IOS_ONLY:-}" ]; then
+  IFS=',' read -ra classes <<< "$FD_IOS_ONLY"
+  for c in "${classes[@]}"; do ONLY+=("-only-testing:FlightDeckMobileTests/$c"); done
+fi
+
 xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeckMobile \
   -configuration Debug \
   -destination "platform=iOS Simulator,id=$UDID" \
-  -derivedDataPath DerivedData test
+  -derivedDataPath DerivedData test ${ONLY[@]+"${ONLY[@]}"}

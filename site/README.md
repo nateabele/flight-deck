@@ -1,13 +1,15 @@
 # flightdeckapp.dev
 
 The marketing site for Flight Deck. Static — no build step, no dependencies, no
-framework. Four files plus icons.
+framework. Five files plus icons.
 
 ```
 site/
   index.html     the whole page
   styles.css     design tokens + the app-window replica
   demo.js        the demo (beats, glyphs, terminal content) + launch sequence
+  highlights.js  the features stage: active tile on scroll, shot zoom, phone dialog
+  status-carousel.js  the hero's rotating status word
   assets/        icon sizes derived from ../assets/appicon-source.png
 ```
 
@@ -52,21 +54,25 @@ Everything else on the page is accurate as written — see below.
 
 ## Editing the content
 
-**Feature list.** `index.html`, the `.outcomes` block. Four numbered outcomes,
-each with nested capabilities. Numbering is CSS counters, so inserting an item
-renumbers everything automatically — don't hand-number.
+**Features.** `index.html`, `#features`. Eleven highlights, every one shipped —
+the page lists nothing that isn't built. Each is two parts tied by its number NN:
 
-Each capability carries a state tag, and the page's credibility rests on these
-being true:
+- **A tile** in `.hl-list`: a small looping illustration (`.hl-art`), a title and
+  a one-line blurb. Its CSS is scoped under `.hl-NN` in `styles.css`; the art is
+  sized in container units, so it scales with the tile.
+- **A detail** in `.hl-stage` (`#hl-d-NN`): a product shot (`<figure class="fviz
+  fviz-MM">`, drawn for a 1000px stage) and the extended points (`.hl-points`).
 
-| Tag | Meaning |
-|---|---|
-| `tag-shipped` | Built and running today |
-| `tag-building` | Actively in progress |
-| `tag-planned` | Designed and specified, not yet built |
+On wide screens `highlights.js` makes the tile nearest the middle of the
+viewport active: its art loops, the others pause and dim, and its detail shows
+on the sticky stage, with the shot zoomed to the stage width. At 900px and
+below the stage hides and a tap on a tile opens its detail in a `<dialog>`; the
+detail node is moved in and back, not cloned, so the SVG ids in the shots stay
+unique. Shots carry their own phone layouts below 640px. Without JS every
+detail shows in order under the tiles.
 
-The current assignment tracks `docs/HANDOFF.md` and `docs/FOLLOWUPS.md`. When a
-subsystem lands, move its tag in the same branch as the behaviour change — the
+A highlight's claims track `docs/HANDOFF.md` and `docs/FOLLOWUPS.md`. When a
+behaviour changes, change its blurb, points and shot in the same branch — the
 same rule `AGENTS.md` applies to docs.
 
 **Demo.** `demo.js`, the `BEATS` array — one entry per beat, each holding its

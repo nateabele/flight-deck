@@ -694,9 +694,17 @@ during the build.
   into `<project>/docs/plans/<slug>/`, committing only that folder; a project in no repo is
   refused. Any `.git`-named path component (any case) is refused in a manifest and in an export.
   A manifest entry of size 0 or less is refused.
-- **The phone's viewer** blocks every non-`fdvisual` load with a `WKContentRuleList` and keeps
-  JavaScript off. The Mac's live view needs the same rule list before P2b serves any page an
-  agent wrote.
+- **The phone's viewer** blocks every non-`fdvisual` load with a `WKContentRuleList`. The Mac's
+  live view needs the same rule list before P2b serves any page an agent wrote.
+- **Interactive comps run their JavaScript on the phone (2026-11-01).** Script comes only from the
+  revision's hash-checked files or inline in them (`script-src fdvisual: 'unsafe-inline'`, no
+  `eval`); `fetch` reaches only the revision's files; workers, frames and plugins are refused.
+  A document-start script in every frame removes WebRTC, sockets, server events, beacons,
+  workers, camera, microphone and location, and an iframe hands out no window. Camera and
+  microphone requests are denied without a prompt. Tests prove each route against a loopback
+  server, with a control that reaches it. The comp's page still cannot reach the app. Canvas
+  comps stay snapshot-only on the phone until `export-checkpoint` ships a script that plays the
+  comp (§8); a comp from any other provider that exports HTML with script is live now.
 
 ## Errata: P3 core (2026-11-01)
 
