@@ -162,7 +162,10 @@ public enum ProviderManifestParser {
             warnings.append(ProviderManifestIssue(.warning, line: node.line, "unknown key \(key) in [[kind]] (ignored)"))
         }
         return ProviderKind(id: id, summary: summary, output: output, entry: entry, pins: pins,
-                            states: states, sizes: sizes, cost: cost, instructions: instructions, assets: assets)
+                            states: states, sizes: sizes, cost: cost, instructions: instructions, assets: assets,
+                            lines: ProviderKind.Lines(entry: table.entries["entry"]?.line,
+                                                      instructions: table.entries["instructions"]?.line,
+                                                      assets: table.entries["assets"]?.line))
     }
 
     private static func cost(_ node: TOMLNode, field: String,

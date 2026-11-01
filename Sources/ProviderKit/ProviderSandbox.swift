@@ -160,10 +160,11 @@ public struct ProviderSandbox: Sendable {
 
     /// Runs `provider`'s generator once. On exit 0 the generator's output folder is copied into
     /// `outputDirectory`. `{out}` in the arguments is the generator's output folder; each
-    /// `placeholders` key `k` replaces `{k}`. `onSpawn` gets the pid, which is also the process
+    /// `placeholders` key `k` replaces `{k}`. `inputInProvider` (a folder inside the provider)
+    /// becomes the readable input and the value of `{source}` and `{input}`, taken in the copy. `onSpawn` gets the pid, which is also the process
     /// group id.
     public func run(_ provider: ResolvedProvider, outputDirectory: URL, inputDirectory: URL? = nil,
-                    placeholders: [String: String] = [:],
+                    inputInProvider: String? = nil, placeholders: [String: String] = [:],
                     onSpawn: (@Sendable (Int32) -> Void)? = nil) async throws -> ProviderSandboxResult {
         // Every refusal that needs no file system comes first, so a refused run touches nothing.
         guard let generator = provider.manifest?.generator, !generator.command.isEmpty else {
@@ -189,7 +190,10 @@ public struct ProviderSandbox: Sendable {
         let outPath = try Self.realPath(run.output)
         let tempPath = try Self.realPath(run.temp)
         let rootPath = try Self.realPath(run.root)
-        let inputPath = try inputDirectory.map { try Self.realPath($0) } ?? rootPath
+        // `inputInProvider` names a folder of the provider itself: the generator reads the copy
+        // that was checked, not the original, which an edit could change after the digest.
+        let inputPath = try inputInProvider.map { try Self.realPath(run.snapshot.appendingPathComponent($0)) }
+            ?? inputDirectory.map { try Self.realPath($0) } ?? rootPath
         let homePath = try Self.realPath(Self.userHome)
         let userVarPath = try Self.userVarFolder()
         let ancestors = Self.ancestors(of: [rootPath, inputPath])
@@ -198,6 +202,7 @@ public struct ProviderSandbox: Sendable {
 
         var values = placeholders
         values["out"] = outPath
+        if inputInProvider != nil { values["source"] = inputPath; values["input"] = inputPath }
         let program = try Self.program(generator, in: cwd)
         let args = generator.command.dropFirst().map { Self.substitute($0, values) }
         let arguments = ["-D", "OUTPUT_DIR=\(outPath)", "-D", "TEMP_DIR=\(tempPath)",

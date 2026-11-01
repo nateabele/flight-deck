@@ -76,6 +76,37 @@ final class ProviderManifestParserTests: XCTestCase {
         XCTAssertEqual(m.generator?.network, false)
     }
 
+    func testKindsRecordTheLineOfEachPathTheyRead() throws {
+        let text = """
+        id = "fd.t"
+        name = "T"
+        version = "1"
+        contract = 1
+
+        [[kind]]
+        id = "a"
+        summary = "s"
+        output = "svg"
+        entry = "a.svg"
+        instructions = "a/../a.md"
+        assets = ["s.css"]
+
+        [[kind]]
+        id = "b"
+        summary = "s"
+        output = "svg"
+        entry = "b.svg"
+        instructions = "b.md"
+        """
+        let kinds = try ProviderManifestParser.parse(text, folder: folder).manifest.kinds
+        XCTAssertEqual(kinds[0].lines.entry, 10)
+        XCTAssertEqual(kinds[0].lines.instructions, 11)
+        XCTAssertEqual(kinds[0].lines.assets, 12)
+        XCTAssertEqual(kinds[1].lines.entry, 18)
+        XCTAssertEqual(kinds[1].lines.instructions, 19)
+        XCTAssertNil(kinds[1].lines.assets)
+    }
+
     func testKindArrayKeepsEveryTableInOrder() throws {
         let text = head + kind() + "\n[[kind]]\nid = \"k2\"\nsummary = \"s\"\noutput = \"html\"\nentry = \"b.html\"\ninstructions = \"j.md\"\n"
         let kinds = try parse(text).manifest.kinds

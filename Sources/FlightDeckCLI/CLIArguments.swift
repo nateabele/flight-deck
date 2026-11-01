@@ -56,7 +56,7 @@ public enum CLICommand: Equatable {
     /// `provider check DIR`: validates a visual provider's folder. Local like `intakeRun`:
     /// `main.swift` runs it before any transport exists, since it reads files and never asks
     /// Flight Deck anything.
-    case providerCheck(dir: String)
+    case providerCheck(dir: String, runSamples: Bool)
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
@@ -450,8 +450,15 @@ public enum CLIArguments {
         switch sub {
         case "check":
             let dir = try c.requirePositional("provider check: missing the provider folder")
+            var runSamples = false
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--run-samples": runSamples = true
+                default: throw Cursor.unknownFlag(flag, in: "provider check")
+                }
+            }
             try c.end(verb: "provider check")
-            return .providerCheck(dir: dir)
+            return .providerCheck(dir: dir, runSamples: runSamples)
         default:
             throw CLIUsageError("provider: unknown subcommand \"\(sub)\"")
         }

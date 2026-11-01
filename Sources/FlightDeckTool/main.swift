@@ -47,10 +47,10 @@ if case .help(let topic) = invocation.command {
 // `provider check` reads a folder and runs a sandboxed sample; it asks Flight Deck nothing, so it
 // is intercepted here, before the socket setup, and works with the app closed. Exit 0 valid,
 // 1 problems, 2 usage error (above).
-if case .providerCheck(let dir) = invocation.command {
+if case .providerCheck(let dir, let runSamples) = invocation.command {
     let folder = URL(fileURLWithPath: dir, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
     Task {
-        let report = await ProviderCheck.run(folder: folder.standardizedFileURL)
+        let report = await ProviderCheck.run(folder: folder.standardizedFileURL, runSamples: runSamples)
         print(report.text)
         fflush(stdout)
         exit(report.exitCode)

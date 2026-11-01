@@ -69,10 +69,28 @@ public struct ProviderKind: Sendable, Equatable {
     public var cost: Cost?
     public var instructions: String
     public var assets: [String]
+    /// Where the parser read each path. Not part of equality: two kinds that differ only in
+    /// where they were written are the same kind.
+    public var lines: Lines
+
+    public struct Lines: Sendable, Equatable {
+        /// 1-based `provider.toml` lines; nil when the kind was built by hand.
+        public var entry: Int?
+        public var instructions: Int?
+        /// The line of the `assets` array, which names every asset.
+        public var assets: Int?
+        public init(entry: Int? = nil, instructions: Int? = nil, assets: Int? = nil) {
+            self.entry = entry
+            self.instructions = instructions
+            self.assets = assets
+        }
+        public static func == (_: Lines, _: Lines) -> Bool { true }
+    }
 
     public init(id: String, summary: String, output: Output, entry: String, pins: Pins? = nil,
                 states: [String] = [], sizes: [String] = ["default"], cost: Cost? = nil,
-                instructions: String, assets: [String] = []) {
+                instructions: String, assets: [String] = [], lines: Lines = Lines()) {
+        self.lines = lines
         self.id = id
         self.summary = summary
         self.output = output

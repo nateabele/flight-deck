@@ -6,11 +6,19 @@ final class CLIArgumentsProviderTests: XCTestCase {
     private func parse(_ s: String...) throws -> CLIInvocation { try CLIArguments.parse(s) }
 
     func testProviderCheckParsesTheFolder() throws {
-        XCTAssertEqual(try parse("provider", "check", "/p/x").command, .providerCheck(dir: "/p/x"))
+        XCTAssertEqual(try parse("provider", "check", "/p/x").command, .providerCheck(dir: "/p/x", runSamples: false))
     }
 
     func testProviderCheckAcceptsTheFolderBeforeOrAfterJSON() throws {
-        XCTAssertEqual(try parse("provider", "check", "--json", "x").command, .providerCheck(dir: "x"))
+        XCTAssertEqual(try parse("provider", "check", "--json", "x").command, .providerCheck(dir: "x", runSamples: false))
+    }
+
+    func testProviderCheckRunSamplesFlag() throws {
+        XCTAssertEqual(try parse("provider", "check", "x", "--run-samples").command,
+                       .providerCheck(dir: "x", runSamples: true))
+        XCTAssertEqual(try parse("provider", "check", "--run-samples", "x").command,
+                       .providerCheck(dir: "x", runSamples: true))
+        XCTAssertTrue(CLIHelp.text(for: "provider check").contains("--run-samples"))
     }
 
     func testProviderCheckWithoutAFolderIsUsageError() {

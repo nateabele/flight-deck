@@ -593,18 +593,24 @@ public enum CLIHelp {
             pages: [
                 Page(
                     name: "provider check", summary: "validate a visual provider's folder",
-                    usage: ["flightdeck provider check DIR"],
+                    usage: ["flightdeck provider check DIR [--run-samples]"],
                     about: """
                     Reads DIR/provider.toml and reports every problem with its line number: the \
-                    contract version, the kinds, and whether each kind's instructions and assets \
-                    exist inside the folder. When the provider has a generator and DIR/samples/KIND/ \
-                    holds input for a kind, it runs the generator on that input in the sandbox and \
-                    reports the result. This runs on this Mac only and does not need Flight Deck \
-                    to be open. A provider is valid whole or not at all. \
+                    contract version, the kinds, and whether each kind's entry, instructions and \
+                    assets exist inside the folder. A provider is valid whole or not at all.
+
+                    A generator never runs unless you pass --run-samples. Then, for each kind \
+                    that has input in DIR/samples/KIND/, it prints the exact command, runs it \
+                    in the sandbox (no network, writes only to a private folder) on a private \
+                    copy of the folder, and reports the result. Without the flag the last line \
+                    says the generator was not run. This works on this Mac only, with Flight \
+                    Deck closed.
+
                     Exit status: 0 valid (warnings may print) · 1 problems found, or a sample \
                     failed · 2 usage error.
                     """,
                     arguments: [("DIR", "the provider's folder, the one holding provider.toml")],
+                    options: [("--run-samples", "run the generator on samples/KIND/ in the sandbox")],
                     examples: ["flightdeck provider check .flightdeck/visual-providers/my-charts"]
                 ),
             ]
