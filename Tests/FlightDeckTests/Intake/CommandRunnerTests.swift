@@ -336,6 +336,52 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(signals.all.map(\.signal), [SIGTERM, SIGKILL])
     }
 
+    /// A probe whose bit fails the self-test and whose scan cannot see the holder: the case
+    /// in which nothing can say a writer is gone.
+    private static let blindProbe = SystemCommandRunner.PipeProbe(eofBit: { _ in nil }, writers: { _ in [] },
+                                                                  signal: { _, _ in })
+
+    /// With an untrusted bit and a holder nobody can see, the drain waits at most the limit,
+    /// then abandons, and says so. A rescue kills the holder after 15 s so a regression fails.
+    func testUnseenHolderWithAnUntrustedBitIsAbandonedAtTheLimit() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { Self.pkill(marker) }
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec \"/bin/sleep\", \"\(marker)\"'; echo started"
+        let rescue = Task { try await Task.sleep(nanoseconds: 15_000_000_000); Self.pkill(marker) }
+        defer { rescue.cancel() }
+        let start = Date()
+        let r = try await SystemCommandRunner(probe: Self.blindProbe, untrustedDrainLimit: 1).run(
+            executable: "sh", arguments: ["-c", script], cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+            processGroup: true, onSpawn: nil)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 6, "the drain waited on an unseen holder past its limit")
+        XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "started\n")
+        XCTAssertTrue(r.stderr.hasSuffix(SystemCommandRunner.abandonedNote), r.stderr)
+    }
+
+    /// The same holder, and the caller's clock runs out first: its cancel must reach the drain
+    /// (timeout plus the one-second sweep), not leave it waiting on the holder.
+    func testCancelReachesADrainHeldByAnUnseenHolder() async throws {
+        let marker = "\(Int.random(in: 7_000_000...7_999_999))"
+        defer { Self.pkill(marker) }
+        let script = "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec \"/bin/sleep\", \"\(marker)\"'; echo started"
+        let rescue = Task { try await Task.sleep(nanoseconds: 15_000_000_000); Self.pkill(marker) }
+        defer { rescue.cancel() }
+        let env = self.env
+        let start = Date()
+        let work = Task {
+            try await SystemCommandRunner(probe: Self.blindProbe, untrustedDrainLimit: 600).run(
+                executable: "sh", arguments: ["-c", script], cwd: URL(fileURLWithPath: "/tmp"), environment: env,
+                processGroup: true, onSpawn: nil)
+        }
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        work.cancel()
+        do {
+            _ = try await work.value
+            XCTFail("a cancelled run returned a result")
+        } catch is CancellationError {}
+        XCTAssertLessThan(Date().timeIntervalSince(start), 6, "the cancel did not reach the drain")
+    }
+
     /// The bit is self-tested once per process; a probe whose bit lies either way is not trusted.
     func testEOFBitSelfTest() {
         XCTAssertTrue(SystemCommandRunner.PipeProbe.system.bitTrusted, "this kernel's PIPE_EOF failed the self-test")

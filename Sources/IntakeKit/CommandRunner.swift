@@ -85,7 +85,23 @@ public struct SystemCommandRunner: CommandRunner {
     public static let stderrCapture = 1 << 20
     public static let stderrTruncatedNote = "\n[stderr truncated]"
 
-    public init() {}
+    /// What the post-grace holder sweep asks the kernel; `.system` outside tests.
+    let probe: PipeProbe
+    /// How long a drain may wait on a holder nothing can see once the PIPE_EOF bit failed its
+    /// self-test (the scan then is all there is, and it can miss another user's process).
+    let untrustedDrainLimit: TimeInterval
+
+    public init() { self.init(probe: .system, untrustedDrainLimit: SystemCommandRunner.defaultUntrustedDrainLimit) }
+
+    init(probe: PipeProbe, untrustedDrainLimit: TimeInterval) {
+        self.probe = probe
+        self.untrustedDrainLimit = untrustedDrainLimit
+    }
+
+    /// Ten minutes, a provider generator's longest timeout, plus the drain grace.
+    static let defaultUntrustedDrainLimit: TimeInterval = 600 + drainGrace
+
+    static let abandonedNote = "\n[stopped waiting for output still held by a process that could not be stopped]"
 
     public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
                      processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
@@ -513,13 +529,20 @@ public struct SystemCommandRunner: CommandRunner {
                     // holders' handles against them.
                     var stopped = 0
                     if drains.wait(timeout: .now() + Self.drainGrace) == .timedOut {
-                        let outcome = Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD])
+                        let outcome = Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD], probe: probe)
                         stopped = outcome.stopped
                         // With no writer left EOF is certain, so the drains finish on their own
                         // however slow the sink is: cutting them off here lost the tail of a
                         // slow sink's stream (a round's final JSON line). Only a writer still
                         // alive, one we could not see or kill, can hold them forever.
-                        if outcome.writerAlive { abandon.set() }
+                        if outcome.writerAlive {
+                            abandon.set()
+                        } else if !probe.bitTrusted,
+                                  drains.wait(timeout: .now() + untrustedDrainLimit) == .timedOut {
+                            // An untrusted bit cannot speak for a holder the scan cannot see,
+                            // so "no writer found" is not proof of EOF: bounded, then abandoned.
+                            abandon.set()
+                        }
                         drains.wait()
                     }
                     close(outPipe.readFD)
@@ -532,6 +555,7 @@ public struct SystemCommandRunner: CommandRunner {
                     // A holder killed above may have been a same-group child with late output
                     // still to write; its loss is never silent.
                     if stopped > 0 { err.data.append(Data(Self.killedHoldersNote(stopped).utf8)) }
+                    if abandon.isSet { err.data.append(Data(Self.abandonedNote.utf8)) }
                     // `WIFSIGNALED`/`WTERMSIG`/`WEXITSTATUS` are `#define`s, not C functions —
                     // Swift can't call them, so this is their BSD wait-status layout by hand.
                     let low7 = status & 0x7f
@@ -555,6 +579,9 @@ public struct SystemCommandRunner: CommandRunner {
                 // `killpg(_, 0)` finds the group, it is still ours. (Only once the group is
                 // empty could the id be recycled, and then the probe finds nothing to kill.)
                 if !exitFlag.hasExited || killpg(childPID, 0) == 0 { killpg(childPID, SIGKILL) }
+                // The caller's clock has run out (a sandbox's timeout): with an untrusted bit a
+                // drain may be waiting on a holder nothing can see, so the cancel ends it too.
+                if !probe.bitTrusted { abandon.set() }
             }
         }
 
