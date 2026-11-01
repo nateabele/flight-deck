@@ -4,8 +4,9 @@
 //! returns `state: UNAVAILABLE` with the reason (spec §6), never an answer from a private index.
 //!
 //! MCP over stdio is newline-delimited JSON-RPC 2.0. Requests are answered one at a time, in order.
-//! The tool list (`mcp_tools.json`) is the qartez v0.11.0 schema set captured from the installed
-//! binary, so agent habits keep working; only the path and add_root/workspace wording differ.
+//! The tool list (`mcp_tools.json`) keeps the qartez v0.11.0 tool and parameter names and schema
+//! shapes, so agent habits keep working. The descriptions are fdindex's own: what each tool does and
+//! which sibling to use instead, tersely (tests/mcp_descriptions.rs holds them to that).
 
 use crate::client::{connect_only, connect_or_start, Client};
 use crate::error::Result;
@@ -31,12 +32,19 @@ const MUTATORS: &[&str] = &[
     "qartez_rename_file",
 ];
 
-const INSTRUCTIONS: &str = "Flight Deck's code index: one machine-wide daemon answers every query, so results are the same for every session on this machine and there is nothing to configure per project.\n\
-The tools are qartez-compatible (qartez_map, qartez_find, qartez_grep, qartez_read, qartez_outline, qartez_deps, qartez_stats, qartez_impact, qartez_refs, qartez_calls, and the edit tools).\n\
-Paths: pass absolute paths or paths relative to the working directory this server was started in. Every path in a result is absolute.\n\
-Views: each result starts with a `view:` line naming the worktree, repository, base commit and dirty state that answered it, so you can tell which checkout you are looking at. A path under another worktree or repository is answered from that one.\n\
-While a view is still being indexed the header says `index: building`; ask again shortly.\n\
-If a result says `state: UNAVAILABLE` the index daemon cannot be reached; fall back to rg and reading files. Run `flightdeck index status` to see why.";
+/// Server instructions: what this is, which tool answers which question, and how to read a result.
+/// The routing lines mirror the "use X instead" sentences in `mcp_tools.json`.
+const INSTRUCTIONS: &str = "Flight Deck's code index: one machine-wide daemon answers every session's queries; nothing to configure.\n\
+Which tool:\n\
+- Where is X defined? qartez_find (exact or qualified name). Part of a name: qartez_grep (prefix). Text in function bodies: qartez_grep search_bodies=true.\n\
+- Show code: qartez_read (symbols, or a file's line range). A file's symbols: qartez_outline.\n\
+- Who uses symbol X? qartez_refs (every reference). Callers or callees, or a call chain: qartez_calls.\n\
+- What could break if file F changes? qartez_impact. F's direct imports and importers only: qartez_deps.\n\
+- New to the repo: qartez_map (files by importance); qartez_stats for counts.\n\
+- Edits (rename, move, replace_symbol, insert_*, safe_delete, rename_file) preview unless apply=true.\n\
+Paths: absolute, or relative to the directory this server started in; results print absolute paths.\n\
+Each result starts with a `view:` line: the worktree, repository, base commit and dirty state that answered. `index: building` there means ask again shortly.\n\
+`state: UNAVAILABLE` means the daemon is down: use rg and read files, and run `flightdeck index status`.";
 
 pub struct Options {
     pub paths: Paths,
