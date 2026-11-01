@@ -108,7 +108,7 @@ A stdio MCP server, newline-delimited JSON-RPC 2.0 (`initialize`, `notifications
 
 ## The `qartez` name
 
-`fdindex` behaves as the qartez alias when `argv[0]`'s basename is `qartez` (a symlink to `fdindex`; nothing installs one yet). `qartez mcp` is `fdindex mcp`; `qartez` with no verb starts the MCP server, as qartez does; `qartez find …` is `fdindex find …`; `--root DIR` (first one wins, anywhere on the line) is `--cwd DIR`. Qartez's indexing options before the verb (`--reindex`, `--no-watch`, `--git-depth`, `--db-path`, `--log-level`, `--wiki`, `--leiden-resolution`) are accepted and dropped; `--format json` before the verb is `--json`.
+`fdindex` behaves as the qartez alias when `argv[0]`'s basename is `qartez` (a symlink to `fdindex`; `fdindex switchover --apply` installs it, and `qartez-mcp` is accepted as the same name). `qartez mcp` is `fdindex mcp`; `qartez` with no verb starts the MCP server, as qartez does; `qartez find …` is `fdindex find …`; `--root DIR` (first one wins, anywhere on the line) is `--cwd DIR`. Qartez's indexing options before the verb (`--reindex`, `--no-watch`, `--git-depth`, `--db-path`, `--log-level`, `--wiki`, `--leiden-resolution`) are accepted and dropped; `--format json` before the verb is `--json`.
 
 ## Service (`fdindex service install|uninstall|start|stop|status|restart`)
 
@@ -169,3 +169,31 @@ Today's gate is the `qartez-guard` binary, registered as a `PreToolUse` hook on 
 - The guard also reads PageRank and blast radius from `<project_root>/.qartez/index.db` (`--db`), so the guard itself must be replaced or pointed at the daemon at switch-over; writing compatible acks alone does not retire it.
 
 To stay compatible per view, the new `impact` tool writes `<view worktree>/.qartez/acks/<fnv1a64(relative path)>` with that content on every call. The view's worktree is the right root: it is what `$CLAUDE_PROJECT_DIR` is for a session started in that worktree.
+
+
+## Switch-over (spec §11a step 8), as built
+
+`fdindex guard`, `fdindex session-start` and `fdindex switchover` replace `qartez-guard`, `qartez-setup --session-start` and the hand edits of every agent config. Sources: `src/guard.rs`, `src/session_start.rs`, `src/switchover.rs`, `src/ack.rs`, `src/textedit.rs`.
+
+### `fdindex guard` (PreToolUse hook)
+
+Same observable contract as the installed `qartez-guard`, characterised black-box: Claude Code's PreToolUse JSON on stdin; stdout is empty to allow or `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}` plus a newline to deny; the exit status is always 0. `scripts/guard-parity.sh` runs both on the same inputs (31 cases, all matching in decision and wording).
+
+- `Glob`/`glob`, `Grep`/`grep` and Gemini's `grep_search` are denied in a project whose index is ready, whatever the pattern (the old hook words `grep_search` like `Glob`). Messages are the old ones, naming `qartez_map`, `qartez_find`, `qartez_grep`.
+- `Edit`, `Write`, `MultiEdit`, `replace`, `write_file` of a file whose PageRank is at least `--pagerank-min` / `QARTEZ_GUARD_PAGERANK_MIN` (0.05) or whose blast radius is at least `--blast-min` / `QARTEZ_GUARD_BLAST_MIN` (10) are denied unless an ack is no older than `--ack-ttl-secs` / `QARTEZ_GUARD_ACK_TTL_SECS` (600; `QARTEZ_ACK_TTL_SECS` also works). The message lists the exceeded thresholds (PageRank first) and the file's three top symbols. A file the index does not know is not guarded. `QARTEZ_GUARD_DISABLE` other than empty, `0` or `false` turns it off. `--db` is accepted and ignored.
+- Facts come from the daemon through an internal `guard` request (`{"state":"NONE|BUILDING|READY","worktree","in_index","rel","pagerank","blast","hot":[…]}`): the view that holds the file, ranks from its graph, blast radius within that view. The old hook looked for `.qartez/index.db` upward from the file; this one does not need a project directory at all, so `$CLAUDE_PROJECT_DIR` and `--project-root` only stand in for a missing `cwd`.
+- **The index never blocks an agent.** Daemon not running or not answering (2.5 s), or the view still building (1.5 s wait): the call is allowed and stderr says why. The hook never starts a daemon.
+- Acks are written by `impact` (`src/ack.rs`) into `<view worktree>/.qartez/acks/`, in the format above, so the old guard and the new one accept each other's.
+- One deliberate difference: a relative `file_path` is resolved against the call's `cwd`; the old hook resolved it against its own working directory (Claude Code always sends absolute paths).
+
+### `fdindex session-start`
+
+`qartez-setup --session-start` prints nothing and, in the background, indexes the session's project and checks GitHub for a newer qartez (observed in a temp HOME: `~/.qartez/last-update-check`, `~/.cache/qartez-mcp/session-index.log`). `session-start` keeps the useful half: it starts the daemon if needed and starts the cwd view's build without waiting (the `guard` request with no file does that, and answers `NONE` for a directory that is no project, so a session in `~` indexes nothing). It prints only when an agent should act: the daemon could not be started or did not answer within 4 s (`state: UNAVAILABLE`, fall back to rg), or the view is still building. Exit status 0 always.
+
+### No `.qartez/status.json`
+
+The daemon is machine-wide, so a per-project status file would be written into every worktree and go stale; the results carry the state instead (`view:` header with `index: building, N of M files`; `state: BUILDING|UNAVAILABLE|…` on refusals), and `fdindex status` describes the daemon. The skill draft says so.
+
+### `fdindex switchover`
+
+`--dry-run` (the default) prints every file and change, `--apply` does it, `--rollback` undoes the last apply, `--list-old-dbs [root…]` lists `.qartez/index.db` files with sizes (default root `~/Projects`) and deletes nothing. `--home`, `--store` and `--no-service` exist for rehearsal. See the module comment of `src/switchover.rs` for exactly what changes, and `scripts/switchover-rehearsal.sh` for the round trip on copies of the real files.
