@@ -8,6 +8,8 @@ public enum ProviderManifestParser {
     public static let fileName = "provider.toml"
     /// The newest contract this build reads.
     public static let supportedContract = 1
+    /// provider.toml is untrusted repo input that Settings reads for every provider.
+    public static let maxManifestBytes = 256 * 1024
 
     public static func load(folder: URL) throws -> ProviderManifestParseResult {
         let url = folder.appendingPathComponent(fileName)
@@ -16,10 +18,39 @@ public enum ProviderManifestParser {
         }
         // Decoded here so a wrong encoding says so, rather than reaching the user as Cocoa's
         // "couldn't be opened".
-        guard let text = String(data: try Data(contentsOf: url), encoding: .utf8) else {
+        guard let text = String(data: try readCapped(url), encoding: .utf8) else {
             throw ProviderManifestIssue(.error, "provider.toml is not valid UTF-8; save it as UTF-8")
         }
         return try parse(text, folder: folder)
+    }
+
+    /// At most `maxManifestBytes`, through one descriptor. A repo is untrusted input and
+    /// Settings reads every provider in it, so the file is opened without following a link and
+    /// without blocking on a FIFO, checked to be a regular file, refused from its size, and then
+    /// read no further than the cap: a file that grows after the size check is refused too.
+    private static func readCapped(_ url: URL) throws -> Data {
+        let notRegular = ProviderManifestIssue(.error, "provider.toml must be a regular file")
+        let tooLarge = ProviderManifestIssue(.error, "provider.toml is larger than \(maxManifestBytes / 1024) KB")
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == ELOOP { throw notRegular }
+            throw ProviderManifestIssue(.error, "could not read provider.toml (\(String(cString: strerror(errno))))")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { throw notRegular }
+        guard info.st_size <= maxManifestBytes else { throw tooLarge }
+        var data = Data()
+        while data.count <= maxManifestBytes {
+            let chunk: Data?
+            do { chunk = try handle.read(upToCount: maxManifestBytes + 1 - data.count) } catch {
+                throw ProviderManifestIssue(.error, "could not read provider.toml")
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= maxManifestBytes else { throw tooLarge }
+        return data
     }
 
     public static func parse(_ text: String, folder: URL) throws -> ProviderManifestParseResult {
@@ -123,7 +154,17 @@ public enum ProviderManifestParser {
     private static func kind(_ table: TOMLTable, folder: URL,
                              warnings: inout [ProviderManifestIssue]) throws -> ProviderKind {
         let scope = "[[kind]]"
-        let id = try required(table, "id", in: scope) { try string($0, "kind.id") }
+        // A kind id becomes the `samples/<id>` folder and the generator's `{kind}`, so it follows
+        // the visual-id grammar. \A…\z, not ^…$, for the same reason as the provider id.
+        let id = try required(table, "id", in: scope) { node in
+            let value = try string(node, "kind.id")
+            guard value.count <= 64,
+                  value.range(of: "\\A[a-z0-9][a-z0-9._-]*\\z", options: .regularExpression) != nil else {
+                throw ProviderManifestIssue(.error, line: node.line,
+                    "kind id \"\(value)\" must be lower-case letters, digits, \".\", \"_\" or \"-\", start with a letter or digit, and be at most 64 characters")
+            }
+            return value
+        }
         let path = "kind \(id)"
         let summary = try required(table, "summary", in: scope) { try string($0, "\(path).summary") }
         let outputName = try required(table, "output", in: scope) { try string($0, "\(path).output") }

@@ -257,4 +257,85 @@ final class ProviderManifestParserTests: XCTestCase {
         XCTAssertEqual(found?.line, 10)
         XCTAssertTrue(found?.message.contains("symlink") == true)
     }
+
+    // MARK: - Final review
+
+    private func loadIssue() -> ProviderManifestIssue? {
+        do { _ = try ProviderManifestParser.load(folder: folder); return nil } catch { return error as? ProviderManifestIssue }
+    }
+
+    /// The peak footprint so far, so a read that was freed again still shows.
+    private func peakFootprint() -> UInt64 {
+        #if os(macOS)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let rc = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return rc == KERN_SUCCESS ? UInt64(info.ledger_phys_footprint_peak) : 0
+        #else
+        return 0
+        #endif
+    }
+
+    /// A cloned repo can commit a huge provider.toml; Settings reads every one. It is refused
+    /// from its size, without reading it: a 300 MB file used to take 9 s and 1.5 GB.
+    func testOversizedManifestIsRefusedQuicklyWithoutReadingIt() throws {
+        let url = folder.appendingPathComponent("provider.toml")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: Data((head + kind()).utf8)))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: 300 * 1024 * 1024)  // sparse: costs no disk
+        try handle.close()
+        let before = peakFootprint()
+        let start = Date()
+        let found = loadIssue()
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(found?.message, "provider.toml is larger than 256 KB")
+        XCTAssertLessThan(elapsed, 0.5)
+        XCTAssertLessThan(Int64(peakFootprint()) - Int64(before), 16 * 1024 * 1024, "the file was read into memory")
+    }
+
+    func testManifestAtTheCapStillLoads() throws {
+        let body = head + kind()
+        let pad = "#" + String(repeating: "x", count: ProviderManifestParser.maxManifestBytes - body.utf8.count - 2) + "\n"
+        let text = body + pad
+        XCTAssertEqual(text.utf8.count, ProviderManifestParser.maxManifestBytes)
+        try Data(text.utf8).write(to: folder.appendingPathComponent("provider.toml"))
+        XCTAssertNoThrow(try ProviderManifestParser.load(folder: folder))
+        try Data((text + "\n").utf8).write(to: folder.appendingPathComponent("provider.toml"))
+        XCTAssertEqual(loadIssue()?.message, "provider.toml is larger than 256 KB")
+    }
+
+    func testManifestThatIsAFifoIsRefusedPlainly() throws {
+        XCTAssertEqual(mkfifo(folder.appendingPathComponent("provider.toml").path, 0o644), 0)
+        XCTAssertEqual(loadIssue()?.message, "provider.toml must be a regular file")
+    }
+
+    func testManifestThatIsALinkIsRefusedPlainly() throws {
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("provider.toml").path,
+                                                   withDestinationPath: "/dev/zero")
+        XCTAssertEqual(loadIssue()?.message, "provider.toml must be a regular file")
+    }
+
+    func testManifestThatIsAFolderIsRefusedPlainly() throws {
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("provider.toml"), withIntermediateDirectories: true)
+        XCTAssertEqual(loadIssue()?.message, "provider.toml must be a regular file")
+    }
+
+    /// A kind id becomes `samples/<id>` and the generator's `{kind}`, so it follows the visual-id
+    /// grammar: lower-case letters, digits, ".", "_" and "-", at most 64.
+    func testKindIdOutsideTheVisualIdGrammarIsRefusedWithItsLine() {
+        for bad in ["a/b", "..", "../x", "a\\nb", "Upper", "-lead", ".lead", "", String(repeating: "a", count: 65)] {
+            let text = head + kind().replacingOccurrences(of: "id = \"k\"", with: "id = \"\(bad)\"")
+            let found = issue(text)
+            XCTAssertEqual(found?.line, 6, "kind id \(bad.debugDescription)")
+            XCTAssertTrue(found?.message.contains("kind id") == true, found?.message ?? "accepted \(bad.debugDescription)")
+        }
+        for good in ["k", "diagram.sequence", "a_b-c.1", "0", String(repeating: "a", count: 64)] {
+            let text = head + kind().replacingOccurrences(of: "id = \"k\"", with: "id = \"\(good)\"")
+            XCTAssertNil(issue(text), good)
+        }
+    }
 }
