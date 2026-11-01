@@ -78,6 +78,54 @@ final class ThreadPanelClickTests: XCTestCase {
     }
 }
 
+extension ThreadPanelClickTests {
+    private func panelWindow(_ model: ThreadPanelModel, focusesComposer: Bool) -> NSWindow {
+        let size = NSSize(width: 560, height: 700)
+        let host = NSHostingView(rootView: ThreadPanel(model: model, withdraw: { _ in }, openCitation: { _ in },
+                                                       reveal: { _ in }, focusesComposer: focusesComposer)
+            .frame(width: size.width, height: size.height))
+        let w = KeyWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = host
+        w.makeKeyAndOrderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        return w
+    }
+
+    private func commandReturn(_ w: NSWindow) {
+        let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime,
+                                    windowNumber: w.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                                    isARepeat: false, keyCode: 36)!
+        w.sendEvent(down)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+    }
+
+    /// M3: ⌘↩ sends only from the composer. Window-wide, it sent a stashed reply while the human
+    /// was in the plan, and fought Triage's own ⌘↩.
+    func testCommandReturnSendsOnlyFromTheComposer() {
+        let store = FakeThreadStore()
+        let thread = store.add("Why?")
+        store.addTurn(thread.id, you: "Why?", reply: "Because.")
+        var sent: [String] = []
+        ThreadPanelModel.forgetSession()
+        let model = ThreadPanelModel(intakeID: UUID(), reader: store,
+                                     actions: .init(send: { _, text in sent.append(text); return nil }))
+        model.refresh()
+        model.open(thread.id)
+        model.composer = "A stashed reply"
+        let w = panelWindow(model, focusesComposer: false)
+        w.makeFirstResponder(nil)
+        commandReturn(w)
+        XCTAssertEqual(sent, [], "⌘↩ sent from outside the composer")
+        w.orderOut(nil)
+
+        let focused = panelWindow(model, focusesComposer: true)
+        commandReturn(focused)
+        XCTAssertEqual(sent, ["A stashed reply"], "⌘↩ in the composer did not send")
+        focused.orderOut(nil)
+    }
+}
+
 /// A borderless window that can be key, as the app's window is when the panel is clicked.
 private final class KeyWindow: NSWindow {
     override var canBecomeKey: Bool { true }

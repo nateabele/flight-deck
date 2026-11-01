@@ -66,6 +66,81 @@ final class ThreadPanelModelTests: XCTestCase {
                                         options: [.init(id: "a", label: "A")]))
     }
 
+    // MARK: Final review B
+
+    /// B-I1: the plan draws proposals whether or not the rail or panel is on screen. The model polls
+    /// on its own while the plan has a pending diff (a new one shows, a decided one goes), and lets
+    /// go of the clock once there is none.
+    func testTheModelPollsOnItsOwnWhileThePlanHasPendingDiffs() {
+        let t = store.add("Why?")
+        store.diffsByThread[t.id] = [ThreadDiff(thread: t.id, turn: 1, checkpoint: 2, anchor: NoteAnchor(checkpoint: 2, quote: "a"),
+                                                old: "a", new: "b")]
+        let clock = WatchClock(appIsActive: { true })
+        let m = ThreadPanelModel(intakeID: intake, reader: store, pollClock: clock)
+        m.refresh()                                   // the bind, with no rail or panel shown
+        XCTAssertTrue(clock.isRegistered(m), "pending diffs and nothing polling")
+        store.diffsByThread[t.id]!.append(ThreadDiff(thread: t.id, turn: 2, checkpoint: 2,
+                                                     anchor: NoteAnchor(checkpoint: 2, quote: "c"), old: "c", new: "d"))
+        clock.fire()
+        XCTAssertEqual(m.pendingDiffsInPlan.count, 2)
+        store.diffsByThread[t.id] = store.diffsByThread[t.id]!.map { var d = $0; d.state = .accepted; return d }
+        clock.fire()
+        XCTAssertFalse(clock.isRegistered(m), "nothing pending and no view: the clock is let go")
+        m.start(on: clock)
+        m.stop()
+        XCTAssertFalse(clock.isRegistered(m))
+    }
+
+    /// M1: a thread started here that ThreadRunner never folds (a dead runner, an intake that left
+    /// shaping) stops saying "answering…" after a minute, and Retry puts the words back.
+    func testAStartedThreadThatNeverStartsSaysSoAfterAMinute() {
+        var now = FakeThreadStore.date
+        let started = ThreadID()
+        let m = ThreadPanelModel(intakeID: intake, reader: store, actions: .init(open: { _, _, _, _ in .success(started) }),
+                                 now: { now })
+        m.beginThread(on: .wholePlan)
+        m.composer = "Why?"
+        m.send()
+        guard case .pending(let p) = m.conversation else { return XCTFail("\(m.conversation)") }
+        XCTAssertFalse(m.pendingStalled(p))
+        now = now.addingTimeInterval(ThreadPanelModel.pendingTimeout + 1)
+        XCTAssertTrue(m.pendingStalled(p))
+        XCTAssertFalse(m.stalledStarts.contains(started))
+        m.refresh()
+        XCTAssertEqual(m.stalledStarts, [started], "the poll publishes the stall")
+        m.retryPending(started)
+        XCTAssertEqual(m.conversation, .newThread(.wholePlan))
+        XCTAssertEqual(m.composer, "Why?")
+    }
+
+    /// M2: "You answered" names the picks, by their labels.
+    func testYouAnsweredNamesThePicks() {
+        let t = store.add("Which store?")
+        let q = StructuredQuestion(id: "q1", text: "Which?", kind: .multi,
+                                   options: [.init(id: "a", label: "SQLite"), .init(id: "b", label: "Files")])
+        store.addTurn(t.id, reply: "Pick.", actions: [.askQuestion(q)])
+        store.addTurn(t.id, answers: [StructuredAnswer(questionID: "q1", selected: ["b", "a"], other: "S3")])
+        let m = model()
+        m.refresh()
+        XCTAssertEqual(m.answered(t.id, turn: m.turns(t.id)[1]), "Files, SQLite, and S3")
+    }
+
+    /// M5: a new thread starts with no answer picks left over from the last one.
+    func testBeginThreadClearsAnswerDrafts() {
+        let m = model()
+        m.answerDrafts = ["q1": StructuredAnswer(questionID: "q1", selected: ["a"])]
+        m.beginThread(on: .wholePlan)
+        XCTAssertTrue(m.answerDrafts.isEmpty)
+    }
+
+    /// Wording: refusals the panel can get read as words, never as a code.
+    func testEveryPanelRefusalReadsAsWords() {
+        for code in ["unknown_checkpoint", "unknown_block", "stale_questions", "out_of_scope"] {
+            let words = ThreadPanelModel.words(for: ThreadRefusal(code: code))
+            XCTAssertFalse(words.contains(code), "\(code): \(words)")
+        }
+    }
+
     // MARK: A thread just started
 
     /// Concern 2: after ✦ Ask's first send the thread exists only as a queued open until

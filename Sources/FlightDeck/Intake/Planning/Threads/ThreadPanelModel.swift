@@ -207,8 +207,43 @@ final class ThreadPanelModel: ObservableObject {
     @Published var composer = ""
     /// Threads opened here that the reader does not have yet (`PendingThread`).
     @Published private(set) var pending: [ThreadID: PendingThread] = [:]
+    /// The started threads `pendingStalled` holds for, as of the last poll.
+    @Published private(set) var stalledStarts: Set<ThreadID> = []
 
     func pendingThread(_ id: ThreadID) -> PendingThread? { pending[id] }
+
+    /// M1: no runner has folded it in `pendingTimeout` (it died, or the intake left shaping).
+    func pendingStalled(_ started: PendingThread) -> Bool {
+        guard let since = pendingSince[started.id] else { return false }
+        return now().timeIntervalSince(since) > Self.pendingTimeout
+    }
+
+    /// Retry on a stalled start: the words go back into a new thread's composer to send again.
+    func retryPending(_ id: ThreadID) {
+        guard let started = pending.removeValue(forKey: id) else { return }
+        pendingSince[id] = nil
+        stalledStarts.remove(id)
+        beginThread(on: started.anchor)
+        composer = started.you
+    }
+
+    /// M2: what "You answered" names: each pick's label in the order chosen, then the typed answer.
+    func answered(_ thread: ThreadID, turn: ThreadTurn) -> String? {
+        guard let answers = turn.answers, !answers.isEmpty else { return nil }
+        var questions: [String: StructuredQuestion] = [:]
+        for earlier in turns(thread) where earlier.seq < turn.seq {
+            for case .askQuestion(let q) in earlier.actions { questions[q.id] = q }
+        }
+        var parts: [String] = []
+        for answer in answers {
+            let labels = answer.selected.map { id in questions[answer.questionID]?.options.first { $0.id == id }?.label ?? id }
+            parts += labels
+            if let other = answer.other?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty {
+                parts.append(parts.isEmpty ? other : "and \(other)")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
 
     /// The conversation column: the open thread once the reader has it, the one just started
     /// until then, a new thread being composed, or nothing.
@@ -227,6 +262,16 @@ final class ThreadPanelModel: ObservableObject {
     private var drafts: [ThreadID?: String] = [:]
 
     private var clock: WatchClock?
+    /// The clock the model polls on by itself while the plan has pending diffs (B-I1); the views'
+    /// `start(on:)` may name another.
+    private let pollClock: WatchClock
+    /// Registered on a clock because the plan has pending diffs, whether or not a view watches.
+    private var watchesForDiffs = false
+    private let now: () -> Date
+    /// When each started thread was sent, for `pendingStalled`.
+    private var pendingSince: [ThreadID: Date] = [:]
+    /// A started thread no runner has folded after this long says so, with Retry (M1).
+    static let pendingTimeout: TimeInterval = 60
 
     /// The app's one poll clock is `SessionStore.watchClock`, which a view cannot reach; this one
     /// only runs while a rail or panel is on screen, and sleeps otherwise.
@@ -240,7 +285,10 @@ final class ThreadPanelModel: ObservableObject {
     init(intakeID: UUID, reader: any ThreadStoreReading, actions: Actions = Actions(),
          headings: @escaping () -> [String] = { [] },
          defaultsProvider: @escaping @MainActor () -> ThreadDefaults = { ThreadDefaults() },
-         modelMenu: @escaping @MainActor () -> [ThreadAgentChoice] = { [] }) {
+         modelMenu: @escaping @MainActor () -> [ThreadAgentChoice] = { [] },
+         pollClock: WatchClock = ThreadPanelModel.sharedClock, now: @escaping () -> Date = Date.init) {
+        self.pollClock = pollClock
+        self.now = now
         self.defaultsProvider = defaultsProvider
         self.modelMenu = modelMenu
         self.intakeID = intakeID
@@ -264,7 +312,7 @@ final class ThreadPanelModel: ObservableObject {
     /// rail and the panel each start it when they appear, and swapping one for the other must not
     /// stop the polling while either is still on screen.
     func start(on given: WatchClock? = nil) {
-        let clock = given ?? Self.sharedClock
+        let clock = given ?? pollClock
         watchers += 1
         if let current = self.clock, current !== clock { current.remove(self) }
         self.clock = clock
@@ -277,6 +325,25 @@ final class ThreadPanelModel: ObservableObject {
         guard watchers == 0 else { return }
         clock?.remove(self)
         clock = nil
+        syncDiffWatch()
+    }
+
+    /// B-I1: the plan draws the proposals, and needs them current even with the rail and panel off
+    /// screen (the inspector closed, or on Rounds). So while any diff is pending the model stays on
+    /// a clock by itself, and lets go once none is, unless a view still watches.
+    private func syncDiffWatch() {
+        let wants = !pendingDiffsInPlan.isEmpty
+        if wants, clock == nil {
+            pollClock.add(self) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
+            clock = pollClock
+            watchesForDiffs = true
+        } else if !wants, watchesForDiffs, watchers == 0 {
+            clock?.remove(self)
+            clock = nil
+            watchesForDiffs = false
+        } else if watchers > 0 {
+            watchesForDiffs = false
+        }
     }
 
     /// How many views have asked for the polling and not yet let go of it.
@@ -294,8 +361,13 @@ final class ThreadPanelModel: ObservableObject {
         if next != snapshot { snapshot = next }
         // A started thread the runner has folded is shown as itself from now on.
         let folded = pending.keys.filter { id in records.contains { $0.id == id } }
-        if !folded.isEmpty { for id in folded { pending[id] = nil } }
+        if !folded.isEmpty { for id in folded { pending[id] = nil; pendingSince[id] = nil } }
+        // Published only when it changes, so the view turns "answering…" into Retry at the minute
+        // even though nothing on disk moved.
+        let stalled = Set(pending.values.filter(pendingStalled).map(\.id))
+        if stalled != stalledStarts { stalledStarts = stalled }
         settleOverrides()
+        syncDiffWatch()
         rebuildIndex()
     }
 
@@ -443,6 +515,8 @@ final class ThreadPanelModel: ObservableObject {
     /// Opens the panel on a new thread about `anchor`, the composer empty and waiting.
     func beginThread(on anchor: ThreadAnchor) {
         stashDraft()
+        // A new thread asks nothing yet: picks left from the last thread's question must not ride along.
+        answerDrafts = [:]
         newThreadAnchor = anchor
         isOpen = true
         notice = nil
@@ -498,6 +572,7 @@ final class ThreadPanelModel: ObservableObject {
             case .success(let id):
                 thread = id
                 pending[id] = PendingThread(id: id, title: Self.title(from: text), anchor: anchor, you: text)
+                pendingSince[id] = now()
                 newThreadAnchor = nil
                 drafts[ThreadID?.none] = nil
                 selected = id
@@ -577,6 +652,10 @@ final class ThreadPanelModel: ObservableObject {
         case "thread_resolved": "That thread is resolved. Reopen it to ask again."
         case "diff_decided": "That edit was already answered the other way."
         case "write_failed": "Flight Deck couldn't save that. Check the disk, then try again."
+        case "unknown_checkpoint": "That version of the plan is gone. Select the passage again in the current one."
+        case "unknown_block": "That passage is no longer in the plan. Select it again."
+        case "stale_questions": "Those questions were already answered or replaced."
+        case "out_of_scope": "Flight Deck doesn't allow that from here."
         default: "Flight Deck couldn't do that (\(refusal.code))."
         }
     }

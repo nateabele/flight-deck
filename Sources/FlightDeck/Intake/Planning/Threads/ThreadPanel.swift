@@ -92,7 +92,7 @@ struct ThreadPanel: View {
             ThreadConversation(model: model, id: selected, withdraw: withdraw, openCitation: openCitation,
                                projectPath: projectPath, focusesComposer: focusesComposer)
         case .pending(let started):
-            PendingThreadView(started: started)
+            PendingThreadView(model: model, started: started)
         case .newThread(let anchor):
             NewThreadView(model: model, anchor: anchor, focusesComposer: focusesComposer)
         case .none:
@@ -336,6 +336,7 @@ private struct FlowRow: Layout {
 /// A thread just started here, before ThreadRunner has folded its open (about a second): its
 /// title and anchor, the words sent, and "answering…". The real conversation replaces it.
 private struct PendingThreadView: View {
+    @ObservedObject var model: ThreadPanelModel
     let started: PendingThread
 
     var body: some View {
@@ -352,7 +353,16 @@ private struct PendingThreadView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            Text("● answering…").font(.system(size: 12)).foregroundStyle(.green)
+            // The model polls, so a start that never lands turns into this after a minute (M1).
+            if model.stalledStarts.contains(started.id) {
+                HStack(spacing: 8) {
+                    Text("Couldn't start this thread.").font(.system(size: 12)).foregroundStyle(.orange)
+                    Button("Retry") { model.retryPending(started.id) }.controlSize(.small)
+                        .accessibilityIdentifier("thread-pending-retry")
+                }
+            } else {
+                Text("● answering…").font(.system(size: 12)).foregroundStyle(.green)
+            }
             Spacer(minLength: 0)
         }
         .padding(14)
@@ -384,7 +394,12 @@ private struct TurnView: View {
                 }
             }
             if turn.answers != nil {
-                who("You answered")
+                VStack(alignment: .leading, spacing: 2) {
+                    who("You answered")
+                    if let picks = model.answered(thread, turn: turn) {
+                        Text(picks).font(.system(size: 12.5)).textSelection(.enabled)
+                    }
+                }
             }
             if turn.reply != nil || !turn.actions.isEmpty || !turn.errors.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -529,13 +544,13 @@ private struct ThreadComposer: View {
                 .padding(.vertical, 7)
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.5)).allowsHitTesting(false))
                 .accessibilityIdentifier("thread-composer")
-            // The keys live on buttons so they work with the field focused; hidden, as the field
-            // itself says what they are.
-            ZStack {
-                Button("Send") { model.send() }.keyboardShortcut(.return, modifiers: .command)
-                Button("Send and resolve") { model.send(andResolve: true) }.keyboardShortcut(.return, modifiers: [.command, .shift])
-            }
-            .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
+                // ⌘↩ sends, ⌘⇧↩ sends and resolves — from the composer only (M3). As window-wide
+                // shortcuts they sent a stashed reply from the plan and fought Triage's own ⌘↩.
+                .onKeyPress(keys: [.return]) { press in
+                    guard press.modifiers.contains(.command) else { return .ignored }
+                    model.send(andResolve: press.modifiers.contains(.shift))
+                    return .handled
+                }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
