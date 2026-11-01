@@ -147,7 +147,9 @@ struct ReleaseReviewView: View {
                             Task { await release() }
                         }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!review.canRelease || model(review).counts.isEmpty || releasing || review.intake.state == .releasing)
+                        .disabled(!review.canRelease || model(review).counts.isEmpty || model(review).exportBlocksRelease
+                                  || releasing || review.intake.state == .releasing)
+                        .help(model(review).releaseHelp ?? "")
                         .accessibilityIdentifier("release-review-release")
                     }
                 }
@@ -439,7 +441,7 @@ struct ReleaseReviewView: View {
     /// as the summary line.
     private func model(_ review: ReleaseReview) -> ReleaseSheetModel {
         ReleaseSheetModel(ops: ops(review), drift: review.drift, dropped: review.intake.droppedOps,
-                          titles: review.titles, export: review.export ?? exportPreview)
+                          titles: review.titles, export: review.export ?? exportPreview, exportRefusal: review.exportRefusal)
     }
 
     private func rowBackground(drift: OpDrift, dropped: Bool) -> Color {

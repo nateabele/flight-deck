@@ -39,6 +39,19 @@ final class ReleaseSheetModelTests: XCTestCase {
         XCTAssertNil(untouched.header, "nothing left out, nothing to say — there is no selection to count")
     }
 
+    /// Ruling (P2a concern 4): an export the preview says release would refuse blocks the
+    /// button, and its help names why. With no refusal the button is free and has no such help.
+    func testAnExportRefusalBlocksReleaseAndSaysWhy() {
+        let drift = Array(repeating: OpDrift.holds, count: 7)
+        let refusal = "docs/plans/pair/ has changes that are not committed."
+        let blocked = ReleaseSheetModel(ops: ops, drift: drift, dropped: [], titles: titles, exportRefusal: refusal)
+        XCTAssertTrue(blocked.exportBlocksRelease)
+        XCTAssertEqual(blocked.releaseHelp, "Release is blocked: \(refusal)")
+        let free = ReleaseSheetModel(ops: ops, drift: drift, dropped: [], titles: titles)
+        XCTAssertFalse(free.exportBlocksRelease)
+        XCTAssertNil(free.releaseHelp)
+    }
+
     /// An impossible op is left out exactly like a dropped one, by all three.
     func testImpossibleOpsAreLeftOutEverywhere() {
         var drift = Array(repeating: OpDrift.holds, count: 7)
