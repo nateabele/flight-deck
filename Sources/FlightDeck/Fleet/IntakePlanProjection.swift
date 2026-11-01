@@ -127,6 +127,11 @@ enum IntakePlanProjection {
                               outline: outline(markdown: markdown, blocks: blocks, churn: churn, divergingSection: diverging),
                               notes: notes, added: added, removed: removed)
         IntakeThreadProjection.fill(&wire, intake: id, blocks: blocks, service: service)
+        // Only while the gate is open, as for the detail's flag: a phone told nothing of visuals
+        // gets a plan with nothing to fetch.
+        if service.visualsAvailable {
+            wire.visuals = IntakeVisualProjection.refs(markdown: markdown, checkpoint: checkpointID, reader: service.visualReader(id))
+        }
         return wire
     }
 }

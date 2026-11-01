@@ -191,14 +191,14 @@ final class VisualFetchTests: XCTestCase {
         let none = await VisualFetch.serve(nil, visualID: "flow", revision: 1, part: "file:export/a.txt",
                                            offset: 0, limit: 10, gateOpen: true)
         XCTAssertEqual(code(none), "visuals_unavailable")
-        // The gate stays closed until V4: with it shut, a fully valid request is still refused,
-        // and the store is never touched.
+        // With the gate shut, a fully valid request is still refused, and the store is never touched.
         let shut = await serve(WireVisualPart.file("export/a.txt"), open: false)
         XCTAssertEqual(code(shut), "visuals_unavailable")
+        // V4 opened it: the shipped default serves.
         let byDefault = await VisualFetch.serve(store, visualID: "flow", revision: 1, part: "file:export/a.txt",
                                                 offset: 0, limit: 10)
-        XCTAssertEqual(code(byDefault), "visuals_unavailable", "the shipped default is closed")
-        XCTAssertFalse(VisualFetch.gateOpen)
+        XCTAssertEqual(try byDefault.get().data, Data("a".utf8), "the shipped default is open")
+        XCTAssertTrue(VisualFetch.gateOpen)
     }
 
     // MARK: - Threads

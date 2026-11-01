@@ -2,7 +2,7 @@ import Foundation
 import FleetKit
 import IntakeKit
 
-/// `intake.visual.fetch`'s worker. V3 owns this file and fills `serve` in.
+/// `intake.visual.fetch`'s worker (planning v2 §10, V-R6).
 ///
 /// **Why a `nonisolated` enum and not a method on `IntakeService`.** `IntakeService` is
 /// `@MainActor`, so an `async` method on it still runs on the main actor, and reading and
@@ -10,12 +10,10 @@ import IntakeKit
 /// reader on the main actor (`IntakeService.visualReader`, cheap) and awaits this, which runs
 /// on the global executor.
 enum VisualFetch {
-    /// **The gate, shut until V4.** The detail's `visuals` flag stays off until V4 turns it on
-    /// with the rest of the visual path, so a phone never sends this op; this is the same answer
-    /// on the Mac's side, for a phone that sends it anyway. The serve logic below works and is
-    /// tested with the gate open, and `FleetService` (which this stream may not touch) calls it
-    /// with the default, so V4 flips one constant.
-    nonisolated static let gateOpen = false
+    /// **The gate, open since P2a V4.** The detail's `visuals` flag follows it
+    /// (`IntakeService.visualsAvailable`), so shutting it again hides every visual op from the
+    /// phone and refuses one sent anyway. `serve` takes it as a parameter so a test can shut it.
+    nonisolated static let gateOpen = true
 
     /// A slice of one revision's snapshot (`part` `snapshot…`) or listed file (`file:<path>`) as a
     /// `WireFileChunk` whose `path` is the relative path and whose `size` is the whole file's.

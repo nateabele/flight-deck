@@ -230,7 +230,7 @@ public enum PlanExporter {
 
     /// The snapshot a plan shows for a revision: the `default` state (else the first) at the
     /// first size. Also the catalogue's snapshot path, so a round reads the picture release exports.
-    static func defaultSnapshot(_ m: VisualManifest) -> String? {
+    public static func defaultSnapshot(_ m: VisualManifest) -> String? {
         let state = m.states.contains("default") ? "default" : (m.states.first ?? "default")
         let pngs = m.files.map(\.path).filter { $0.hasPrefix("snapshot@") && $0.hasSuffix(".png") && isSafe($0) }
         if let size = m.sizes.first, pngs.contains("snapshot@\(state)-\(size).png") { return "snapshot@\(state)-\(size).png" }

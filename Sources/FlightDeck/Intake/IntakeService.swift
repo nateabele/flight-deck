@@ -190,6 +190,9 @@ struct ReleaseReview {
     /// Every task the graph holds, id → title, as of this read — so the sheet names the tasks
     /// an edit, reopen, follow-up or dependency touches by title instead of by raw id.
     var titles: [String: String] = [:]
+    /// What release will write to the repo and commit (spec §12, "Confirmation"): nil for a plan
+    /// with no visuals, which release exports nothing for.
+    var export: PlanExportPreview?
 
     /// What release will treat as op `i`'s precondition: the live state for a drifted op,
     /// the triage-time `pre` otherwise.
@@ -2113,7 +2116,7 @@ final class IntakeService: ObservableObject {
     func reviewModel(_ id: UUID) async -> ReleaseReview? {
         guard let i = intake(id), let cs = i.changeSet,
               let triaged = triageGraph(id),
-              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged),
+              case .success(let v) = ChangeSetValidator.validate(cs, against: triaged, knownVisuals: knownVisuals(id)),
               let current = try? await graphReader.read(project: i.projectPath)
         else { return nil }
         let drift = DriftClassifier.classify(v, current: current)
@@ -2128,6 +2131,7 @@ final class IntakeService: ObservableObject {
         // The triage-time graph first, the live one over it: a task retitled since triage reads
         // as it is now, and one deleted since still has a name on its (impossible) row.
         review.titles = triaged.beads.mapValues(\.title).merging(current.beads.mapValues(\.title)) { _, now in now }
+        review.export = await releasePreview(latest)
         return review
     }
 
@@ -2168,8 +2172,16 @@ final class IntakeService: ObservableObject {
         let current: GraphSnapshot
         do { current = try await graphReader.read(project: i.projectPath) }
         catch { return fail(id, backTo: .review, "Could not read the task graph before release: \(error)") }
-        guard let triaged = triageGraph(id), case .success(let v) = ChangeSetValidator.validate(cs, against: triaged) else {
+        let known = knownVisuals(id)
+        guard let triaged = triageGraph(id) else {
             return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
+        }
+        let v: ValidatedChangeSet
+        switch ChangeSetValidator.validate(cs, against: triaged, knownVisuals: known) {
+        case .success(let good): v = good
+        case .failure(let errs):
+            return fail(id, backTo: .review, "The change set no longer validates: "
+                        + errs.errors.map(\.userMessage).joined(separator: "; "))
         }
         let drift = DriftClassifier.classify(v, current: current)
         guard Self.review(i, drift: drift).canRelease else {
@@ -2194,7 +2206,8 @@ final class IntakeService: ObservableObject {
         var validated: ValidatedChangeSet?, kept: [Int] = []
         for _ in 0...ops.count {
             let (sub, map) = Self.releasable(ops, skipping: skip)
-            switch ChangeSetValidator.validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current) {
+            switch ChangeSetValidator.validate(ChangeSet(graphObservedAt: cs.graphObservedAt, ops: sub), against: current,
+                                               knownVisuals: known) {
             case .success(let good):
                 validated = good; kept = map
             case .failure(let errs):
@@ -2212,6 +2225,26 @@ final class IntakeService: ObservableObject {
         guard let validated else { return fail(id, backTo: .review, "The change set could not be reconciled with the live graph.") }
         guard !Task.isCancelled else { return }
 
+        // The plan and its visuals go into the repo first (spec §12, V-R4), committed by path, so
+        // every "Fidelity references" path a task cites already exists when `br create` runs. A
+        // refusal (uncommitted changes in the folder, …) writes nothing, tasks included.
+        var planSlug: String?
+        var exportWarnings: [String] = []
+        switch await releaseExport(i) {
+        case nil: break
+        case .failure(let refusal)?: return fail(id, backTo: .review, refusal.message)
+        case .success(let export)?:
+            guard !Task.isCancelled else { return }
+            do {
+                _ = try await RepoCommitter().commit(export, repo: URL(fileURLWithPath: i.projectPath, isDirectory: true))
+            } catch {
+                return fail(id, backTo: .review, Self.exportMessage(error))
+            }
+            planSlug = export.slug
+            exportWarnings = export.warnings
+        }
+        guard !Task.isCancelled else { return }
+
         let actor = "flightdeck-intake:\(id.uuidString)"
         let steps = ApplyPlanner.plan(validated, skipping: [])
         // Routed before the first write, so a create lands with its block in one `br create`
@@ -2220,7 +2253,7 @@ final class IntakeService: ObservableObject {
         // Routing suspends, and the guard above ran before it: a release discarded or retried
         // while the router was working would otherwise still write its tasks.
         guard !Task.isCancelled else { return }
-        let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor)
+        let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor, planSlug: planSlug)
             .apply(steps, project: i.projectPath, agentContexts: contexts)
 
         // The plan is ordered and BeadWriter stops at the first failure, so exactly
@@ -2234,7 +2267,7 @@ final class IntakeService: ObservableObject {
         let project = i.projectPath
         let planned = DeliveryPlanner.plan(validated.changeSet, ratings: ratings,
                                            hasSession: { [hasSession] in hasSession(project, $0) })
-        var warnings: [String] = []
+        var warnings: [String] = exportWarnings
         var unnotified = Set<String>()
         for action in planned {
             guard case .mail(let to, let bead, _, _) = action, !landed.contains(bead) else { continue }
@@ -2434,7 +2467,8 @@ final class IntakeService: ObservableObject {
 
         if case .recommendation(let preset, let reason, var cs?) = result.triage {
             cs.graphObservedAt = observedAt  // FD owns this timestamp — see `Triage.initialPrompt`.
-            if case .failure(let errs) = ChangeSetValidator.validate(cs, against: graph) {
+            // No plan exists at triage, so no visual can be cited: `Set()`, not nil.
+            if case .failure(let errs) = ChangeSetValidator.validate(cs, against: graph, knownVisuals: []) {
                 // One automatic retry in the same session, errors listed (spec §11).
                 guard !Task.isCancelled else { return }
                 save(i)
@@ -2449,7 +2483,7 @@ final class IntakeService: ObservableObject {
                         return fail(id, "The corrected reply carried no change set.", raw: second.raw)
                     }
                     cs2.graphObservedAt = observedAt
-                    if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph) {
+                    if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph, knownVisuals: []) {
                         return fail(id, "The change set failed validation twice: "
                                     + errs2.errors.map(\.userMessage).joined(separator: "; "), raw: second.raw)
                     }

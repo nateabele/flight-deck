@@ -3,11 +3,12 @@ import FleetKit
 import IntakeKit
 @testable import FlightDeck
 
-/// What the Mac does with `intake.visual.fetch` before visuals ship (P2a V0): it is scoped like
-/// the other intake reads, refused `visuals_unavailable` through the real `FleetService`, reads
-/// nothing, and the phone is never told it may ask. The wire bytes are `VisualWireCodingTests`.
+/// The Mac's visual path once it is open (P2a V4): `intake.visual.fetch` is scoped like the other
+/// intake reads and served through the real `FleetService`, the detail tells the phone it may
+/// ask, and the plan projection lists each block's visual so the reader can lay it out before
+/// its bytes arrive. The wire bytes are `VisualWireCodingTests`.
 @MainActor
-final class VisualStubRefusalTests: XCTestCase {
+final class VisualIntegrationTests: XCTestCase {
     private var root: URL!
     private var harness: FleetTestHarness!
     private var client: FleetClient!
@@ -17,7 +18,7 @@ final class VisualStubRefusalTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("VisualStubs-\(UUID())", isDirectory: true)
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("VisualIntegration-\(UUID())", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
@@ -62,23 +63,82 @@ final class VisualStubRefusalTests: XCTestCase {
         XCTAssertTrue(ControlScope.permits(fetch, level: .readOnly, caller: .human))
     }
 
-    /// A runner reaches nothing until Stream B scopes it to its own intake — a read included.
+    /// A runner caller is refused every request, a read included (P1: runners get least privilege).
     func testAnIntakeRunnerCallerIsRefusedTheFetch() {
         for level in ControlScopeLevel.allCases {
             XCTAssertFalse(ControlScope.permits(fetch, level: level, caller: .intakeRunner(UUID())), "\(level)")
         }
     }
 
-    // MARK: - Stub
+    // MARK: - Open
 
-    func testTheStubRefusesAndReadsNothing() async throws {
+    func testTheGateIsOpenAndTheDetailSaysSo() async throws {
         let i = try shapingIntake()
         let svc = await makeService()
-        XCTAssertEqual(IntakeService.visualsUnavailable, "visuals_unavailable")
-        XCTAssertFalse(svc.visualsAvailable)
-        // And the phone is never told it may ask.
+        XCTAssertTrue(VisualFetch.gateOpen)
+        XCTAssertTrue(svc.visualsAvailable)
         let detail = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc, servedAt: Date()))
-        XCTAssertNil(detail.visuals)
+        XCTAssertEqual(detail.visuals, true)
+    }
+
+    // MARK: - Plan projection
+
+    private func plan(_ id: UUID, markdown: String, checkpoint: Int = 1) throws {
+        let tapes = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: id))
+        var tape = tapes.loadTape()
+        try tapes.writeCheckpoint(Checkpoint(id: checkpoint, parent: checkpoint > 1 ? checkpoint - 1 : nil, stage: .refine,
+                                             round: checkpoint, major: true, createdAt: Date()),
+                                  files: ["plan.md": Data(markdown.utf8)], into: &tape)
+    }
+    private func tape(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: id)) }
+    private let visualPlan = "# Plan\n\n## Pairing\n\n```fd-visual id=pairing\nPairing handshake\n```\n\n```fd-visual id=later pending\n```\n"
+
+    /// Each block's visual, with what the phone needs before any bytes: the primary, the kinds,
+    /// the states and sizes, the shape from the default snapshot, and every file it may fetch.
+    func testThePlanListsEachVisualWithFilesSizesAndAspect() async throws {
+        let i = try shapingIntake()
+        try plan(i.id, markdown: visualPlan)
+        try VisualDiskFixture.install(tape(i.id), id: "pairing", states: ["default", "error"], sizes: ["wide", "narrow"])
+        let svc = await makeService()
+        let wire = try XCTUnwrap(IntakePlanProjection.plan(i.id, checkpoint: nil, changes: false, service: svc))
+        let refs = try XCTUnwrap(wire.visuals)
+        XCTAssertEqual(refs.map(\.id), ["pairing"], "a pending placeholder has nothing to list yet")
+        let ref = refs[0]
+        XCTAssertEqual(ref.revision, 1)
+        XCTAssertEqual(ref.kinds, ["sequence"])
+        XCTAssertEqual(ref.states, ["default", "error"])
+        XCTAssertEqual(ref.sizes, ["wide", "narrow"])
+        XCTAssertEqual(ref.aspect ?? 0, 2.0, accuracy: 0.0001, "800 x 400, from the default snapshot's header")
+        let manifest = try XCTUnwrap(DiskVisualStore(tape: tape(i.id)).revision(VisualID(rawValue: "pairing")!, r: 1)).manifest
+        XCTAssertEqual(ref.files, manifest.files.map { WireVisualFile(path: $0.path, size: $0.size, sha256: $0.sha256) })
+        XCTAssertTrue(ref.alternates.isEmpty)
+    }
+
+    /// A plan with no visual blocks carries no list, so its wire is what it always was.
+    func testAPlanWithNoVisualsCarriesNoList() async throws {
+        let i = try shapingIntake()
+        try plan(i.id, markdown: "# Plan\n\nJust words.\n")
+        let svc = await makeService()
+        XCTAssertNil(try XCTUnwrap(IntakePlanProjection.plan(i.id, checkpoint: nil, changes: false, service: svc)).visuals)
+    }
+
+    /// An old checkpoint shows its visuals as it recorded them; the other representation is an
+    /// alternate, in filmstrip order, with its kind.
+    func testACheckpointShowsTheBlockStateItRecordedAndItsAlternates() async throws {
+        let i = try shapingIntake()
+        try plan(i.id, markdown: visualPlan)
+        let t = tape(i.id)
+        let id = try VisualDiskFixture.install(t, id: "pairing", r: 1, kind: "sequence")
+        try VisualDiskFixture.install(t, id: "pairing", r: 2, kind: "component")
+        let both = BlockState(representations: [RevisionRef(visualID: id, r: 1), RevisionRef(visualID: id, r: 2)],
+                              primary: RevisionRef(visualID: id, r: 1))
+        try IntakeJSON.encoder.encode(CheckpointBlockStates(states: [id: both])).write(to: t.checkpointVisualsURL(1))
+        let svc = await makeService()
+        let ref = try XCTUnwrap(IntakePlanProjection.plan(i.id, checkpoint: 1, changes: false, service: svc)?.visuals?.first)
+        XCTAssertEqual(ref.revision, 1, "checkpoint 1 recorded r1 as primary; block.json now says r2")
+        XCTAssertEqual(ref.kinds, ["sequence", "component"])
+        XCTAssertEqual(ref.alternates.map(\.revision), [2])
+        XCTAssertEqual(ref.alternates.map(\.kind), ["component"])
     }
 
     /// The store hook V1 reads through is always a disk store, so the editor's hooks never go
@@ -103,25 +163,27 @@ final class VisualStubRefusalTests: XCTestCase {
         XCTAssertNil(PlanEditHooks().visuals, "the hook defaults to nil for renders and tests")
     }
 
-    /// The fetch's worker runs off the main thread, and today refuses `visuals_unavailable`.
-    func testTheFetchWorkerRunsOffTheMainThreadAndRefuses() async {
+    /// The fetch's worker runs off the main thread; with no reader it is still unavailable.
+    func testTheFetchWorkerRunsOffTheMainThread() async {
         nonisolated(unsafe) var ranOnMain: Bool?
         let result = await VisualFetch.serve(EmptyVisualStore(), visualID: "flow", revision: 1, part: "snapshot",
                                              offset: 0, limit: 10, probe: { ranOnMain = Thread.isMainThread })
         XCTAssertEqual(ranOnMain, false)
-        XCTAssertEqual(result, .failure(VisualRefusal(code: "visuals_unavailable")))
+        XCTAssertEqual(result, .failure(VisualRefusal(code: "unknown_visual")))
         let none = await VisualFetch.serve(nil, visualID: "flow", revision: 1, part: "snapshot", offset: 0, limit: 10)
         XCTAssertEqual(none, .failure(VisualRefusal(code: "visuals_unavailable")))
     }
 
-    /// The real `FleetService` arm over a real socket answers the request with the stub's code,
-    /// on the request's own cid.
-    func testAFetchThroughFleetServiceIsRefusedVisualsUnavailable() async throws {
+    /// The real `FleetService` arm over a real socket serves a listed file's bytes, on the
+    /// request's own cid.
+    func testAFetchThroughFleetServiceServesTheFile() async throws {
         let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
         let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
                                  preferences: prefs, daemonControl: LiveDaemonControl(), intakesRoot: root)
         store.newSession(in: URL(fileURLWithPath: "/w/larkOS-\(UUID().uuidString.prefix(6))", isDirectory: true))
         let i = try shapingIntake(projectPath: store.repos[0].url.standardizedFileURL.path)
+        let source = Data("sequenceDiagram\n  A->>B: hi\n".utf8)
+        try VisualDiskFixture.install(tape(i.id), id: "pairing-handshake", files: ["diagram.mmd": source])
         harness = FleetTestHarness(store: store)
         try await harness.start()
 
@@ -133,12 +195,13 @@ final class VisualStubRefusalTests: XCTestCase {
             if let cid = frame.correlationID, cid == sent { reply = frame; answered.fulfill() }
         }
         let request = FleetRequest.intakeVisualFetch(id: i.id, visualID: "pairing-handshake", revision: 1,
-                                                     part: WireVisualPart.snapshot, offset: 0, limit: 1024)
+                                                     part: WireVisualPart.file("diagram.mmd"), offset: 0, limit: 1024)
         client.onReady = { [weak self] in sent = self?.client.send(request) ?? 0 }
         client.connect(to: try harness.service.loopbackEndpoint(), lastSeq: 0)
         await fulfillment(of: [answered], timeout: 15)
-        guard case .err(_, let code, _) = try XCTUnwrap(reply) else { return XCTFail("expected err, got \(String(describing: reply))") }
-        XCTAssertEqual(code, "visuals_unavailable")
+        guard case .fileChunk(_, let chunk) = try XCTUnwrap(reply) else { return XCTFail("expected a chunk, got \(String(describing: reply))") }
+        XCTAssertEqual(chunk.path, "diagram.mmd")
+        XCTAssertEqual(chunk.data, source)
     }
 }
 

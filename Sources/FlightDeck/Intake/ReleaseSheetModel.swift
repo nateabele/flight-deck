@@ -13,7 +13,7 @@ struct ReleaseSheetModel {
     /// (`ReleaseReview.titles`).
     let titles: [String: String]
     /// The repo files release will write and the commit it will make; nil when the plan has no
-    /// export to show (the integration wires this; until then the sheet is unchanged).
+    /// export to show (`ReleaseReview.export`).
     let export: PlanExportPreview?
 
     init(ops: [ChangeOp], drift: [OpDrift], dropped: Set<Int>, titles: [String: String],

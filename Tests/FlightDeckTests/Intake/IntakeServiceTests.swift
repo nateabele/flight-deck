@@ -641,6 +641,137 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(create[create.firstIndex(of: "--actor")! + 1], "flightdeck-intake:\(id.uuidString)")
     }
 
+    // MARK: - Release export (P2a V4)
+
+    @discardableResult
+    private func git(_ repo: URL, _ args: String...) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["-C", repo.path] + args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try p.run()
+        p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    /// A real repo with one commit and a file the user is still editing.
+    private func repo() throws -> URL {
+        let r = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        try git(r, "init", "-q")
+        try git(r, "config", "user.email", "t@example.com")
+        try git(r, "config", "user.name", "T")
+        try git(r, "config", "commit.gpgsign", "false")
+        try "hello\n".write(to: r.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try git(r, "add", "-A")
+        try git(r, "commit", "-q", "-m", "init")
+        try "hello, still editing\n".write(to: r.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        return r
+    }
+
+    private static let visualPlan = "# Pair the phone\n\n## Pairing\n\n```fd-visual id=pairing\nPairing handshake\n```\n"
+
+    /// An intake in review whose encode carried a plan with one visual, and one new task that
+    /// cites `cites` — what a shaped intake looks like when it reaches the release sheet.
+    private func reviewIntake(project: URL, cites: String?) throws -> UUID {
+        var i = Intake(projectPath: project.path, intent: "Pair the phone")
+        i.state = .review
+        i.recommended = .fullPlan
+        i.changeSet = ChangeSet(graphObservedAt: Date(timeIntervalSince1970: 1_800_000_000), ops: [
+            .createBead(NewBead(tempId: "n1", title: "Note", description: "d",
+                                visualRefs: cites.map { [VisualRef(visualID: $0, states: ["default"])] })),
+        ])
+        let intakes = IntakeStore(root: root)
+        try intakes.save(i)
+        let triage = intakes.directory(for: i.id).appendingPathComponent("triage", isDirectory: true)
+        try FileManager.default.createDirectory(at: triage, withIntermediateDirectories: true)
+        let graph = GraphSnapshot(beads: ["b1": BeadSnapshot(id: "b1", title: "T b1", status: "open"),
+                                          "b2": BeadSnapshot(id: "b2", title: "T b2", status: "open")])
+        try IntakeJSON.encoder.encode(graph).write(to: triage.appendingPathComponent("graph.json"))
+        let tapes = TapeStore(intakeDirectory: intakes.directory(for: i.id))
+        var tape = tapes.loadTape()
+        try tapes.writeCheckpoint(Checkpoint(id: 1, stage: .encode, round: 0, major: true, createdAt: Date()),
+                                  files: ["plan.md": Data(Self.visualPlan.utf8)], into: &tape)
+        try VisualDiskFixture.install(tapes, id: "pairing")
+        return i.id
+    }
+
+    private var releaseBr: MutableRunner {
+        MutableRunner(Self.brReplies(Self.openGraph).merging(["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+    }
+
+    /// Release exports the plan and its visual into `docs/plans/<slug>/`, commits only that folder
+    /// (the user's own edit stays uncommitted), and the task cites the exported folder.
+    func testReleaseExportsThePlanCommitsOnlyItsFolderAndCitesTheVisual() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "pairing")
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+
+        let review = await svc.reviewModel(id)
+        XCTAssertEqual(review?.export?.paths.contains("docs/plans/pair-the-phone/plan.md"), true, "\(String(describing: review?.export))")
+        XCTAssertEqual(review?.export?.commitMessage, "docs: plan pair-the-phone for release")
+
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .released, i.failure ?? i.release?.error ?? "")
+        XCTAssertEqual(try git(repo, "log", "-1", "--format=%s").trimmingCharacters(in: .whitespacesAndNewlines),
+                       "docs: plan pair-the-phone for release")
+        let committed = try git(repo, "show", "--name-only", "--format=", "HEAD").split(separator: "\n").map(String.init)
+        XCTAssertTrue(committed.allSatisfy { $0.hasPrefix("docs/plans/pair-the-phone/") }, "\(committed)")
+        XCTAssertTrue(committed.contains("docs/plans/pair-the-phone/visuals/pairing/diagram.mmd"), "\(committed)")
+        XCTAssertEqual(try git(repo, "status", "--porcelain", "--", "README.md"), " M README.md\n", "the user's edit is untouched")
+        let plan = try String(contentsOf: repo.appendingPathComponent("docs/plans/pair-the-phone/plan.md"), encoding: .utf8)
+        XCTAssertTrue(plan.contains("visuals/pairing/snapshot@default-wide.png"), plan)
+
+        let create = try XCTUnwrap(br.calls.first { $0.prefix(2) == ["br", "create"] })
+        let description = create[try XCTUnwrap(create.firstIndex(of: "--description")) + 1]
+        XCTAssertTrue(description.contains("Fidelity references"), description)
+        XCTAssertTrue(description.contains("docs/plans/pair-the-phone/visuals/pairing/"), description)
+    }
+
+    /// Uncommitted changes under the plan's own folder refuse the release with the folder named,
+    /// and nothing is written: no task, no export (Review Focus 4). (A folder with no marker is
+    /// someone else's, and the export takes `-2` instead: `PlanExporterTests`.)
+    func testReleaseRefusesWhenThePlanFolderHasUncommittedChanges() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "pairing")
+        // The folder an earlier release of this intake committed, with an edit since.
+        let folder = repo.appendingPathComponent("docs/plans/pair-the-phone", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "\(id.uuidString)\n".write(to: folder.appendingPathComponent(".flightdeck-intake"), atomically: true, encoding: .utf8)
+        try git(repo, "add", "--", "docs")
+        try git(repo, "commit", "-q", "-m", "earlier release")
+        try "mine\n".write(to: folder.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .review)
+        XCTAssertTrue(i.failure?.contains("docs/plans/pair-the-phone") == true, i.failure ?? "nil")
+        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] }, "no task is written")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("plan.md").path))
+        XCTAssertEqual(try git(repo, "log", "--format=%s"), "earlier release\ninit\n")
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("notes.md"), encoding: .utf8), "mine\n")
+    }
+
+    /// A task citing a visual the plan does not have fails the release's validation, with
+    /// nothing exported or written.
+    func testReleaseRefusesATaskCitingAVisualThePlanDoesNotHave() async throws {
+        let repo = try repo()
+        let id = try reviewIntake(project: repo, cites: "ghost")
+        let br = releaseBr
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: br)
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .review)
+        XCTAssertTrue(i.failure?.contains("ghost") == true, i.failure ?? "nil")
+        XCTAssertFalse(br.calls.contains { $0.prefix(2) == ["br", "create"] })
+        XCTAssertEqual(try git(repo, "log", "--format=%s"), "init\n")
+    }
+
     func testConfirmedDriftReleasesAgainstTheCurrentHolder() async {
         let br = MutableRunner(Self.brReplies(Self.openGraph))
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.editB1))]), br: br,

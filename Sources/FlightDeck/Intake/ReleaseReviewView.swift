@@ -12,8 +12,8 @@ struct ReleaseReviewView: View {
     @ObservedObject var store: SessionStore
     let intakeID: UUID
     let onClose: () -> Void
-    /// What release will write to the repo and commit, listed above the buttons. nil until the
-    /// integration passes one.
+    /// What release will write to the repo and commit, listed above the buttons, for a render
+    /// that has no service to ask. A loaded review's own `export` wins.
     let exportPreview: PlanExportPreview?
 
     @State private var review: ReleaseReview?
@@ -430,7 +430,7 @@ struct ReleaseReviewView: View {
     /// as the summary line.
     private func model(_ review: ReleaseReview) -> ReleaseSheetModel {
         ReleaseSheetModel(ops: ops(review), drift: review.drift, dropped: review.intake.droppedOps,
-                          titles: review.titles, export: exportPreview)
+                          titles: review.titles, export: review.export ?? exportPreview)
     }
 
     private func rowBackground(drift: OpDrift, dropped: Bool) -> Color {

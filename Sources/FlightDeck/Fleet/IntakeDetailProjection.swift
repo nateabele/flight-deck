@@ -163,7 +163,9 @@ enum IntakeDetailProjection {
             structuredQuestions: true,
             // Ask threads (spec §10): this Mac runs a ThreadRunner per shaping intake, so the
             // phone may offer Ask and send `intake.thread.*` / `intake.diff.decide`.
-            threads: true)
+            threads: true,
+            // Visual blocks (spec §10): the phone may send `intake.visual.fetch` and draw blocks.
+            visuals: service.visualsAvailable)
         detail.etag = etag(detail)
         return detail
     }

@@ -339,6 +339,7 @@ targets:
       - path: Tests/FlightDeckTests/FlightControlL3/Routing/RuleWireTestData.swift
       - path: Tests/FlightDeckTests/CPUTime.swift
       - path: Tests/FlightDeckTests/Intake/ScriptedHarnessRunner.swift
+      - path: Tests/FlightDeckTests/Intake/VisualDiskFixture.swift
       # Shared with FlightDeckTests rather than copied: pure tests read fixtures through
       # Bundle(for:), so the logic bundle needs the same folder structure in its Resources.
       - path: Tests/FlightDeckTests/Fixtures
