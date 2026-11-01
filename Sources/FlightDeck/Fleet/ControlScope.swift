@@ -37,8 +37,9 @@ enum ControlCaller: Equatable {
     /// fail closed rather than falling back to `.human`'s trust.
     case invalid
     /// A detached planning runner (IntakeRunner or ThreadRunner) for intake `UUID`, proven by
-    /// `ControlEnvironment.intakeRunner(forToken:)`. It reaches commands and requests about its
-    /// own intake at every level and nothing else (`out_of_scope`).
+    /// `ControlEnvironment.intakeRunner(forToken:)`. Least privilege: neither runner uses the
+    /// socket for intake ops (each writes its own files), so it reaches no command and no request
+    /// at any level (`out_of_scope`). The canvas branch adds its own canvas requests back.
     case intakeRunner(UUID)
 }
 
@@ -87,9 +88,11 @@ enum ControlScope {
     /// Exhaustive with no `default`, so a new `FleetCommand` case cannot compile until someone
     /// here decides whether it is a write reachable only by its own session, or fleet-wide.
     static func permits(_ command: FleetCommand, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
-        // First, before `.full` waves everything through: a runner is not a human or a tab, so it
-        // gets its own intake's commands and nothing a tab or human could reach.
-        if case .intakeRunner(let own) = caller { return command.intakeID == own }
+        // An intake's runner is not a tab and not a person: no command is its to issue (not even
+        // presence), at any scope level, so this comes before every shortcut below. Its own
+        // intake's commands included: both runners write their files directly, so an allowance
+        // would be unused reach for anything that gets the runner's environment.
+        if case .intakeRunner = caller { return false }
         if case .viewing = command { return true }
         if level == .full || caller == .human { return true }
         guard case .session(let me) = caller, level == .ownSession else { return false }
@@ -131,9 +134,22 @@ enum ControlScope {
     /// (`.full` or `.human` only), as do the infra requests that write. The delegation requests
     /// that write follow the own-session rule instead (see their arm). Every other request only
     /// reads and is always allowed.
+    /// What an intake's runner may ask, listed arm by arm with no `default` so a new request kind
+    /// cannot compile until it is decided here. Nothing on this branch: the canvas branch adds its
+    /// canvas requests (`case .canvas`) as the one reach.
+    private static func runnerPermits(_ request: FleetRequest, level: ControlScopeLevel) -> Bool {
+        switch request {
+        case .peer, .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search, .openConversation,
+             .intakeDetail, .intakePlan, .intakeThreadGet, .fileRead, .hostList, .hostInfo, .delegate, .infra, .accountList,
+             .accountSwitch:
+            return false
+        }
+    }
+
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
-        // As for commands: a runner reaches only reads about its own intake.
-        if case .intakeRunner(let own) = caller { return request.intakeID == own }
+        // Before the full-scope and read shortcuts: a runner holds no tab's trust, so those
+        // shortcuts do not apply to it.
+        if case .intakeRunner = caller { return runnerPermits(request, level: level) }
         switch request {
         case .peer(let peer):
             if caller == .invalid { return false }
@@ -192,32 +208,6 @@ enum ControlScope {
             if infra.isReadOnly || level == .full || caller == .human { return true }
             guard case .budget = infra, case .session = caller else { return false }
             return level == .ownSession
-        }
-    }
-}
-
-private extension FleetCommand {
-    /// The intake a command is about, or `nil` for every command that is not about one. The
-    /// default is the safe side: a new intake command is refused to a runner until it is listed.
-    var intakeID: UUID? {
-        switch self {
-        case .intakeTape(let id, _, _, _), .intakeDefaultPlay(let id, _, _), .intakeNote(let id, _, _, _, _, _, _, _),
-             .intakeRemoveNote(let id, _, _), .intakeSetNoteKind(let id, _, _, _), .intakeChoose(let id, _, _),
-             .intakeAnswer(let id, _, _, _, _), .intakeStart(let id, _, _, _, _), .intakeRounds(let id, _, _, _),
-             .intakeThreadSend(let id, _, _, _, _), .intakeThreadAnswer(let id, _, _, _),
-             .intakeThreadResolve(let id, _, _), .intakeDiffDecide(let id, _, _, _, _):
-            return id
-        default:
-            return nil
-        }
-    }
-}
-
-private extension FleetRequest {
-    var intakeID: UUID? {
-        switch self {
-        case .intakeDetail(let id, _), .intakePlan(let id, _, _), .intakeThreadGet(let id, _, _): return id
-        default: return nil
         }
     }
 }

@@ -41,29 +41,26 @@ final class RunnerTokenTests: XCTestCase {
         }
     }
 
-    func testARunnerTokenForIntakeXIsRefusedForIntakeY() {
+    /// Least privilege (ruling): neither runner uses the socket for intake ops — both write their
+    /// own files — so a runner token reaches no intake command or request, its own intake's
+    /// included, at any level. It gets `out_of_scope`, as on the canvas branch.
+    func testARunnerTokenReachesNoIntakeOpEvenForItsOwnIntake() {
         let x = intake, y = UUID(), thread = UUID()
         let runner = ControlCaller.intakeRunner(x)
-        let own: [FleetCommand] = [
-            .intakeTape(id: x, token: UUID(), command: "pause", stage: nil),
-            .intakeThreadResolve(id: x, token: UUID(), threadID: thread),
-            .intakeDiffDecide(id: x, token: UUID(), threadID: thread, diffID: UUID(), accept: true),
-        ]
-        let others: [FleetCommand] = [
-            .intakeTape(id: y, token: UUID(), command: "pause", stage: nil),
-            .intakeThreadResolve(id: y, token: UUID(), threadID: thread),
-            .intakeDiffDecide(id: y, token: UUID(), threadID: thread, diffID: UUID(), accept: true),
-        ]
+        let commands: [FleetCommand] = [x, y].flatMap { id -> [FleetCommand] in [
+            .intakeTape(id: id, token: UUID(), command: "pause", stage: nil),
+            .intakeThreadSend(id: id, token: UUID(), threadID: nil, anchor: nil, text: "x"),
+            .intakeThreadResolve(id: id, token: UUID(), threadID: thread),
+            .intakeDiffDecide(id: id, token: UUID(), threadID: thread, diffID: UUID(), accept: true),
+        ] }
+        let requests: [FleetRequest] = [x, y].flatMap { id -> [FleetRequest] in [
+            .intakeThreadGet(id: id, threadID: thread, since: nil),
+            .intakeDetail(id: id, ifNot: nil),
+            .intakePlan(id: id, checkpoint: nil, changes: false),
+        ] }
         for level in ControlScopeLevel.allCases {
-            for c in own { XCTAssertTrue(ControlScope.permits(c, level: level, caller: runner), "\(level) \(c)") }
-            for c in others { XCTAssertFalse(ControlScope.permits(c, level: level, caller: runner), "\(level) \(c)") }
-            XCTAssertTrue(ControlScope.permits(FleetRequest.intakeThreadGet(id: x, threadID: thread, since: nil),
-                                               level: level, caller: runner))
-            XCTAssertTrue(ControlScope.permits(FleetRequest.intakeDetail(id: x, ifNot: nil), level: level, caller: runner))
-            XCTAssertFalse(ControlScope.permits(FleetRequest.intakeThreadGet(id: y, threadID: thread, since: nil),
-                                                level: level, caller: runner))
-            XCTAssertFalse(ControlScope.permits(FleetRequest.intakePlan(id: y, checkpoint: nil, changes: false),
-                                                level: level, caller: runner))
+            for c in commands { XCTAssertFalse(ControlScope.permits(c, level: level, caller: runner), "\(level) \(c)") }
+            for r in requests { XCTAssertFalse(ControlScope.permits(r, level: level, caller: runner), "\(level) \(r)") }
         }
     }
 
@@ -74,6 +71,8 @@ final class RunnerTokenTests: XCTestCase {
             XCTAssertFalse(ControlScope.permits(FleetCommand.closeSession(id: UUID()), level: level, caller: runner))
             XCTAssertFalse(ControlScope.permits(FleetCommand.swarmPause(project: UUID()), level: level, caller: runner))
             XCTAssertFalse(ControlScope.permits(FleetRequest.hostList, level: level, caller: runner))
+            XCTAssertFalse(ControlScope.permits(FleetRequest.recentlyClosed, level: level,
+                                                caller: runner))
         }
     }
 }
