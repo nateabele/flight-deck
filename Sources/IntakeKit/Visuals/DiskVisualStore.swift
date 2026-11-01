@@ -16,8 +16,9 @@ import Foundation
 ///   otherwise block a reader forever; it is opened `O_NONBLOCK` so the check itself cannot;
 /// - a file with another hard link (`st_nlink > 1`), which could be the same inode as a file
 ///   outside the folder;
-/// - a file over `VisualStoreLimits.maxFileBytes`, or whose size differs from the manifest entry's
-///   when that is recorded (> 0).
+/// - a file over `VisualStoreLimits.maxFileBytes`, or whose size differs from the manifest
+///   entry's. An entry whose size is 0 or less is refused: an empty file is not a visual, and an
+///   unrecorded size would let the export read a file of any length.
 ///
 /// The bytes come from `pread` on that same checked descriptor and the size from its `fstat`, so
 /// nothing is reopened by path afterwards. The store hands out no URLs.
@@ -63,7 +64,7 @@ public struct DiskVisualStore: VisualStoreReading, Sendable {
         var st = stat()
         guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_nlink == 1,
               st.st_size <= off_t(VisualStoreLimits.maxFileBytes),
-              entry.size <= 0 || entry.size == Int64(st.st_size) else { return nil }
+              entry.size > 0, entry.size == Int64(st.st_size) else { return nil }
         let size = Int64(st.st_size)
         guard offset <= size else { return nil }
         let want = Int(min(Int64(limit), size - offset))

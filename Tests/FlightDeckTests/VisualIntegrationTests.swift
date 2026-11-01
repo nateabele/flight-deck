@@ -159,7 +159,7 @@ final class VisualIntegrationTests: XCTestCase {
         let rev = tape.revisionDirectory(id, r: 1)
         try FileManager.default.createDirectory(at: rev, withIntermediateDirectories: true)
         let manifest = VisualManifest(provider: "p", providerVersion: "1", kind: "k", title: "T", entry: "a.txt", madeOnCheckpoint: 1,
-                                      madeBy: .you, files: [VisualFileEntry(path: "a.txt", size: 0, sha256: "")])
+                                      madeBy: .you, files: [VisualFileEntry(path: "a.txt", size: 2, sha256: "")])
         try IntakeJSON.encoder.encode(manifest).write(to: rev.appendingPathComponent("manifest.json"))
         try Data("hi".utf8).write(to: rev.appendingPathComponent("a.txt"))
         XCTAssertEqual(reader.read(id, r: 1, name: "a.txt", offset: 0, limit: 10)?.data, Data("hi".utf8))

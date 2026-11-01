@@ -34,13 +34,23 @@ final class DiskVisualStoreTests: XCTestCase {
                        files: files.map { VisualFileEntry(path: $0, size: sizes[$0] ?? 0, sha256: "") })
     }
 
+    /// Writes a revision's file and, unless the test pinned that entry's size, records the file's
+    /// true size in the manifest, as a writer does.
     private func write(_ name: String, _ text: String = "x", in dir: URL? = nil) throws {
-        let url = (dir ?? rev).appendingPathComponent(name)
+        let folder = dir ?? rev
+        let url = folder.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(text.utf8).write(to: url)
+        let manifestURL = folder.appendingPathComponent("manifest.json")
+        guard !pinned.contains(name), let data = try? Data(contentsOf: manifestURL),
+              var m = try? IntakeJSON.decoder.decode(VisualManifest.self, from: data) else { return }
+        m.files = m.files.map { $0.path == name ? VisualFileEntry(path: name, size: Int64(text.utf8.count), sha256: $0.sha256) : $0 }
+        try IntakeJSON.encoder.encode(m).write(to: manifestURL)
     }
+    private var pinned: Set<String> = []
 
     private func install(files: [String], r: Int = 1, sizes: [String: Int64] = [:]) throws {
+        pinned.formUnion(sizes.keys)
         let dir = tape.revisionDirectory(id, r: r)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try IntakeJSON.encoder.encode(manifest(files: files, sizes: sizes)).write(to: dir.appendingPathComponent("manifest.json"))
@@ -201,11 +211,15 @@ final class DiskVisualStoreTests: XCTestCase {
         try write("a.txt", "12345"); try write("b.txt", "12345"); try write("c.txt", "12345")
         XCTAssertNotNil(read("a.txt"), "matches")
         XCTAssertNil(read("b.txt"), "differs")
-        XCTAssertNotNil(read("c.txt"), "a listed size of 0 means not recorded")
+        XCTAssertNil(read("c.txt"), "a listed size of 0 is refused, not taken as unrecorded")
     }
 
     func testAFileOverTheLimitIsRefused() throws {
         try install(files: ["big.bin"])
+        let m = VisualManifest(provider: "mermaid", providerVersion: "1", kind: "diagram", title: "T", entry: "big.bin",
+                               madeOnCheckpoint: 1, madeBy: .you, primary: true,
+                               files: [VisualFileEntry(path: "big.bin", size: Int64(VisualStoreLimits.maxFileBytes), sha256: "")])
+        try IntakeJSON.encoder.encode(m).write(to: rev.appendingPathComponent("manifest.json"))
         let fd = open(rev.appendingPathComponent("big.bin").path, O_CREAT | O_WRONLY, 0o600)
         XCTAssertGreaterThanOrEqual(fd, 0)
         XCTAssertEqual(ftruncate(fd, off_t(VisualStoreLimits.maxFileBytes + 1)), 0)   // sparse: no real disk
