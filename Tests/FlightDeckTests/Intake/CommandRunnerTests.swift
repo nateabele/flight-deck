@@ -1,5 +1,5 @@
 import XCTest
-import IntakeKit
+@testable import IntakeKit
 
 /// `SystemCommandRunner`'s `Foundation.Process` path — moved unchanged from the app's old
 /// `SystemHeadlessRunner`, which `HeadlessRunnerTests`-equivalent coverage (now
@@ -231,7 +231,7 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "started\n")
         XCTAssertEqual(r.exitCode, 0)
         // A same-group child's lost late output is never silent.
-        XCTAssertTrue(r.stderr.hasSuffix("\n[killed 1 background processes still holding output]"), r.stderr)
+        XCTAssertTrue(r.stderr.hasSuffix("\n[stopped 1 background processes still holding output]"), r.stderr)
         var waited = 0
         while Self.alive(marker), waited < 100 { try await Task.sleep(nanoseconds: 20_000_000); waited += 1 }
         XCTAssertFalse(Self.alive(marker), "the escaped pipe holder is still running")
@@ -274,7 +274,74 @@ final class CommandRunnerTests: XCTestCase {
             })
         XCTAssertEqual(r.stdout.count, 10_001)
         XCTAssertEqual(received.bytes, 10_001)
-        XCTAssertFalse(r.stderr.contains("[killed"), r.stderr)
+        XCTAssertFalse(r.stderr.contains("background processes"), r.stderr)
+        XCTAssertFalse(r.stdoutTruncated)
+    }
+
+    /// A holder that exits on SIGTERM was asked to stop, not killed; the note says "stopped".
+    func testHolderNoteSaysStopped() {
+        XCTAssertEqual(SystemCommandRunner.killedHoldersNote(2), "\n[stopped 2 background processes still holding output]")
+    }
+
+    /// Stdout dropped past `stdoutCapture` is flagged, on the process-group path and on a fake.
+    func testDroppedStdoutIsFlagged() async throws {
+        let cut = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "head -c 100 /dev/zero"], cwd: URL(fileURLWithPath: "/tmp"),
+            environment: env, processGroup: true, onSpawn: nil, onStdout: nil, stdoutCapture: 10)
+        XCTAssertEqual(cut.stdout.count, 10)
+        XCTAssertTrue(cut.stdoutTruncated)
+        let whole = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "head -c 10 /dev/zero"], cwd: URL(fileURLWithPath: "/tmp"),
+            environment: env, processGroup: true, onSpawn: nil, onStdout: nil, stdoutCapture: 10)
+        XCTAssertFalse(whole.stdoutTruncated)
+        let viaProcess = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "head -c 100 /dev/zero"], cwd: URL(fileURLWithPath: "/tmp"),
+            environment: env, processGroup: false, onSpawn: nil, onStdout: nil, stdoutCapture: 10)
+        XCTAssertTrue(viaProcess.stdoutTruncated)
+    }
+
+    // MARK: - The PIPE_EOF bit, made wrong on purpose
+
+    /// A kernel that never sets PIPE_EOF: the bit reads "writer alive" forever. With no holder
+    /// in the scan, EOF is certain, so the drain must not be abandoned (which silently cut a
+    /// slow sink's tail).
+    func testEOFBitThatIsNeverSetDoesNotAbandonAQuietPipe() {
+        var fds: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&fds), 0)
+        close(fds[1])
+        defer { close(fds[0]) }
+        let signals = Signals()
+        let probe = SystemCommandRunner.PipeProbe(eofBit: { _ in false }, writers: { _ in [] },
+                                                  signal: { signals.add($0, $1) })
+        let outcome = SystemCommandRunner.killPipeWriters(of: [fds[0]], probe: probe)
+        XCTAssertFalse(outcome.writerAlive, "no holder exists, yet the drain would be abandoned")
+        XCTAssertEqual(outcome.stopped, 0)
+        XCTAssertTrue(signals.all.isEmpty)
+    }
+
+    /// A kernel that sets PIPE_EOF while a writer still lives: the scan still sees the holder,
+    /// so it gets TERM then KILL, and while it survives the drain may be abandoned (bounded),
+    /// never awaited without a limit.
+    func testEOFBitSetWhileAWriterLivesStillCountsTheWriter() {
+        var fds: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&fds), 0)
+        defer { close(fds[0]); close(fds[1]) }
+        let signals = Signals()
+        let holder: pid_t = 999_999
+        let probe = SystemCommandRunner.PipeProbe(eofBit: { _ in true }, writers: { _ in [holder] },
+                                                  signal: { signals.add($0, $1) })
+        let outcome = SystemCommandRunner.killPipeWriters(of: [fds[0]], probe: probe)
+        XCTAssertTrue(outcome.writerAlive, "a holder the scan sees was treated as gone")
+        XCTAssertEqual(outcome.stopped, 1)
+        XCTAssertEqual(signals.all.map(\.signal), [SIGTERM, SIGKILL])
+    }
+
+    /// The bit is self-tested once per process; a probe whose bit lies either way is not trusted.
+    func testEOFBitSelfTest() {
+        XCTAssertTrue(SystemCommandRunner.PipeProbe.system.bitTrusted, "this kernel's PIPE_EOF failed the self-test")
+        XCTAssertFalse(SystemCommandRunner.PipeProbe.selfTest { _ in false })
+        XCTAssertFalse(SystemCommandRunner.PipeProbe.selfTest { _ in true })
+        XCTAssertFalse(SystemCommandRunner.PipeProbe.selfTest { _ in nil })
     }
 
     /// The holder is asked first: SIGTERM, which an MCP server or an ssh master uses to shut
@@ -292,7 +359,7 @@ final class CommandRunnerTests: XCTestCase {
                                                     cwd: URL(fileURLWithPath: "/tmp"), environment: env,
                                                     processGroup: true, onSpawn: nil)
         XCTAssertEqual(try? String(contentsOf: termed, encoding: .utf8), "term\n", "the holder was not sent SIGTERM first")
-        XCTAssertTrue(r.stderr.contains("[killed "), r.stderr)
+        XCTAssertTrue(r.stderr.contains("[stopped "), r.stderr)
     }
 
     /// A holder that ignores SIGTERM gets SIGKILL half a second later.
@@ -308,7 +375,7 @@ final class CommandRunnerTests: XCTestCase {
                                                     processGroup: true, onSpawn: nil)
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
         XCTAssertFalse(Self.alive(marker), "a TERM-ignoring holder survived")
-        XCTAssertTrue(r.stderr.hasSuffix("\n[killed 1 background processes still holding output]"), r.stderr)
+        XCTAssertTrue(r.stderr.hasSuffix("\n[stopped 1 background processes still holding output]"), r.stderr)
     }
 
     static func pgrep(_ marker: String) -> Int32 {
@@ -379,4 +446,12 @@ private final class Received: @unchecked Sendable {
     /// Returns the call number, from 1.
     func add(_ chunk: Data) -> Int { lock.lock(); defer { lock.unlock() }; calls += 1; total += chunk.count; return calls }
     var bytes: Int { lock.lock(); defer { lock.unlock() }; return total }
+}
+
+/// The signals a fake `PipeProbe` was asked to send, in order.
+private final class Signals: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent: [(pid: pid_t, signal: Int32)] = []
+    func add(_ pid: pid_t, _ signal: Int32) { lock.lock(); sent.append((pid, signal)); lock.unlock() }
+    var all: [(pid: pid_t, signal: Int32)] { lock.lock(); defer { lock.unlock() }; return sent }
 }

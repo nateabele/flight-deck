@@ -7,8 +7,10 @@ public struct CommandResult: Sendable {
     public let stdout: Data
     public let stderr: String
     public let exitCode: Int32
-    public init(stdout: Data, stderr: String, exitCode: Int32) {
-        self.stdout = stdout; self.stderr = stderr; self.exitCode = exitCode
+    /// True when the runner dropped stdout past the caller's `stdoutCapture`.
+    public let stdoutTruncated: Bool
+    public init(stdout: Data, stderr: String, exitCode: Int32, stdoutTruncated: Bool = false) {
+        self.stdout = stdout; self.stderr = stderr; self.exitCode = exitCode; self.stdoutTruncated = stdoutTruncated
     }
 }
 
@@ -58,7 +60,8 @@ extension CommandRunner {
         let result = try await run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
                                    processGroup: processGroup, onSpawn: onSpawn, onStdout: onStdout)
         guard let stdoutCapture, result.stdout.count > stdoutCapture else { return result }
-        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode)
+        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode,
+                             stdoutTruncated: true)
     }
 
     /// The common case: no process group, nobody needs the pid while it runs.
@@ -110,7 +113,8 @@ public struct SystemCommandRunner: CommandRunner {
         let result = try await runViaFoundationProcess(executable: executable, arguments: arguments, cwd: cwd,
                                                        environment: environment, onSpawn: onSpawn, onStdout: onStdout)
         guard let stdoutCapture, result.stdout.count > stdoutCapture else { return result }
-        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode)
+        return CommandResult(stdout: result.stdout.prefix(stdoutCapture), stderr: result.stderr, exitCode: result.exitCode,
+                             stdoutTruncated: true)
     }
 
     /// Reads `handle` to EOF on the calling thread, handing each chunk to `sink` as it lands.
@@ -171,16 +175,58 @@ public struct SystemCommandRunner: CommandRunner {
 
     /// XNU's `PIPE_EOF` in `pipe_status`: set on a read end once its last write end has closed,
     /// whoever held it, even with bytes still buffered (measured). It answers "can a writer
-    /// still exist" for processes the libproc scan cannot inspect, too.
+    /// still exist" for processes the libproc scan cannot inspect, too, but only while it
+    /// behaves: `PipeProbe` self-tests it and believes the scan over it.
     private static let pipeEOF: Int32 = 0x80
 
-    static func noWriterLeft(_ readFDs: [Int32]) -> Bool {
+    /// The `PIPE_EOF` bit of one of our read ends, or nil when it cannot be read.
+    static func eofBit(_ fd: Int32) -> Bool? {
         let infoSize = Int32(MemoryLayout<pipe_fdinfo>.size)
-        return readFDs.allSatisfy { fd in
-            var info = pipe_fdinfo()
-            // Unknown counts as "a writer may be alive": the caller then bounds its wait.
-            guard proc_pidfdinfo(getpid(), fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize else { return false }
-            return info.pipeinfo.pipe_status & pipeEOF != 0
+        var info = pipe_fdinfo()
+        guard proc_pidfdinfo(getpid(), fd, PROC_PIDFDPIPEINFO, &info, infoSize) == infoSize else { return nil }
+        return info.pipeinfo.pipe_status & pipeEOF != 0
+    }
+
+    /// What `killPipeWriters` asks the kernel and does to holders. A seam, so tests can make
+    /// the `PIPE_EOF` bit wrong in either direction; `.system` is the real one.
+    struct PipeProbe: Sendable {
+        var eofBit: @Sendable (Int32) -> Bool?
+        var writers: @Sendable ([Int32]) -> Set<pid_t>
+        var signal: @Sendable (pid_t, Int32) -> Void
+
+        /// Whether `eofBit` passed `selfTest`. When it did not, only the scan is believed.
+        let bitTrusted: Bool
+
+        init(eofBit: @escaping @Sendable (Int32) -> Bool?, writers: @escaping @Sendable ([Int32]) -> Set<pid_t>,
+             signal: @escaping @Sendable (pid_t, Int32) -> Void) {
+            self.eofBit = eofBit; self.writers = writers; self.signal = signal
+            bitTrusted = Self.selfTest(eofBit)
+        }
+
+        /// A `static let`, so the real bit is self-tested once per process.
+        static let system = PipeProbe(eofBit: SystemCommandRunner.eofBit, writers: SystemCommandRunner.pipeWriters(of:),
+                                      signal: { _ = kill($0, $1) })
+
+        /// One fresh pipe: the bit must be clear while its write end is open and set once that
+        /// closes. A kernel whose bit is never set would have every drain abandoned (a slow
+        /// sink silently cut); one whose bit is set early would have a drain awaited forever.
+        static func selfTest(_ bit: (Int32) -> Bool?) -> Bool {
+            var fds: [Int32] = [0, 0]
+            guard pipe(&fds) == 0 else { return false }
+            let whileOpen = bit(fds[0])
+            close(fds[1])
+            let afterClose = bit(fds[0])
+            close(fds[0])
+            return whileOpen == false && afterClose == true
+        }
+
+        /// True when a write end of one of `readFDs` may still be open. A holder the scan finds
+        /// is alive whatever the bit says. With none found, a trusted bit still speaks for a
+        /// holder the scan cannot inspect; an untrusted one is ignored.
+        func writerMayRemain(_ readFDs: [Int32]) -> Bool {
+            // A trusted bit that says "open" needs no scan (about 10 ms each, measured).
+            if bitTrusted, !readFDs.allSatisfy({ eofBit($0) == true }) { return true }
+            return !writers(readFDs).isEmpty
         }
     }
 
@@ -224,28 +270,30 @@ public struct SystemCommandRunner: CommandRunner {
 
     /// SIGTERM to every holder of our pipes, half a second for them to close (an MCP server or
     /// an ssh master shuts down cleanly on it), then SIGKILL to whatever still holds one, found
-    /// by a fresh scan so a holder forked meanwhile is caught too. `killed` counts the processes
-    /// signalled; `writerAlive` is true only if a write end is still open afterwards (a holder
-    /// this user may not inspect or kill), the one case in which EOF cannot be awaited.
-    static func killPipeWriters(of readFDs: [Int32]) -> (killed: Int, writerAlive: Bool) {
+    /// by a fresh scan so a holder forked meanwhile is caught too. `stopped` counts the processes
+    /// signalled; `writerAlive` is true only if a write end may still be open afterwards (a
+    /// holder that survived, or one this user may not inspect), the one case in which EOF
+    /// cannot be awaited.
+    static func killPipeWriters(of readFDs: [Int32], probe: PipeProbe = .system) -> (stopped: Int, writerAlive: Bool) {
         func waitForEOF(_ seconds: Double) {
             let deadline = Date().addingTimeInterval(seconds)
-            while !noWriterLeft(readFDs), Date() < deadline { usleep(10_000) }
+            while probe.writerMayRemain(readFDs), Date() < deadline { usleep(10_000) }
         }
-        var signalled = pipeWriters(of: readFDs)
-        for pid in signalled { kill(pid, SIGTERM) }
+        var signalled = probe.writers(readFDs)
+        for pid in signalled { probe.signal(pid, SIGTERM) }
         if !signalled.isEmpty { waitForEOF(0.5) }
-        if !noWriterLeft(readFDs) {
-            let stubborn = pipeWriters(of: readFDs)
-            for pid in stubborn { kill(pid, SIGKILL) }
+        if probe.writerMayRemain(readFDs) {
+            let stubborn = probe.writers(readFDs)
+            for pid in stubborn { probe.signal(pid, SIGKILL) }
             signalled.formUnion(stubborn)
             if !stubborn.isEmpty { waitForEOF(1) }
         }
-        return (signalled.count, !noWriterLeft(readFDs))
+        return (signalled.count, probe.writerMayRemain(readFDs))
     }
 
+    /// "Stopped": a holder that exits cleanly on SIGTERM was asked, not killed.
     static func killedHoldersNote(_ count: Int) -> String {
-        "\n[killed \(count) background processes still holding output]"
+        "\n[stopped \(count) background processes still holding output]"
     }
 
     // MARK: - Foundation.Process path (moved from the app's SystemHeadlessRunner)
@@ -425,13 +473,15 @@ public struct SystemCommandRunner: CommandRunner {
 
         let exitFlag = ExitFlag()
         let abandon = Latch()
-        let result: (Data, Data, Int32, Bool) = try await withTaskCancellationHandler {
+        let result: (Data, Data, Int32, Bool, Bool) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let drains = DispatchGroup()
-                let out = Buffer(), err = Buffer(), errDropped = Latch()
+                let out = Buffer(), err = Buffer(), errDropped = Latch(), outDropped = Latch()
                 drains.enter()
                 DispatchQueue.global().async {
-                    out.data = Self.pollingDrain(outPipe.readFD, keep: stdoutCapture, sink: onStdout, abandon: abandon).data
+                    let drained = Self.pollingDrain(outPipe.readFD, keep: stdoutCapture, sink: onStdout, abandon: abandon)
+                    out.data = drained.data
+                    if drained.dropped { outDropped.set() }
                     drains.leave()
                 }
                 drains.enter()
@@ -461,10 +511,10 @@ public struct SystemCommandRunner: CommandRunner {
                     // still holds a write end is an orphan of this run and is killed, so the
                     // drains see EOF. Our read ends stay open until then: the scan matches the
                     // holders' handles against them.
-                    var killed = 0
+                    var stopped = 0
                     if drains.wait(timeout: .now() + Self.drainGrace) == .timedOut {
                         let outcome = Self.killPipeWriters(of: [outPipe.readFD, errPipe.readFD])
-                        killed = outcome.killed
+                        stopped = outcome.stopped
                         // With no writer left EOF is certain, so the drains finish on their own
                         // however slow the sink is: cutting them off here lost the tail of a
                         // slow sink's stream (a round's final JSON line). Only a writer still
@@ -481,13 +531,13 @@ public struct SystemCommandRunner: CommandRunner {
                     if errDropped.isSet { err.data.append(Data(Self.stderrTruncatedNote.utf8)) }
                     // A holder killed above may have been a same-group child with late output
                     // still to write; its loss is never silent.
-                    if killed > 0 { err.data.append(Data(Self.killedHoldersNote(killed).utf8)) }
+                    if stopped > 0 { err.data.append(Data(Self.killedHoldersNote(stopped).utf8)) }
                     // `WIFSIGNALED`/`WTERMSIG`/`WEXITSTATUS` are `#define`s, not C functions —
                     // Swift can't call them, so this is their BSD wait-status layout by hand.
                     let low7 = status & 0x7f
                     let signaled = low7 != 0 && low7 != 0x7f
                     let code = signaled ? low7 : (status >> 8) & 0xff
-                    continuation.resume(returning: (out.data, err.data, code, signaled))
+                    continuation.resume(returning: (out.data, err.data, code, signaled, outDropped.isSet))
                 }
             }
         } onCancel: {
@@ -510,9 +560,11 @@ public struct SystemCommandRunner: CommandRunner {
 
         if Task.isCancelled { throw CancellationError() }
         var stderr = String(decoding: result.1, as: UTF8.self)
-        guard result.3 else { return CommandResult(stdout: result.0, stderr: stderr, exitCode: result.2) }
+        guard result.3 else {
+            return CommandResult(stdout: result.0, stderr: stderr, exitCode: result.2, stdoutTruncated: result.4)
+        }
         stderr = "terminated by signal \(result.2)" + (stderr.isEmpty ? "" : "\n" + stderr)
-        return CommandResult(stdout: result.0, stderr: stderr, exitCode: 128 + result.2)
+        return CommandResult(stdout: result.0, stderr: stderr, exitCode: 128 + result.2, stdoutTruncated: result.4)
     }
 }
 
