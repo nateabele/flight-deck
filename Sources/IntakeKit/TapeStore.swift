@@ -295,6 +295,22 @@ public struct TapeStore: Sendable {
         try IntakeJSON.encoder.encode(sources).write(to: url, options: .atomic)
     }
 
+    /// Runner-only, after a hand edit lands on `checkpoint` (A-6): drops each thread source whose
+    /// change the edit reverted — its passage reads as the old text again and the new text is
+    /// gone — so the next round is not told "Its change is already in the plan" about a change
+    /// the human took back. A source whose diff can't be read is kept.
+    public func pruneThreadEdits(checkpoint: Int, markdown: String, diff: (ThreadEditSource) -> ThreadDiff?) throws {
+        let url = threadEditSourcesURL(checkpoint: checkpoint)
+        guard let data = try? Data(contentsOf: url),
+              let sources = try? IntakeJSON.decoder.decode([ThreadEditSource].self, from: data) else { return }
+        let kept = sources.filter { source in
+            guard let d = diff(source), !d.old.isEmpty else { return true }
+            return !(markdown.contains(d.old) && (d.new.isEmpty || !markdown.contains(d.new)))
+        }
+        guard kept != sources else { return }
+        try IntakeJSON.encoder.encode(kept).write(to: url, options: .atomic)
+    }
+
     /// Every note on `tape` for the app to list or highlight: the ones rounds already consumed,
     /// oldest first, each with the checkpoint that consumed it, then the ones still pending
     /// (`consumedBy` nil). A note that is somehow both is listed once, as consumed.

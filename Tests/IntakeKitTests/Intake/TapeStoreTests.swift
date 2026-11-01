@@ -252,4 +252,25 @@ final class TapeStoreTests: XCTestCase {
         try Data("{torn".utf8).write(to: dir.appendingPathComponent("result.json"))
         XCTAssertNil(store.seatResult(run: "refine-1-reviewer"))
     }
+
+    /// A-6: a hand edit that takes a thread's change back drops that thread's source; one that
+    /// leaves it in place, or touches something else, keeps it.
+    func testAHandEditThatRevertsAThreadsChangeDropsItsSource() throws {
+        let store = TapeStore(intakeDirectory: root)
+        var tape = Tape()
+        try store.writeCheckpoint(Checkpoint(id: 1, stage: .refine, round: 1, major: false, createdAt: Date()),
+                                  files: ["plan.md": Data("We ship on Friday.\n".utf8)], into: &tape)
+        let thread = ThreadID()
+        let d = ThreadDiff(thread: thread, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "We ship on Friday."),
+                           old: "We ship on Friday.", new: "We ship on Monday.")
+        let source = ThreadEditSource(thread: thread, diff: d.id)
+        try store.writeUserEdits(checkpoint: 1, markdown: "We ship on Monday.\nMore.\n")
+        try store.recordThreadEdit(checkpoint: 1, source)
+
+        try store.pruneThreadEdits(checkpoint: 1, markdown: "We ship on Monday.\nMore, edited.\n") { _ in d }
+        XCTAssertEqual(store.threadEditSources(checkpoint: 1), [source], "the change is still there")
+        try store.writeUserEdits(checkpoint: 1, markdown: "We ship on Friday.\nMore.\n")
+        try store.pruneThreadEdits(checkpoint: 1, markdown: "We ship on Friday.\nMore.\n") { _ in d }
+        XCTAssertEqual(store.threadEditSources(checkpoint: 1), [], "taken back: no source")
+    }
 }

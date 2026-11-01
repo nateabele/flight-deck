@@ -309,7 +309,10 @@ private actor TapeKeeper {
             case .pause, .note, .removeNote, .setNoteKind, .extend, .trim:
                 TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
-                applyEdit(checkpoint: checkpoint, markdown: markdown)
+                if applyEdit(checkpoint: checkpoint, markdown: markdown) {
+                    let threads = ThreadStore(intakeDirectory: store.intakeDirectory)
+                    try? store.pruneThreadEdits(checkpoint: checkpoint, markdown: markdown) { threads.diff($0.thread, $0.diff) }
+                }
             case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
                 // The payload is exactly `editPlan`'s — the whole edited plan for one checkpoint
                 // — and so is the effect: the human accepted the text, so it is their edit. It
