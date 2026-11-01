@@ -67,7 +67,8 @@ fn impact_text(p: &Probe, t: &Task, seed: &str, diff: &[String]) -> String {
     let co = cochange(p.root, &t.parent);
     let get = move || -> flightindex::error::Result<Arc<CoChange>> { Ok(co.clone()) };
     let no_base = || -> flightindex::error::Result<Option<tools::Baseline>> { Ok(None) };
-    let ctx = Ctx { graph: p.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], recent: &[], cochange: &get, diff, base: &no_base };
+    let no_history = || flightindex::history::HistoryState::Unavailable("no history in eval".into());
+    let ctx = Ctx { graph: p.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], recent: &[], cochange: &get, diff, base: &no_base, history: &no_history };
     tools::run("impact", &ctx).unwrap_or_default()
 }
 

@@ -965,7 +965,7 @@ fn overlay_stamp(commit: &str, overlay: &[Overlay]) -> String {
 
 /// `git cat-file --batch`: contents for each id, `None` if git does not have it. Feeding stdin
 /// from a second thread keeps a full stdout pipe from deadlocking the writer.
-fn cat_file_batch(root: &Path, ids: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+pub(crate) fn cat_file_batch(root: &Path, ids: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
     let mut child = Command::new("git")
         .args(["cat-file", "--batch"])
         .current_dir(root)

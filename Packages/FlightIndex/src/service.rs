@@ -22,6 +22,7 @@ use crate::edit;
 use crate::engine::{heap_limit_for, target_for_heap, Engine, Phase, Progress, DEFAULT_MEMORY_TARGET};
 use crate::error::{Error, Result};
 use crate::git::{self, View};
+use crate::history::{HistoryIndex, HistoryState};
 use crate::links::{LinkIndex, Member, Role};
 use crate::proto::{state, Request, Response, PROTOCOL_VERSION};
 use crate::refresh::{self, BaseIndex, Refreshed};
@@ -71,6 +72,15 @@ impl Config {
 /// One repository's co-change, computed once by whichever request needs it first.
 type CoChangeCell = Arc<OnceLock<std::result::Result<Arc<CoChange>, String>>>;
 
+/// One repository's history-text index (`history.rs`): the one that answers, and the commit a
+/// background build is working towards.
+#[derive(Default)]
+struct HistorySlot {
+    ready: Option<(String, Arc<HistoryIndex>)>,
+    building: Option<String>,
+    failed: Option<(String, String)>,
+}
+
 /// What a build is doing, shared between the thread running it and the requests waiting on it.
 struct Job {
     state: Mutex<JobState>,
@@ -116,6 +126,7 @@ pub struct Service {
     builds: Mutex<HashMap<PathBuf, Arc<Job>>>,
     views: Mutex<HashMap<PathBuf, ViewInfo>>,
     cochange: Mutex<HashMap<PathBuf, (String, CoChangeCell)>>,
+    history: Mutex<HashMap<PathBuf, HistorySlot>>,
     /// What each view's manifests link to (`links.rs`).
     links: LinkIndex,
     /// One gate per worktree: a mutation holds it for writing from planning to re-index, and every
@@ -162,6 +173,7 @@ impl Service {
                 builds: Mutex::new(HashMap::new()),
                 views: Mutex::new(HashMap::new()),
                 cochange: Mutex::new(HashMap::new()),
+                history: Mutex::new(HashMap::new()),
                 links: LinkIndex::default(),
                 gates: Mutex::new(HashMap::new()),
                 seqs: Mutex::new(HashMap::new()),
@@ -235,6 +247,9 @@ impl Service {
                 base.is_some() && views.values().any(|i| i.repo == *repo && i.base == *base)
             };
             self.engine.release_worktree(repo, wt, base.as_deref(), in_use);
+            if !self.views.lock().unwrap().values().any(|i| i.repo == *repo) {
+                self.history.lock().unwrap().remove(repo); // tens of MB a repository
+            }
             log::info(&format!("worktree {} is gone: released its view, overlay and graph", wt.display()));
         }
         gone.len()
@@ -402,8 +417,9 @@ impl Service {
             let root = view.label.worktree.clone();
             Ok(Some(tools::Baseline { graph, text: Box::new(move |id| git::blob_text(&root, id)) }))
         };
+        let history = || self.history_for(&view);
         let recent = self.recent_for(&view);
-        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, recent: &recent, cochange: &cochange, base: &base, diff: &diff };
+        let ctx = Ctx { graph: &graph, args: &args, format, token_budget, building, members: &members, recent: &recent, cochange: &cochange, base: &base, diff: &diff, history: &history };
         let body = tools::run(tool, &ctx)?;
         if matches!(tool, "read" | "outline") {
             self.remember_reads(&view, crate::near::read_files(&ctx));
@@ -918,6 +934,64 @@ impl Service {
         cell.get_or_init(|| CoChange::compute(&view.label.worktree, &commit).map(Arc::new).map_err(|e| e.to_string())).clone().map_err(Error::Msg)
     }
 
+    /// The history-text index of the view's repository. It is built on a background thread the
+    /// first time a query wants it and again when HEAD moves; until the first build ends the tier
+    /// says it is indexing, and after a HEAD move the previous index answers until the new one is
+    /// ready (it lacks only the newest commits). A HEAD that moved forward by a few commits adds
+    /// just those (`HistoryIndex::update`).
+    fn history_for(self: &Arc<Self>, view: &View) -> HistoryState {
+        let Some(commit) = view.label.base_commit.clone().filter(|_| view.label.is_git) else {
+            return HistoryState::Unavailable("no git commits".into());
+        };
+        let repo = view.label.repo.clone();
+        let mut m = self.history.lock().unwrap();
+        let slot = m.entry(repo.clone()).or_default();
+        if let Some((c, idx)) = &slot.ready
+            && *c == commit
+        {
+            return HistoryState::Ready { index: idx.clone(), allow: None };
+        }
+        if let Some((c, why)) = &slot.failed
+            && *c == commit
+        {
+            return HistoryState::Unavailable(why.clone());
+        }
+        if slot.building.is_none() {
+            slot.building = Some(commit.clone());
+            let (svc, worktree, prev) = (self.clone(), view.label.worktree.clone(), slot.ready.clone());
+            let spawned = std::thread::Builder::new().name("fdindex-history".into()).spawn(move || {
+                let reader = svc.engine.reader(&repo).ok();
+                let known = |blob: &str, lang: &'static str| {
+                    let v = crate::lang::by_id(lang)?.parser_version();
+                    reader.as_ref()?.get_facts(blob, lang, v).ok().flatten()
+                };
+                let opts = crate::history::Options::default();
+                let built = match &prev {
+                    Some((at, old)) => old.update(at, &worktree, &commit, &opts, &known),
+                    None => HistoryIndex::compute(&worktree, &commit, &opts, &known),
+                };
+                let mut m = svc.history.lock().unwrap();
+                let slot = m.entry(repo).or_default();
+                slot.building = None;
+                match built {
+                    Ok(idx) => {
+                        slot.ready = Some((commit, Arc::new(idx)));
+                        slot.failed = None;
+                    }
+                    Err(e) => slot.failed = Some((commit, e.to_string())),
+                }
+            });
+            if let Err(e) = spawned {
+                slot.building = None;
+                return HistoryState::Unavailable(format!("could not start the history thread: {e}"));
+            }
+        }
+        match &slot.ready {
+            Some((_, idx)) => HistoryState::Ready { index: idx.clone(), allow: None },
+            None => HistoryState::Building,
+        }
+    }
+
     // ---- admin tools ----------------------------------------------------------------------
 
     /// `add_root` / `workspace`: hints that start a build early. They never change what a query
@@ -1016,6 +1090,20 @@ impl Service {
             "runs": self.maintenance.runs(), "reclaimed_bytes_total": self.maintenance.reclaimed_total(),
             "free_pages": free_pages, "last": self.maintenance.last().map(|r| r.to_json()),
         });
+        let history: Vec<Value> = {
+            let m = self.history.lock().unwrap();
+            m.iter()
+                .map(|(repo, slot)| {
+                    let (commit, idx) = slot.ready.as_ref().map(|(c, i)| (Some(c.clone()), Some(i.clone()))).unwrap_or((None, None));
+                    json!({
+                        "repo": repo, "commit": commit, "building": slot.building.is_some(),
+                        "commits": idx.as_ref().map(|i| i.commits.len()), "bytes": idx.as_ref().map(|i| i.bytes()),
+                        "build_ms": idx.as_ref().map(|i| i.stats.millis as u64), "incremental": idx.as_ref().map(|i| i.stats.incremental),
+                        "failed": slot.failed.as_ref().map(|(_, e)| e.clone()),
+                    })
+                })
+                .collect()
+        };
         let rss = crate::runtime::rss_bytes();
         let vm = crate::runtime::vm_info();
         let data = json!({
@@ -1028,7 +1116,7 @@ impl Service {
             "vm": {"resident": vm.resident, "internal": vm.internal, "reusable": vm.reusable, "compressed": vm.compressed, "footprint": vm.footprint},
             "heap_bytes": crate::alloc::live_bytes(), "heap_peak_bytes": crate::alloc::peak_bytes(),
             "graphs": {"count": g.graphs, "bytes": g.bytes, "facts_bytes": g.facts_bytes, "blocks": g.blocks, "block_bytes": g.block_bytes, "budget": g.budget, "evictions": g.evictions, "heap_limit": g.heap_limit},
-            "stores": stores,
+            "stores": stores, "history": history,
             "watch": watch, "gc": gc,
         });
         let mb = |b: u64| format!("{:.1} MB", b as f64 / 1_048_576.0);

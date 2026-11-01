@@ -166,6 +166,14 @@
       "null"
      ]
     },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose recent commit messages match these words (BM25). Default: on for a multi-word query or no name hit; false = off.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
     "regex": {
      "default": null,
      "description": "Treat name as an unanchored, case-insensitive regex.",
@@ -246,6 +254,14 @@
     "query": {
      "description": "Name prefix (Foo = Foo*), a regex with regex=true, or text with search_bodies=true. Alias: pattern.",
      "type": "string"
+    },
+    "history": {
+     "default": null,
+     "description": "Also list symbols whose recent commit messages match these words (BM25). Default: on for a multi-word query or no name hit; false = off.",
+     "type": [
+      "boolean",
+      "null"
+     ]
     },
     "regex": {
      "default": null,

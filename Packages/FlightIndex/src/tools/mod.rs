@@ -11,6 +11,7 @@ mod analysis;
 mod calltree;
 mod impact;
 pub mod args;
+mod history;
 pub mod mutate;
 mod nav;
 pub mod pending;
@@ -87,6 +88,8 @@ pub struct Ctx<'a> {
     /// The view's base commit, for `impact pending=true`; `None` when there is no base commit or
     /// nothing differs from it. Built only when a tool asks.
     pub base: &'a (dyn Fn() -> Result<Option<Baseline>> + Sync),
+    /// The repository's history-text index (`history.rs`), for the history tier of `find`/`grep`.
+    pub history: &'a (dyn Fn() -> crate::history::HistoryState + Sync),
 }
 
 /// Strip the `qartez_` / `fdindex_` prefix an MCP client adds and return the tool's own name.

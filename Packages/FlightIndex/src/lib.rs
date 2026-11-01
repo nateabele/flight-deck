@@ -13,6 +13,7 @@ pub mod facts;
 pub mod git;
 pub mod graph;
 pub mod guard;
+pub mod history;
 pub mod lang;
 pub mod near;
 pub mod links;

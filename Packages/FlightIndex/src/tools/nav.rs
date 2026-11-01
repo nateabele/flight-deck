@@ -21,8 +21,9 @@ pub fn find(c: &Ctx) -> ToolResult {
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
     let views = c.views();
     let mut hits = views.find_symbols(&matcher, kind);
+    let history = super::history::section(c, &name, hits.is_empty());
     if hits.is_empty() {
-        return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match."));
+        return Ok(format!("No symbol found with name '{name}'\nTry `grep query={name}*` for prefix search, or pass regex=true for a pattern match.{history}"));
     }
     let near = Near::of(c);
     if let Some(n) = &near {
@@ -52,6 +53,7 @@ pub fn find(c: &Ctx) -> ToolResult {
     if hits.len() > limit {
         let _ = writeln!(out, "… {} more match(es); pass limit={} to see all", hits.len() - limit, hits.len());
     }
+    out.push_str(history.trim_start_matches('\n'));
     Ok(out)
 }
 
@@ -69,8 +71,9 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let views = c.views();
     let mut hits = views.find_symbols(&NameMatch::Regex(re), kind);
     hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.path.cmp(&b.path)).then(a.start_line.cmp(&b.start_line)));
+    let history = super::history::section(c, &query, hits.is_empty());
     if hits.is_empty() {
-        return Ok(format!("No symbols match `{query}`"));
+        return Ok(c.fit(format!("No symbols match `{query}`{history}")));
     }
     // With a seed set, nearest first; equally near rows stay alphabetical (the sort is stable).
     let near = Near::of(c);
@@ -88,6 +91,7 @@ pub fn grep(c: &Ctx) -> ToolResult {
     if hits.len() > limit {
         let _ = writeln!(out, "… {} more; pass limit={} to see all", hits.len() - limit, hits.len());
     }
+    out.push_str(history.trim_start_matches('\n'));
     Ok(c.fit(out))
 }
 
