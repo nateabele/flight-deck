@@ -29,6 +29,33 @@ enum TapeOverlay {
         pending.filter { $0.seq > tape.ackedCommandSeq }
     }
 
+    /// A plan edit queued and not yet folded: what IntakeRunner will write as the checkpoint's
+    /// `plan.user.md`. A thread's accepted diff counts as one exactly like a hand edit (ruling,
+    /// A-I3/B-C1): it IS the plan the editor shows from the moment it is queued, and a later
+    /// hand edit must be composed on it.
+    struct QueuedPlan: Equatable {
+        var seq: Int
+        var markdown: String
+        /// An `applyThreadDiff`, not the human's own `editPlan`.
+        var thread: Bool
+    }
+
+    /// The newest queued plan per checkpoint in `pending` (commands after the tape's ack), in seq
+    /// order — the last one wins, as it will when IntakeRunner folds them.
+    static func queuedPlans(_ pending: [CommandEnvelope]) -> [Int: QueuedPlan] {
+        var plans: [Int: QueuedPlan] = [:]
+        for envelope in pending {
+            switch envelope.command {
+            case .editPlan(let checkpoint, let markdown):
+                plans[checkpoint] = QueuedPlan(seq: envelope.seq, markdown: markdown, thread: false)
+            case .applyThreadDiff(_, _, let checkpoint, let markdown):
+                plans[checkpoint] = QueuedPlan(seq: envelope.seq, markdown: markdown, thread: true)
+            default: continue
+            }
+        }
+        return plans
+    }
+
     /// `tape` with `pending` applied in order, as the runner will apply them. `ackedCommandSeq` is
     /// left alone: an ack is the runner's to give, and `HaltRequest` waits on it.
     static func applying(_ pending: [CommandEnvelope], to tape: Tape, config: RoundConfig?) -> Tape {

@@ -6,6 +6,25 @@ import IntakeKit
 /// pinned before the move, run against the IntakeKit entry point; `EditLayerTests` keeps its own
 /// copies, which now go through the forwarder.
 final class PlanRebaseTests: XCTestCase {
+    /// An accept's reworded line goes onto typing that only touched the next line — the case
+    /// `git merge-file` calls a conflict because the hunks are adjacent.
+    func testReplayPutsAnAcceptedLineOntoAdjacentTyping() {
+        let base = "# P\n\nWe ship on Friday.\n"
+        let ours = "# P\n\nWe ship on Monday.\n"
+        XCTAssertEqual(PlanRebase.replay(base: base, ours: ours, onto: base + "\nA hand note.\n"),
+                       "# P\n\nWe ship on Monday.\n\nA hand note.\n")
+        XCTAssertEqual(PlanRebase.replay(base: base, ours: base, onto: "anything"), "anything", "no change to replay")
+    }
+
+    /// Nil when the human changed the same line, when it is there twice, or mid-line only.
+    func testReplayRefusesARealConflict() {
+        let base = "We ship on Friday.\n", ours = "We ship on Monday.\n"
+        XCTAssertNil(PlanRebase.replay(base: base, ours: ours, onto: "We ship on Friday, maybe.\n"))
+        XCTAssertNil(PlanRebase.replay(base: base, ours: ours, onto: "We ship on Friday.\nWe ship on Friday.\n"))
+        XCTAssertNil(PlanRebase.replay(base: base, ours: ours, onto: "Then We ship on Friday.\n"))
+        XCTAssertNil(PlanRebase.replay(base: "a\n", ours: "a\nb\n", onto: "a\nc\n"), "an insertion has no old lines to find")
+    }
+
     /// A clean merge is sent for the new head. The merge runs off the main actor even when
     /// called from it, as the editor calls it.
     @MainActor

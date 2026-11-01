@@ -599,6 +599,7 @@ struct IntakeDetailView: View {
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
                             focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
                             noteShown: service.editNoteShown.contains(intake.id), notes: final ? nil : notes,
+                            acceptedStamp: final ? nil : service.threadEditStamp(intake.id),
                             onOpenNotes: { showInspector(.notes) })
             .equatable()
             .environment(\.pageObscuredTop, pinnedHeight)
@@ -1444,12 +1445,14 @@ private struct DocumentPlan: View, Equatable {
     let churn: ChurnLaneInput?
     let noteShown: Bool
     let notes: PlanNotesController?
+    /// `IntakeService.threadEditStamp`: an accept queued changes the plan with the tape unchanged.
+    let acceptedStamp: Int?
     let onOpenNotes: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
         a.intakeID == b.intakeID && a.projectPath == b.projectPath && a.title == b.title && a.tape == b.tape && a.final == b.final
             && a.selection == b.selection && a.focus == b.focus && a.churn?.cycle == b.churn?.cycle
-            && a.noteShown == b.noteShown && a.notes === b.notes
+            && a.noteShown == b.noteShown && a.notes === b.notes && a.acceptedStamp == b.acceptedStamp
     }
 
     var body: some View {
@@ -1473,7 +1476,9 @@ private struct DocumentPlan: View, Equatable {
                                          router: final ? nil : service.editRouter(intakeID),
                                          folds: service.planFolds(intakeID),
                                          scroll: service.planScroll(intakeID),
-                                         projectPath: projectPath))
+                                         projectPath: projectPath,
+                                         queuedPlan: final ? nil : { [service, intakeID] in service.queuedPlan(intakeID, checkpoint: $0) },
+                                         acceptedStamp: acceptedStamp))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)

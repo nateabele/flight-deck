@@ -132,6 +132,37 @@ extension IntakeService {
         return appendThread(id, [.repropose(thread, diff: diff)])
     }
 
+    // MARK: - Accepted diffs in the editor
+
+    /// The newest plan queued for `checkpoint` that IntakeRunner hasn't folded — a hand edit or a
+    /// thread's accepted diff, from this Mac, the phone or auto-accept — else nil (the plan on
+    /// disk is the newest). What the editor loads and what a hand edit is composed on (A-I3, B-C1).
+    func queuedPlan(_ id: UUID, checkpoint: Int) -> String? {
+        queuedPlans(id)[checkpoint]?.markdown
+    }
+
+    /// The seq of the newest thread accept queued and not yet folded, part of the editor's key.
+    func threadEditStamp(_ id: UUID) -> Int? { threadEditStamps[id] }
+
+    /// Re-reads `id`'s queued plans when `commands.jsonl` or the ack moved; a stat otherwise.
+    /// The ack is the newest tape read's: until the service reads the runner's ack, a folded edit
+    /// still reads as queued, with the same text the runner wrote.
+    func queuedPlans(_ id: UUID) -> [Int: TapeOverlay.QueuedPlan] {
+        let store = tapeStore(id)
+        let stamp = TranscriptStamp(of: store.commandsURL)
+        let acked = storedTape(id).ackedCommandSeq
+        if let memo = queuedPlansMemo[id], memo.stamp == stamp, memo.acked == acked { return memo.plans }
+        let plans = TapeOverlay.queuedPlans(store.commands(after: acked))
+        queuedPlansMemo[id] = QueuedPlansMemo(stamp: stamp, acked: acked, plans: plans)
+        return plans
+    }
+
+    /// Publishes `threadEditStamps[id]` when it changed — after this Mac's ✓ and on every tick.
+    func refreshThreadEditStamp(_ id: UUID) {
+        let newest = queuedPlans(id).values.filter(\.thread).map(\.seq).max()
+        if threadEditStamps[id] != newest { threadEditStamps[id] = newest }
+    }
+
     // MARK: - Shared by the Mac's and the phone's ops
 
     /// `applyThreadDiff` for `diff`, composed on the newest version of the head under the
@@ -141,6 +172,8 @@ extension IntakeService {
         let outcome: ThreadAccept.Outcome
         do { outcome = try ThreadAccept.append(diff, editedMarkdown: editedMarkdown, to: tapeStore(id)) }
         catch { return ThreadRefusal(code: "write_failed") }
+        // The editor shows the accept at once, without waiting for the next tick.
+        refreshThreadEditStamp(id)
         switch outcome {
         case .appended, .already: return nil
         case .stale: return ThreadRefusal(code: "diff_stale")

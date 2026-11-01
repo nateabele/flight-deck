@@ -344,6 +344,19 @@ final class IntakeService: ObservableObject {
     /// liveness, resumption and announcements are about what it has done, not what was asked.
     private var overlays: [UUID: [CommandEnvelope]] = [:]
 
+    /// The newest thread accept each shaping intake has queued that no tape read has acked, by
+    /// seq (`threadEditStamp`). Published, and only this, so the plan editor reloads the moment an
+    /// accept is queued — from this Mac at once, from the phone or auto-accept on the next tick —
+    /// while a hand edit's own send republishes nothing.
+    @Published var threadEditStamps: [UUID: Int] = [:]
+    /// `queuedPlans`' memory, per intake: `commands.jsonl`'s stat and the ack it was read past.
+    var queuedPlansMemo: [UUID: QueuedPlansMemo] = [:]
+    struct QueuedPlansMemo {
+        let stamp: TranscriptStamp?
+        let acked: Int
+        let plans: [Int: TapeOverlay.QueuedPlan]
+    }
+
     /// `hasPendingCommands`'s memory, per intake. Dropped with the intake's other shaping
     /// state in `pollTapes` when it stops shaping.
     private var pendingCommandsMemo: [UUID: PendingCommandsMemo] = [:]
@@ -1711,11 +1724,13 @@ final class IntakeService: ObservableObject {
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
             .union(convergenceKeys.keys).union(coverage.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
-            .union(overlays.keys).union(pendingCommandsMemo.keys)
+            .union(overlays.keys).union(pendingCommandsMemo.keys).union(queuedPlansMemo.keys).union(threadEditStamps.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             overlays[gone] = nil
             pendingCommandsMemo[gone] = nil
+            queuedPlansMemo[gone] = nil
+            threadEditStamps[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
             forgetSeats(gone)
@@ -1740,6 +1755,7 @@ final class IntakeService: ObservableObject {
             }
             // Already seeded (a view asked first) is skipped: the values since then were observed.
             if !flapSeeded.contains(id) { _ = flapPolicy(for: id) }
+            refreshThreadEditStamp(id)
             refreshConvergence(id)
             pollSeats(id)
             if let halt = halts[id], let acked = latestTapes[id]?.ackedCommandSeq, acked >= halt.seq { halts[id] = nil }

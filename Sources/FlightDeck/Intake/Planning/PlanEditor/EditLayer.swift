@@ -873,6 +873,12 @@ struct PlanEditHooks {
     /// The intake's project directory, which the plan's relative file links resolve against
     /// (`PlanLinks`); nil resolves only absolute and `~` paths.
     var projectPath: String?
+    /// The newest plan queued for a checkpoint and not yet folded (`IntakeService.queuedPlan`):
+    /// what the editor loads, and what a hand edit is composed on. Nil keeps the router's own sends.
+    var queuedPlan: ((Int) -> String?)?
+    /// The newest thread accept queued and not yet folded (`IntakeService.threadEditStamp`), so the
+    /// editor reloads on an accept, which changes the plan without a new checkpoint.
+    var acceptedStamp: Int?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

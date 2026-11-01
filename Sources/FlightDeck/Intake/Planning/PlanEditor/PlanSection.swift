@@ -187,7 +187,7 @@ struct PlanSectionBody: View {
     }
 
     var body: some View {
-        let key = ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)
+        let key = ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape, accepted: hooks.acceptedStamp)
         let hunks = userHunks
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
@@ -234,7 +234,7 @@ struct PlanSectionBody: View {
         .onChange(of: focus, initial: true) { _, focus in
             guard let focus else { return }
             pendingFocus = focus
-            if mode == .diff { reload(ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)) } else { mode = .diff }
+            if mode == .diff { reload(ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape, accepted: hooks.acceptedStamp)) } else { mode = .diff }
         }
     }
 
@@ -310,7 +310,7 @@ struct PlanSectionBody: View {
         router.env = PlanEditRouter.Env(tape: { live?() ?? latest }, loadFile: loadFile, send: onSend,
                                         onConflict: hooks.onConflict,
                                         deliver: { checkpoint, plan in deliver(plan, to: checkpoint) },
-                                        runner: hooks.runner)
+                                        runner: hooks.runner, queued: hooks.queuedPlan)
     }
 
     /// A merge's plan for `checkpoint`: offered to the editor as `incoming` — never written
@@ -447,6 +447,18 @@ struct PlanSectionBody: View {
         }
     }
 
+    /// What the editor loads for `checkpoint`: the newest plan queued for it, whoever queued it —
+    /// a hand edit, or a thread's accept that came later and was composed on it (and so supersedes
+    /// it) — else the plan on disk. Without the service's queue (renders, tests), the router's own
+    /// last send stands in for it: reloading from disk before the runner applied it would offer
+    /// the pre-edit plan back as if it were news.
+    static func planToShow(checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?,
+                           queued: ((Int) -> String?)?, sent: [Int: String]) -> String? {
+        if let queued, let plan = queued(checkpoint) { return plan }
+        if queued == nil, let plan = sent[checkpoint] { return plan }
+        return PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile)
+    }
+
     private func reload(_ key: ShapingModel.ViewerKey) {
         let navigated = loadedSelection.map { $0 != selection } ?? false
         loadedSelection = .some(selection)
@@ -481,7 +493,8 @@ struct PlanSectionBody: View {
         // polish checkpoint carries a change set, and resolving to it literally made the
         // editor vanish into "No plan at this checkpoint" the moment encoding began.
         if selection == nil, let head = PlanSection.planHead(tape: tape, loadFile: loadFile) { checkpoint = head }
-        guard let plan = router.sent[checkpoint] ?? PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile) else {
+        guard let plan = Self.planToShow(checkpoint: checkpoint, tape: tape, loadFile: loadFile, queued: hooks.queuedPlan,
+                                         sent: router.sent) else {
             message = "No plan at this checkpoint."
             return
         }

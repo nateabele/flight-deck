@@ -277,6 +277,136 @@ final class IntakeThreadServiceTests: XCTestCase {
         XCTAssertTrue(threadCommands(i.id).isEmpty)
     }
 
+    // MARK: - An accepted diff in the editor (A-I3, B-C1)
+
+    /// The editor's router, wired the way `PlanSection` wires it: the live tape, the service's
+    /// files and sends, and the plan queued on the tape.
+    private func editorRouter(_ svc: IntakeService, _ id: UUID) -> PlanEditRouter {
+        let router = svc.editRouter(id)
+        router.env = PlanEditRouter.Env(tape: { svc.tapes[id] ?? .empty },
+                                        loadFile: { svc.checkpointFile(id, checkpoint: $0, $1) },
+                                        send: { svc.send(id, $0) },
+                                        queued: { svc.queuedPlan(id, checkpoint: $0) })
+        return router
+    }
+
+    /// What IntakeRunner does with the queued plan commands: each one, in order, becomes the
+    /// checkpoint's `plan.user.md`, and the tape acks it.
+    private func fold(_ id: UUID) throws {
+        let tapes = TapeStore(intakeDirectory: directory(id))
+        var tape = tapes.loadTape()
+        for envelope in tapes.commands(after: tape.ackedCommandSeq) {
+            switch envelope.command {
+            case .editPlan(let checkpoint, let markdown):
+                try tapes.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
+            case .applyThreadDiff(let thread, let diff, let checkpoint, let markdown):
+                try tapes.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
+                try tapes.recordThreadEdit(checkpoint: checkpoint, ThreadEditSource(thread: thread, diff: diff))
+            default: break
+            }
+            tape.ackedCommandSeq = envelope.seq
+        }
+        try tapes.saveTape(tape)
+    }
+
+    private func headPlan(_ id: UUID) -> String? {
+        TapeStore(intakeDirectory: directory(id)).effectivePlan(checkpoint: 1)
+    }
+
+    /// The review's scenario: ✓, then the human types in the plan the editor loaded before the
+    /// ✓, then IntakeRunner folds both. The hand edit is composed on the accept, so the accepted
+    /// words survive — for a second commit of the same typing too, and after the fold.
+    func testAHandEditAfterAnAcceptKeepsTheAcceptedWords() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        svc.pollTapes()
+        let router = editorRouter(svc, i.id)
+        let loaded = Self.plan
+
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        router.commit(Self.plan + "\nA hand note.\n", typedOn: 1, loaded: loaded, editable: true)
+        await router.settle()
+        try fold(i.id)
+        svc.pollTapes()
+        var plan = try XCTUnwrap(headPlan(i.id))
+        XCTAssertTrue(plan.contains("We ship on Monday."), plan)
+        XCTAssertTrue(plan.contains("A hand note."), plan)
+
+        // More typing on the same load (the editor held the merge behind the banner).
+        router.commit(Self.plan + "\nA hand note, and more.\n", typedOn: 1, loaded: loaded, editable: true)
+        await router.settle()
+        try fold(i.id)
+        plan = try XCTUnwrap(headPlan(i.id))
+        XCTAssertTrue(plan.contains("We ship on Monday."), plan)
+        XCTAssertTrue(plan.contains("A hand note, and more."), plan)
+    }
+
+    /// The same from an accept the app didn't make — the phone's ✓ or ThreadRunner's
+    /// auto-accept append `applyThreadDiff` straight to the tape's log.
+    func testAHandEditAfterAnAcceptFromElsewhereKeepsTheAcceptedWords() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        svc.pollTapes()
+        let router = editorRouter(svc, i.id)
+        router.commit(Self.plan + "\nTyped first.\n", typedOn: 1, loaded: Self.plan, editable: true)
+
+        XCTAssertEqual(try ThreadAccept.append(d, editedMarkdown: nil, to: TapeStore(intakeDirectory: directory(i.id))), .appended)
+        router.commit(Self.plan + "\nTyped first, then more.\n", typedOn: 1, loaded: Self.plan, editable: true)
+        await router.settle()
+        try fold(i.id)
+        let plan = try XCTUnwrap(headPlan(i.id))
+        XCTAssertTrue(plan.contains("We ship on Monday."), plan)
+        XCTAssertTrue(plan.contains("Typed first, then more."), plan)
+    }
+
+    /// Right after ✓ the editor reloads (its key moves) and loads the accepted plan — even over
+    /// the router's own earlier send, which the accept was composed on and supersedes. A ✓ from
+    /// the phone or auto-accept moves the key on the next tick.
+    func testTheEditorShowsAnAcceptAtOnce() async throws {
+        let i = try shapingIntake()
+        let svc = await makeService()
+        let t = ThreadID(), d = diff(t)
+        try writeThread(i.id, record(t), diffs: [d])
+        svc.pollTapes()
+        let router = editorRouter(svc, i.id)
+        let typed = Self.plan + "\nA hand note.\n"
+        router.commit(typed, typedOn: 1, loaded: Self.plan, editable: true)
+        func key() -> ShapingModel.ViewerKey {
+            ShapingModel.viewerKey(selected: nil, mode: .plan, tape: svc.tapes[i.id] ?? .empty, accepted: svc.threadEditStamp(i.id))
+        }
+        func shown() -> String? {
+            PlanSectionBody.planToShow(checkpoint: 1, tape: svc.tapes[i.id] ?? .empty,
+                                       loadFile: { svc.checkpointFile(i.id, checkpoint: $0, $1) },
+                                       queued: { svc.queuedPlan(i.id, checkpoint: $0) }, sent: router.sent)
+        }
+        let before = key()
+        XCTAssertEqual(shown(), typed)
+
+        XCTAssertNil(svc.decideDiff(i.id, thread: t, diff: d.id, accept: true))
+        let accepted = typed.replacingOccurrences(of: "Friday", with: "Monday")
+        XCTAssertNotEqual(key(), before, "the ✓ alone reloads the editor")
+        XCTAssertEqual(shown(), accepted)
+
+        try fold(i.id)
+        svc.pollTapes()
+        XCTAssertNil(svc.threadEditStamp(i.id), "folded: nothing queued")
+        XCTAssertEqual(shown(), accepted, "the plan on disk, not the older send")
+
+        // Another diff, accepted from outside the app: the next tick moves the key.
+        let other = ThreadDiff(thread: t, turn: 2, checkpoint: 1, anchor: NoteAnchor(checkpoint: 1, quote: "A hand note."),
+                               old: "A hand note.", new: "A hand note, reworded.")
+        try writeThread(i.id, record(t), diffs: [other])
+        let quiet = key()
+        XCTAssertEqual(try ThreadAccept.append(other, editedMarkdown: nil, to: TapeStore(intakeDirectory: directory(i.id))), .appended)
+        svc.pollTapes()
+        XCTAssertNotEqual(key(), quiet)
+        XCTAssertEqual(shown(), accepted.replacingOccurrences(of: "A hand note.", with: "A hand note, reworded."))
+    }
+
     // MARK: - ThreadRunner liveness
 
     /// A ThreadRunner that died with work left (a command after the cursor) is brought back by the

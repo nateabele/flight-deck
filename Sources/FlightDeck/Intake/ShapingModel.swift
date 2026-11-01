@@ -337,10 +337,14 @@ struct ShapingModel {
         var checkpoint: Int?
         var mode: ViewerMode
         var head: Int?
+        /// The newest thread accept queued and not yet folded (`IntakeService.threadEditStamp`):
+        /// an accept changes the head's plan without a new checkpoint, so the editor must reload
+        /// on it too, or it shows the old words and the next keystroke sends them back.
+        var accepted: Int? = nil
     }
 
-    static func viewerKey(selected: Int?, mode: ViewerMode, tape: Tape) -> ViewerKey {
-        ViewerKey(checkpoint: selected ?? tape.head?.id, mode: mode, head: tape.head?.id)
+    static func viewerKey(selected: Int?, mode: ViewerMode, tape: Tape, accepted: Int? = nil) -> ViewerKey {
+        ViewerKey(checkpoint: selected ?? tape.head?.id, mode: mode, head: tape.head?.id, accepted: accepted)
     }
 
     static func viewerContent(_ key: ViewerKey, tape: Tape, loadFile: (Int, String) -> Data?) -> String {

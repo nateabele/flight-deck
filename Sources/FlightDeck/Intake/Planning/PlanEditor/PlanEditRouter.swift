@@ -29,6 +29,10 @@ final class PlanEditRouter {
         /// A merged plan for `checkpoint`, to be offered to the editor.
         var deliver: (_ checkpoint: Int, _ plan: String) -> Void = { _, _ in }
         var runner: CommandRunner = SystemCommandRunner()
+        /// The newest plan queued for a checkpoint that IntakeRunner hasn't folded yet — a hand
+        /// edit or a thread's accepted diff, whoever sent it (`IntakeService.queuedPlan`). Nil
+        /// (renders, tests) falls back to this router's own `sent`.
+        var queued: ((Int) -> String?)?
     }
 
     var env = Env()
@@ -44,6 +48,11 @@ final class PlanEditRouter {
     /// What a merge wrote onto a head the editor hasn't taken yet: the plan it wrote, and the
     /// edit it carried there (from which checkpoint, as typed).
     private var carried: [Int: (plan: String, from: Int, markdown: String)] = [:]
+    /// The last commit typed on each checkpoint, and the text its editor had loaded: what the
+    /// next commit from the same load is relative to. A head plan that moved away from it since —
+    /// a thread's accept from anywhere, folded or still queued — is merged under the typing
+    /// rather than overwritten by it (A-I3, B-C1).
+    private var typed: [Int: (loaded: String, markdown: String)] = [:]
     private var chain: Task<Void, Never>?
     private var queued = 0
 
@@ -57,6 +66,7 @@ final class PlanEditRouter {
             // The editor took the merge it was offered: its commits are plain again.
             if carried[checkpoint]?.plan == loaded { carried[checkpoint] = nil }
             if editable, isRefused(checkpoint, tape: env.tape()) { stuck.insert(checkpoint) }
+            typed[checkpoint] = (loaded, markdown)
             return direct(checkpoint, markdown)
         }
         let previous = chain
@@ -81,9 +91,32 @@ final class PlanEditRouter {
         return tape.checkpoints.first { $0.id == head }?.record.editConflict == checkpoint
     }
 
+    /// The head's plan as it stands: the newest edit queued for it (whoever queued it), else
+    /// the plan on disk. Without the service's queue, this router's own last send stands in.
+    private func headPlan(_ head: Int, tape: Tape) -> String? {
+        let disk = { PlanSection.effectivePlan(checkpoint: head, tape: tape, loadFile: self.env.loadFile) }
+        if let queued = env.queued { return queued(head) ?? disk() }
+        return sent[head] ?? disk()
+    }
+
+    /// What a commit typed on `checkpoint` from `loaded` is relative to: the last commit from the
+    /// same load (the editor's text is cumulative), else the load itself.
+    private func typedBase(_ checkpoint: Int, loaded: String) -> String {
+        typed[checkpoint].flatMap { $0.loaded == loaded ? $0.markdown : nil } ?? loaded
+    }
+
     private func needsMerge(_ checkpoint: Int, loaded: String, editable: Bool, tape: Tape) -> Bool {
         guard editable, !stuck.contains(checkpoint), let head = PlanSection.planHead(tape: tape, loadFile: env.loadFile) else { return false }
-        if head == checkpoint { return carried[checkpoint].map { $0.plan != loaded } ?? false }
+        if head == checkpoint {
+            if let carried = carried[checkpoint], carried.plan != loaded { return true }
+            // Something other than this typing changed the head since its last commit — a thread's
+            // accept, from this Mac, the phone or auto-accept: the typing goes on top of it.
+            // Compared unwrapped: the runner stores an edit unwrapped (`TapeStore.writeUserEdits`),
+            // and that alone is no one else's change.
+            return headPlan(head, tape: tape).map {
+                MarkdownUnwrap.unwrap($0) != MarkdownUnwrap.unwrap(typedBase(checkpoint, loaded: loaded))
+            } ?? false
+        }
         // The runner already failed to carry this checkpoint's edits into the head; merging
         // more of them onto it would land the rest without the part that conflicted.
         return !isRefused(checkpoint, tape: tape)
@@ -97,21 +130,29 @@ final class PlanEditRouter {
                   let head = PlanSection.planHead(tape: tape, loadFile: env.loadFile) else {
                 if editable, isRefused(checkpoint, tape: tape) { stuck.insert(checkpoint) }
                 if carried[checkpoint]?.plan == loaded { carried[checkpoint] = nil }
+                typed[checkpoint] = (loaded, markdown)
                 return direct(checkpoint, markdown)
             }
             // Onto the head: its plan now. Typed on the head itself, over a merge it hadn't
             // taken: the edit's base is what the editor loaded. Typed on an older checkpoint:
             // the checkpoint's text before the head moved — commits since went to the head, so
             // that is still the last one sent for it (or the load).
-            guard let ours = sent[head] ?? PlanSection.effectivePlan(checkpoint: head, tape: tape, loadFile: env.loadFile) else { return }
-            let base = head == checkpoint ? loaded : sent[checkpoint] ?? loaded
-            let outcome = await EditLayer.retarget(markdown: markdown, typedOn: checkpoint, base: base, head: head,
+            guard let ours = headPlan(head, tape: tape) else { return }
+            let base = head == checkpoint ? typedBase(checkpoint, loaded: loaded) : sent[checkpoint] ?? loaded
+            var outcome = await EditLayer.retarget(markdown: markdown, typedOn: checkpoint, base: base, head: head,
                                                    headPlan: ours, runner: env.runner)
+            // Typing on the head next to a passage an accept changed is a conflict to `git` (the
+            // hunks touch) but not to the human: the accept's lines are put onto the typing as they are.
+            if outcome.conflict != nil, head == checkpoint, carried[head] == nil,
+               let replayed = PlanRebase.replay(base: base, ours: ours, onto: markdown) {
+                outcome = PlanRebase.Retarget(command: .editPlan(checkpoint: head, markdown: replayed), conflict: nil)
+            }
             merges += 1
 
             let now = env.tape()
             let nowHead = PlanSection.planHead(tape: now, loadFile: env.loadFile)
-            let nowOurs = nowHead.flatMap { sent[$0] ?? PlanSection.effectivePlan(checkpoint: $0, tape: now, loadFile: env.loadFile) }
+            let nowOurs = nowHead.flatMap { headPlan($0, tape: now) }
+            typed[checkpoint] = (loaded, markdown)
             if stuck.contains(checkpoint) { return direct(checkpoint, markdown) }
             if nowHead != head || nowOurs != ours {
                 if merges < Self.maxMerges { continue }
@@ -124,11 +165,15 @@ final class PlanEditRouter {
             switch (outcome.conflict, head == checkpoint) {
             case (nil, _):
                 guard case .editPlan(_, let plan) = outcome.command else { return }
-                let from = head == checkpoint ? carried[head]?.from ?? checkpoint : checkpoint
-                let typed = head == checkpoint ? carried[head]?.markdown ?? markdown : markdown
                 sent[head] = plan
                 env.send(.editPlan(checkpoint: head, markdown: plan))
-                carried[head] = (plan, from, typed)
+                if head != checkpoint {
+                    carried[head] = (plan, checkpoint, markdown)
+                } else if let carry = carried[head] {
+                    carried[head] = (plan, carry.from, carry.markdown)
+                }
+                // Typing on the head merged over an accept carries nothing from another round:
+                // `typed` alone brings the next commit from this load back here.
                 env.deliver(head, plan)
             case (let conflict?, false):
                 stuck.insert(checkpoint)
