@@ -42,9 +42,9 @@ through a dozen terminal windows you can't tell apart.
 
 Early. It runs, and it's what I use to build it, but it is nowhere near finished.
 
-Apple Silicon only. The build is ad-hoc signed rather than notarised, so the first
-launch needs a right-click → Open before macOS will let it start. Latest build is on
-the [releases page](../../releases/latest).
+Apple Silicon only. Builds are signed with Developer ID and notarized by Apple, so they
+open like any other downloaded Mac app. Latest build is on the
+[releases page](../../releases/latest).
 
 There's also an iPhone companion. It pairs with a Mac over the local network — scan the QR
 or type the twelve-character code — and shows the same fleet: one section per project, one

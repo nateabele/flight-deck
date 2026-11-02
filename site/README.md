@@ -47,8 +47,9 @@ workflow re-run. To add the copy to an existing release:
 gh workflow run stable-download.yml -f tag=vX.Y.Z
 ```
 
-The build is signed but not notarized, so the closing CTA tells visitors to
-right-click → Open on first launch. Drop that line once releases are notarized.
+Releases are signed with Developer ID and notarized (`scripts/release.sh`), so the
+page carries no first-launch workaround. Never publish a build `release.sh` didn't
+notarize: macOS 15 and later block it outright.
 
 Everything else on the page is accurate as written — see below.
 
