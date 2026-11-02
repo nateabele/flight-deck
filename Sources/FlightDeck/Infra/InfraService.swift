@@ -84,8 +84,10 @@ final class InfraService: InfraSessionHooks {
     /// next launch of that session counts it, as `launching` counts its worst case.
     private var launchingBurns: [String: (session: UUID, burn: SessionBudgetModel.Burn)] = [:]
 
-    /// Sessions that have closed, for an `up` still in flight when its session goes.
-    private var closedSessions: Set<UUID> = []
+    /// How many times each session has closed. An `up` reads its session's count when it starts
+    /// and rolls its machine back if the count moved before it finished. A count, not a set of
+    /// closed ids: reopening a session reuses its id, and a reopened session may provision again.
+    private var sessionCloses: [UUID: Int] = [:]
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
     /// Tailscale auth keys outlive the boot that redeems them by this much at most.
@@ -130,9 +132,7 @@ final class InfraService: InfraSessionHooks {
     func up(name: String, config: InfraConfig, repoRoot: URL, owner: InfraOwner,
             events: @escaping (InfraEvent) -> Void) async throws -> InfraMachine {
         let session = owner.session
-        if let session, closedSessions.contains(session) {
-            throw InfraError.refused("the session that asked for \(name) has closed")
-        }
+        let closesAtStart = session.map { sessionCloses[$0, default: 0] }
         try claim(name)
         defer { release(name) }
         let repo = repoRoot.standardizedFileURL
@@ -211,7 +211,7 @@ final class InfraService: InfraSessionHooks {
         }
         // The session closed while this was coming up: nothing will use it, and its close found
         // the name claimed, so it is destroyed here, under this `up`'s claim.
-        if let session, closedSessions.contains(session) {
+        if let session, sessionCloses[session, default: 0] != closesAtStart {
             await rollBack(name, events: events)
             throw InfraError.refused("the session that asked for \(name) closed while it was being created, so it was destroyed")
         }
@@ -444,7 +444,7 @@ final class InfraService: InfraSessionHooks {
     /// its name's claim, so `up` destroys it itself when it finishes (it sees the session here);
     /// one mid-`down` is already going. Failures are logged, and the Reaper retries them.
     func sessionClosed(_ session: UUID) {
-        closedSessions.insert(session)
+        sessionCloses[session, default: 0] += 1
         let names = registry.machines.filter { $0.session == session && $0.state != .gone }.map(\.name)
         for name in names where !busy.contains(name.lowercased()) {
             Task {

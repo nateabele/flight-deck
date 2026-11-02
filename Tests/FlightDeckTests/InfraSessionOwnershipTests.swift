@@ -70,11 +70,15 @@ final class InfraSessionOwnershipTests: XCTestCase {
         XCTAssertEqual(h.registry.machine(named: "theirs")?.state, .ready)
     }
 
-    func testAClosedSessionCannotStartAnotherMachine() async throws {
+    /// Reopening a closed session reuses its id (`closeSession`), so a close must not bar that
+    /// id from provisioning for the rest of the run: only an `up` the close overtook is undone.
+    func testAReopenedSessionCanStartAMachine() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
         h.service.sessionClosed(Self.infraTab)
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
-        catch InfraError.refused {}
-        XCTAssertEqual(h.tofu.calls, [])
+        let machine = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
+        XCTAssertEqual(machine.session, Self.infraTab)
+        XCTAssertNotEqual(h.registry.machine(named: "gpu")?.state, .gone)
     }
 
     func testAnotherSessionCannotTakeOverARunningMachine() async throws {
