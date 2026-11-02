@@ -19,6 +19,7 @@ pub mod indexstore;
 pub mod lang;
 pub mod near;
 pub mod links;
+pub mod listing;
 pub mod mcp;
 pub mod names;
 pub mod pkgview;

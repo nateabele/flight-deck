@@ -17,7 +17,8 @@ use crate::error::Result;
 use crate::git::{self, FileRef, Overlay, View};
 use crate::lang;
 use crate::sweep::Changes;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use crate::listing::Listing;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -28,19 +29,25 @@ const MAX_WALK_FILES: usize = 2000;
 /// More paths git would have to be asked about than this is also cheaper as a full status.
 const MAX_UNKNOWN: usize = 200;
 
-/// The base tree by path, so "is this path in git?" is a lookup. Built once per commit.
+/// The base tree by path, so "is this path in git?" is a lookup: a search of the view's own
+/// listing, which every worktree on the commit shares, rather than a copy of it (`listing`).
 pub struct BaseIndex {
-    by_path: HashMap<String, FileRef>,
+    listing: Listing,
     pub commit: Option<String>,
 }
 
 impl BaseIndex {
     pub fn new(view: &View) -> BaseIndex {
-        BaseIndex { by_path: view.base.iter().map(|f| (f.path.clone(), f.clone())).collect(), commit: view.label.base_commit.clone() }
+        BaseIndex { listing: Listing::new(view.base.clone()), commit: view.label.base_commit.clone() }
     }
 
     pub fn contains(&self, path: &str) -> bool {
-        self.by_path.contains_key(path)
+        self.listing.find(path).is_some()
+    }
+
+    /// The listing searched, to share with the view's stat snapshot.
+    pub fn listing(&self) -> &Listing {
+        &self.listing
     }
 }
 
@@ -68,7 +75,7 @@ pub fn refresh(prev: &View, index: &BaseIndex, pending: &Changes) -> Result<Refr
     for dir in &pending.subtrees {
         let Some(d) = rel(dir) else { continue };
         let prefix = format!("{d}/");
-        candidates.extend(index.by_path.keys().filter(|p| p.starts_with(&prefix)).cloned());
+        candidates.extend(index.listing.with_prefix(&prefix).map(String::from));
         candidates.extend(overlay.keys().filter(|p| p.starts_with(&prefix)).cloned());
         // Whatever exists there now. `ignore` applies `.gitignore` while walking so a new
         // `node_modules/` is not enumerated; the exact answer for each new file still comes from git.
@@ -97,7 +104,7 @@ pub fn refresh(prev: &View, index: &BaseIndex, pending: &Changes) -> Result<Refr
     for path in &candidates {
         let Some(language) = lang::for_path(Path::new(path)) else { continue };
         let now = git::read_overlay_file(root, path, language.id());
-        match (index.by_path.get(path), now) {
+        match (index.listing.get(path), now) {
             (Some(base), Some(f)) if f.blob_id == base.blob_id => {
                 overlay.remove(path);
             }
