@@ -669,6 +669,30 @@
             <p class="hl-blurb">⌘K finds any conversation from any of the five agents, live or old, and opens it in a tab.</p>
           </article>
         </li>
+        <li class="hl-item reveal">
+          <article class="hl-tile hl-12" tabindex="0" role="button" aria-controls="hl-d-12" data-hl="12">
+            <div class="hl-art" aria-hidden="true">
+              <svg class="hl12-wires" viewBox="0 0 100 62.5" preserveAspectRatio="none">
+                <path d="M20 13 L50 31 M20 50 L50 31 M80 13 L50 31 M80 50 L50 31" vector-effect="non-scaling-stroke"/>
+              </svg>
+              <div class="hl12-ag" style="left:8cqw;top:6cqw;--dx:30cqw;--dy:18cqw;--i:0"><b class="hl12-mk m-circle"></b><s style="width:6cqw"></s></div>
+              <div class="hl12-ag" style="left:8cqw;top:43cqw;--dx:30cqw;--dy:-18cqw;--i:1"><b class="hl12-mk m-sq"></b><s style="width:5cqw"></s></div>
+              <div class="hl12-ag" style="right:8cqw;top:6cqw;--dx:-30cqw;--dy:18cqw;--i:2"><b class="hl12-mk m-tri"></b><s style="width:7cqw"></s></div>
+              <div class="hl12-ag" style="right:8cqw;top:43cqw;--dx:-30cqw;--dy:-18cqw;--i:3"><b class="hl12-mk m-ring"></b><s style="width:5.5cqw"></s></div>
+              <div class="hl12-pip q" style="left:19cqw;top:12cqw;--dx:30cqw;--dy:18cqw;--i:0"></div>
+              <div class="hl12-pip q" style="left:19cqw;top:49cqw;--dx:30cqw;--dy:-18cqw;--i:1"></div>
+              <div class="hl12-pip q" style="left:79cqw;top:12cqw;--dx:-30cqw;--dy:18cqw;--i:2"></div>
+              <div class="hl12-pip q" style="left:79cqw;top:49cqw;--dx:-30cqw;--dy:-18cqw;--i:3"></div>
+              <div class="hl12-hub"><i></i><span>index</span></div>
+              <div class="hl12-pip a" style="left:49cqw;top:30cqw;--dx:-30cqw;--dy:-18cqw;--i:0"></div>
+              <div class="hl12-pip a" style="left:49cqw;top:30cqw;--dx:-30cqw;--dy:18cqw;--i:1"></div>
+              <div class="hl12-pip a" style="left:49cqw;top:30cqw;--dx:30cqw;--dy:-18cqw;--i:2"></div>
+              <div class="hl12-pip a" style="left:49cqw;top:30cqw;--dx:30cqw;--dy:18cqw;--i:3"></div>
+            </div>
+            <h3 class="hl-title">One code index for every agent</h3>
+            <p class="hl-blurb">Every agent on your Mac looks code up in one shared index instead of reading whole files, so answers arrive in fewer tokens and fewer turns. New worktrees are searchable at once.</p>
+          </article>
+        </li>
       </ol>
       <div class="hl-stage">
         <div class="hl-detail" id="hl-d-01" data-hl="01">
@@ -2479,6 +2503,89 @@
           <h3 class="hl-d-title">Search every conversation</h3>
           <ul class="hl-points">
             <li><h4>Find that conversation again</h4><p>⌘K searches session names and every transcript, across all five agents, and shows the matching words. Jump to a live session, or reopen an old conversation in a new tab.</p></li>
+          </ul>
+        </div>
+        <div class="hl-detail" id="hl-d-12" data-hl="12">
+          <div class="hl-shot">
+            <figure class="fviz fviz-12" aria-hidden="true">
+              <div class="fv12-top">
+                <!-- A Claude Code pane: one call, a signature-only call tree back -->
+                <div class="fv12-win">
+                  <div class="fv12-titlebar">
+                    <span class="fv12-lights"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+                    <span class="fv12-wintitle">Flight Deck - orchard-app</span>
+                  </div>
+                  <div class="fv12-term">
+                    <span class="l user"><span class="t-dim">❯</span> what calls checkout_total, two levels up?</span>
+                    <span class="l"><span class="b-ok">⏺</span> Bash(flightdeck index calls checkout_total --depth 2)</span>
+                    <span class="l t-dim">  ⎿  fn checkout_total(cart: &amp;Cart) -&gt; Money</span>
+                    <span class="l t-dim">       ← fn submit_order(cart: Cart) -&gt; Receipt</span>
+                    <span class="l t-dim">            ← fn OrderScreen::confirm(&amp;mut self)</span>
+                    <span class="l t-dim">            ← fn retry_failed_order(id: OrderId)</span>
+                    <span class="l t-dim">       ← fn preview_totals(cart: &amp;Cart) -&gt; Totals</span>
+                    <span class="l t-dim">            ← fn CartView::render(&amp;self)</span>
+                    <span class="l fv12-gap"><span class="b-ok">⏺</span> Two levels, five callers. <span class="t-dim">Reading</span> submit_order <span class="t-dim">next.</span></span>
+                    <span class="l"><span class="b-run">⏺</span> Bash(flightdeck index read submit_order)</span>
+                  </div>
+                </div>
+                <!-- flightdeck index status -->
+                <div class="fv12-status">
+                  <div class="fv12-cmd"><span class="t-dim">$</span> flightdeck index status</div>
+                  <div class="fv12-kv"><span>daemon</span><b><i class="fv12-dot"></i>running, 1 process</b></div>
+                  <div class="fv12-kv"><span>clients</span><b>30 connected</b></div>
+                  <div class="fv12-kv"><span>worktrees</span><b>85 searchable</b></div>
+                  <div class="fv12-kv"><span>memory</span><b>1.66 GB peak</b></div>
+                  <div class="fv12-kv"><span>languages</span><b>7 supported</b></div>
+                  <div class="fv12-kv"><span>login</span><b>service installed</b></div>
+                  <div class="fv12-projs">
+                    <span><i class="fv12-dot"></i>orchard-app</span>
+                    <span><i class="fv12-dot"></i>ledger-sync</span>
+                    <span><i class="fv12-dot"></i>atlas-api</span>
+                    <span><i class="fv12-dot"></i>docs-site</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Measured numbers: paired bars, one scale per row, zero-based -->
+              <div class="fv12-stats">
+                <div class="fv12-col">
+                  <h5>Compared with a per-agent code index</h5>
+                  <div class="fv12-leg"><span><i class="a"></i>One shared index</span><span><i class="b"></i>Per-agent index</span></div>
+                  <div class="fv12-row"><div class="fv12-m">Memory for 30 agents</div>
+                    <div class="fv12-bar a" style="--w:32.4%"><b>1.66 GB</b></div><div class="fv12-bar b" style="--w:100%"><b>5.13 GB</b></div></div>
+                  <div class="fv12-row"><div class="fv12-m">Tool descriptions in every session <em>−32%</em></div>
+                    <div class="fv12-bar a" style="--w:67.8%"><b>8,625 tokens</b></div><div class="fv12-bar b" style="--w:100%"><b>12,725</b></div></div>
+                  <div class="fv12-sub">Same 10 coding tasks, headless A/B</div>
+                  <div class="fv12-row"><div class="fv12-m">Tool calls per task <em>−21%</em></div>
+                    <div class="fv12-bar a" style="--w:78.9%"><b>7.5</b></div><div class="fv12-bar b" style="--w:100%"><b>9.5</b></div></div>
+                  <div class="fv12-row"><div class="fv12-m">Empty results per run</div>
+                    <div class="fv12-bar a" style="--w:35.3%"><b>0.53</b></div><div class="fv12-bar b" style="--w:100%"><b>1.50</b></div></div>
+                  <div class="fv12-row"><div class="fv12-m">Cost per run <em>−20%</em></div>
+                    <div class="fv12-bar a" style="--w:80.3%"><b>$0.102</b></div><div class="fv12-bar b" style="--w:100%"><b>$0.127</b></div></div>
+                </div>
+                <div class="fv12-col">
+                  <h5>Compared with no index (shell tools)</h5>
+                  <div class="fv12-leg"><span><i class="a"></i>One shared index</span><span><i class="b"></i>Shell tools</span></div>
+                  <div class="fv12-row"><div class="fv12-m">Search across 85 worktrees: one call vs ripgrep</div>
+                    <div class="fv12-bar a" style="--w:21.3%"><b>0.3–1.6 s</b></div><div class="fv12-bar b" style="--w:100%"><b>6.5–7.5 s</b></div></div>
+                  <div class="fv12-row"><div class="fv12-m">Two-level call tree vs one lookup at a time <em>−93%</em></div>
+                    <div class="fv12-bar a" style="--w:7.2%"><b>446 tokens, 1 call</b></div><div class="fv12-bar b" style="--w:100%"><b>6,177 tokens, 8.5 calls</b></div></div>
+                  <div class="fv12-row"><div class="fv12-m">Every call site of a changed signature</div>
+                    <div class="fv12-bar a" style="--w:8%"><b>8 extra, found 93 of 93</b></div><div class="fv12-bar b" style="--w:100%"><b>100 extra, found 88 of 93</b></div></div>
+                  <div class="fv12-sub">The problem the index solves</div>
+                  <div class="fv12-row"><div class="fv12-m">Shell read and search output, share of a typical agent's transcript</div>
+                    <div class="fv12-track"><i style="left:45%;width:13%"></i><b>45–58%</b></div></div>
+                </div>
+              </div>
+              <p class="fv12-foot">Measured on the developers' machines on two real repositories.</p>
+            </figure>
+          </div>
+          <h3 class="hl-d-title">One code index for every agent</h3>
+          <ul class="hl-points">
+            <li><h4>Answers instead of file dumps</h4><p>Agents ask for a definition, a caller list or a call tree and get signatures back, not whole files.</p></li>
+            <li><h4>Every worktree, no setup</h4><p>A new worktree is searchable at once. Worktrees share results for the files they have in common.</p></li>
+            <li><h4>Always up to date</h4><p>After an agent edits a file, its next query sees the edit. Zero stale answers over 86,400 edits made by 24 processes at once.</p></li>
+            <li><h4>Works everywhere you run an agent</h4><p>Claude Code, Codex and OpenCode use it over MCP, and any shell can run <code>flightdeck index</code>. The app does not need to be open.</p></li>
           </ul>
         </div>
       </div>
