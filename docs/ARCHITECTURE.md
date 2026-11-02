@@ -952,6 +952,13 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   sorted permutation only for a listing not already in byte order) instead of copying every path
   into maps of their own; the snapshot keeps a 40-byte stat per base file by position and a map
   only for files outside the base tree. 1.24 MB a tessera worktree before, 0.17 MB after.
+- **Package views.** A reference into a dependency resolves to a symbol of that package version
+  (`src/pkgview.rs`), never ranked and never a file edge: Elm from `docs.json` under `ELM_HOME`
+  (`src/graph/elm_pkg.rs`), TypeScript and JavaScript from the declaration files of
+  `node_modules` and `@types` (`src/pkgview/npm.rs`, `src/graph/ecma_pkg.rs`). Package files are
+  only read, parsed once per process per package version and file, and shared by every view.
+  On tessera they took TypeScript unresolved references from 57,858 to 38,194 and JavaScript from
+  25,997 to 22,269; the process-wide npm caches hold about 18 MB for it.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.
