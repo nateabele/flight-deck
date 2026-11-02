@@ -959,6 +959,16 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   only read, parsed once per process per package version and file, and shared by every view.
   On tessera they took TypeScript unresolved references from 57,858 to 38,194 and JavaScript from
   25,997 to 22,269; the process-wide npm caches hold about 18 MB for it.
+- **Package views.** A reference into a dependency resolves to a symbol of that package version,
+  read from the package manager's cache and never written: Elm's `docs.json` under `~/.elm`
+  (`src/pkgview.rs`), Rust crates of `Cargo.lock` from `~/.cargo/registry/src` and std/core/alloc
+  from the rust-src component, each crate's `pub` surface parsed with tree-sitter on first use
+  (`src/pkgview/cargo.rs`). One copy per process, shared by every graph; a package reference has
+  no target, so it adds no edge, rank or rename site (`src/graph/elm_pkg.rs`,
+  `src/graph/rust_pkg.rs`). On tessera Rust unresolved references went from 23,481 to 11,425 and
+  on this repository from 23,843 to 13,405 (nearly all of the rest are method calls,
+  which need the receiver's type); loading std, core and alloc costs about two CPU seconds
+  once per daemon, the crates a repository reaches about 10 to 16 MB of heap.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

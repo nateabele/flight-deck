@@ -18,7 +18,7 @@
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
 //!   changed, because "the unique symbol with this name" may have changed (looked up in the
 //!   base's `soft_index`, built on the first overlay, rather than scanned). A reference resolved
-//!   to a package symbol is neither (see `elm_pkg`).
+//!   to a package symbol is neither (see `elm_pkg`, `rust_pkg`).
 //!
 //! File indices are stable across `with_changes` (removed files become tombstones, added files are
 //! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
@@ -42,6 +42,7 @@ mod precise;
 pub(crate) mod ppr;
 mod python;
 pub mod rank;
+mod rust_pkg;
 mod surface;
 mod swift;
 mod swift_types;
@@ -1075,12 +1076,12 @@ impl GraphData {
 
         let mut refs = Vec::with_capacity(facts.refs.len());
         let swift_keys = (lang == "swift").then(|| self.swift_keys(f));
-        let pkg_scope = (lang == "elm")
-            .then(|| self.resolver.elm_packages(&node.path))
-            .flatten()
-            .filter(|p| !p.modules.is_empty())
-            .map(|p| elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports));
-        let ecma_scope = matches!(lang, "typescript" | "tsx" | "javascript").then(|| ecma_pkg::EcmaPkgScope::new(&facts.imports, &imports)).flatten();
+        let pkg_scope = match lang {
+            "elm" => self.resolver.elm_packages(&node.path).filter(|p| !p.modules.is_empty()).map(|p| rust_pkg::PkgScope::Elm(elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports))),
+            "rust" => self.resolver.rust_packages(&node.path).map(|d| rust_pkg::PkgScope::Rust(rust_pkg::RustPkgScope::new(d, &facts.imports, &imports))),
+            "typescript" | "tsx" | "javascript" => ecma_pkg::EcmaPkgScope::new(&facts.imports, &imports).map(rust_pkg::PkgScope::Ecma),
+            _ => None,
+        };
         let mut pkg_refs = elm_pkg::PkgRefs::default();
         for (ri, r) in facts.refs.iter().enumerate() {
             let mut rr = match &swift_keys {
@@ -1089,11 +1090,7 @@ impl GraphData {
             };
             // Nothing in the view, or only a unique-name guess: a package name beats both.
             if (rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none())
-                && let Some(sym) = match (&pkg_scope, &ecma_scope) {
-                    (Some(scope), _) => scope.lookup(self.name(r.name), self.qualifier(r), r.kind),
-                    (_, Some(scope)) => scope.lookup(self.name(r.name), self.qualifier(r), r.kind),
-                    _ => None,
-                }
+                && let Some(sym) = pkg_scope.as_ref().and_then(|scope| scope.lookup(self.name(r.name), self.qualifier(r), r.kind))
             {
                 pkg_refs.push(ri as u32, sym);
                 rr = RefRes { target: None, confidence: Confidence::Package, external: None };

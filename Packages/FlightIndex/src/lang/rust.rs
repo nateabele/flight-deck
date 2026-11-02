@@ -13,8 +13,9 @@ impl Language for Rust {
     }
 
     /// 2: references inside macro arguments; `#[path]` on `mod` declarations.
+    /// 3: macro invocations are `RefKind::Macro`, not calls.
     fn parser_version(&self) -> u32 {
-        2
+        3
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -213,7 +214,7 @@ impl<'a> Walker<'a> {
             "macro_invocation" => {
                 if let Some(m) = n.child_by_field_name("macro") {
                     let (q, name) = split_qualified(text(m, src), "::");
-                    self.add_ref(n, name, q, enclosing, RefKind::Call);
+                    self.add_ref(n, name, q, enclosing, RefKind::Macro);
                 }
                 let mut c = n.walk();
                 let tree = n.children(&mut c).find(|k| k.kind() == "token_tree");

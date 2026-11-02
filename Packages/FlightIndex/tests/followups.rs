@@ -50,8 +50,9 @@ fn rust_calls_inside_macro_arguments_are_references() {
     // Upper-case names are uses, as outside a macro.
     assert!(has(&f, None, "MAX_ITEMS", RefKind::Use), "{d:?}");
     assert!(has(&f, Some("Kind"), "Leaf", RefKind::Use), "{d:?}");
-    // The macros themselves are still calls; plain lower-case locals are still not recorded.
-    assert!(has(&f, None, "assert", RefKind::Call) && has(&f, None, "my_macro", RefKind::Call), "{d:?}");
+    // The macros themselves are `RefKind::Macro` (bound to a crate's `macro_rules!`, never to a
+    // function of the same name: pk-rs); plain lower-case locals are still not recorded.
+    assert!(has(&f, None, "assert", RefKind::Macro) && has(&f, None, "my_macro", RefKind::Macro), "{d:?}");
     assert!(refs_named(&f, "cfg").is_empty() && refs_named(&f, "path").is_empty(), "{d:?}");
     // Each reference sits in `check`.
     let check = f.symbols.iter().find(|s| s.name == "check").unwrap().local_id;

@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// Package symbols `find`/`refs` should show for `name`, given how many repository symbols
 /// matched.
 pub fn candidates(c: &Ctx, name: &str, repo_hits: usize) -> Vec<Arc<PkgSymbol>> {
-    if repo_hits > 0 && !name.contains('.') {
+    if repo_hits > 0 && !name.contains('.') && !name.contains("::") {
         return Vec::new();
     }
     c.graph.find_package_symbols(name)
