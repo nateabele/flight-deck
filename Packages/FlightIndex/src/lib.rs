@@ -14,6 +14,7 @@ pub mod facts;
 pub mod git;
 pub mod graph;
 pub mod guard;
+pub mod hexview;
 pub mod history;
 pub mod indexstore;
 pub mod lang;

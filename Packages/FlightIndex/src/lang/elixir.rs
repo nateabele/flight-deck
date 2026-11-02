@@ -15,7 +15,9 @@ impl Language for Elixir {
     }
 
     fn parser_version(&self) -> u32 {
-        1
+        // 2: `use` keeps bare calls (it may import anything), ExUnit's `using do … end` is a
+        // `__using__` macro, and `import unquote(__MODULE__)` imports the enclosing module.
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -175,6 +177,7 @@ impl<'a> Walker<'a> {
                         self.function(n, name, ctx)
                     }
                     "defstruct" | "defexception" if ctx.body => self.defstruct(n, ctx),
+                    "using" if ctx.body && Self::do_block(n).is_some() => self.using_block(n, ctx),
                     "alias" | "import" | "require" | "use" => self.import(n, name),
                     _ => {
                         if !KERNEL.contains(&name) {
@@ -390,6 +393,20 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// `using do … end` in a case template (`use ExUnit.CaseTemplate`) is what `use`-ing the
+    /// template runs, exactly as a `defmacro __using__` would be: recorded as one, so whoever reads
+    /// the imports inside it can tell them from the template's own.
+    fn using_block(&mut self, n: Node, ctx: Ctx) {
+        let sig = one_line(text(n, self.src).lines().next().unwrap_or("using do"));
+        let id = self.facts.push_symbol(symbol(n, "__using__", SymbolKind::Macro, Some(sig), ctx.parent, true));
+        let inner = Ctx { parent: ctx.parent, enclosing: Some(id), body: false, in_type: false };
+        let target = n.child_by_field_name("target");
+        let mut c = n.walk();
+        for child in n.named_children(&mut c).filter(|k| Some(*k) != target) {
+            self.walk(child, inner);
+        }
+    }
+
     fn delegate(&mut self, n: Node, args: Node, name: &str, id: u32) {
         let src = self.src;
         let mut stack = vec![args];
@@ -484,10 +501,17 @@ impl<'a> Walker<'a> {
                 }
             }
             "import" | "require" | "use" => {
-                if first.kind() != "alias" && !(first.kind() == "identifier" && text(first, src) == "__MODULE__") {
+                // `import unquote(__MODULE__)` in a `__using__` quote imports the defining module.
+                let unquoted_self = first.kind() == "call"
+                    && first.child_by_field_name("target").is_some_and(|t| text(t, src) == "unquote")
+                    && Self::args(first).and_then(|a| a.named_child(0)).is_some_and(|a| text(a, src) == "__MODULE__");
+                let spec = if unquoted_self {
+                    self.expand("__MODULE__")
+                } else if first.kind() == "alias" || (first.kind() == "identifier" && text(first, src) == "__MODULE__") {
+                    self.expand(text(first, src))
+                } else {
                     return;
-                }
-                let spec = self.expand(text(first, src));
+                };
                 let mut names = Vec::new();
                 if keyword == "import" {
                     match opts.get("only").filter(|v| v.kind() == "list") {
@@ -511,6 +535,10 @@ impl<'a> Walker<'a> {
                             names.push(ImportName::plain("*"));
                         }
                     }
+                }
+                if keyword == "use" {
+                    // `use` runs the module's `__using__`, which may import anything.
+                    self.wildcard = true;
                 }
                 push(self, spec, None, names);
             }

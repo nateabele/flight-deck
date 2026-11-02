@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 /// One package at one version, as a package manager names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackageId {
-    /// `elm` today; `cargo`, `hex`, `npm`, `swiftpm` later.
+    /// `elm`; `elixir` (the standard library) and `hex` / `git` (Mix dependencies, see
+    /// `hexview`); `cargo`, `npm`, `swiftpm` later.
     pub manager: &'static str,
     /// `elm/core`
     pub name: String,
@@ -46,6 +47,10 @@ pub enum PkgKind {
     TypeAlias,
     Constructor,
     Operator,
+    /// An Elixir module (`MapSet`, `Phoenix.Socket`): `module` is its full name.
+    Module,
+    /// An Elixir macro (`assert`, `Kernel.then`).
+    Macro,
 }
 
 impl PkgKind {
@@ -56,6 +61,8 @@ impl PkgKind {
             PkgKind::TypeAlias => "type_alias",
             PkgKind::Constructor => "constructor",
             PkgKind::Operator => "operator",
+            PkgKind::Module => "module",
+            PkgKind::Macro => "macro",
         }
     }
 }
@@ -74,13 +81,18 @@ pub struct PkgSymbol {
 impl PkgSymbol {
     /// `elm/core@1.0.5 List.map`: what `find`/`refs` print.
     pub fn display(&self) -> String {
-        format!("{} {}.{}", self.package, self.module, self.name)
+        match self.kind {
+            PkgKind::Module => format!("{} {}", self.package, self.module),
+            _ => format!("{} {}.{}", self.package, self.module, self.name),
+        }
     }
 
     /// The SCIP symbol string: `elm elm/core 1.0.5 List/map.` (a type descriptor ends `#`).
     pub fn scip(&self) -> String {
         let suffix = match self.kind {
             PkgKind::Type | PkgKind::TypeAlias => "#",
+            // A namespace descriptor: `hex jason 1.4.4 Jason/`.
+            PkgKind::Module => return format!("{} {} {} {}/", self.package.manager, self.package.name, self.package.version, self.module.replace('.', "/")),
             _ => ".",
         };
         format!("{} {} {} {}/{}{suffix}", self.package.manager, self.package.name, self.package.version, self.module.replace('.', "/"), self.name)
