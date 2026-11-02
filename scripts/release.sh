@@ -11,6 +11,12 @@
 #   xcrun notarytool store-credentials developer-id-notary \
 #     --key ~/.appstoreconnect/AuthKey_<KEYID>.p8 --key-id <KEYID> --issuer <ISSUER-UUID>
 #
+# Preferably in its own keychain, which this script uses whenever the file exists:
+#
+#   security create-keychain ~/Library/Keychains/flightdeck-notary.keychain-db
+#   xcrun notarytool store-credentials developer-id-notary --apple-id <APPLE-ID> \
+#     --team-id ZM74LQ6QWG --keychain ~/Library/Keychains/flightdeck-notary.keychain-db
+#
 # Certificates and provisioning are automatic: `-allowProvisioningUpdates` lets xcodebuild
 # create the Developer ID Application certificate through the Xcode account if it is missing.
 set -euo pipefail
@@ -22,6 +28,11 @@ cd "$(dirname "$0")/.."
 
 TEAM_ID=ZM74LQ6QWG
 NOTARY_PROFILE="${NOTARY_PROFILE:-developer-id-notary}"
+# The profile lives in its own keychain when that file exists. The login keychain's copy was lost
+# twice within an hour on 2026-11-01 with nothing in this repo deleting it.
+NOTARY_KEYCHAIN="${NOTARY_KEYCHAIN:-$HOME/Library/Keychains/flightdeck-notary.keychain-db}"
+NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+[ -f "$NOTARY_KEYCHAIN" ] && NOTARY_AUTH+=(--keychain "$NOTARY_KEYCHAIN")
 NOTARIZE=1
 for arg in "$@"; do
   case "$arg" in
@@ -39,7 +50,7 @@ APP="$EXPORT/Flight Deck.app"
 ZIP="$OUT/FlightDeck-v$VERSION-macOS-arm64.zip"
 DMG="$OUT/FlightDeck-v$VERSION-macOS-arm64.dmg"
 
-if [ "$NOTARIZE" = 1 ] && ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+if [ "$NOTARIZE" = 1 ] && ! xcrun notarytool history "${NOTARY_AUTH[@]}" >/dev/null 2>&1; then
   echo "no usable notarytool profile '$NOTARY_PROFILE' in the keychain (see the header of this script)" >&2
   exit 1
 fi
@@ -97,7 +108,7 @@ fi
 
 echo "==> notarizing the app"
 ditto -c -k --keepParent "$APP" "$OUT/notarize.zip"
-xcrun notarytool submit "$OUT/notarize.zip" --keychain-profile "$NOTARY_PROFILE" --wait \
+xcrun notarytool submit "$OUT/notarize.zip" "${NOTARY_AUTH[@]}" --wait \
   | tee "$OUT/notarize.log"
 grep -q 'status: Accepted' "$OUT/notarize.log" || { echo "notarization was not accepted" >&2; exit 1; }
 rm "$OUT/notarize.zip"
@@ -123,7 +134,7 @@ if [ -n "$DEVID" ]; then
 else
   echo "  (no local Developer ID Application identity: dmg left unsigned)"
 fi
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait | tee -a "$OUT/notarize.log"
+xcrun notarytool submit "$DMG" "${NOTARY_AUTH[@]}" --wait | tee -a "$OUT/notarize.log"
 xcrun stapler staple "$DMG"
 [ -z "$DEVID" ] || spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
