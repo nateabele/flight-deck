@@ -1069,7 +1069,15 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   install, the `$XDG_RUNTIME_DIR/fdindex.sock` default socket, a query with `--no-start`, a
   SIGKILL restarted within `RestartSec`, `stop` staying stopped, `start`, a second install left
   alone, and uninstall leaving no unit, socket or process.
-- **Linux.** `scripts/test-fdindex-linux.sh` runs `cargo test` and `cargo clippy --all-targets` in
+- **Test runner.** `Packages/FlightIndex/scripts/test.sh` runs the suite under `cargo nextest run`
+  when cargo-nextest is installed and under `cargo test` otherwise (`cargo test` keeps working).
+  nextest runs every test in its own process, all in parallel, so the wall time is the longest
+  tests instead of the sum of 52 binaries run one after another (about 45 s against 100 s warm on
+  an M5 Max). Because a process per test repeats per-process work, `.config/nextest.toml` has a
+  setup script that points `RUST_SRC_PATH` at a stub rust-src, so a test does not parse the real
+  std (6 s) each time; `rust_packages` supplies its own fixtures. The profile `no-macos-watcher`
+  drops the six tests that need the macOS ref watcher, for Linux hosts without it.
+- **Linux.** `scripts/test-fdindex-linux.sh` runs the tests (nextest, as above) and `cargo clippy --all-targets` in
   `rust:1.96.0-slim-trixie` as an ordinary user (two tests rely on permission bits that root
   ignores); all 476 tests pass there. The Linux hostd release
   tarball (`scripts/build-hostd-linux.sh`) carries `fdindex` beside `flightdeck-hostd`, built in
