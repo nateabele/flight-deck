@@ -444,7 +444,7 @@ impl<'a> Views<'a> {
     /// `(referring view, file, index into that file's refs)` of the references from other views
     /// that bind to `d`: each external target of each other view is looked up in the file it
     /// names, which is how it is known which symbol it is.
-    fn external_referrers(&self, d: &SymbolHit) -> Vec<(usize, u32, u32)> {
+    pub fn external_referrers(&self, d: &SymbolHit) -> Vec<(usize, u32, u32)> {
         let mut out = Vec::new();
         let mut lookups: HashMap<(PathBuf, String), Option<SymId>> = HashMap::new();
         for (v, g) in self.graphs.iter().enumerate().filter(|(v, _)| *v != d.view) {
@@ -602,22 +602,36 @@ impl<'a> Views<'a> {
     /// The import lines (file and line) in other views that bring in `file` of `view`, and, if
     /// `name` is given, name it.
     pub fn import_sites(&self, view: usize, file: u32, name: Option<&str>) -> Vec<(usize, PathBuf, u32)> {
+        let mut out: Vec<(usize, PathBuf, u32)> = self
+            .cross_imports(view, file)
+            .into_iter()
+            .filter_map(|(v, fi, ii)| {
+                let g = self.graphs[v];
+                let imp = &g.file(fi).facts.imports[ii];
+                name.is_none_or(|n| imp.names.iter().any(|x| x.name == n || x.name == "*")).then(|| (v, g.abs(fi), imp.line))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// `(view, file, import index)` of every import statement in another view that lands on `file`
+    /// of `view`: what a mutator applied across views rewrites there.
+    pub fn cross_imports(&self, view: usize, file: u32) -> Vec<(usize, u32, usize)> {
         let mut out = Vec::new();
-        for (v, fi) in self.cross_importers().remove(&(view, file)).unwrap_or_default() {
+        let mut importers = self.cross_importers().remove(&(view, file)).unwrap_or_default();
+        importers.sort();
+        importers.dedup();
+        for (v, fi) in importers {
             let g = self.graphs[v];
-            let node = g.file(fi);
-            for (imp, res) in node.facts.imports.iter().zip(&g.res[fi as usize].imports) {
+            for (ii, res) in g.res[fi as usize].imports.iter().enumerate() {
                 let Resolved::External(p) = res else { continue };
-                if self.locate(&g.external_abs(p)) != Some((view, file)) {
-                    continue;
-                }
-                if name.is_none_or(|n| imp.names.iter().any(|x| x.name == n || x.name == "*")) {
-                    out.push((v, g.abs(fi), imp.line));
+                if self.locate(&g.external_abs(p)) == Some((view, file)) {
+                    out.push((v, fi, ii));
                 }
             }
         }
-        out.sort();
-        out.dedup();
         out
     }
 }

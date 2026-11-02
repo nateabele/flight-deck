@@ -559,15 +559,25 @@ struct Done {
 /// never half), keeping the original's permissions. If any step fails, the files already written
 /// are put back and directories this call created are removed.
 pub fn apply_changes(root: &Path, changes: &[Change]) -> Result<(), String> {
-    for c in changes {
-        check_within(root, &c.path)?;
-        let now = std::fs::read(&c.path).ok();
-        if now != c.before {
-            return Err(format!("{} changed on disk while the edit was being prepared; nothing was written, retry", c.path.display()));
+    apply_change_sets(&[(root, changes)])
+}
+
+/// `apply_changes` for several worktrees at once (a mutation applied across linked views): every
+/// change is checked against its own root and its recorded bytes before anything is written, and
+/// a failure in any root puts back the files already written in all of them. A half-applied
+/// cross-repository rename is worse than none.
+pub fn apply_change_sets(sets: &[(&Path, &[Change])]) -> Result<(), String> {
+    for (root, changes) in sets {
+        for c in changes.iter() {
+            check_within(root, &c.path)?;
+            let now = std::fs::read(&c.path).ok();
+            if now != c.before {
+                return Err(format!("{} changed on disk while the edit was being prepared; nothing was written, retry", c.path.display()));
+            }
         }
     }
     let mut done: Vec<Done> = Vec::new();
-    for c in changes {
+    for c in sets.iter().flat_map(|(_, changes)| changes.iter()) {
         let existing = std::fs::metadata(&c.path).ok().map(|m| m.permissions());
         let perms = existing.clone().or_else(|| {
             use std::os::unix::fs::PermissionsExt;
@@ -598,7 +608,8 @@ pub fn apply_changes(root: &Path, changes: &[Change]) -> Result<(), String> {
         done.push(Done { path: c.path.clone(), before: c.before.clone(), perms: existing, created_dirs });
         if let Err(e) = step {
             let restored = rollback(&done);
-            return Err(format!("writing {} failed: {e}. Rolled back {restored} file(s); the worktree is as it was.", c.path.display()));
+            let scope = if sets.len() > 1 { "every worktree is" } else { "the worktree is" };
+            return Err(format!("writing {} failed: {e}. Rolled back {restored} file(s); {scope} as it was.", c.path.display()));
         }
     }
     Ok(())
