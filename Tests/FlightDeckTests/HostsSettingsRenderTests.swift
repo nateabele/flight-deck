@@ -156,4 +156,30 @@ final class HostsSettingsRenderTests: XCTestCase {
                                  size: NSSize(width: 420, height: 600),
                                  to: dir.appendingPathComponent("hosting-pair-sheet-fallback-port.png"))
     }
+
+    /// The Code Index section on its own (it sits below the fold of the Hosting tab), from a
+    /// fake transport: running with views, a build and a last error, then not running.
+    func testRenderCodeIndexSection() async throws {
+        let dir = try outputDirectory()
+        struct Fixed: IndexDaemonTransport {
+            let reply: Result<String, IndexDaemonError>
+            func roundTrip(_ line: Data, socketPath: String, timeout: TimeInterval) throws -> Data {
+                Data(try reply.get().utf8)
+            }
+        }
+        func section(_ reply: Result<String, IndexDaemonError>) async -> some View {
+            let model = IndexStatusModel(client: IndexDaemonClient(socketPath: "/tmp/fd-none.sock",
+                                                                   transport: Fixed(reply: reply)),
+                                         restarter: InertIndexRestarter())
+            await model.refresh().value
+            return Form { IndexStatusSection(model: model) }.formStyle(.grouped)
+        }
+        let size = NSSize(width: 720, height: 460)
+        try PlanningRender.write(await section(.success(IndexStatusFixture.running)), size: size,
+                                 to: dir.appendingPathComponent("hosting-index-running.png"))
+        try PlanningRender.write(await section(.success(IndexStatusFixture.running)), size: size,
+                                 to: dir.appendingPathComponent("hosting-index-running-light.png"), appearance: .aqua)
+        try PlanningRender.write(await section(.failure(.notRunning)), size: NSSize(width: 720, height: 200),
+                                 to: dir.appendingPathComponent("hosting-index-not-running.png"))
+    }
 }

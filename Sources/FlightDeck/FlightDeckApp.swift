@@ -281,14 +281,15 @@ struct FlightDeckApp: App {
     ///
     /// Under a UITest reset its admin socket is a path nothing listens on and its LaunchAgent is
     /// `InertAgentService`, so a reset run never reads, arms or revokes the developer's real
-    /// hostd, and never registers (or unregisters) the real `dev.flightdeck.hostd` agent.
+    /// hostd, and never registers (or unregisters) the real `dev.flightdeck.hostd` agent. Its
+    /// Code Index model is inert too: a reset run never reads or restarts the real index daemon.
     @MainActor
     private static func makeHostingController() -> HostingController {
         guard !isResettingState else {
             return HostingController(service: InertAgentService(),
                                      adminPath: "/tmp/fd-uitest-\(UUID().uuidString.prefix(8)).sock")
         }
-        return HostingController(adminPath: HostingController.defaultAdminPath)
+        return HostingController(adminPath: HostingController.defaultAdminPath, index: .live())
     }
 
     /// Builds the fleet service and starts its listener, unless the launch is a UITest

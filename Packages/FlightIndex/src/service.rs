@@ -151,6 +151,10 @@ pub struct Service {
     errors: AtomicU64,
     /// What this daemon has served to peers asking for facts (`peer_facts` connections).
     served: crate::peer::serve::ServeCounters,
+    /// The last request that failed on the daemon's side (`ERROR`, `VERSION_MISMATCH`), for
+    /// `status`'s `last_error`: (state, tool, message, when). A caller's own mistake
+    /// (`BAD_REQUEST`) and "ask again" (`BUILDING`) are counted in `errors` but not kept here.
+    last_error: Mutex<Option<(String, String, String, SystemTime)>>,
 }
 
 impl Drop for Service {
@@ -193,6 +197,7 @@ impl Service {
                 requests: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
                 served: Default::default(),
+                last_error: Mutex::new(None),
             }
         });
         svc.watch_known_repos();
@@ -354,23 +359,29 @@ impl Service {
     pub fn handle(self: &Arc<Self>, req: Request) -> Response {
         self.requests.fetch_add(1, Ordering::Relaxed);
         let id = req.id.clone();
+        let tool = req.tool.clone();
         if let Some(v) = req.v
             && v != PROTOCOL_VERSION
         {
-            return self.fail(Response::error(id, state::VERSION_MISMATCH, format!("client speaks protocol {v}, daemon speaks {PROTOCOL_VERSION}")));
+            return self.fail(&tool, Response::error(id, state::VERSION_MISMATCH, format!("client speaks protocol {v}, daemon speaks {PROTOCOL_VERSION}")));
         }
         let svc = self.clone();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || svc.dispatch(&req)));
         self.shed_memory();
         match outcome {
             Ok(Ok(resp)) => resp.with_id(id),
-            Ok(Err(e)) => self.fail(Response::error(id, e.state, e.message)),
-            Err(_) => self.fail(Response::error(id, state::ERROR, "internal error: the request panicked (see the daemon log)")),
+            Ok(Err(e)) => self.fail(&tool, Response::error(id, e.state, e.message)),
+            Err(_) => self.fail(&tool, Response::error(id, state::ERROR, "internal error: the request panicked (see the daemon log)")),
         }
     }
 
-    fn fail(&self, r: Response) -> Response {
+    fn fail(&self, tool: &str, r: Response) -> Response {
         self.errors.fetch_add(1, Ordering::Relaxed);
+        if let (Some(st), Some(msg)) = (r.state.as_deref(), r.error.as_deref())
+            && (st == state::ERROR || st == state::VERSION_MISMATCH)
+        {
+            *self.last_error.lock().unwrap() = Some((st.to_string(), tool.to_string(), msg.to_string(), SystemTime::now()));
+        }
         r
     }
 
@@ -1118,6 +1129,7 @@ impl Service {
             "uptime_seconds": self.started.elapsed().as_secs(),
             "rss_bytes": rss, "memory_target": self.cfg.memory_target,
             "requests": self.requests.load(Ordering::Relaxed), "errors": self.errors.load(Ordering::Relaxed),
+            "last_error": self.last_error.lock().unwrap().as_ref().map(|(st, tool, msg, at)| json!({"state": st, "tool": tool, "message": msg, "seconds_ago": ago(*at)})),
             "parses": self.engine.parse_count(),
             "views": views, "builds": builds,
             "vm": {"resident": vm.resident, "internal": vm.internal, "reusable": vm.reusable, "compressed": vm.compressed, "footprint": vm.footprint},

@@ -445,3 +445,23 @@ fn map_on_a_dirty_worktree_is_seeded_by_its_modified_files_unless_personalize_is
     let own = ok(&svc, &r.root, "map", json!({"top_n": 4, "boost_files": ["src/x1.ts"]}));
     assert!(own.contains(&format!("Seeds: {}\n", r.root.join("src/x1.ts").display())) && map_rows(&r.root, &own)[0] == "src/hub.ts", "{own}");
 }
+
+#[test]
+fn status_reports_the_last_daemon_side_error_but_not_caller_mistakes() {
+    // The app shows `last_error`: a failure of the daemon's own (ERROR, VERSION_MISMATCH), with
+    // the tool and when. A caller's bad arguments are the caller's to fix and are not shown.
+    let (_d, svc) = service();
+    let r = project();
+    let data = |svc: &Arc<Service>| svc.handle(req(&r.root, "status", json!({}))).data.unwrap();
+    assert!(data(&svc)["last_error"].is_null(), "{}", data(&svc));
+    assert_eq!(call(&svc, &r.root, "find", json!({})).state.as_deref(), Some(state::BAD_REQUEST));
+    assert!(data(&svc)["last_error"].is_null(), "a caller mistake is not a daemon error");
+    let mut old = req(&r.root, "find", json!({"name": "x"}));
+    old.v = Some(PROTOCOL_VERSION + 1);
+    assert_eq!(svc.handle(old).state.as_deref(), Some(state::VERSION_MISMATCH));
+    let last = &data(&svc)["last_error"];
+    assert_eq!(last["state"], state::VERSION_MISMATCH, "{last}");
+    assert_eq!(last["tool"], "find", "{last}");
+    assert!(last["message"].as_str().unwrap().contains("protocol"), "{last}");
+    assert!(last["seconds_ago"].as_u64().unwrap() < 60, "{last}");
+}
