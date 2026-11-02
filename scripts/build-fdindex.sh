@@ -62,6 +62,12 @@ for a in $ARCH_LIST; do
   built+=("$PKG/target/$t/release/fdindex")
 done
 
+# A worktree may link vendor/fdindex-artifacts to another checkout's copy. Writing through that link
+# would replace the other checkout's index with this branch's, so the link becomes a local folder.
+if [ -L "$OUT" ]; then
+  echo "note: $OUT linked to $(readlink "$OUT"); building into a local folder instead" >&2
+  rm "$OUT"
+fi
 mkdir -p "$OUT"
 tmp=$(mktemp "$OUT/.fdindex.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
