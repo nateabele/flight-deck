@@ -73,6 +73,12 @@ public enum FleetEvent: Equatable, Sendable {
     /// `nil` clears. There is no separate "cleared" case, so a client cannot forget to handle it.
     case apiErrorChanged(id: UUID, error: SessionAPIError?)
 
+    /// This session's cloud machines or budget changed structurally, or its spend baseline was
+    /// re-anchored (see `WireSessionCloud`). `nil` clears: the session has no machine left.
+    /// Sent only to peers that advertise `FleetCapability.cloud`: an older phone's decoder
+    /// throws on an unknown tag.
+    case sessionCloudChanged(id: UUID, cloud: WireSessionCloud?)
+
     /// A plan gate opened, changed subject, or closed on this session.
     ///
     /// Without this case, `planGate` was a field the projection oracle could see
@@ -114,7 +120,8 @@ extension FleetEvent {
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
              .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
-             .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
+             .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _),
+             .sessionCloudChanged(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
              .projectsReordered, .sessionsReordered, .projectIntakes, .projectSwarm:
@@ -131,7 +138,7 @@ extension FleetEvent {
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
              .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired,
-             .promptTyped, .apiErrorChanged:
+             .promptTyped, .apiErrorChanged, .sessionCloudChanged:
             return nil
         }
     }

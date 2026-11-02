@@ -101,7 +101,7 @@ public enum FleetReplay {
     /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
         case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID), planGate(UUID)
-        case apiError(UUID), intakes(UUID), swarm(UUID)
+        case apiError(UUID), intakes(UUID), swarm(UUID), cloud(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -119,6 +119,8 @@ public enum FleetReplay {
         // one resume gap, and only the final value is real by the time a reconnecting phone
         // sees it.
         case .apiErrorChanged(let id, _): return .apiError(id)
+        // Same rationale as `.activity`: only the last cloud summary inside a gap is real.
+        case .sessionCloudChanged(let id, _): return .cloud(id)
         // Same rationale as `.activity`: a list that changed five times inside one resume gap
         // is only real in its last form by the time a reconnecting phone sees it.
         case .projectIntakes(let id, _): return .intakes(id)

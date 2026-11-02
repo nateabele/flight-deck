@@ -54,6 +54,12 @@ final class SessionStore: ObservableObject {
     /// is the whole point of the badge.
     @Published private(set) var apiErrors: [UUID: SessionAPIError] = [:]
 
+    /// Each session's cloud machines and budget as last RECORDED on the fleet wire; a session
+    /// with no machine has no key. `FleetProjection` reads this (the drift-oracle rule
+    /// `intakeSummaries` explains), and the sidebar's cloud icon reads it too. Written ONLY by
+    /// `recordSessionClouds`, in the same call that records the events.
+    @Published private(set) var sessionClouds: [UUID: WireSessionCloud] = [:]
+
     /// When each tab last changed activity. Beside `statuses`, not inside `SessionStatus`: that
     /// type is compared for equality in `commitStatuses`' change diff and across the suite, and a
     /// timestamp in it would make every tick a change. Plain, not `@Published` — every write
@@ -1668,6 +1674,62 @@ final class SessionStore: ObservableObject {
         return choices
     }
 
+    /// `accountChoices`, with the context of a tab whose agent has no status line read from
+    /// that agent's own files (`AgentContextReader`). Async: the file and database reads run
+    /// off the main actor, and OpenCode's window is a question to its server.
+    func accountChoicesWithContext(for id: UUID) async -> WireAccountChoices? {
+        guard var choices = accountChoices(for: id) else { return nil }
+        if choices.context == nil { choices.context = await agentContext(for: id) }
+        return choices
+    }
+
+    /// The context fill of a codex, grok, gemini or opencode tab, or nil (claude's comes from
+    /// `contextUsage`).
+    func agentContext(for id: UUID) async -> WireContextUsage? {
+        guard let session = session(for: id) else { return nil }
+        let recorded = session.transcriptPath.map { URL(fileURLWithPath: $0) }
+        switch session.agent {
+        case .claude:
+            return nil
+        case .codex:
+            guard let rollout = recorded else { return nil }
+            return await Task.detached(priority: .utility) {
+                CodexRolloutFile.tail(rollout).flatMap(AgentContextReader.codex(rolloutTail:))
+            }.value
+        case .grok:
+            guard let transcript = recorded ?? adapter(for: instance(for: session)).binding(for: session).transcriptURL
+            else { return nil }
+            let signals = GrokSessionFiles.sibling(AgentContextReader.grokSignalsName, of: transcript)
+            return await Task.detached(priority: .utility) {
+                guard let data = try? Data(contentsOf: signals) else { return nil }
+                return AgentContextReader.grok(signals: data, readAt: AgentContextReader.modified(signals) ?? Date())
+            }.value
+        case .gemini:
+            let transcript = recorded ?? geminiPaths.transcript(session.pinnedConversationID)
+            let store = GeminiPaths.conversation(ofTranscript: transcript).map { $0.paths.stepStore($0.id) }
+                ?? geminiPaths.stepStore(session.pinnedConversationID)
+            return await Task.detached(priority: .utility) { AgentContextReader.gemini(store: store) }.value
+        case .opencode:
+            guard let sessionID = OpenCodeIdentity.sessionID(fromTranscript: recorded) else { return nil }
+            let account = instance(for: session).account
+            let stack = openCodeStacks[account]
+            guard let database = stack?.server.databaseURL
+                    ?? OpenCodeMirror.databaseURL(home: home(ofAccount: account, agent: .opencode))
+            else { return nil }
+            guard let tokens = await Task.detached(priority: .utility, operation: {
+                AgentContextReader.openCodeTokens(database: database, session: sessionID)
+            }).value,
+                let client = try? stack?.adapter.client(),
+                let (status, body) = try? await client.http.send(OpenCodeRequest(
+                    method: "GET", path: "/config/providers", query: ["directory": session.transcriptDirectory])),
+                (200..<300).contains(status),
+                let window = AgentContextReader.openCodeWindow(
+                    providers: body, providerID: tokens.providerID, modelID: tokens.modelID)
+            else { return nil }
+            return AgentContextReader.openCode(tokens, window: window)
+        }
+    }
+
     /// The refusals shared by every tab that cannot move right now, or nil when it can.
     private func accountSwitchRefusal(for session: Session) -> String? {
         let id = session.id
@@ -2729,6 +2791,23 @@ final class SessionStore: ObservableObject {
     /// registering the store itself would replace its other registration. Per store, not
     /// shared: a test process builds many stores, and a shared owner would leave only the last.
     private let intakeRetentionTicker = IntakeRetentionTicker()
+
+    /// Replaces every session's cloud summary with `next` (a session absent from it has none)
+    /// and records one `sessionCloudChanged` per session whose summary differs at all. The
+    /// caller (`SessionCloudMonitor`) decides when a summary is worth re-sending; this only
+    /// keeps the cache and the wire in step. Sessions this store does not hold are dropped:
+    /// an event for an unknown tab would fold into nothing on the mirror.
+    func recordSessionClouds(_ next: [UUID: WireSessionCloud]) {
+        let known = Set(repos.flatMap { $0.sessions.map(\.id) })
+        let filtered = next.filter { known.contains($0.key) }
+        guard filtered != sessionClouds else { return }
+        let ids = Set(filtered.keys).union(sessionClouds.keys).sorted { $0.uuidString < $1.uuidString }
+        let events: [FleetEvent] = ids.compactMap { id in
+            filtered[id] == sessionClouds[id] ? nil : .sessionCloudChanged(id: id, cloud: filtered[id])
+        }
+        sessionClouds = filtered
+        emit(events)
+    }
 
     /// Recomputes every project's summaries and records the difference. A project with Flight
     /// Control off never touches `intakeService`, so a Mac that never enabled it never builds

@@ -107,6 +107,9 @@ final class FleetService: ObservableObject {
     /// Answers `infra.*` (cloud infra hosts). Set by the app once it builds the service
     /// (Task 18); nil answers `infra_unavailable`, for `delegation`'s reason.
     var infra: InfraService?
+    /// Keeps each session's cloud summary on the wire (`session.cloud`); held here because the
+    /// fleet is what that summary is for, and nothing else owns it.
+    var cloudMonitor: SessionCloudMonitor?
     /// Injectable for hermetic loopback tests; the production instance is built in startLocal.
     var peerMessaging: PeerMessagingService?
     private(set) var boundPort: NWEndpoint.Port?
@@ -583,10 +586,22 @@ final class FleetService: ObservableObject {
         return twin
     }
 
+    /// The `infra.*` requests a paired phone (already key-authenticated) may send: what the
+    /// cloud pane's list, extend and stop controls need, and no more.
+    nonisolated static func phoneMayRequest(_ request: InfraRequest) -> Bool {
+        switch request {
+        case .list(let orphans): return !orphans
+        case .extend: return true
+        case .down(_, let orphanID): return orphanID == nil
+        case .up, .doctor, .budget: return false
+        }
+    }
+
     /// Which capability a peer must have claimed to be sent this event (spec §6).
     nonisolated static func requiredCapability(for event: FleetEvent) -> String? {
         if case .projectIntakes = event { return FleetCapability.flightControl }
         if case .projectSwarm = event { return FleetCapability.swarm }
+        if case .sessionCloudChanged = event { return FleetCapability.cloud }
         return nil
     }
 
@@ -877,10 +892,14 @@ final class FleetService: ObservableObject {
         case .accountList(let session):
             // A read, so a phone may ask too: its session sheet shows the tab's account, usage
             // and context, and moves the tab by typing `/switch-account <id>` into it.
-            guard let choices = store.accountChoices(for: session) else {
-                return reply(.err(cid: cid, code: "unknown_session"))
+            // A `Task`: a codex, grok, gemini or opencode tab's context is read from its agent's
+            // files (and OpenCode's server) at ask time, which is not a main-actor job.
+            Task { @MainActor in
+                guard let choices = await store.accountChoicesWithContext(for: session) else {
+                    return reply(.err(cid: cid, code: "unknown_session"))
+                }
+                reply(.accountChoices(cid: cid, choices))
             }
-            reply(.accountChoices(cid: cid, choices))
         case .accountSwitch(let session, let target):
             guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
             // Answered synchronously, and the move starts only after this reply (the store
@@ -903,9 +922,13 @@ final class FleetService: ObservableObject {
                               cid: cid, cancellation: cancellation,
                               reply: reply)
         case .infra(let request):
-            // Local callers only, like `delegate`: creating or destroying a cloud machine
-            // spends this Mac's money, and the phone has no screen that asks for it.
-            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            // A paired phone may do exactly what its cloud pane offers: list, extend, and stop
+            // a machine by name (a list without the orphan scan, which spends API calls).
+            // Creating one spends this Mac's money on a recipe only a repo on this Mac names, and `doctor`, `budget` and an orphan `down` reach accounts
+            // and a tab's own budget, so those stay local.
+            guard client.isLocal || Self.phoneMayRequest(request) else {
+                return reply(.err(cid: cid, code: "out_of_scope"))
+            }
             guard let infra else {
                 return reply(.err(cid: cid, code: "infra_unavailable",
                                   message: "cloud machines are not available in this Flight Deck"))

@@ -746,6 +746,25 @@ OAuth client is created by hand (probe P1: the API cannot create one), from a tw
 and Paste from Clipboard; the policy step diffs with `HuJSONPatcher` and writes with the fetched
 `ETag`, falling back to copying `HuJSONPatcher.snippet` and opening the policy editor.
 
+**A session's cloud on the wire.** A session that owns a machine that still exists shows a cloud
+icon in the sidebar (Mac popover) and a cloud pane on the phone, both fed by
+`WireSession.cloud` (`WireSessionCloud`: machines oldest first, the session's spend and burn
+rate, its budget, this month's spend and cap). `InfraService` is not observable, so
+`SessionCloudMonitor` (`FleetService.cloudMonitor`, started in `makeFleetService`; it only reads,
+so it runs under a reset too) polls it every 5 s, and at once whenever an `infra.*` request or a
+`run --on` auto-up finishes (`InfraService.onOperationFinished`). It does nothing on a Mac with no
+machines. Spend moves every second, so the value carries a baseline (`spentUsd` at `asOf`) and a
+rate (`hourlyUsd`) that a client extrapolates (`spent(at:)`, `remaining(at:)`); the pure
+`SessionCloudMonitor.resend` keeps the previously recorded value unless its `structure` changed
+(a machine added, gone or changing state, a budget or deadline moved, the rate changed) or the
+baseline is 300 s old while money is being spent. `SessionStore.recordSessionClouds` diffs and
+emits `session.cloud` (nil clears), which `FleetService` withholds from a peer that did not claim
+`FleetCapability.cloud` (an older phone's decoder throws on an unknown tag). A paired phone may
+send exactly `infra.ls` (no orphan scan), `infra.extend` and `infra.down` by name, answered
+through the same streamed `infraProgress` frames as the CLI (`FleetService.phoneMayRequest`);
+`up`, `doctor`, `budget` and an orphan `down` stay local-only (`out_of_scope`), since they create
+machines on a recipe only this Mac's repos name or reach the cloud accounts directly.
+
 ## Preferences
 
 `Sources/FlightDeck/Preferences/` holds a pure core and a SwiftUI shell over it.

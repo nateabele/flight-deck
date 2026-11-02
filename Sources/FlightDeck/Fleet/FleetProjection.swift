@@ -40,7 +40,8 @@ enum FleetProjection {
                 swarm: store.swarmSummaries[$0.id] ?? nil,
                 subagentTrees: store.subagentTrees,
                 openPromptAgents: store.openPromptAgents,
-                openPromptOffers: store.openPromptOffers
+                openPromptOffers: store.openPromptOffers,
+                clouds: store.sessionClouds
             )
         })
     }
@@ -55,7 +56,8 @@ enum FleetProjection {
         swarm: WireSwarm? = nil,
         subagentTrees: [UUID: SubagentTree] = [:],
         openPromptAgents: [UUID: String] = [:],
-        openPromptOffers: [UUID: OpenPrompt] = [:]
+        openPromptOffers: [UUID: OpenPrompt] = [:],
+        clouds: [UUID: WireSessionCloud] = [:]
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -72,7 +74,8 @@ enum FleetProjection {
                     allowsBlockedAbort: allowsBlockedAbort,
                     subagents: subagentModel(of: $0, trees: subagentTrees, status: statuses[$0.id]),
                     openPromptAgent: openPromptAgents[$0.id],
-                    openPrompt: openPromptOffers[$0.id]
+                    openPrompt: openPromptOffers[$0.id],
+                    cloud: clouds[$0.id]
                 )
             },
             intakes: intakes,
@@ -88,7 +91,8 @@ enum FleetProjection {
         apiError: SessionAPIError?,
         planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false,
         subagents: SubagentTree? = nil, openPromptAgent: String? = nil,
-        openPrompt: OpenPrompt? = nil
+        openPrompt: OpenPrompt? = nil,
+        cloud: WireSessionCloud? = nil
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -125,7 +129,8 @@ enum FleetProjection {
             openPromptAgent: openPromptAgent,
             // Only for an agent whose transcript cannot carry the dialog — `SessionStore`
             // records no offer for any other — so a claude tab's bytes are unchanged.
-            openPrompt: openPrompt.map(WireOpenPrompt.init)
+            openPrompt: openPrompt.map(WireOpenPrompt.init),
+            cloud: cloud
         )
     }
 

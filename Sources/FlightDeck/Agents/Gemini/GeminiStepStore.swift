@@ -172,9 +172,35 @@ enum ProtoWire {
         message(data, field: field).flatMap { String(data: $0, encoding: .utf8) }
     }
 
+    /// The first varint field `field` at this level, or nil.
+    static func uint(_ data: Data, field: Int) -> UInt64? {
+        var found: UInt64?
+        scan(data) { number, wireType, value, _ in
+            if number == field, wireType == 0, found == nil { found = value }
+        }
+        return found
+    }
+
+    /// The varint at the end of a chain of nested messages: `[1, 9, 10, 1]` is field 1 of
+    /// field 10 of field 9 of field 1.
+    static func uint(_ data: Data, path: [Int]) -> UInt64? {
+        guard let last = path.last else { return nil }
+        var current = data
+        for field in path.dropLast() {
+            guard let inner = message(current, field: field) else { return nil }
+            current = inner
+        }
+        return uint(current, field: last)
+    }
+
     /// Calls `visit` for each field at this level. Stops quietly at the first malformed field —
     /// a torn read of a live store must not trap.
     static func walk(_ data: Data, _ visit: (Int, Int, Data?) -> Void) {
+        scan(data) { number, wireType, _, value in visit(number, wireType, value) }
+    }
+
+    /// `walk`, with each varint's value (0 for the other wire types).
+    private static func scan(_ data: Data, _ visit: (Int, Int, UInt64, Data?) -> Void) {
         let bytes = [UInt8](data)
         var i = 0
         func varint() -> UInt64? {
@@ -192,13 +218,13 @@ enum ProtoWire {
             guard let key = varint() else { return }
             let number = Int(key >> 3), wireType = Int(key & 7)
             switch wireType {
-            case 0: guard varint() != nil else { return }; visit(number, 0, nil)
-            case 1: guard i + 8 <= bytes.count else { return }; i += 8; visit(number, 1, nil)
-            case 5: guard i + 4 <= bytes.count else { return }; i += 4; visit(number, 5, nil)
+            case 0: guard let value = varint() else { return }; visit(number, 0, value, nil)
+            case 1: guard i + 8 <= bytes.count else { return }; i += 8; visit(number, 1, 0, nil)
+            case 5: guard i + 4 <= bytes.count else { return }; i += 4; visit(number, 5, 0, nil)
             case 2:
                 guard let length = varint(), length <= UInt64(bytes.count - i) else { return }
                 let end = i + Int(length)
-                visit(number, 2, Data(bytes[i..<end]))
+                visit(number, 2, 0, Data(bytes[i..<end]))
                 i = end
             default: return
             }

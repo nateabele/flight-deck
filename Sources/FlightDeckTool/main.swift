@@ -218,7 +218,15 @@ let namesSelf: Bool = {
     }
 }()
 if context.selfID == nil, namesSelf, env["CODEX_THREAD_ID"].flatMap(UUID.init(uuidString:)) != nil {
-    PeerToolEntry.whoami(environment: env) { runner.run(selfID: $0) }
+    PeerToolEntry.whoami(environment: env) { result in
+        switch result {
+        case .success(let id): runner.run(selfID: id)
+        case .failure(let error):
+            // Said before the runner's own "self" refusal, which names only the variable.
+            writeStderr("flightdeck: could not ask Flight Deck which tab this codex thread is in: \(error)")
+            runner.run(selfID: nil)
+        }
+    }
 } else {
     runner.run()
 }

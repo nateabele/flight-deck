@@ -18,6 +18,7 @@ extension InfraService {
                 worktrees: WorktreeLocating = LiveWorktreeLocator(),
                 reply: @escaping (ServerFrame) -> Void) {
         Task { @MainActor in
+            defer { self.onOperationFinished?() }
             // The text `up`/`down` recorded on the machine when it failed, which says more
             // than the bare error (`destroy: …`, or OpenTofu's diagnostics with their fix).
             var recorded: String?
@@ -139,6 +140,7 @@ extension InfraService {
 /// worded and coded as `infra.up`'s are, so the CLI prints the same lines either way.
 extension InfraService: InfraUpProviding {
     func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?, notice: @escaping (String) -> Void) async throws {
+        defer { onOperationFinished?() }
         var recorded: String?
         do {
             _ = try await up(name: name, config: config, repoRoot: repoRoot, session: session) { event in

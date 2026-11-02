@@ -105,6 +105,9 @@ extension FleetSnapshot {
         case .apiErrorChanged(let id, let error):
             mutate(id) { $0.apiError = error }
 
+        case .sessionCloudChanged(let id, let cloud):
+            mutate(id) { $0.cloud = cloud }
+
         case .planGateChanged(let id, let gate):
             mutate(id) { $0.planGate = gate }
         }

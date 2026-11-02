@@ -354,6 +354,11 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// it — see `WireOpenPrompt`. Nil for every other agent and for every tab with nothing open;
     /// a client derives those itself, exactly as before.
     public var openPrompt: WireOpenPrompt?
+    /// The cloud machines this session created and its budget, or nil when it has none that
+    /// still exist. See `WireSessionCloud` for why it changes rarely. Moved by
+    /// `FleetEvent.sessionCloudChanged`, which a peer without `FleetCapability.cloud` is never
+    /// sent; such a peer simply never sees the key, since a session with no cloud writes none.
+    public var cloud: WireSessionCloud?
 
     public init(
         id: UUID, title: String, agent: String,
@@ -368,7 +373,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         acceptsTypedAnswers: Bool = false,
         subagents: [WireSubagent]? = nil,
         openPromptAgent: String? = nil,
-        openPrompt: WireOpenPrompt? = nil
+        openPrompt: WireOpenPrompt? = nil,
+        cloud: WireSessionCloud? = nil
     ) {
         self.id = id
         self.title = title
@@ -387,6 +393,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.subagents = subagents
         self.openPromptAgent = openPromptAgent
         self.openPrompt = openPrompt
+        self.cloud = cloud
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -405,6 +412,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
         case hasBackgroundWork, planGate, openPromptCall, apiError, allowsBlockedAbort
         case answerless, acceptsTypedAnswers, subagents, openPromptAgent, openPrompt
+        case cloud
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -434,6 +442,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // Absent, not `null`: a claude tab — every tab an older phone knows how to draw — must
         // put exactly the bytes on the wire it always has.
         try c.encodeIfPresent(openPrompt, forKey: .openPrompt)
+        // Absent, not `null`: every session without a machine — every one an older phone has
+        // ever seen — keeps its bytes.
+        try c.encodeIfPresent(cloud, forKey: .cloud)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -497,6 +508,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // `try?`, not `try`: this is the one field here whose shape a newer Mac might grow, and
         // a dialog this build cannot read must cost one card, never the whole snapshot.
         openPrompt = try? c.decodeIfPresent(WireOpenPrompt.self, forKey: .openPrompt)
+        // `try?` for `openPrompt`'s reason: a cloud summary a newer Mac reshaped must cost the
+        // icon, never the snapshot.
+        cloud = try? c.decodeIfPresent(WireSessionCloud.self, forKey: .cloud)
     }
 }
 

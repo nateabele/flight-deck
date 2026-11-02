@@ -52,9 +52,11 @@ import Foundation
 // interrupted mid-`up` leaves the app going: a half-created machine must never be abandoned
 // because a reader went away.
 //
-// Every one of these frames is sent only on the connection that asked, and only the local CLI
-// asks: the phone app never sends an `infra.*` request, so an installed phone that cannot
-// decode these tags never receives one.
+// Every one of these frames is sent only on the connection that asked. The local CLI may send
+// any request; a paired phone may send exactly `infra.ls` (without `orphans`), `infra.extend`
+// and `infra.down` by name, for its cloud pane, and any other draws `err(out_of_scope)`. A
+// phone that sends them has claimed `FleetCapability.cloud`, so one that cannot decode these
+// tags never receives one.
 //
 // Strings rather than enums for every value a newer Mac may extend (`state`, `network`,
 // `cloud`), for `WireSession.agent`'s reason: a client-side enum throws on a value added after
@@ -266,5 +268,139 @@ public struct WireSessionBudget: Codable, Equatable, Sendable {
         self.exhaustsIn = exhaustsIn
         self.machines = machines
         self.line = line
+    }
+}
+
+// MARK: - A session's cloud, as the sidebar and the phone show it
+
+/// The cloud machines one session created and where its budget stands, carried on
+/// `WireSession.cloud` and moved by `FleetEvent.sessionCloudChanged` (withheld from a peer
+/// without `FleetCapability.cloud`).
+///
+/// **Built to change rarely.** Spend grows every second a machine runs, and an event per tick
+/// per session would flood the replay ring. So every figure that moves with the clock is sent
+/// as a baseline plus a rate — `spentUsd` at `asOf`, burning `hourlyUsd` — and a deadline as an
+/// absolute date, and a client extrapolates (`spent(at:)`, `remaining(at:)`). The Mac re-sends
+/// on a structural change (a machine added, gone or changing state, a budget set or cleared,
+/// a deadline moved) and otherwise only every few minutes, to re-anchor the baseline.
+///
+/// Absent (nil on `WireSession`) when the session has no machine that still exists; a budget
+/// with no machines is not a reason to draw the icon.
+public struct WireSessionCloud: Codable, Equatable, Sendable {
+    /// When `spentUsd` and `monthUsd` were measured.
+    public var asOf: Date
+    /// The session's machines that still exist, oldest first.
+    public var machines: [WireCloudMachine]
+    /// What every machine of this session cost since the budget's window began (or ever, with
+    /// no budget), as of `asOf`.
+    public var spentUsd: Double
+    /// What its running machines bill per hour now: the rate `spentUsd` grows at.
+    public var hourlyUsd: Double
+    /// The session's budget cap; nil with no budget.
+    public var budgetCapUsd: Double?
+    /// When the budget's window began; nil with no budget.
+    public var budgetSince: Date?
+    /// When the budget runs out at current rates; nil with no budget, or when every machine's
+    /// deadline comes first. In the past: used up, its machines are being destroyed.
+    public var budgetExhaustsAt: Date?
+    /// This month's spend on every machine of this Mac, as of `asOf`, and the monthly cap.
+    public var monthUsd: Double
+    public var monthCapUsd: Double?
+
+    public init(asOf: Date, machines: [WireCloudMachine], spentUsd: Double, hourlyUsd: Double,
+                budgetCapUsd: Double? = nil, budgetSince: Date? = nil, budgetExhaustsAt: Date? = nil,
+                monthUsd: Double, monthCapUsd: Double? = nil) {
+        self.asOf = asOf
+        self.machines = machines
+        self.spentUsd = spentUsd
+        self.hourlyUsd = hourlyUsd
+        self.budgetCapUsd = budgetCapUsd
+        self.budgetSince = budgetSince
+        self.budgetExhaustsAt = budgetExhaustsAt
+        self.monthUsd = monthUsd
+        self.monthCapUsd = monthCapUsd
+    }
+
+    /// The session's spend extrapolated to `now` from the baseline at its current rate.
+    public func spent(at now: Date) -> Double {
+        spentUsd + hourlyUsd * max(0, now.timeIntervalSince(asOf)) / 3600
+    }
+
+    /// What is left of the budget at `now`; nil with no budget. Never negative.
+    public func remaining(at now: Date) -> Double? {
+        budgetCapUsd.map { max(0, $0 - spent(at: now)) }
+    }
+
+    /// This value with the clock-driven figures zeroed, for deciding whether a change is
+    /// structural (worth an event) or only the baseline moving.
+    public var structure: WireSessionCloud {
+        var s = self
+        s.asOf = .distantPast
+        s.spentUsd = 0
+        s.monthUsd = 0
+        s.machines = machines.map { var m = $0; m.spentUsd = 0; return m }
+        return s
+    }
+
+    /// The worst state among the machines, for the icon's tint: "failed" over "provisioning"
+    /// (anything not yet ready) over "ready".
+    public var badge: Badge {
+        if machines.contains(where: { $0.state == "failed" || $0.state == "orphaned" }) { return .failed }
+        if let exhausts = budgetExhaustsAt, exhausts <= asOf { return .failed }
+        if machines.contains(where: { !["ready", "idle"].contains($0.state) }) { return .busy }
+        return .ready
+    }
+
+    public enum Badge: Sendable { case ready, busy, failed }
+}
+
+/// One machine of a session's cloud. Strings for `state`, `cloud` and `network`, for
+/// `WireInfraMachine`'s reason.
+public struct WireCloudMachine: Codable, Equatable, Sendable, Identifiable {
+    /// The `[infra.<name>]` name, unique on this Mac: what `infra.down`/`infra.extend` take.
+    public var name: String
+    public var cloud: String
+    /// Empty for a user module, which chooses its own machine.
+    public var instanceType: String
+    public var region: String
+    /// `InfraState`'s raw value.
+    public var state: String
+    public var network: String
+    /// Nil when the machine cannot be priced.
+    public var hourlyUsd: Double?
+    /// What this machine has cost, as of the cloud's `asOf`.
+    public var spentUsd: Double
+    public var createdAt: Date
+    /// The controller's deadline (the Reaper destroys it then).
+    public var deadline: Date
+    /// The machine's own TTL, past which `extend` cannot move `deadline`; nil means `deadline`.
+    public var machineDeadline: Date?
+    /// What went wrong, for a `failed` machine.
+    public var failure: String?
+    public var id: String { name }
+
+    public init(name: String, cloud: String, instanceType: String, region: String, state: String, network: String,
+                hourlyUsd: Double?, spentUsd: Double, createdAt: Date, deadline: Date,
+                machineDeadline: Date? = nil, failure: String? = nil) {
+        self.name = name
+        self.cloud = cloud
+        self.instanceType = instanceType
+        self.region = region
+        self.state = state
+        self.network = network
+        self.hourlyUsd = hourlyUsd
+        self.spentUsd = spentUsd
+        self.createdAt = createdAt
+        self.deadline = deadline
+        self.machineDeadline = machineDeadline
+        self.failure = failure
+    }
+
+    /// This machine's spend extrapolated from `asOf` to `now`, at its rate, stopping at its
+    /// deadline.
+    public func spent(asOf: Date, at now: Date) -> Double {
+        guard let rate = hourlyUsd, state != "gone" else { return spentUsd }
+        let end = min(now, deadline)
+        return spentUsd + rate * max(0, end.timeIntervalSince(asOf)) / 3600
     }
 }
