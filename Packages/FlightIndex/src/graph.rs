@@ -325,6 +325,7 @@ impl ViewGraph {
             impact: std::sync::OnceLock::new(),
         };
         g.reindex(None);
+        rayon::join(|| g.preload_rust_crates(), || rayon::join(|| g.preload_npm_modules(), || g.preload_elixir_packages()));
         for f in 0..g.files.len() as u32 {
             if g.files[f as usize].alive {
                 g.res[f as usize] = g.intern(g.resolve_file(f));

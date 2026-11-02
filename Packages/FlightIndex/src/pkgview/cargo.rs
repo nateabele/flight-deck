@@ -587,7 +587,7 @@ pub fn stats() -> CrateStats {
 }
 
 /// The view of the crate rooted at `root`, built on first use. Two threads asking for one crate
-/// wait for one parse (std, core and alloc take about two CPU seconds); a crate that could not
+/// wait for one parse (std, core and alloc take about half a CPU second); a crate that could not
 /// be read is not remembered, so one downloaded later is picked up.
 fn load(root: &Path, id: PackageId, deps: Deps, detached: Option<&Detached>) -> Option<Arc<CrateView>> {
     // A crate this thread is already building: "unknown" rather than waiting on ourselves. (A
@@ -730,9 +730,7 @@ impl RustDeps {
         self.prelude
             .get_or_init(|| {
                 let module = if self.edition.as_str() >= "2024" { "rust_2024" } else { "rust_2021" };
-                // The prelude reaches core and alloc, and the three parse independently.
-                let (std, _) = rayon::join(|| self.krate("std"), || rayon::join(|| self.krate("core"), || self.krate("alloc")));
-                let p = std?.root().child("prelude")?.child(module)?;
+                let p = self.krate("std")?.root().child("prelude")?.child(module)?;
                 let mut names = BTreeSet::new();
                 p.names(0, &mut Vec::new(), &mut names);
                 Some(names.into_iter().filter_map(|n| Some((n.clone(), p.child(&n)?))).collect())

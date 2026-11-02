@@ -11,8 +11,31 @@ use super::GraphData;
 use crate::facts::{Import, ImportKind, RefKind};
 use crate::pkgview::{ModuleExports, PkgSymbol};
 use crate::resolve::Resolved;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+impl GraphData {
+    /// Resolves, all at once, the package imports of the view's TypeScript and JavaScript files.
+    /// The resolver keeps the answer per directory and specifier, so resolution then finds each
+    /// package module read; asked one file at a time, a first build waits for every package's
+    /// declaration files (react's, vitest's, `@types/node`'s) in series.
+    pub(super) fn preload_npm_modules(&self) {
+        use rayon::prelude::*;
+        let mut seen: HashSet<(&str, &str)> = HashSet::new();
+        let mut tasks: Vec<(&str, &str, &Import)> = Vec::new();
+        for node in self.files.iter().filter(|n| n.alive && matches!(n.language, "typescript" | "tsx" | "javascript")) {
+            let dir = node.path.rsplit_once('/').map_or("", |(d, _)| d);
+            for imp in node.facts.imports.iter().filter(|i| !i.specifier.starts_with('.')) {
+                if seen.insert((dir, imp.specifier.as_str())) {
+                    tasks.push((&node.path, node.language, imp));
+                }
+            }
+        }
+        tasks.par_iter().for_each(|(from, lang, imp)| {
+            self.resolver.resolve_import(from, lang, imp);
+        });
+    }
+}
 
 /// The package names one TypeScript/JavaScript file can use.
 #[derive(Default)]
