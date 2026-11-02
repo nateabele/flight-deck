@@ -30,7 +30,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Manifest names looked for in every directory of a view that holds source.
-const MANIFESTS: &[&str] = &["elm.json", "tsconfig.json", "package.json", "mix.exs", "Cargo.toml"];
+/// `(file name, kind)`: the kind says how it is parsed and is what `via` shows. Vite and Nx keep
+/// `paths` in a `tsconfig.app.json` or `tsconfig.base.json` beside a `tsconfig.json` that only
+/// references it, so those common names are read as tsconfigs too.
+const MANIFESTS: &[(&str, &str)] = &[
+    ("elm.json", "elm.json"),
+    ("tsconfig.json", "tsconfig.json"),
+    ("tsconfig.app.json", "tsconfig.json"),
+    ("tsconfig.base.json", "tsconfig.json"),
+    ("tsconfig.lib.json", "tsconfig.json"),
+    ("package.json", "package.json"),
+    ("mix.exs", "mix.exs"),
+    ("Cargo.toml", "Cargo.toml"),
+];
 
 // ---- discovery --------------------------------------------------------------------------------
 
@@ -153,10 +165,10 @@ fn find_manifests(view: &View) -> Vec<(String, &'static str)> {
     let root = &view.label.worktree;
     let mut out = Vec::new();
     for d in &dirs {
-        for name in MANIFESTS {
+        for (name, kind) in MANIFESTS {
             let rel = if d.is_empty() { name.to_string() } else { format!("{d}/{name}") };
             if root.join(&rel).is_file() {
-                out.push((rel, *name));
+                out.push((rel, *kind));
             }
         }
     }

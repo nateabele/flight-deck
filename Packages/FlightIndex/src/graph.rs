@@ -619,12 +619,18 @@ impl GraphData {
                     self.external_refs.entry(t.path.clone()).or_default().push((fi as u32, ri as u32));
                 }
             }
-            for imp in &r.imports {
-                if let Resolved::External(p) = imp {
-                    let v = self.external_importers.entry(p.clone()).or_default();
-                    if v.last() != Some(&(fi as u32)) {
-                        v.push(fi as u32);
-                    }
+            // Elixir needs no import to call `Dep.Mod.f()`, so a reference into a linked view is
+            // itself a dependency on the file (as `resolve_file` makes ref targets edges in-view).
+            let elixir = self.files[fi].language == "elixir";
+            let ref_paths = r.refs.iter().filter(|_| elixir).flat_map(|rr| rr.external.iter().flat_map(|v| v.iter().map(|t| &t.path)));
+            let import_paths = r.imports.iter().filter_map(|imp| match imp {
+                Resolved::External(p) => Some(p),
+                _ => None,
+            });
+            for p in import_paths.chain(ref_paths) {
+                let v = self.external_importers.entry(p.clone()).or_default();
+                if v.last() != Some(&(fi as u32)) {
+                    v.push(fi as u32);
                 }
             }
         }
@@ -900,6 +906,11 @@ impl GraphData {
             }
             if lang == "elixir" && matches!(r, Resolved::Unresolved) {
                 r = self.elixir_import(&imp.specifier);
+                if matches!(r, Resolved::Unresolved)
+                    && let Some(p) = self.resolver.elixir_external(&imp.specifier)
+                {
+                    r = Resolved::External(p);
+                }
             }
             if let Some(t) = self.file_of(&r) {
                 add_edge(&mut edges, t);
@@ -936,12 +947,18 @@ impl GraphData {
                         let mut segs: Vec<String> = imp.specifier.split("::").filter(|s| !s.is_empty()).map(String::from).collect();
                         segs.push(n.name.clone());
                         let deeper = self.resolver.rust_path(&node.path, &segs);
+                        // `use dep::store::{self, sub}` with `dep` a linked crate: `sub` is a module
+                        // when the walk on disk used up every segment.
+                        let linked_module = self.resolver.rust_external(&segs).filter(|(p, rest)| rest.is_empty() && r != Resolved::External(p.clone()));
                         match (&deeper, &r) {
                             (Resolved::File { path: dp, rest }, Resolved::File { path: rp, .. }) if rest.is_empty() && dp != rp => {
                                 if let Some(t) = self.file_of(&deeper) {
                                     add_edge(&mut edges, t);
                                 }
                                 qualifiers.insert(n.local().to_string(), deeper.clone());
+                            }
+                            _ if linked_module.is_some() => {
+                                qualifiers.insert(n.local().to_string(), Resolved::External(linked_module.unwrap().0));
                             }
                             _ => {
                                 locals.insert(n.local().to_string(), (r.clone(), n.name.clone()));
@@ -1115,9 +1132,22 @@ impl GraphData {
                             && let Resolved::File { path: p2, rest } = self.resolver.rust_path(path, &segs) {
                                 return self.rust_item(&p2, &rest, name).map(exact).unwrap_or(none);
                             }
+                        if let Resolved::External(p) = res {
+                            let (file, _) = self.resolver.rust_external_from(p, &segs[1..]);
+                            return external(vec![ExtTarget { path: file, name: name.to_string() }]);
+                        }
                         return none;
                     }
                     return through(res, name);
+                }
+                if lang == "rust" {
+                    // `dep::store::open()` or `dep::Thing::new()` with `dep` a Cargo path dependency
+                    // outside the worktree: the linked view says which symbol it is.
+                    let mut segs: Vec<String> = q.split("::").map(String::from).collect();
+                    segs.push(name.to_string());
+                    if let Some((file, _)) = self.resolver.rust_external(&segs) {
+                        return external(vec![ExtTarget { path: file, name: name.to_string() }]);
+                    }
                 }
                 if lang == "rust" && (q.contains("::") || matches!(q, "crate" | "super")) {
                     let mut segs: Vec<String> = q.split("::").map(String::from).collect();
@@ -1142,6 +1172,11 @@ impl GraphData {
                         && let Some(id) = self.member_of(t, orig, name) {
                             return exact(id);
                         }
+                    if let Resolved::External(p) = res {
+                        // `Handle::new()`, `Store.open()` on a type imported from a linked view: the
+                        // member is looked up by name in the file the type is in.
+                        return external(vec![ExtTarget { path: p.clone(), name: name.to_string() }]);
+                    }
                     if !matches!(res, Resolved::File { .. }) {
                         return none; // a member of something from a package
                     }

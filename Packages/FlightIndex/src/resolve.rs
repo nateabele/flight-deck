@@ -13,6 +13,7 @@
 //! of them; each worktree makes it absolute against its own root (`absolute`). `links.rs` turns
 //! that path into a file of the linked view.
 
+mod links;
 mod python;
 mod swift;
 
@@ -53,6 +54,8 @@ pub struct Resolver {
     probed_outside: AtomicBool,
     /// Swift module name -> the module keys (directories) bearing it.
     swift_modules: HashMap<String, Vec<String>>,
+    /// What imports through Cargo/npm/tsconfig/mix links need, read on first use (`links.rs`).
+    links: links::LinkState,
 }
 
 /// One `elm.json`.
@@ -78,7 +81,7 @@ impl Resolver {
             }
         }
         let swift_modules = swift::swift_module_names(paths.iter());
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, links: Default::default() }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -188,7 +191,7 @@ impl Resolver {
 
     fn ts_specifier(&self, from: &str, spec: &str) -> Resolved {
         if !(spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..") {
-            return Resolved::Unresolved; // a package; tsconfig `paths` come with step 7
+            return self.ts_bare(from, spec);
         }
         let base = normalize_rel(&join_rel(Path::new(from).parent().unwrap_or(Path::new("")), spec));
         let Some(base) = base else { return self.ts_external(from, spec) };
@@ -299,8 +302,12 @@ impl Resolver {
                 }
             }
             other => {
-                if let Some(lib) = self.rust_crates.get(other) {
-                    (lib.clone(), &segs[1..])
+                if let Some(lib) = self.rust_crates.get(other).cloned().or_else(|| self.rust_linked_inside(other)) {
+                    (lib, &segs[1..])
+                } else if let Some((ext, _)) = self.rust_external(segs) {
+                    // A Cargo path dependency outside the worktree. The unresolved tail is lost
+                    // here; callers that need it ask `rust_external` themselves.
+                    return Resolved::External(ext);
                 } else {
                     // 2018 relative path: `use child::item` where `child` is a module of this file.
                     let dir = rust_child_dir(from);
