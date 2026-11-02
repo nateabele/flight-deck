@@ -856,7 +856,9 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   index` on Linux): `fdindex.sock`, `daemon.pid`, `daemon.log`, `launchd.log`, and one `.db` per
   repository. `--store`, `--socket`, `FLIGHTDECK_INDEX_DIR` and `FLIGHTDECK_INDEX_SOCKET` move it,
   which gives a fully separate daemon (tests and scratch runs). Facts are derived data: any `.db`
-  can be deleted and is rebuilt from git.
+  can be deleted and is rebuilt from git. A blob's facts (symbols, imports, references, type
+  relations and the Swift type facts) are one columnar, zstd-compressed chunk (`src/chunk.rs`); a
+  changed layout bumps the schema version, which rebuilds the file.
 - **Clients.** `fdindex <tool>` is the CLI. `fdindex mcp` is the stdio MCP shim: it holds no index,
   sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
   answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
@@ -910,6 +912,11 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
   incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
   before, 0.81 GB after.
+- **Guard.** `fdindex guard` (the PreToolUse hook) asks the daemon for the edited file's PageRank
+  and blast radius. The blast radius takes in dependent views (repositories whose manifests link
+  into the file's) only when the engine already holds their graphs (`Engine::held_graph`, a cache
+  lookup): the hook never builds, loads or reads git for them, so its latency does not depend on
+  who links in.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

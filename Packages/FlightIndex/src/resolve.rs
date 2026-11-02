@@ -98,7 +98,7 @@ impl Resolver {
             "typescript" | "tsx" | "javascript" => self.ts_specifier(from, &imp.specifier),
             "rust" => {
                 if imp.kind == ImportKind::ModDecl {
-                    return self.rust_mod_decl(from, &imp.specifier);
+                    return self.rust_mod_decl(from, &imp.specifier, imp.alias.as_deref());
                 }
                 let segs: Vec<String> = imp.specifier.split("::").filter(|s| !s.is_empty()).map(String::from).collect();
                 self.rust_path(from, &segs)
@@ -228,7 +228,16 @@ impl Resolver {
 
     /// `mod foo;` in `from`: `<dir>/foo.rs` or `<dir>/foo/mod.rs`, where `<dir>` depends on whether
     /// `from` is a module-root file (`lib.rs`, `main.rs`, `mod.rs`) or a plain `x.rs`.
-    fn rust_mod_decl(&self, from: &str, name: &str) -> Resolved {
+    /// `mod name;` in `from`. `path` is its `#[path = "..."]`, relative to `from`'s own directory
+    /// (the rule for a declaration outside an inline module); a path that names no file of the
+    /// view falls back to the usual places.
+    fn rust_mod_decl(&self, from: &str, name: &str, path: Option<&str>) -> Resolved {
+        if let Some(p) = path
+            && let Some(cand) = normalize_rel(&join_rel(Path::new(from).parent().unwrap_or(Path::new("")), p))
+            && self.paths.contains(&cand)
+        {
+            return Resolved::File { path: cand, rest: vec![] };
+        }
         let dir = rust_child_dir(from);
         for cand in [join_rel(Path::new(&dir), &format!("{name}.rs")), join_rel(Path::new(&dir), &format!("{name}/mod.rs"))] {
             if self.paths.contains(&cand) {
@@ -313,7 +322,7 @@ impl Resolver {
         };
         // Descend through child modules.
         while let Some(seg) = rest.first() {
-            match self.rust_mod_decl(&cur, seg) {
+            match self.rust_mod_decl(&cur, seg, None) {
                 Resolved::File { path, .. } => {
                     cur = path;
                     rest = &rest[1..];
@@ -327,7 +336,7 @@ impl Resolver {
     fn rust_file_for_module(&self, crate_root: &str, module: &[String]) -> Option<String> {
         let mut cur = crate_root.to_string();
         for seg in module {
-            match self.rust_mod_decl(&cur, seg) {
+            match self.rust_mod_decl(&cur, seg, None) {
                 Resolved::File { path, .. } => cur = path,
                 _ => return None,
             }

@@ -206,11 +206,30 @@ fn a_sweep_takes_about_a_millisecond_per_thousand_files() {
     let view = git::view_for_path(&r.root).unwrap();
     let mut snap = Snapshot::take_with_window(&view, &r.root.join(".git"), 0.0);
     let _ = snap.check();
-    let t = std::time::Instant::now();
+    // Timed in CPU time, and the fastest of 20 sweeps: wall time on a loaded machine (load above
+    // 80) measures the scheduler, not the sweep, and failed here while the sweep was as cheap as
+    // ever. A sweep that really got slower is slower in CPU time on every run. The sweep fans out
+    // over rayon, so it runs in a one-thread pool whose thread does all of its work, and that
+    // thread's clock is the sweep's whole cost (other tests in this process do not count).
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut best = std::time::Duration::MAX;
     for _ in 0..20 {
-        assert!(snap.check().is_empty());
+        let cpu = pool.install(|| {
+            let t = thread_cpu_time();
+            assert!(snap.check().is_empty());
+            thread_cpu_time().saturating_sub(t)
+        });
+        best = best.min(cpu);
     }
-    let per = t.elapsed() / 20;
-    assert!(per < std::time::Duration::from_millis(40), "2000 files swept in {per:?}");
+    assert!(best < std::time::Duration::from_millis(40), "2000 files swept in {best:?} of CPU");
     let _ = Path::new("");
+}
+
+/// CPU time this thread has used, user and system (the sweep is mostly `lstat` calls).
+fn thread_cpu_time() -> std::time::Duration {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid out-pointer; CLOCK_THREAD_CPUTIME_ID exists on macOS and Linux.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID)");
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }

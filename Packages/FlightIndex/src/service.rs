@@ -488,7 +488,18 @@ impl Service {
         let Some(file) = file else { return answer(json!({"state": "READY", "worktree": worktree})) };
         let graph = self.engine.graph(&view)?;
         let Some(fi) = graph.file_idx(&file) else { return answer(json!({"state": "READY", "worktree": worktree, "in_index": false})) };
-        let blast = crate::links::Views::new(&graph, &[]).blast_radius(0, fi).len();
+        // Dependent views (repositories whose manifests link into this one) count when the
+        // engine already holds a graph for them; nothing is built or read from git for them here.
+        let dependents: Vec<Member> = self
+            .links
+            .dependents_of(&worktree)
+            .into_iter()
+            .filter_map(|(root, via)| {
+                let graph = self.engine.held_graph(&root)?;
+                Some(Member { graph, role: Role::Dependent, scopes: Vec::new(), via, dirty_files: 0, building: None })
+            })
+            .collect();
+        let blast = crate::links::Views::new(&graph, &dependents).blast_radius(0, fi).len();
         let mut hot: Vec<crate::query::SymbolHit> = graph
             .file(fi)
             .facts

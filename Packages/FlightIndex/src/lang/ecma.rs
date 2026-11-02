@@ -474,7 +474,14 @@ impl<'a> Walker<'a> {
             "identifier" | "jsx_identifier" => {
                 self.add(n, text(n, src), None, enclosing, RefKind::Use);
             }
-            "string" | "template_string" | "comment" | "regex" => {}
+            // A template's text is not code, its `${...}` substitutions are.
+            "template_string" => {
+                let mut c = n.walk();
+                for sub in n.named_children(&mut c).filter(|k| k.kind() == "template_substitution") {
+                    self.refs_children(sub, enclosing);
+                }
+            }
+            "string" | "comment" | "regex" => {}
             _ => self.refs_children(n, enclosing),
         }
     }

@@ -155,17 +155,22 @@ fn a_call_the_parser_cannot_see_is_found_by_text_in_the_files_that_import_the_sy
     write(&r.root, "b.ts", TS_B);
     // A call inside a template substitution and one in a comment: only the first is owed an edit.
     write(&r.root, "a.ts", "import { helper } from './b';\nexport function msg() {\n  return `n=${helper(1)}`;\n}\n// helper(9) is documented here\nit('helper(2) in a test name', () => {});\n");
-    write(&r.root, "lib.rs", "mod util;\npub fn check() {\n    assert!(util::twice(1) > 0);\n}\n");
+    // A macro argument the parser reads, and a `macro_rules!` body it does not (a template that
+    // only becomes code where the macro is used): the text scan finds the second.
+    write(&r.root, "lib.rs", "mod util;\npub fn check() {\n    assert!(util::twice(1) > 0);\n}\nmacro_rules! again {\n    () => { util::twice(3) };\n}\n");
     write(&r.root, "util.rs", "pub fn twice(n: u8) -> u8 {\n    n * 2\n}\n");
     commit_all(&r.root, "init");
     pending(&svc, &r.root);
     write(&r.root, "b.ts", "export function helper(a: number, b: number) {\n  return a + b;\n}\n");
     write(&r.root, "util.rs", "pub fn twice(n: u8, m: u8) -> u8 {\n    n * m\n}\n");
     let t = pending(&svc, &r.root);
-    assert!(t.contains(&format!("{}:L3 call in msg (matched by text)", r.root.join("a.ts").display())), "template substitution: {t}");
-    assert!(t.contains(&format!("{}:L3 call in check (matched by text)", r.root.join("lib.rs").display())), "macro argument: {t}");
-    assert!(!t.contains(":L5 call"), "a comment is not a call site: {t}");
-    assert!(!t.contains(":L6 call"), "nor is a string: {t}");
+    let row = |file: &str, line: u32| t.lines().find(|l| l.contains(&format!("{}:L{line} ", r.root.join(file).display()))).unwrap_or_else(|| panic!("no row for {file}:L{line}: {t}"));
+    assert!(row("a.ts", 3).contains("call in msg") && !row("a.ts", 3).contains("matched"), "a template substitution is a parsed reference: {t}");
+    assert!(row("lib.rs", 3).contains("call in check") && !row("lib.rs", 3).contains("matched"), "a macro argument is a parsed reference: {t}");
+    assert!(row("lib.rs", 6).contains("(matched by text)"), "a macro_rules body is found by text: {t}");
+    let a = r.root.join("a.ts").display().to_string();
+    assert!(!t.contains(&format!("{a}:L5 ")), "a comment is not a call site: {t}");
+    assert!(!t.contains(&format!("{a}:L6 ")), "nor is a string: {t}");
 }
 
 #[test]

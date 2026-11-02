@@ -52,11 +52,11 @@ fn sample() -> Decoded {
         TypeRelation { symbol: 0, target: "Base".into(), kind: HierarchyKind::Implements },
         TypeRelation { symbol: 2, target: "Other".into(), kind: HierarchyKind::Extends },
     ];
-    Decoded { symbols, imports, refs, hierarchy }
+    Decoded { symbols, imports, refs, hierarchy, ..Default::default() }
 }
 
 fn round_trip(d: &Decoded) -> Decoded {
-    decode(&encode(&d.symbols, &d.imports, &d.refs, &d.hierarchy)).unwrap()
+    decode(&encode(&d.symbols, &d.imports, &d.refs, &d.hierarchy, &d.types)).unwrap()
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn every_field_survives_a_round_trip() {
 #[test]
 fn an_empty_blob_round_trips_in_a_few_bytes() {
     let d = Decoded::default();
-    let bytes = encode(&[], &[], &[], &[]);
+    let bytes = encode(&[], &[], &[], &[], &TypeFacts::default());
     assert!(bytes.len() <= 10, "{} bytes for nothing", bytes.len());
     assert_eq!(decode(&bytes).unwrap(), d);
 }
@@ -98,7 +98,7 @@ fn a_large_reference_column_packs_to_a_few_bytes_a_reference() {
         })
         .collect();
     let d = Decoded { refs, ..Default::default() };
-    let bytes = encode(&[], &[], &d.refs, &[]);
+    let bytes = encode(&[], &[], &d.refs, &[], &TypeFacts::default());
     assert!(bytes.len() < 4 * 2000, "{} bytes for 2000 references", bytes.len());
     assert_eq!(decode(&bytes).unwrap(), d);
 }
@@ -114,7 +114,7 @@ fn long_string_sections_are_compressed_and_still_round_trip() {
         .collect();
     let raw: usize = symbols.iter().map(|s| s.name.len() + s.signature.as_ref().unwrap().len()).sum();
     let d = Decoded { symbols, ..Default::default() };
-    let bytes = encode(&d.symbols, &[], &[], &[]);
+    let bytes = encode(&d.symbols, &[], &[], &[], &TypeFacts::default());
     assert!(bytes.len() < raw / 3, "{} bytes for {raw} bytes of strings", bytes.len());
     assert_eq!(decode(&bytes).unwrap(), d);
 }
@@ -124,7 +124,7 @@ fn long_string_sections_are_compressed_and_still_round_trip() {
 #[test]
 fn a_damaged_chunk_is_an_error_not_a_panic() {
     let d = sample();
-    let bytes = encode(&d.symbols, &d.imports, &d.refs, &d.hierarchy);
+    let bytes = encode(&d.symbols, &d.imports, &d.refs, &d.hierarchy, &d.types);
     for cut in 0..bytes.len() {
         let _ = decode(&bytes[..cut]); // must return, Ok or Err
         assert!(decode(&bytes[..cut]).is_err() || cut == bytes.len(), "truncated at {cut} decoded");
