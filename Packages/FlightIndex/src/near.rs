@@ -31,6 +31,13 @@
 //! it, the worktree's changed files plus the files the agent read last (`Ctx::recent`, kept by
 //! the service). `near: []` (or `near: false`) turns ordering off. Only the answering view is
 //! scored; rows from linked views score by PageRank alone and keep their place among themselves.
+//!
+//! The default seed set is on for every tool that orders by nearness. Scored with seeds an agent
+//! could really hold (the same author's previous 1-3 commits, or the open file left out of the
+//! gold set; `examples/eval_near.rs`), it raised `find`/`grep`/`refs` File@10 on both measured
+//! repositories in every seeding, each paired comparison at p < 0.001 (e.g. tessera `grep`
+//! 13.2 -> 24.7 from the previous commit). `impact` never re-sorts its ranked interleave by it,
+//! explicit `near` included: that lost File@10 in all four cells (see `tools/analysis.rs`).
 
 use crate::graph::{SymId, ViewGraph};
 use crate::query::{NameMatch, SymbolHit};

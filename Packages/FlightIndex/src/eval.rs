@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod seeded;
+pub mod seeds;
 
 /// A commit that changes more files than this is a mass change (a rename sweep, a format pass).
 pub const MAX_CHANGED_FILES: usize = 25;
@@ -97,6 +98,18 @@ impl Probe<'_> {
     /// `tool` with a history tier (`src/history.rs`): a strategy hands it the index restricted to
     /// what the task's parent commit could have known.
     pub fn tool_with(&self, tool: &str, args: Value, history: &(dyn Fn() -> crate::history::HistoryState + Sync)) -> String {
+        self.tool_full(tool, args, &[], history)
+    }
+
+    /// `tool` as answered in a worktree whose agent was just working on `recent` (absolute
+    /// paths): the service's default `near` seed set (`Ctx::recent`), so a strategy scores what
+    /// a tool does by default, without passing `near`.
+    pub fn tool_recent(&self, tool: &str, args: Value, recent: &[PathBuf]) -> String {
+        let none = || crate::history::HistoryState::Unavailable("no history in eval".into());
+        self.tool_full(tool, args, recent, &none)
+    }
+
+    fn tool_full(&self, tool: &str, args: Value, recent: &[PathBuf], history: &(dyn Fn() -> crate::history::HistoryState + Sync)) -> String {
         let mut map = match args {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -109,7 +122,7 @@ impl Probe<'_> {
         let args = Args::new(map, self.root.to_path_buf());
         let none = || -> crate::error::Result<Arc<crate::cochange::CoChange>> { Err(crate::error::Error::Msg("no co-change in eval".into())) };
         let no_base = || -> crate::error::Result<Option<tools::Baseline>> { Ok(None) };
-        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], recent: &[], cochange: &none, diff: &[], base: &no_base, history };
+        let ctx = Ctx { graph: self.graph, args: &args, format: Format::Concise, token_budget: 1_000_000_000, building: None, members: &[], recent, cochange: &none, diff: &[], base: &no_base, history };
         tools::run(tool, &ctx).unwrap_or_default()
     }
 

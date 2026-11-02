@@ -106,3 +106,18 @@ fn files_read_recently_seed_a_clean_worktree() {
     let t = ok(&svc, &r.root, "find", json!({"name": "parse"}));
     assert!(before(&t, "y/near_dep.ts", "x/far.ts"), "{t}");
 }
+
+/// `near` reorders `impact`'s capped lists (direct importers, blast radius) but never its ranked
+/// list: re-sorting the importer/co-change interleave by nearness cost File@10 on both repositories
+/// in every seeding measured (tessera -1.7 / -2.5, flight-deck -4.8 / -2.3; contract doc, "near").
+#[test]
+fn near_leaves_impacts_ranked_list_in_its_interleave() {
+    let r = project();
+    let (_d, svc) = service();
+    let ranked = |t: &str| t[pos(t, "Ranked impact")..pos(t, "Tests (")].to_string();
+    let plain = ok(&svc, &r.root, "impact", json!({"file_path": "h.ts", "near": []}));
+    let seeded = ok(&svc, &r.root, "impact", json!({"file_path": "h.ts", "near": ["y/seed.ts"]}));
+    assert_eq!(ranked(&plain), ranked(&seeded), "{seeded}");
+    let direct = &seeded[pos(&seeded, "Direct importers")..];
+    assert!(before(direct, "y/near_dep.ts", "x/far.ts"), "{seeded}");
+}

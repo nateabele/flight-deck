@@ -380,11 +380,11 @@ pub fn impact(c: &Ctx) -> ToolResult {
             partner_keys.push(k);
         }
     }
-    let mut ranked = impact::interleave(&importers, &partner_keys);
-    // The interleave is the measured default order (see impact.rs); an explicit `near` still wins.
-    if let Some(n) = near.as_ref().filter(|_| c.args.has(&["near"])) {
-        n.sort_by_file(&mut ranked, |r| local(r.0, &r.1));
-    }
+    // The interleave is the measured order (see impact.rs), and `near` never re-sorts it, even
+    // when passed explicitly: that cost File@10 in every seeding measured on both repositories
+    // (tessera -1.7 / -2.5, flight-deck -4.8 / -2.3; contract doc, "near"). Nearness pulls the
+    // importers up and the co-change half down, undoing the 50:50 split.
+    let ranked = impact::interleave(&importers, &partner_keys);
 
     let mut out = format!("Impact analysis: {}\n", path.display());
     if let Some(n) = &near {

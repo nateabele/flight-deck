@@ -869,6 +869,12 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   blocking Unix sockets (for Codex: -s workspace-write -c sandbox_workspace_write.network_access=true,
   or run outside the sandbox); fall back to rg`. `fdindex guard` still allows. With that flag the
   same call answers from the daemon (verified).
+- **Working-set ordering (`near`, `src/near.rs`).** The service remembers the last 8 files each
+  worktree read or outlined and passes them, after the worktree's changed files, as the default
+  seed set (`Ctx::recent`). `find`, `grep`, `refs` and `calls` order their rows by graph distance
+  from it; `impact` orders its two capped lists by it but never its ranked importer/co-change
+  interleave, even when `near` is explicit. Each default was set from paired eval runs with
+  leak-free seeds (`examples/eval_near.rs`; numbers in the tool contract, "near").
 - **Freshness.** A request sees every edit made before it, by whatever tool, because it looks at
   the file system itself: the daemon keeps each active worktree's view and, per request, `stat`s
   every indexed file and every non-ignored directory (~2 ms on tessera, against 14 to 20 ms for the
