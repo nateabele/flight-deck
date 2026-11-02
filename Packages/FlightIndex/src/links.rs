@@ -599,6 +599,39 @@ impl<'a> Views<'a> {
         out
     }
 
+    /// The edges that cross between the answering view and member `view` (1-based, as in
+    /// `graph`), in the direction the link runs: from the answering view into a linked view, from
+    /// a dependent view into the answering one. `(file imports, references)`: an import counts
+    /// once per importing file and target file; a reference counts when the symbol it names is
+    /// found in the other view. What `stats` reports, and how link resolution is measured.
+    pub fn crossing(&self, view: usize) -> (usize, usize) {
+        let (from, to) = match self.members[view - 1].role {
+            Role::Linked => (0, view),
+            Role::Dependent => (view, 0),
+        };
+        let g = self.graphs[from];
+        let mut imports = 0;
+        for (rel, files) in &g.external_importers {
+            if self.locate(&g.external_abs(rel)).is_some_and(|(v, _)| v == to) {
+                imports += files.len();
+            }
+        }
+        let mut refs = 0;
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        for entries in g.external_refs.values() {
+            for &(fi, ri) in entries {
+                if !seen.insert((fi, ri)) {
+                    continue;
+                }
+                let Some(ext) = &g.res[fi as usize].refs[ri as usize].external else { continue };
+                if self.resolve_external(from, ext).iter().any(|(v, _)| *v == to) {
+                    refs += 1;
+                }
+            }
+        }
+        (imports, refs)
+    }
+
     /// The import lines (file and line) in other views that bring in `file` of `view`, and, if
     /// `name` is given, name it.
     pub fn import_sites(&self, view: usize, file: u32, name: Option<&str>) -> Vec<(usize, PathBuf, u32)> {

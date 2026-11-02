@@ -312,6 +312,17 @@ pub fn stats(c: &Ctx) -> ToolResult {
     for fi in top.into_iter().take(5).filter(|i| !g.importers[*i as usize].is_empty()) {
         let _ = writeln!(out, "  {} ×{}", g.abs(fi).display(), g.importers[fi as usize].len());
     }
+    // How much of this view's code crosses each link: a link whose imports do not resolve shows
+    // 0 here, which is the difference between "linked" and "followed".
+    let views = c.views();
+    if views.len() > 1 {
+        out.push_str("links (file imports, references that cross):\n");
+        for v in 1..views.len() {
+            let (imports, refs) = views.crossing(v);
+            let dir = if c.members[v - 1].role == crate::links::Role::Linked { "into it" } else { "from it" };
+            let _ = writeln!(out, "  {} via {}: {imports} import(s), {refs} reference(s) {dir}", views.tag(v).unwrap_or_default(), c.members[v - 1].via.join(", "));
+        }
+    }
     Ok(out)
 }
 

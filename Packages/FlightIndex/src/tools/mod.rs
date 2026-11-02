@@ -158,6 +158,7 @@ pub fn anchor(tool: &str, args: &Args) -> std::result::Result<Anchor, ToolError>
 pub fn uses_links(tool: &str, args: &Args) -> bool {
     match tool {
         "find" | "refs" | "calls" | "deps" | "impact" => true,
+        "stats" => !args.has(args::FILE),
         "grep" => !args.flag(&["search_bodies"], false),
         "read" => !args.has(args::FILE) && (args.has(args::SYMBOL) || args.has(&["symbols"])),
         _ => false,
