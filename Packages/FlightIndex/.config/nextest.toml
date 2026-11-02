@@ -1,0 +1,31 @@
+# cargo-nextest settings for this crate (`cargo nextest run`; `cargo test` ignores this file).
+nextest-version = "0.9.86"
+experimental = ["setup-scripts"]
+
+[scripts.setup.stub-rust-src]
+# nextest runs every test in its own process, and the first Rust lookup in a process parses the
+# real rust-src (std, core, alloc: ~6 s of CPU). `cargo test` pays that once per test binary;
+# nextest would pay it once per test. A stub `library` makes the discovery near-free. The tests
+# that care about rust-src (`rust_packages`) point at their own fixture.
+command = "sh scripts/nextest-env.sh"
+
+[[profile.default.scripts]]
+filter = "all()"
+setup = "stub-rust-src"
+
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# `cargo nextest run -P no-macos-watcher`: the same run minus six tests that need the macOS ref
+# watcher / stat-sweep behaviour (not ported to Linux yet), for the cloud build host. These are the
+# tests its `~/bin/cargo` wrapper skips on `cargo test`.
+[profile.no-macos-watcher]
+default-filter = '''not (
+    test(=a_moved_branch_reaches_the_store_without_any_request)
+  | test(=a_checkout_is_prepared_before_anyone_asks)
+  | test(=every_external_write_is_in_the_very_next_answer)
+  | test(=gc_without_a_path_collects_the_store_and_status_reports_it)
+  | test(=replace_by_rename_deletion_creation_and_directory_moves_agree_with_git_status)
+  | test(=a_hundred_mixed_external_edits_are_each_found_by_the_next_sweep)
+)'''
