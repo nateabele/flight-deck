@@ -12,7 +12,8 @@ extension InfraService {
     /// same.
     ///
     /// `session` is the asking tab's, from its caller token (nil for a shell outside any tab):
-    /// what `up` creates is that session's, and `budget` reads and sets that session's alone.
+    /// `up` creates a machine that is that session's, destroyed when it closes, and `budget`
+    /// reads and sets that session's alone. Both refuse a shell outside any tab.
     func handle(_ request: InfraRequest, session: UUID? = nil, cid: Int,
                 config: DelegateConfigLoading = LiveConfigLoader(),
                 worktrees: WorktreeLocating = LiveWorktreeLocator(),
@@ -34,8 +35,9 @@ extension InfraService {
             do {
                 switch request {
                 case .up(let name, let cwd):
+                    guard let session else { throw Refusal.noSessionForMachine }
                     let (root, recipe) = try await Self.recipe(name, cwd: cwd, config: config, worktrees: worktrees)
-                    let machine = try await self.up(name: name, config: recipe, repoRoot: root, session: session, events: events)
+                    let machine = try await self.up(name: name, config: recipe, repoRoot: root, owner: .session(session), events: events)
                     reply(.infraMachine(cid: cid, self.wire(machine, now: self.now)))
                 case .down(_, let orphanID?):
                     try await self.downOrphan(id: orphanID)
@@ -127,6 +129,10 @@ extension InfraService {
     private struct Refusal: Error {
         let code: String
         let message: String
+
+        static let noSessionForMachine = Refusal(
+            code: "infra_no_session",
+            message: "a cloud machine belongs to a Flight Deck session and is destroyed when it closes: run `flightdeck infra up` from that session's tab")
     }
 
     /// A boot console's last 40 lines: where cloud-init says why it stopped, without putting a
@@ -139,11 +145,11 @@ extension InfraService {
 /// `run --on` a cloud machine (`DelegationService`): the same `up` `infra up` runs, its errors
 /// worded and coded as `infra.up`'s are, so the CLI prints the same lines either way.
 extension InfraService: InfraUpProviding {
-    func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?, notice: @escaping (String) -> Void) async throws {
+    func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID, notice: @escaping (String) -> Void) async throws {
         defer { onOperationFinished?() }
         var recorded: String?
         do {
-            _ = try await up(name: name, config: config, repoRoot: repoRoot, session: session) { event in
+            _ = try await up(name: name, config: config, repoRoot: repoRoot, owner: .session(session)) { event in
                 switch event {
                 case .progress(let line): notice(line)
                 case .failed(let message): recorded = message

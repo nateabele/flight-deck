@@ -36,7 +36,8 @@ struct InfraMachine: Codable, Equatable, Identifiable, Sendable {
     var destroyAttempts: Int? = nil
     var lastDestroyAt: Date? = nil
     /// The Flight Deck session whose `up` (or `run --on`) created it: its spend is that
-    /// session's, whoever uses the machine later. Nil for a shell outside any tab.
+    /// session's, whoever uses the machine later, and it is destroyed when that session closes.
+    /// Nil only for a machine from before ownership was recorded, and the Settings test machine.
     var session: UUID? = nil
     var id: String { name }
 }

@@ -545,7 +545,9 @@ public enum CLIHelp {
                     about: """
                     Creates the machine described by [infra.NAME] in this repo's
                     .flightdeck/delegate.toml and pairs it as a host. Takes minutes. Ctrl-C stops
-                    watching, not the create: it carries on in Flight Deck.
+                    watching, not the create: it carries on in Flight Deck. The machine belongs to
+                    the session whose tab you run this in, so run it there; it is destroyed when
+                    that session closes.
                     """,
                     arguments: [("NAME", "the infra table's name")]
                 ),

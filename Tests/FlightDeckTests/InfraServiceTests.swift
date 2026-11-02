@@ -17,7 +17,7 @@ final class InfraServiceTests: XCTestCase {
     func testUpCreatesEnrollsAndBecomesReady() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }
         XCTAssertEqual(m.state, .ready); XCTAssertEqual(m.network, .public)
         XCTAssertEqual(m.allowCIDR, "203.0.113.9/32")                 // from env.publicIP fake
         XCTAssertEqual(h.hosts.registry.hosts.map(\.name), ["gpu"])
@@ -34,7 +34,7 @@ final class InfraServiceTests: XCTestCase {
 
     func testPreflightRefusesBeforeAnyTofuCall() async throws {
         h.budget.allowedTypes["aws"] = []                      // nothing allowed
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.preflight(let checks) { XCTAssertTrue(checks.contains { !$0.ok && $0.name == "budget" }) }
         XCTAssertEqual(h.tofu.calls, [], "nothing created")
         XCTAssertTrue(h.hosts.registry.hosts.isEmpty)
@@ -44,10 +44,10 @@ final class InfraServiceTests: XCTestCase {
     /// Review Focus 3.
     func testNameClashRefusedBeforeCreate() async throws {
         try h.hosts.enroll(key: .mint(), name: "gpu", endpoints: [])
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.nameInUse(let why) { XCTAssertTrue(why.contains("paired host"), why) }
         try h.registry.upsert(.fixture(name: "db", repoRoot: "/other/repo"))
-        do { _ = try await h.service.up(name: "db", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "db", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.nameInUse(let why) { XCTAssertTrue(why.contains("/other/repo"), why) }
         XCTAssertEqual(h.tofu.calls, [])
     }
@@ -56,7 +56,7 @@ final class InfraServiceTests: XCTestCase {
     /// that failed on a later step did), so `up` destroys what it made before it reports.
     func testFailedApplyIsDestroyedAtOnce() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "InsufficientInstanceCapacity")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() }
         catch { XCTAssertEqual(error as? TofuError, .failed(step: "apply", message: "InsufficientInstanceCapacity"), "the apply's failure is the one reported") }
         XCTAssertTrue(h.events.contains { if case .failed(let why) = $0 { return why.contains("InsufficientInstanceCapacity") }; return false })
         XCTAssertEqual(h.tofu.calls.last, "destroy")
@@ -82,7 +82,7 @@ final class InfraServiceTests: XCTestCase {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.consoleOutput = "cloud-init: curl: (6) Could not resolve host"
         h.enrollTimeout = 0.05
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.enrollTimeout(let console) { XCTAssertTrue(console?.contains("Could not resolve") == true) }
         XCTAssertNil(h.registry.machine(named: "gpu"), "destroyed: a machine that never enrolled only bills")
         XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
@@ -96,7 +96,7 @@ final class InfraServiceTests: XCTestCase {
         h.account.ended = true
         h.instancePoll = 0.01
         let started = Date()
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() }
         catch InfraError.enrollFailed(let console) { XCTAssertTrue(console?.contains("powering off") == true) }
         XCTAssertLessThan(Date().timeIntervalSince(started), 5, "not the 600 s enroll timeout")
         XCTAssertNil(h.registry.machine(named: "gpu"))
@@ -108,7 +108,7 @@ final class InfraServiceTests: XCTestCase {
     func testAFailedRollbackIsLeftForTheReaper() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "UnsupportedOperation")
         h.tofu.failDestroy = TofuError.failed(step: "destroy", message: "throttled")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() }
         catch { XCTAssertEqual(error as? TofuError, .failed(step: "apply", message: "UnsupportedOperation")) }
         let m = try XCTUnwrap(h.registry.machine(named: "gpu"))
         XCTAssertEqual(m.state, .failed); XCTAssertEqual(m.destroyAttempts, 1)
@@ -120,7 +120,7 @@ final class InfraServiceTests: XCTestCase {
     /// project into the session budget or list in `infra doctor`, no host, no work directory.
     func testAFailureBeforeTheApplyDestroysNothingAndLeavesNoRecord() async throws {
         h.tofu.failInit = TofuError.failed(step: "init", message: "registry unreachable")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() } catch {}
         XCTAssertNil(h.registry.machine(named: "gpu"))
         XCTAssertTrue(h.registry.machines.isEmpty)
         if case .success = h.hosts.registry.resolve(name: "gpu") { XCTFail("the enrolled host is forgotten") }
@@ -135,7 +135,7 @@ final class InfraServiceTests: XCTestCase {
         h.tailnetAvailable(nodeIP: "100.64.0.9")
         h.tofu.outputs = TofuOutputs(address: "10.0.0.4", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         XCTAssertEqual(m.network, .tailnet); XCTAssertNil(m.allowCIDR)
         XCTAssertEqual(h.hosts.registry.hosts[0].endpoints, ["100.64.0.9:47410"])
         XCTAssertEqual(try h.tfvars("gpu")["fd_allow_cidr"] as? String, "")
@@ -161,7 +161,7 @@ final class InfraServiceTests: XCTestCase {
     func testLabelsCarryTheHashedOwnerAndTheName() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         let labels = try XCTUnwrap(try h.tfvars("gpu")["fd_labels"] as? [String: String])
         let digest = SHA256.hash(data: Data(h.controllerID.utf8)).map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(labels, ["flightdeck": "1", "flightdeck-owner": String(digest.prefix(12)), "flightdeck-name": "gpu"])
@@ -172,7 +172,7 @@ final class InfraServiceTests: XCTestCase {
     func testPresetVarsAndAbsoluteDeadline() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         let vars = try h.tfvars("gpu")
         XCTAssertEqual(vars["ttl_seconds"] as? Double, 3600)
         XCTAssertEqual(vars["region"] as? String, "us-east-1")
@@ -189,7 +189,7 @@ final class InfraServiceTests: XCTestCase {
     func testTofuGetsTheAccountsProviderEnvironment() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         let env = try XCTUnwrap(h.tofu.environments.first)
         XCTAssertEqual(env["AWS_PROFILE"], "example")
         XCTAssertEqual(env["PATH"], "/usr/bin:/bin:/login/shell/bin")
@@ -213,7 +213,7 @@ final class InfraServiceTests: XCTestCase {
     /// Carry 12: an apply refused for missing permissions names the IAM actions the preset needs.
     func testUnauthorizedApplyNamesTheIAMActions() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "api error UnauthorizedOperation: You are not authorized")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() } catch {}
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() } catch {}
         let failure = try XCTUnwrap(h.events.lazy.compactMap { if case .failed(let why) = $0 { return why }; return nil }.first)
         XCTAssertTrue(failure.contains("ec2:RunInstances"), failure)
         XCTAssertTrue(failure.contains("servicequotas:GetServiceQuota"), failure)
@@ -230,7 +230,7 @@ final class InfraServiceTests: XCTestCase {
     func testMaxHourlyBelowThePriceRefuses() async throws {
         var cheap = gpu
         cheap.maxHourly = 0.1
-        do { _ = try await h.service.up(name: "gpu", config: cheap, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: cheap, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.preflight(let checks) {
             let budget = try XCTUnwrap(checks.first { $0.name == "budget" })
             XCTAssertFalse(budget.ok); XCTAssertTrue(budget.detail.contains("max_hourly"), budget.detail)
@@ -240,7 +240,7 @@ final class InfraServiceTests: XCTestCase {
 
     func testUpOfAReadyMachineFromTheSameRepoReturnsIt() async throws {
         try h.registry.upsert(.fixture(name: "gpu", repoRoot: h.repo.path))
-        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         XCTAssertEqual(m.name, "gpu"); XCTAssertEqual(h.tofu.calls, [])
     }
 
@@ -321,7 +321,7 @@ extension InfraServiceTests {
         let outcomes = Outcomes()
         for i in 0..<2 {
             Task {
-                do { outcomes.byName["\(i)"] = .success(try await service.up(name: "gpu", config: config, repoRoot: repo) { _ in }) }
+                do { outcomes.byName["\(i)"] = .success(try await service.up(name: "gpu", config: config, repoRoot: repo, owner: Self.infraOwner) { _ in }) }
                 catch { outcomes.byName["\(i)"] = .failure(error) }
             }
         }
@@ -342,7 +342,7 @@ extension InfraServiceTests {
         h.hostComesOnline(after: .applied)
         h.tofu.holdApply = true
         let service = h.service, repo = h.repo, config = gpu
-        let first = Task { try await service.up(name: "gpu", config: config, repoRoot: repo) { _ in } }
+        let first = Task { try await service.up(name: "gpu", config: config, repoRoot: repo, owner: Self.infraOwner) { _ in } }
         try await waitUntil { self.h.tofu.calls.contains("apply") }
         let before = h.registry.machine(named: "gpu")
         do { try await service.down(name: "gpu") { _ in }; XCTFail() }
@@ -364,7 +364,7 @@ extension InfraServiceTests {
         let outcomes = Outcomes()
         for name in ["gpu", "db"] {
             Task {
-                do { outcomes.byName[name] = .success(try await service.up(name: name, config: config, repoRoot: repo) { _ in }) }
+                do { outcomes.byName[name] = .success(try await service.up(name: name, config: config, repoRoot: repo, owner: Self.infraOwner) { _ in }) }
                 catch { outcomes.byName[name] = .failure(error) }
             }
         }
@@ -400,7 +400,7 @@ extension InfraServiceTests {
     func testUpRecordsWhenEnrollingBegan() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         XCTAssertEqual(m.enrollingSince, h.now)
     }
 
@@ -423,14 +423,14 @@ extension InfraServiceTests {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
         var events: [InfraEvent] = []
-        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { events.append($0) }
+        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { events.append($0) }
         let progress = try XCTUnwrap(events.firstIndex(of: .progress("create aws_instance.this")), "\(events)")
         let cost = try XCTUnwrap(events.firstIndex { if case .cost = $0 { return true }; return false })
         XCTAssertLessThan(progress, cost)
 
         events = []
         h.tofu.failApply = TofuError.failed(step: "apply", message: "boom")
-        do { _ = try await h.service.up(name: "db", config: gpu, repoRoot: h.repo) { events.append($0) }; XCTFail() } catch {}
+        do { _ = try await h.service.up(name: "db", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { events.append($0) }; XCTFail() } catch {}
         let failedProgress = try XCTUnwrap(events.firstIndex(of: .progress("create aws_instance.this")), "\(events)")
         let failed = try XCTUnwrap(events.firstIndex { if case .failed = $0 { return true }; return false })
         XCTAssertLessThan(failedProgress, failed)
@@ -502,7 +502,7 @@ extension InfraServiceTests {
     func testFailedApplyTextIsRedactedEverywhere() async throws {
         let secret = String(repeating: "9c", count: 40)
         h.tofu.failApply = TofuError.failed(step: "apply", message: "user_data = \"enroll \(secret) tskey-auth-k2-QQ\"")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { self.h.events.append($0) }; XCTFail() }
         catch {
             let refusal = InfraService.refusal(for: error, recorded: nil)
             XCTAssertFalse(refusal.message.contains(secret), refusal.message)
@@ -520,7 +520,7 @@ extension InfraServiceTests {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
         var notices: [String] = []
-        try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: nil) { notices.append($0) }
+        try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: Self.infraTab) { notices.append($0) }
         XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
         XCTAssertTrue(notices.contains("tofu init"), "\(notices)")
         XCTAssertTrue(h.service.costLine(host: "gpu")?.hasPrefix("gpu · t3.small") == true)
@@ -529,7 +529,7 @@ extension InfraServiceTests {
 
     func testEnsureUpFailureCarriesTheInfraCode() async throws {
         h.budget.allowedTypes["aws"] = []
-        do { try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: nil) { _ in }; XCTFail() }
+        do { try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo, session: Self.infraTab) { _ in }; XCTFail() }
         catch let error as DelegationError {
             XCTAssertEqual(error.code, "infra_preflight")
             XCTAssertTrue(error.message.contains("budget: "), error.message)

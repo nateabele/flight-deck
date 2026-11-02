@@ -32,7 +32,7 @@ final class SessionBudgetTests: XCTestCase {
     private func up(_ name: String = "gpu", session: UUID?) async throws -> InfraMachine {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        return try await h.service.up(name: name, config: gpu, repoRoot: h.repo, session: session) { self.h.events.append($0) }
+        return try await h.service.up(name: name, config: gpu, repoRoot: h.repo, owner: session.map(InfraOwner.session) ?? .setupTest) { self.h.events.append($0) }
     }
 
     // MARK: up
@@ -102,7 +102,7 @@ final class SessionBudgetTests: XCTestCase {
         XCTAssertEqual(m.deadline, h.now.addingTimeInterval(3600))
     }
 
-    func testUpWithoutASessionIgnoresEveryBudget() async throws {
+    func testTheSetupTestMachineHasNoSessionAndIgnoresEveryBudget() async throws {
         try h.budgets.set(tab, capUSD: 0.01, now: h.now)
         let m = try await up(session: nil)
         XCTAssertNil(m.session)

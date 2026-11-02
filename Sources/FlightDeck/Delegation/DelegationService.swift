@@ -88,9 +88,9 @@ protocol DelegationHostDirectory: AnyObject {
 protocol InfraUpProviding: AnyObject {
     /// Creates `[infra.<name>]` (or takes over the one already running), returning once it is
     /// a paired, online host. `notice` gets each progress line. Throws `DelegationError` with
-    /// the `infra_*` code and its finished line. A machine it creates is `session`'s, and
-    /// counts against that session's budget.
-    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?,
+    /// the `infra_*` code and its finished line. A machine it creates is `session`'s: it counts
+    /// against that session's budget and is destroyed when the session closes.
+    @MainActor func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID,
                              notice: @escaping (String) -> Void) async throws
     /// The §8.4 line for a cloud machine; nil for any other host.
     @MainActor func costLine(host: String) -> String?
@@ -567,6 +567,10 @@ final class DelegationService {
         switch recipe.source {
         case .preset(let preset): what = ([preset] + [recipe.instanceType].compactMap { $0 }).joined(separator: ", ")
         case .module(let path): what = "module \(path)"
+        }
+        guard let owner else {
+            throw DelegationError(code: "infra_no_session",
+                                  message: "a cloud machine belongs to a Flight Deck session and is destroyed when it closes: run `flightdeck run --on \(host)` from that session's tab")
         }
         reply(.delegateNotice(cid: cid, message: "creating \(host) (\(what))…"))
         try await infra.ensureUp(name: host, config: recipe, repoRoot: worktree, session: owner) { line in

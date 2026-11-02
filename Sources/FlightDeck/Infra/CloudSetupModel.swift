@@ -443,7 +443,7 @@ final class CloudSetupModel: ObservableObject {
         let started = Date()
         var output: String?, failure: String?
         do {
-            _ = try await service.up(name: name, config: config, repoRoot: workRoot) { [weak self] event in
+            _ = try await service.up(name: name, config: config, repoRoot: workRoot, owner: .setupTest) { [weak self] event in
                 if case .progress(let line) = event { self?.set(.test, .running, line) }
             }
             set(.test, .running, "Running uname -a on \(name)…")

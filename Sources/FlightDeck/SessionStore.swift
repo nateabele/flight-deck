@@ -2358,6 +2358,8 @@ final class SessionStore: ObservableObject {
     /// exactly as before. Read at launch time, so it must be set before `restore()` — the
     /// convenience initializer takes it for that reason.
     var delegationHooks: DelegationSessionHooks?
+    /// Cloud machines, which a closing tab takes with it. Set once the app has built them.
+    var infraHooks: InfraSessionHooks?
 
     /// Claude tabs whose agent was already running in its daemon when this run restored them
     /// (`restore`'s `isLive`). Only these can hold a plugin older than this bundle's, since a
@@ -5819,6 +5821,7 @@ final class SessionStore: ObservableObject {
         // re-takes it when the agent runs again.
         accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
+        infraHooks?.sessionClosed(id)
         updatePluginReload { $0.forget(id) }
         // A tab closed while frozen or mid-rollover leaves nothing to restore a draft into.
         frozenComposers[id] = nil

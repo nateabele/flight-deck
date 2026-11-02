@@ -308,6 +308,7 @@ struct FlightDeckApp: App {
         // no machines and the monitor then does nothing.
         service.cloudMonitor = SessionCloudMonitor(service: infra, store: store)
         service.cloudMonitor?.start()
+        store.infraHooks = infra  // a closing tab destroys its cloud machines
         fleetRef.fleet = service
         // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
         // during a GUI test would be a live service, not a test fixture.

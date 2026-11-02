@@ -1,3 +1,4 @@
+import XCTest
 import FleetKit
 import Foundation
 import HostKit
@@ -661,4 +662,10 @@ final class CloudSetupHarness {
         let status = #"{"BackendState":"Running","CurrentTailnet":{"Name":"\#(tailnet)"},"Self":{"TailscaleIPs":["100.64.0.2"]}}"#
         return try FakeExecutable.make("tailscale", script: "echo '\(status)'")
     }
+}
+
+extension XCTestCase {
+    /// The session the infra tests' machines belong to: `up` takes no machine without an owner.
+    static var infraTab: UUID { UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")! }
+    static var infraOwner: InfraOwner { .session(infraTab) }
 }

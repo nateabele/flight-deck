@@ -20,7 +20,7 @@ final class ResourceProvenanceTests: XCTestCase {
     func testUpRecordsWhatItCreatedAndDownDeletesIt() async throws {
         h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-gpu", hourlyUSD: nil)
         h.hostComesOnline(after: .applied)
-        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }
         XCTAssertEqual(h.provenance.records.map(\.id), ["i-gpu", "sg-gpu"])
         XCTAssertEqual(Set(h.provenance.records.map(\.machine)), ["gpu"])
         try await h.service.down(name: "gpu") { _ in }
@@ -33,7 +33,7 @@ final class ResourceProvenanceTests: XCTestCase {
     func testAnUpPlanThatImportsIsRefusedBeforeTheApply() async throws {
         h.tofu.upChanges = [change("aws_instance.this", ["create"]),
                             change("aws_security_group.shared", ["no-op"], id: "sg-theirs", importing: true)]
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() }
         catch InfraError.refused(let why) { XCTAssertTrue(why.contains("aws_security_group.shared (import)"), why) }
         XCTAssertEqual(h.tofu.calls, ["init", "plan"], "nothing applied, so nothing to roll back")
         XCTAssertEqual(h.provenance.records, [])
@@ -77,7 +77,7 @@ final class ResourceProvenanceTests: XCTestCase {
     /// What a failed apply created is recorded first, so the rollback can delete it.
     func testAFailedApplyIsRolledBackThroughItsRecords() async throws {
         h.tofu.failApply = TofuError.failed(step: "apply", message: "InsufficientInstanceCapacity")
-        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() } catch {}
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo, owner: Self.infraOwner) { _ in }; XCTFail() } catch {}
         XCTAssertEqual(h.provenance.records.map(\.id), ["i-gpu", "sg-gpu"])
         XCTAssertEqual(h.tofu.destroyed, ["gpu"])
     }

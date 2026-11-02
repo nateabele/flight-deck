@@ -59,7 +59,7 @@ struct InfraEnvironment {
 /// Every state is written to `infra.json` before the step it names begins, so a crash at any
 /// point leaves a record a relaunch can resume or destroy — never a machine nobody knows about.
 @MainActor
-final class InfraService {
+final class InfraService: InfraSessionHooks {
     let registry: InfraRegistry
     let ledger: CostLedger
     let budgets: SessionBudgets
@@ -83,6 +83,9 @@ final class InfraService {
     /// Each `up` in flight that belongs to a session, and what it will bill until when: the
     /// next launch of that session counts it, as `launching` counts its worst case.
     private var launchingBurns: [String: (session: UUID, burn: SessionBudgetModel.Burn)] = [:]
+
+    /// Sessions that have closed, for an `up` still in flight when its session goes.
+    private var closedSessions: Set<UUID> = []
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
     /// Tailscale auth keys outlive the boot that redeems them by this much at most.
@@ -121,14 +124,19 @@ final class InfraService {
 
     // MARK: - up
 
-    /// `session` is the tab that asked: a machine it creates is that session's, counted against
-    /// its budget, and given a deadline no later than when that budget runs out.
-    func up(name: String, config: InfraConfig, repoRoot: URL, session: UUID? = nil,
+    /// `owner` is who asked: a machine a session creates is that session's, counted against
+    /// its budget, given a deadline no later than when that budget runs out, and destroyed when
+    /// the session closes. There is no default: nothing is provisioned without an owner.
+    func up(name: String, config: InfraConfig, repoRoot: URL, owner: InfraOwner,
             events: @escaping (InfraEvent) -> Void) async throws -> InfraMachine {
+        let session = owner.session
+        if let session, closedSessions.contains(session) {
+            throw InfraError.refused("the session that asked for \(name) has closed")
+        }
         try claim(name)
         defer { release(name) }
         let repo = repoRoot.standardizedFileURL
-        if let running = try takeOver(name, repo: repo) {
+        if let running = try takeOver(name, repo: repo, owner: owner) {
             events(.cost(costLine(for: running, now: env.now())))
             return running
         }
@@ -200,6 +208,12 @@ final class InfraService {
             // it: destroyed now, under this `up`'s claim.
             if applyBegan { await rollBack(name, events: events) }
             throw error
+        }
+        // The session closed while this was coming up: nothing will use it, and its close found
+        // the name claimed, so it is destroyed here, under this `up`'s claim.
+        if let session, closedSessions.contains(session) {
+            await rollBack(name, events: events)
+            throw InfraError.refused("the session that asked for \(name) closed while it was being created, so it was destroyed")
         }
         events(.cost(costLine(for: machine, now: env.now())))
         events(.ready(machine))
@@ -393,13 +407,24 @@ final class InfraService {
 
     /// The machine `up` should hand back as it is, or nil for a free name. Every other use of
     /// the name refuses before anything is checked or created (Review Focus 3).
-    private func takeOver(_ name: String, repo: URL) throws -> InfraMachine? {
+    private func takeOver(_ name: String, repo: URL, owner: InfraOwner) throws -> InfraMachine? {
         if let m = registry.machines.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
             guard m.repoRoot == repo.path else {
                 throw InfraError.nameInUse("\(name) is a cloud machine of another repo, \(m.repoRoot); pick another name")
             }
             switch m.state {
             case .ready, .idle:
+                // A machine is destroyed with its session, so it is never handed to another one.
+                if let holder = m.session, holder != owner.session {
+                    throw InfraError.nameInUse("\(name) belongs to another Flight Deck session; pick another name")
+                }
+                // A machine from before ownership was recorded belongs to the first session to ask.
+                if m.session == nil, let session = owner.session {
+                    var claimed = m
+                    claimed.session = session
+                    try registry.upsert(claimed)
+                    return claimed
+                }
                 return m
             case .failed, .orphaned, .gone:
                 throw InfraError.nameInUse("\(name) is \(m.state.rawValue); run `flightdeck infra down \(name)` first")
@@ -411,6 +436,22 @@ final class InfraService {
             throw InfraError.nameInUse("\(name) is already a paired host; pick another name or forget that host in Settings → Hosts")
         }
         return nil
+    }
+
+    // MARK: - session close
+
+    /// The session's tab closed: every machine it owns is destroyed. One that is mid-`up` holds
+    /// its name's claim, so `up` destroys it itself when it finishes (it sees the session here);
+    /// one mid-`down` is already going. Failures are logged, and the Reaper retries them.
+    func sessionClosed(_ session: UUID) {
+        closedSessions.insert(session)
+        let names = registry.machines.filter { $0.session == session && $0.state != .gone }.map(\.name)
+        for name in names where !busy.contains(name.lowercased()) {
+            Task {
+                await downLogged(name)
+                onOperationFinished?()
+            }
+        }
     }
 
     // MARK: - down

@@ -159,10 +159,10 @@ final class InfraControlWireTests: XCTestCase {
                                   spot: false, ttl: .init(seconds: 3600), idle: .init(seconds: 1800), autoUp: false, vars: [:], maxHourly: nil)
 
     /// Every frame the request draws, up to and including the one that ends it.
-    private func frames(_ request: InfraRequest, file: StaticString = #filePath, line: UInt = #line) async -> [ServerFrame] {
+    private func frames(_ request: InfraRequest, session: UUID? = XCTestCase.infraTab, file: StaticString = #filePath, line: UInt = #line) async -> [ServerFrame] {
         var frames: [ServerFrame] = []
         let done = XCTestExpectation(description: "terminal frame")
-        h.service.handle(request, cid: 7, config: config, worktrees: FakeWorktrees(root: h.repo)) { frame in
+        h.service.handle(request, session: session, cid: 7, config: config, worktrees: FakeWorktrees(root: h.repo)) { frame in
             XCTAssertEqual(frame.correlationID, 7, file: file, line: line)
             frames.append(frame)
             if !frame.continuesStream { done.fulfill() }
@@ -193,6 +193,16 @@ final class InfraControlWireTests: XCTestCase {
         let lines = frames.dropLast().compactMap { f -> String? in if case .infraProgress(_, let l) = f { return l }; return nil }
         XCTAssertEqual(lines.count, frames.count - 1, "everything before the machine is progress: \(frames)")
         XCTAssertTrue(lines.contains { $0.hasPrefix("cost: gpu · t3.small") }, "\(lines)")
+    }
+
+    func testUpFromAShellOutsideAnyTabIsRefusedBeforeAnythingIsCreated() async throws {
+        config.config = DelegateConfig(infra: ["gpu": gpu])
+        let frames = await frames(.up(name: "gpu", cwd: h.repo.path), session: nil)
+        guard let (code, message) = error(frames) else { return }
+        XCTAssertEqual(code, "infra_no_session")
+        XCTAssertTrue(message.contains("belongs to a Flight Deck session"), message)
+        XCTAssertEqual(h.tofu.calls, [])
+        XCTAssertTrue(h.registry.machines.isEmpty)
     }
 
     func testUpWithoutTheRecipeIsNotFound() async throws {

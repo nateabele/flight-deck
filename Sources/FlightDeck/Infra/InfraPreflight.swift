@@ -221,3 +221,25 @@ enum InfraPreflight {
         }
     }
 }
+
+/// Who a cloud machine is for. Every `up` has one: a machine with no owner would be billed to
+/// nobody and outlive everything that could end it.
+enum InfraOwner: Equatable {
+    /// A Flight Deck session's tab: the machine is destroyed when the session closes.
+    case session(UUID)
+    /// Settings → Cloud → Run Test, the only provisioning with no session; it destroys its
+    /// machine in the same step.
+    case setupTest
+
+    var session: UUID? {
+        if case .session(let id) = self { id } else { nil }
+    }
+}
+
+/// What `SessionStore` tells the cloud machines about its tabs, as `DelegationSessionHooks`
+/// does delegation.
+@MainActor
+protocol InfraSessionHooks: AnyObject {
+    /// The tab closed: its machines go with it.
+    func sessionClosed(_ session: UUID)
+}

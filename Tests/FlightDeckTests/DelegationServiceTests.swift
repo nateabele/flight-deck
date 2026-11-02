@@ -935,11 +935,11 @@ final class DelegationServiceTests: XCTestCase {
     final class FakeInfraUp: InfraUpProviding {
         let hosts: FakeHosts
         var ensured: [String] = []
-        var sessions: [UUID?] = []
+        var sessions: [UUID] = []
         var costLines: [String: String] = [:]
         var failure: Error?
         init(hosts: FakeHosts) { self.hosts = hosts }
-        func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID?, notice: @escaping (String) -> Void) async throws {
+        func ensureUp(name: String, config: InfraConfig, repoRoot: URL, session: UUID, notice: @escaping (String) -> Void) async throws {
             ensured.append(name)
             sessions.append(session)
             notice("tofu init")
@@ -991,6 +991,15 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertEqual(frames.all.last, .err(cid: 1, code: "infra_preflight",
                                              message: "budget: over the monthly cap — Settings → Cloud → Budget"))
         XCTAssertEqual(sync.snapshots, 0)
+    }
+
+    func testRunOnAutoUpFromAShellOutsideAnyTabCreatesNothing() async throws {
+        let infra = withInfra(autoUp: true)
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])), as: .human)
+        try await until { frames.all.contains(where: terminal) }
+        guard case .err(1, "infra_no_session", let message?) = frames.all.last else { return XCTFail("\(frames.all)") }
+        XCTAssertTrue(message.contains("belongs to a Flight Deck session"), message)
+        XCTAssertEqual(infra.ensured, [], "no machine without a session to own it")
     }
 
     func testRunOnInfraWithoutAutoUpSaysHowToCreateIt() async throws {
