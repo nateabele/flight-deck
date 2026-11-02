@@ -197,6 +197,14 @@
       "string",
       "null"
      ]
+    },
+    "file_path": {
+     "default": null,
+     "description": "Only matches in this file or directory.",
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "required": [

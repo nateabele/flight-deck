@@ -6,14 +6,20 @@
 //! `symbols` and 9 MB of `imports` rows. The graph never reads one fact on its own, only a whole
 //! blob at a time, so nothing needs a row. As chunks the same facts are 17.7 MB.
 //!
-//! **Layout** (format 1, little-endian, varints are LEB128):
+//! **Layout** (format 2, little-endian, varints are LEB128):
 //!
 //! ```text
 //! u8 format | u8 flags | [varint body length, if FLAG_ZSTD] body (raw, or one zstd frame)
-//! body: varint n_sym n_imp n_import_names n_ref n_hier
+//! body: varint n_sym n_imp n_import_names n_ref n_hier [n_binding n_member n_return, if FLAG_TYPES]
 //!       integer columns, in a fixed order (see `encode`), each `u8 scheme` + payload
 //!       string-lengths column (len+1, 0 = None) | varint string bytes | string bytes
 //! ```
+//!
+//! Format 2 added the Swift type facts (`TypeFacts`: bindings, member types, return types),
+//! which format 1 kept as tab-separated text in a `type_facts` table beside the chunk. In the
+//! chunk their lines are packed columns and their strings join the shared, zstd-compressed
+//! string section; a blob without any (every non-Swift blob) leaves `FLAG_TYPES` clear and costs
+//! nothing.
 //!
 //! Each integer column is encoded by **trying every scheme on it and keeping the smallest**
 //! (BtrBlocks' selection, SIGMOD 2023). BtrBlocks samples because its columns hold 64k values;
@@ -49,11 +55,14 @@ use crate::facts::*;
 use crate::names::NameId;
 
 /// The chunk format this build writes and reads.
-pub const FORMAT: u8 = 1;
+pub const FORMAT: u8 = 2;
 
 /// The body (everything after the two header bytes) is one zstd frame, preceded by its
 /// uncompressed length.
 const FLAG_ZSTD: u8 = 1;
+
+/// The body carries Swift type facts: their three counts follow the other five.
+const FLAG_TYPES: u8 = 2;
 
 /// The largest uncompressed body a chunk may claim, so a corrupt length cannot become a huge
 /// allocation.
@@ -126,6 +135,7 @@ pub struct Decoded {
     pub imports: Vec<Import>,
     pub refs: Vec<RefSite>,
     pub hierarchy: Vec<TypeRelation>,
+    pub types: TypeFacts,
 }
 
 fn corrupt() -> Error {
@@ -444,13 +454,31 @@ impl StringReader<'_> {
 
 // ---------------------------------------------------------------- the chunk
 
+/// A binding's type source by code: 0 none, then `Named`, `Expr`, `Each`. Append only.
+fn type_source_code(t: &Option<TypeSource>) -> u64 {
+    match t {
+        None => 0,
+        Some(TypeSource::Named(_)) => 1,
+        Some(TypeSource::Expr(_)) => 2,
+        Some(TypeSource::Each(_)) => 3,
+    }
+}
+
 /// Encode one blob's facts. `refs` carry the store's name ids (see `names`).
-pub fn encode(symbols: &[Symbol], imports: &[Import], refs: &[RefSite], hierarchy: &[TypeRelation]) -> Vec<u8> {
+pub fn encode(symbols: &[Symbol], imports: &[Import], refs: &[RefSite], hierarchy: &[TypeRelation], types: &TypeFacts) -> Vec<u8> {
     let n_names: usize = imports.iter().map(|i| i.names.len()).sum();
+    let (binds, members, returns) = (&types.bindings, &types.members, &types.returns);
     let mut out = Vec::new();
     for n in [symbols.len(), imports.len(), n_names, refs.len(), hierarchy.len()] {
         put_varint(&mut out, n as u64);
     }
+    let typed = !types.is_empty();
+    if typed {
+        for n in [binds.len(), members.len(), returns.len()] {
+            put_varint(&mut out, n as u64);
+        }
+    }
+    let flag_types = if typed { FLAG_TYPES } else { 0 };
     let col = |out: &mut Vec<u8>, it: &mut dyn Iterator<Item = u64>| put_column(out, &it.collect::<Vec<_>>());
 
     // Symbols. `local_id` is the position by construction (`BlobFacts::push_symbol`), which the
@@ -481,6 +509,14 @@ pub fn encode(symbols: &[Symbol], imports: &[Import], refs: &[RefSite], hierarch
     col(&mut out, &mut hierarchy.iter().map(|h| u64::from(h.symbol)));
     col(&mut out, &mut hierarchy.iter().map(|h| hierarchy_kind_code(h.kind)));
 
+    // Bindings: the scope as offsets (start from the declaration, end from the start), small and
+    // alike across a blob; zigzag because a closure parameter's scope can start before its line.
+    col(&mut out, &mut binds.iter().map(|b| type_source_code(&b.ty)));
+    col(&mut out, &mut binds.iter().map(|b| u64::from(b.decl_line)));
+    col(&mut out, &mut binds.iter().map(|b| zigzag(i64::from(b.scope_start) - i64::from(b.decl_line))));
+    col(&mut out, &mut binds.iter().map(|b| zigzag(i64::from(b.scope_end) - i64::from(b.scope_start))));
+    col(&mut out, &mut binds.iter().map(|b| opt(b.enclosing)));
+
     let mut st = Strings::default();
     for s in symbols {
         st.put(Some(&s.name));
@@ -497,6 +533,23 @@ pub fn encode(symbols: &[Symbol], imports: &[Import], refs: &[RefSite], hierarch
     for h in hierarchy {
         st.put(Some(&h.target));
     }
+    for b in binds {
+        st.put(Some(&b.name));
+        st.put(match &b.ty {
+            None => None,
+            Some(TypeSource::Named(t) | TypeSource::Expr(t) | TypeSource::Each(t)) => Some(t),
+        });
+    }
+    for m in members {
+        st.put(Some(&m.owner));
+        st.put(Some(&m.member));
+        st.put(Some(&m.ty));
+    }
+    for r in returns {
+        st.put(Some(&r.owner));
+        st.put(Some(&r.name));
+        st.put(r.ty.as_deref());
+    }
     put_column(&mut out, &st.lens);
     put_varint(&mut out, st.bytes.len() as u64);
     out.extend_from_slice(&st.bytes);
@@ -506,13 +559,13 @@ pub fn encode(symbols: &[Symbol], imports: &[Import], refs: &[RefSite], hierarch
         && let Ok(z) = zstd::bulk::compress(&body, ZSTD_LEVEL)
         && z.len() < body.len()
     {
-        let mut out = vec![FORMAT, FLAG_ZSTD];
+        let mut out = vec![FORMAT, FLAG_ZSTD | flag_types];
         put_varint(&mut out, body.len() as u64);
         out.extend_from_slice(&z);
         return out;
     }
     let mut out = Vec::with_capacity(body.len() + 2);
-    out.extend_from_slice(&[FORMAT, 0]);
+    out.extend_from_slice(&[FORMAT, flag_types]);
     out.extend_from_slice(&body);
     out
 }
@@ -541,6 +594,7 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded> {
     };
     let mut cur = Cursor { buf: body, pos: 0 };
     let (n_sym, n_imp, n_names, n_ref, n_hier) = (cur.count()?, cur.count()?, cur.count()?, cur.count()?, cur.count()?);
+    let (n_bind, n_mem, n_ret) = if flags & FLAG_TYPES != 0 { (cur.count()?, cur.count()?, cur.count()?) } else { (0, 0, 0) };
 
     let local = get_column(&mut cur, n_sym)?;
     let kind = get_column(&mut cur, n_sym)?;
@@ -565,7 +619,13 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded> {
     let h_sym = get_column(&mut cur, n_hier)?;
     let h_kind = get_column(&mut cur, n_hier)?;
 
-    let n_strings = 2 * n_sym + 2 * n_imp + 2 * n_names + n_hier;
+    let b_kind = get_column(&mut cur, n_bind)?;
+    let b_decl = get_column(&mut cur, n_bind)?;
+    let b_start = get_column(&mut cur, n_bind)?;
+    let b_end = get_column(&mut cur, n_bind)?;
+    let b_encl = get_column(&mut cur, n_bind)?;
+
+    let n_strings = 2 * n_sym + 2 * n_imp + 2 * n_names + n_hier + 2 * n_bind + 3 * n_mem + 3 * n_ret;
     let lens = get_column(&mut cur, n_strings)?;
     let raw_len = usize::try_from(cur.varint()?).map_err(|_| corrupt())?;
     let raw = cur.take(raw_len)?;
@@ -626,5 +686,31 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded> {
             kind: if h_kind[i] == 1 { HierarchyKind::Implements } else { HierarchyKind::Extends },
         });
     }
-    Ok(Decoded { symbols, imports, refs, hierarchy })
+    let mut types = TypeFacts::default();
+    types.bindings.reserve_exact(n_bind);
+    let offset = |base: i64, z: u64| u32::try_from(base + unzigzag(z)).map_err(|_| corrupt());
+    for i in 0..n_bind {
+        let name = st.req()?;
+        let t = st.opt()?;
+        let ty = match (b_kind[i], t) {
+            (0, None) => None,
+            (1, Some(t)) => Some(TypeSource::Named(t)),
+            (2, Some(t)) => Some(TypeSource::Expr(t)),
+            (3, Some(t)) => Some(TypeSource::Each(t)),
+            _ => return Err(corrupt()),
+        };
+        let decl_line = u32_of(b_decl[i])?;
+        let scope_start = offset(i64::from(decl_line), b_start[i])?;
+        let scope_end = offset(i64::from(scope_start), b_end[i])?;
+        types.bindings.push(Binding { name, ty, decl_line, scope_start, scope_end, enclosing: unopt(b_encl[i])? });
+    }
+    types.members.reserve_exact(n_mem);
+    for _ in 0..n_mem {
+        types.members.push(MemberType { owner: st.req()?, member: st.req()?, ty: st.req()? });
+    }
+    types.returns.reserve_exact(n_ret);
+    for _ in 0..n_ret {
+        types.returns.push(ReturnType { owner: st.req()?, name: st.req()?, ty: st.opt()? });
+    }
+    Ok(Decoded { symbols, imports, refs, hierarchy, types })
 }

@@ -260,3 +260,24 @@ fn ids_work_with_callers_the_call_tree_and_a_near_seed() {
     let t = ok(&svc, &r.root, "calls", json!({"name": id, "kind": "function", "direction": "callers", "near": [r.root.join("far/zzz.ts").display().to_string()]}));
     assert!(at(&t, "later") < at(&t, "go"), "{t}");
 }
+
+#[test]
+fn find_narrows_to_a_file_or_directory_with_file_path() {
+    let (_d, svc) = service();
+    let r = init_repo();
+    for dir in ["web", "web/admin", "api"] {
+        for i in 0..3 {
+            write(&r.root, &format!("{dir}/v{i}.ts"), "export function view() { return 1; }\n");
+        }
+    }
+    commit_all(&r.root, "init");
+    let t = ok(&svc, &r.root, "find", json!({"name": "view", "limit": 2}));
+    assert!(t.contains("narrow with kind= or file_path= (a file or directory)"), "{t}");
+    let t = ok(&svc, &r.root, "find", json!({"name": "view", "file_path": "web/admin"}));
+    assert!(t.starts_with("Found 3 match(es)") || t.contains("Found 3 match(es)"), "{t}");
+    assert!(!t.contains("/api/") && !t.contains("web/v0.ts"), "{t}");
+    let t = ok(&svc, &r.root, "find", json!({"name": "view", "file_path": "web"}));
+    assert!(t.contains("Found 6 match(es)"), "a directory takes in its subdirectories: {t}");
+    let t = ok(&svc, &r.root, "find", json!({"name": "view", "file_path": "api/v1.ts"}));
+    assert!(t.contains("Found 1 match(es)") && t.contains("api/v1.ts"), "{t}");
+}

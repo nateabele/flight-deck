@@ -302,8 +302,9 @@ fn gc_drops_dead_trees_with_their_orphan_paths_and_blobs() {
 #[test]
 fn a_file_of_an_older_schema_is_rebuilt() {
     // 1: row per fact and text trees; 2: interned names or interned trees (each on its own branch
-    // before they were merged); 3: chunks. None carries the other's tables, so all are dropped.
-    for old in ["1", "2", "3"] {
+    // before they were merged); 3: chunks; 4: a `type_facts` table beside the chunks. None carries
+    // the other's tables, so all are dropped.
+    for old in ["1", "2", "3", "4"] {
         let root = tempfile::tempdir().unwrap();
         let repo = Path::new("/x/app/.git");
         {
@@ -316,5 +317,5 @@ fn a_file_of_an_older_schema_is_rebuilt() {
         assert_eq!(w.stats().unwrap().facts, 0, "the old file was dropped");
         assert_eq!(count(&raw(root.path(), repo), "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'"), SCHEMA_VERSION);
     }
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
 }

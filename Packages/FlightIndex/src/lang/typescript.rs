@@ -11,8 +11,9 @@ impl Language for TypeScript {
         "typescript"
     }
 
+    /// 2: references inside template substitutions.
     fn parser_version(&self) -> u32 {
-        1
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -29,8 +30,9 @@ impl Language for Tsx {
         "tsx"
     }
 
+    /// 2: references inside template substitutions.
     fn parser_version(&self) -> u32 {
-        1
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {

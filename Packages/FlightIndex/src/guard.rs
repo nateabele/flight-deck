@@ -28,9 +28,11 @@
 //!   found from the file's path through the daemon, not from the project directory the session
 //!   started in. `$CLAUDE_PROJECT_DIR` and `--project-root` only stand in for a missing `cwd`.
 //! - `--db` is accepted and ignored: there is no per-project database any more.
-//! - The blast radius is the files that transitively import the file inside its own view. The
-//!   `impact` tool also follows links into other views; a hook that must answer in milliseconds
-//!   does not build those.
+//! - The blast radius is the files that transitively import the file inside its own view and in
+//!   the dependent views (repositories whose manifests link into it) whose graphs the daemon
+//!   already holds. The `impact` tool builds the linked views it needs; a hook that must answer in
+//!   milliseconds never builds, loads or reads git for one, so a dependent nobody has asked about
+//!   does not count.
 
 use crate::ack;
 use crate::client::{unreachable_message, Client};

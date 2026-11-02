@@ -677,6 +677,11 @@ impl ViewGraph {
         ViewGraph { root: label.worktree.clone(), label, data: self.data.clone() }
     }
 
+    /// `for_worktree` when it costs nothing: `None` where it would have to re-resolve.
+    pub fn repointed_cheaply(&self, label: ViewLabel) -> Option<ViewGraph> {
+        (!self.data.location_sensitive || self.data.root == label.worktree).then(|| self.for_worktree(label))
+    }
+
     /// A stable text summary of every resolution, keyed by path. Two graphs of the same file set
     /// have equal fingerprints; used to prove incremental == full.
     pub fn fingerprint(&self) -> Vec<String> {

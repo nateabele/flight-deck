@@ -10,7 +10,7 @@
 use crate::alloc;
 use crate::error::{Error, Result};
 use crate::facts::InternedFacts;
-use crate::git::{self, FileRef, Overlay, View, MAX_FILE_BYTES};
+use crate::git::{self, FileRef, Overlay, View, ViewLabel, MAX_FILE_BYTES};
 use crate::graph::{facts_bytes, FileChange, Share, ViewGraph};
 use crate::lang;
 use crate::names::NamePool;
@@ -119,6 +119,9 @@ pub struct Engine {
     builds: (Mutex<usize>, Condvar),
     /// What the last graph built cost, so the next build can make room before it starts.
     last_build_bytes: AtomicUsize,
+    /// The cache entry (key and stamp) and label of the complete graph last served for each
+    /// worktree, so `held_graph` can hand it out again without git, the store or a build.
+    served: Mutex<HashMap<PathBuf, (GraphKey, String, ViewLabel)>>,
 }
 
 struct BuildSlot<'a>(&'a (Mutex<usize>, Condvar));
@@ -248,6 +251,7 @@ impl Engine {
             facts: Mutex::new(HashMap::new()),
             shares: Mutex::new(HashMap::new()),
             names: Mutex::new(HashMap::new()),
+            served: Mutex::new(HashMap::new()),
             recorded: Mutex::new(HashMap::new()),
             heap_limit: AtomicUsize::new(0),
             builds: (Mutex::new(0), Condvar::new()),
@@ -903,17 +907,22 @@ impl Engine {
             }
         };
         if view.overlay.is_empty() {
+            if complete {
+                self.note_served(&view.label, &base_key, "");
+            }
             return Ok(Arc::new(base.for_worktree(view.label.clone())));
         }
 
         let overlay_key = GraphKey::Overlay(view.label.worktree.clone());
         let stamp = overlay_stamp(commit, &view.overlay);
         if complete && let Some(g) = self.cached(&overlay_key, &stamp) {
+            self.note_served(&view.label, &overlay_key, &stamp);
             return Ok(g);
         }
         let lock = self.key_lock(&overlay_key);
         let _building = complete.then(|| lock.lock().unwrap());
         if complete && let Some(g) = self.cached(&overlay_key, &stamp) {
+            self.note_served(&view.label, &overlay_key, &stamp);
             return Ok(g);
         }
         let present: Vec<FileRef> = view
@@ -941,9 +950,33 @@ impl Engine {
         // of another worktree of the same commit can be used as is.
         let g = Arc::new(base.with_changes(view.label.clone(), changes, names));
         if complete {
+            self.note_served(&view.label, &overlay_key, &stamp);
             self.remember(overlay_key, stamp, g.clone());
         }
         Ok(g)
+    }
+
+    fn note_served(&self, label: &ViewLabel, key: &GraphKey, stamp: &str) {
+        let mut m = self.served.lock().unwrap();
+        if m.get(&label.worktree).is_some_and(|(k, s, l)| k == key && s == stamp && l == label) {
+            return;
+        }
+        m.insert(label.worktree.clone(), (key.clone(), stamp.to_string(), label.clone()));
+    }
+
+    /// The complete graph last served for `worktree`, if the cache still holds it: no git, no
+    /// store and no build, so it costs a map lookup. It may be behind the worktree's files (it is
+    /// whatever the last query about that worktree saw), and it is `None` when the worktree was
+    /// never asked about, its graph was evicted, or handing a shared commit graph to this
+    /// worktree would mean re-resolving it. For callers that must answer in milliseconds and can
+    /// live with a slightly old answer: the guard's blast radius over dependent views.
+    pub fn held_graph(&self, worktree: &Path) -> Option<Arc<ViewGraph>> {
+        let (key, stamp, label) = self.served.lock().unwrap().get(worktree)?.clone();
+        let g = self.cached(&key, &stamp)?;
+        match key {
+            GraphKey::Base(..) => g.repointed_cheaply(label).map(Arc::new),
+            GraphKey::Overlay(_) => Some(g),
+        }
     }
 
     /// Facts for one file, from the shared in-memory copy when some graph still holds it. A file

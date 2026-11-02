@@ -12,8 +12,9 @@ impl Language for Rust {
         "rust"
     }
 
+    /// 2: references inside macro arguments; `#[path]` on `mod` declarations.
     fn parser_version(&self) -> u32 {
-        1
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -173,7 +174,7 @@ impl<'a> Walker<'a> {
                     Some(body) => self.walk_children(body, Some(id), None),
                     None => self.facts.imports.push(Import {
                         specifier: name.to_string(),
-                        alias: None,
+                        alias: path_attribute(n, src),
                         names: vec![],
                         line: n.start_position().row as u32 + 1,
                         kind: ImportKind::ModDecl,
@@ -214,6 +215,11 @@ impl<'a> Walker<'a> {
                     let (q, name) = split_qualified(text(m, src), "::");
                     self.add_ref(n, name, q, enclosing, RefKind::Call);
                 }
+                let mut c = n.walk();
+                let tree = n.children(&mut c).find(|k| k.kind() == "token_tree");
+                if let Some(t) = tree {
+                    self.token_tree(t, enclosing);
+                }
             }
             "type_parameter" => {
                 // `T: Trait` — the bound is a reference, the parameter name is not.
@@ -243,6 +249,58 @@ impl<'a> Walker<'a> {
             }
             "token_tree" | "string_literal" | "line_comment" | "block_comment" | "attribute_item" => {}
             _ => self.walk_children(n, parent, enclosing),
+        }
+    }
+
+    /// A macro's arguments are a flat token tree, not syntax, so read the shapes that look like
+    /// expressions off the tokens: `f(`, `a::b(`, `x.m(`, `m!(` are calls, upper-case names and
+    /// paths are uses, as outside a macro. A name right after a defining keyword (`fn f(`,
+    /// `static X`) is a definition, and `#x` / `$x` are metavariables, so neither is recorded.
+    fn token_tree(&mut self, tree: Node, enclosing: Option<u32>) {
+        let src = self.src;
+        let mut c = tree.walk();
+        let toks: Vec<Node> = tree.children(&mut c).collect();
+        let tx = |i: usize| toks.get(i).map(|t| text(*t, src)).unwrap_or("");
+        let is_ident = |i: usize| toks.get(i).is_some_and(|t| t.kind() == "identifier");
+        let is_head = |i: usize| toks.get(i).is_some_and(|t| matches!(t.kind(), "identifier" | "self" | "super" | "crate"));
+        let opens_call = |i: usize| toks.get(i).is_some_and(|t| t.kind() == "token_tree" && text(*t, src).starts_with('('));
+        let mut i = 0;
+        while i < toks.len() {
+            let t = toks[i];
+            if t.kind() == "token_tree" {
+                self.token_tree(t, enclosing);
+                i += 1;
+                continue;
+            }
+            if !is_head(i) {
+                i += 1;
+                continue;
+            }
+            // The longest `a::b::c` starting here.
+            let start = i;
+            let mut j = i + 1;
+            while tx(j) == "::" && is_head(j + 1) {
+                j += 2;
+            }
+            let last = j - 1;
+            let prev = if start > 0 { tx(start - 1) } else { "" };
+            let name = tx(last);
+            let qualifier = (last > start).then(|| &src[toks[start].start_byte()..toks[last - 2].end_byte()]);
+            let defining = matches!(prev, "fn" | "struct" | "enum" | "union" | "trait" | "type" | "mod" | "static" | "const" | "let" | "#" | "$");
+            if !defining && is_ident(last) {
+                if prev == "." {
+                    // `recv.m(`: a method call; the receiver qualifies it when it is a plain name.
+                    if last == start && opens_call(j) {
+                        let recv = start.checked_sub(2).filter(|r| is_head(*r) && (*r == 0 || tx(*r - 1) != ".")).map(&tx);
+                        self.add_ref(t, name, recv, enclosing, RefKind::Call);
+                    }
+                } else if opens_call(j) || (tx(j) == "!" && toks.get(j + 1).is_some_and(|k| k.kind() == "token_tree")) {
+                    self.add_ref(t, name, qualifier, enclosing, RefKind::Call);
+                } else if name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                    self.add_ref(t, name, qualifier, enclosing, RefKind::Use);
+                }
+            }
+            i = j;
         }
     }
 
@@ -353,6 +411,30 @@ impl<'a> Walker<'a> {
     fn push_import(&mut self, specifier: String, names: Vec<ImportName>, line: u32) {
         self.facts.imports.push(Import { specifier, alias: None, names, line, kind: ImportKind::Import });
     }
+}
+
+/// The file a `#[path = "..."]` attribute right before a `mod` declaration names, as written.
+fn path_attribute(m: Node, src: &str) -> Option<String> {
+    let mut prev = m.prev_sibling();
+    while let Some(p) = prev {
+        match p.kind() {
+            "attribute_item" => {
+                let inner = text(p, src).trim_start_matches('#').trim_start_matches('[').trim_end_matches(']').trim();
+                if let Some(rest) = inner.strip_prefix("path")
+                    && let Some(value) = rest.trim_start().strip_prefix('=')
+                {
+                    let v = value.trim();
+                    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+                        return Some(v[1..v.len() - 1].to_string());
+                    }
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => return None,
+        }
+        prev = p.prev_sibling();
+    }
+    None
 }
 
 /// The type's base name: `Foo` for `Foo<T>`, `a::Foo`, `&Foo`.

@@ -37,8 +37,9 @@ pub fn find(c: &Ctx) -> ToolResult {
     let matcher = if regex { NameMatch::Regex(compile_regex(&name)?) } else { NameMatch::Exact(name.clone()) };
     let views = c.views();
     let mut hits = views.find_symbols(&matcher, kind);
+    // `file_path` narrows to a file or to everything under a directory.
     if let Some(f) = &file {
-        hits.retain(|h| h.path == *f);
+        hits.retain(|h| h.path.starts_with(f));
     }
     let pkgs: Vec<_> = if regex || file.is_some() { Vec::new() } else { super::pkg::candidates(c, &name, hits.len()) }
         .into_iter()
@@ -94,7 +95,7 @@ pub fn find(c: &Ctx) -> ToolResult {
     }
     let total = hits.len() + pkgs.len();
     if total > limit {
-        let _ = writeln!(out, "… {} more match(es) ({limit} of {total} shown, most important first); narrow with kind= or file_path=; or pass limit={total} to see all", total - limit);
+        let _ = writeln!(out, "… {} more match(es) ({limit} of {total} shown, most important first); narrow with kind= or file_path= (a file or directory); or pass limit={total} to see all", total - limit);
     }
     out.push_str(history.trim_start_matches('\n'));
     Ok(out)

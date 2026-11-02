@@ -10,8 +10,9 @@ impl Language for JavaScript {
         "javascript"
     }
 
+    /// 2: references inside template substitutions.
     fn parser_version(&self) -> u32 {
-        1
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
