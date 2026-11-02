@@ -17,6 +17,8 @@
 //! downloaded, never built) is skipped, its references stay unresolved as before, and `status`
 //! lists it. A miss is not cached, so a package built later is picked up by the next project load.
 
+pub mod cargo;
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -24,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 /// One package at one version, as a package manager names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackageId {
-    /// `elm` today; `cargo`, `hex`, `npm`, `swiftpm` later.
+    /// `elm`, `cargo` (crates and std/core/alloc, see `cargo`); `hex`, `npm`, `swiftpm` later.
     pub manager: &'static str,
     /// `elm/core`
     pub name: String,
@@ -46,6 +48,14 @@ pub enum PkgKind {
     TypeAlias,
     Constructor,
     Operator,
+    /// Rust: a trait.
+    Trait,
+    /// Rust: an exported `macro_rules!`.
+    Macro,
+    /// Rust: a function of an `impl` or `trait` block; its module ends with the type's name.
+    Method,
+    /// Rust: a `const` or `static`.
+    Const,
 }
 
 impl PkgKind {
@@ -56,6 +66,10 @@ impl PkgKind {
             PkgKind::TypeAlias => "type_alias",
             PkgKind::Constructor => "constructor",
             PkgKind::Operator => "operator",
+            PkgKind::Trait => "trait",
+            PkgKind::Macro => "macro",
+            PkgKind::Method => "method",
+            PkgKind::Const => "const",
         }
     }
 }
@@ -72,18 +86,37 @@ pub struct PkgSymbol {
 }
 
 impl PkgSymbol {
-    /// `elm/core@1.0.5 List.map`: what `find`/`refs` print.
+    /// `elm/core@1.0.5 List.map`, `std@1.96.0 collections::hash::map::HashMap::new`: what
+    /// `find`/`refs` print. A Rust crate-root item has no module (`serde_json@1.0.140 json`).
     pub fn display(&self) -> String {
-        format!("{} {}.{}", self.package, self.module, self.name)
+        match (self.package.manager, self.module.is_empty()) {
+            ("cargo", true) => format!("{} {}", self.package, self.name),
+            ("cargo", false) => format!("{} {}::{}", self.package, self.module, self.name),
+            _ => format!("{} {}.{}", self.package, self.module, self.name),
+        }
     }
 
-    /// The SCIP symbol string: `elm elm/core 1.0.5 List/map.` (a type descriptor ends `#`).
+    /// The SCIP symbol string: `elm elm/core 1.0.5 List/map.` (a type descriptor ends `#`), and
+    /// for a crate `cargo alloc 1.96.0 vec/Vec#new().` (a member's type is a type descriptor).
     pub fn scip(&self) -> String {
         let suffix = match self.kind {
-            PkgKind::Type | PkgKind::TypeAlias => "#",
+            PkgKind::Type | PkgKind::TypeAlias | PkgKind::Trait => "#",
+            PkgKind::Method => "().",
+            PkgKind::Macro => "!",
             _ => ".",
         };
-        format!("{} {} {} {}/{}{suffix}", self.package.manager, self.package.name, self.package.version, self.module.replace('.', "/"), self.name)
+        let p = &self.package;
+        if p.manager != "cargo" {
+            return format!("{} {} {} {}/{}{suffix}", p.manager, p.name, p.version, self.module.replace('.', "/"), self.name);
+        }
+        let mut path = String::new();
+        let segs: Vec<&str> = self.module.split("::").filter(|s| !s.is_empty()).collect();
+        let member = matches!(self.kind, PkgKind::Method) || matches!(self.kind, PkgKind::Constructor | PkgKind::Const) && segs.last().is_some_and(|s| s.starts_with(char::is_uppercase));
+        for (i, s) in segs.iter().enumerate() {
+            path.push_str(s);
+            path.push_str(if member && i + 1 == segs.len() { "#" } else { "/" });
+        }
+        format!("{} {} {} {path}{}{suffix}", p.manager, p.name, p.version, self.name)
     }
 }
 
@@ -194,15 +227,20 @@ fn cache() -> &'static Mutex<Cache> {
 pub struct PackageStats {
     pub packages: usize,
     pub names: usize,
+    /// Elm versions without docs.json.
     pub missing_docs: Vec<String>,
+    /// Rust crates read, and those that could not be (see `cargo::stats`).
+    pub crates: cargo::CrateStats,
 }
 
 pub fn stats() -> PackageStats {
     let c = cache().lock().unwrap();
+    let crates = cargo::stats();
     PackageStats {
         packages: c.loaded.len(),
         names: c.loaded.values().flat_map(|m| m.values()).map(|m| m.values.len() + m.types.len()).sum(),
         missing_docs: c.missing.iter().cloned().collect(),
+        crates,
     }
 }
 

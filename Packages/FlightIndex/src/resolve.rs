@@ -19,6 +19,7 @@ mod swift;
 pub use swift::swift_module_key;
 
 use crate::facts::Import;
+use crate::pkgview::cargo::RustDeps;
 use crate::pkgview::{ModuleExports, ProjectPackages};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -53,6 +54,10 @@ pub struct Resolver {
     probed_outside: AtomicBool,
     /// Swift module name -> the module keys (directories) bearing it.
     swift_modules: HashMap<String, Vec<String>>,
+    /// Directory (relative to root) -> the Cargo package whose `Cargo.toml` is there, if any.
+    rust_packages: Mutex<HashMap<String, Option<Arc<RustDeps>>>>,
+    /// The crates a Rust file outside every Cargo package can name: std alone.
+    rust_std_only: OnceLock<Arc<RustDeps>>,
 }
 
 /// One `elm.json`.
@@ -78,7 +83,7 @@ impl Resolver {
             }
         }
         let swift_modules = swift::swift_module_names(paths.iter());
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, rust_packages: Mutex::new(HashMap::new()), rust_std_only: OnceLock::new() }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -182,6 +187,50 @@ impl Resolver {
             dir = d.parent();
         }
         Resolved::Unresolved
+    }
+
+    // ---- Rust packages -------------------------------------------------------------------
+
+    /// The crates a Rust file can name (see `pkgview::cargo`): the dependencies, in the nearest
+    /// `Cargo.lock` at or above it, of the nearest Cargo package above it, plus std. Read once
+    /// per package per resolver; the crates themselves once per process. A lock outside the
+    /// worktree is not looked for, so the answer never depends on where the worktree stands.
+    pub fn rust_packages(&self, from: &str) -> Option<Arc<RustDeps>> {
+        let mut dir = Path::new(from).parent();
+        while let Some(d) = dir {
+            let key = d.to_string_lossy().to_string();
+            let cached = self.rust_packages.lock().unwrap().get(&key).cloned();
+            let deps = match cached {
+                Some(v) => v,
+                None => {
+                    let v = std::fs::read_to_string(self.root.join(d).join("Cargo.toml")).ok().filter(|t| t.lines().any(|l| l.trim() == "[package]")).map(|manifest| {
+                        let mut up = Some(d);
+                        let mut lock = None;
+                        while let Some(u) = up {
+                            if let Ok(t) = std::fs::read_to_string(self.root.join(u).join("Cargo.lock")) {
+                                lock = Some((t, std::fs::read_to_string(self.root.join(u).join("Cargo.toml")).ok()));
+                                break;
+                            }
+                            up = u.parent();
+                        }
+                        let (lock, ws) = lock.map_or((None, None), |(l, w)| (Some(l), w));
+                        Arc::new(RustDeps::new(&manifest, lock.as_deref(), ws.as_deref()))
+                    });
+                    self.rust_packages.lock().unwrap().insert(key, v.clone());
+                    v
+                }
+            };
+            if deps.is_some() {
+                return deps;
+            }
+            dir = d.parent();
+        }
+        Some(self.rust_std_only.get_or_init(|| Arc::new(RustDeps::new("", None, None))).clone())
+    }
+
+    /// Every Cargo package this resolver has read, each once.
+    pub fn rust_packages_seen(&self) -> Vec<Arc<RustDeps>> {
+        self.rust_packages.lock().unwrap().values().flatten().cloned().collect()
     }
 
     // ---- TypeScript / JavaScript -------------------------------------------------------

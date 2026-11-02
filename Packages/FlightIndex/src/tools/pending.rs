@@ -360,7 +360,7 @@ enum SiteKind {
 impl SiteKind {
     fn of(k: RefKind) -> SiteKind {
         match k {
-            RefKind::Call => SiteKind::Call,
+            RefKind::Call | RefKind::Macro => SiteKind::Call,
             RefKind::Use => SiteKind::Use,
             RefKind::Type => SiteKind::Type,
         }

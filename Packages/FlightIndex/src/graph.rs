@@ -18,7 +18,7 @@
 //! * every file holding an unresolved or fallback-resolved reference to a name whose definitions
 //!   changed, because "the unique symbol with this name" may have changed (looked up in the
 //!   base's `soft_index`, built on the first overlay, rather than scanned). A reference resolved
-//!   to a package symbol is neither (see `elm_pkg`).
+//!   to a package symbol is neither (see `elm_pkg`, `rust_pkg`).
 //!
 //! File indices are stable across `with_changes` (removed files become tombstones, added files are
 //! appended), so reused per-file results never need re-mapping. `fingerprint` exists so a test can
@@ -41,6 +41,7 @@ mod precise;
 pub(crate) mod ppr;
 mod python;
 pub mod rank;
+mod rust_pkg;
 mod surface;
 mod swift;
 mod swift_types;
@@ -978,11 +979,11 @@ impl GraphData {
 
         let mut refs = Vec::with_capacity(facts.refs.len());
         let swift_keys = (lang == "swift").then(|| self.swift_keys(f));
-        let pkg_scope = (lang == "elm")
-            .then(|| self.resolver.elm_packages(&node.path))
-            .flatten()
-            .filter(|p| !p.modules.is_empty())
-            .map(|p| elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports));
+        let pkg_scope = match lang {
+            "elm" => self.resolver.elm_packages(&node.path).filter(|p| !p.modules.is_empty()).map(|p| rust_pkg::PkgScope::Elm(elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports))),
+            "rust" => self.resolver.rust_packages(&node.path).map(|d| rust_pkg::PkgScope::Rust(rust_pkg::RustPkgScope::new(d, &facts.imports, &imports))),
+            _ => None,
+        };
         let mut pkg_refs = elm_pkg::PkgRefs::default();
         for (ri, r) in facts.refs.iter().enumerate() {
             let mut rr = match &swift_keys {

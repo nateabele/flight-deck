@@ -575,6 +575,7 @@ fn ref_kind(k: RefKind) -> &'static str {
         RefKind::Call => "call",
         RefKind::Type => "type",
         RefKind::Use => "use",
+        RefKind::Macro => "macro",
     }
 }
 

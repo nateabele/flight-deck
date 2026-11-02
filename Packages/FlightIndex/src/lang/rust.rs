@@ -13,7 +13,8 @@ impl Language for Rust {
     }
 
     fn parser_version(&self) -> u32 {
-        1
+        // 2: macro invocations are `RefKind::Macro`, not calls.
+        2
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -212,7 +213,7 @@ impl<'a> Walker<'a> {
             "macro_invocation" => {
                 if let Some(m) = n.child_by_field_name("macro") {
                     let (q, name) = split_qualified(text(m, src), "::");
-                    self.add_ref(n, name, q, enclosing, RefKind::Call);
+                    self.add_ref(n, name, q, enclosing, RefKind::Macro);
                 }
             }
             "type_parameter" => {

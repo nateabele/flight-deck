@@ -1162,11 +1162,15 @@ impl Service {
         let p = crate::pkgview::stats();
         let mut data = data;
         data["packages"] = json!({"parsed": p.packages, "names": p.names, "missing_docs": p.missing_docs});
+        data["crates"] = json!({"parsed": p.crates.crates, "names": p.crates.names, "missing": p.crates.missing});
         let text = format!(
-            "{text}\npackages: {} parsed, {} names{}",
+            "{text}\npackages: {} parsed, {} names{}\ncrates: {} parsed, {} names{}",
             p.packages,
             p.names,
-            if p.missing_docs.is_empty() { String::new() } else { format!("; no docs.json: {}", p.missing_docs.join(", ")) }
+            if p.missing_docs.is_empty() { String::new() } else { format!("; no docs.json: {}", p.missing_docs.join(", ")) },
+            p.crates.crates,
+            p.crates.names,
+            if p.crates.missing.is_empty() { String::new() } else { format!("; not read: {}", p.crates.missing.join(", ")) }
         );
         Response { ok: true, text: Some(text), data: Some(data), ..Default::default() }
     }

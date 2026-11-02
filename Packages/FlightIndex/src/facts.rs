@@ -172,6 +172,9 @@ pub enum RefKind {
     Type,
     /// Any other mention of the name (passing a function, constructor in a pattern, …).
     Use,
+    /// A Rust macro invocation (`println!`): macros have their own namespace, and a method call
+    /// on an expression (`a.b().write(…)`) is recorded as an unqualified call of the same name.
+    Macro,
 }
 
 impl RefKind {
@@ -180,6 +183,7 @@ impl RefKind {
             RefKind::Call => "call",
             RefKind::Type => "type",
             RefKind::Use => "use",
+            RefKind::Macro => "macro",
         }
     }
 
@@ -187,6 +191,7 @@ impl RefKind {
         match s {
             "call" => RefKind::Call,
             "type" => RefKind::Type,
+            "macro" => RefKind::Macro,
             _ => RefKind::Use,
         }
     }
@@ -198,6 +203,7 @@ impl RefKind {
             RefKind::Call => 0,
             RefKind::Type => 1,
             RefKind::Use => 2,
+            RefKind::Macro => 3,
         }
     }
 
@@ -205,6 +211,7 @@ impl RefKind {
         match c {
             0 => RefKind::Call,
             1 => RefKind::Type,
+            3 => RefKind::Macro,
             _ => RefKind::Use,
         }
     }
