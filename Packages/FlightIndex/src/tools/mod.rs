@@ -11,6 +11,7 @@ mod analysis;
 mod calltree;
 mod impact;
 pub mod args;
+mod grep_order;
 mod history;
 pub mod caps;
 pub mod mutate;
