@@ -10,6 +10,7 @@
 mod analysis;
 mod calltree;
 mod impact;
+pub(crate) mod impact_index;
 pub mod args;
 mod history;
 pub mod caps;

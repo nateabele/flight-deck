@@ -910,6 +910,14 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
   incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
   before, 0.81 GB after.
+- **Per-graph tool tables.** What a tool would otherwise derive from the whole graph on every call
+  is built on first use and kept with the graph, dropped by `finalize` with everything else it
+  derives: the BM25 word index, the personalized-PageRank adjacency, and `impact`'s tables
+  (`src/tools/impact_index.rs`): source keys and test subjects by language for the tests group,
+  and each seed's co-change partners among the view's files, memoised against the repository's
+  co-change at its HEAD (itself computed once per repository and HEAD). On tessera the `impact` tool
+  went from 1.5 / 2.3 ms to 0.45 / 1.2 ms (TS / Elm file, p50 in the daemon) with its output byte
+  for byte the same over 63 answers.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

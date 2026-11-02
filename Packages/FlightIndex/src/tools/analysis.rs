@@ -2,14 +2,14 @@
 //! `refs`, `calls`.
 
 use super::caps::{by_proximity, counts, symbol_id, Fit, LIST_LIMIT};
-use super::{impact, is_test_path, range, Ctx, Format, ToolError, ToolResult};
+use super::{impact, impact_index, is_test_path, range, Ctx, Format, ToolError, ToolResult};
 use crate::facts::{RefKind, SymbolKind};
 use crate::graph::{Confidence, SymId};
 use crate::query::{CallEntry, Direction, SymbolHit};
 use crate::links::Views;
 use crate::near::Near;
 use crate::resolve::Resolved;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -367,9 +367,11 @@ pub fn impact(c: &Ctx) -> ToolResult {
         }
     }
     // List B: co-change partners by confidence, among the files this view has.
+    // Each seed's partners among the view's files are read once per graph and HEAD (`impact_index`).
     let co = (c.cochange)();
+    let index = g.impact_index();
     let partners: Vec<impact::Partner> = match &co {
-        Ok(co) => impact::ranked_partners(co, &seeds, impact::MIN_SUPPORT).into_iter().filter(|p| g.file_idx(Path::new(&p.path)).is_some()).collect(),
+        Ok(co) => impact_index::ranked_partners(index, co, &seeds, |p| impact_index::has_file(g, p)),
         Err(_) => Vec::new(),
     };
     let mut partner_keys: Vec<(usize, PathBuf)> = Vec::new();
@@ -410,33 +412,8 @@ pub fn impact(c: &Ctx) -> ToolResult {
     }
 
     // Tests: every one linked to a seed, uncapped and whatever `include_tests` says.
-    let seed_keys: HashSet<(String, &str)> = seeds.iter().filter_map(|s| g.file_idx(Path::new(s)).map(|i| (impact::source_key(s), g.file(i).language))).collect();
-    let mut name_matches: Vec<(usize, PathBuf)> = Vec::new();
-    if !seed_keys.is_empty() {
-        // A stem such as `index` or `types` names many sources; a test can only be matched to one
-        // of them by name when its stem is unique among the sources of that language.
-        let mut sources: HashMap<(String, &str), usize> = HashMap::new();
-        let live: Vec<u32> = (0..g.files.len() as u32).filter(|i| g.file(*i).alive).collect();
-        for i in &live {
-            let f = g.file(*i);
-            if !is_test_path(&f.path) {
-                *sources.entry((impact::source_key(&f.path), f.language)).or_default() += 1;
-            }
-        }
-        for i in &live {
-            let f = g.file(*i);
-            // Only the file asked about is left out: a test the diff already edits is one to run.
-            if !is_test_path(&f.path) || *i == fi {
-                continue;
-            }
-            if let Some(subject) = impact::test_subject(&f.path) {
-                let k = (subject, f.language);
-                if seed_keys.contains(&k) && sources.get(&k) == Some(&1) {
-                    name_matches.push((0, g.abs(*i)));
-                }
-            }
-        }
-    }
+    let seed_keys: Vec<(String, &'static str)> = seeds.iter().filter_map(|s| g.file_idx(Path::new(s)).map(|i| (impact::source_key(s), g.file(i).language))).collect();
+    let name_matches: Vec<(usize, PathBuf)> = index.name_matches(&seed_keys, fi).into_iter().map(|i| (0, g.abs(i))).collect();
     let test_importers: Vec<((usize, PathBuf), u32)> =
         by_depth.iter().filter(|(v, e)| e.depth == 1 && is_test(*v, &e.path)).map(|(v, e)| ((*v, e.path.clone()), e.depth)).collect();
     let test_partners: Vec<((usize, PathBuf), impact::Why)> =

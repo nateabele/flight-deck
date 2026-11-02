@@ -233,6 +233,9 @@ pub struct GraphData {
     /// seeded `map` and dropped with everything else `finalize` derives. Lazy because most graphs
     /// (a base tree behind a dirty worktree, a linked view) are never asked for a seeded rank.
     ppr: std::sync::OnceLock<Arc<ppr::PprGraph>>,
+    /// `impact`'s name tables and memoised co-change partners (`tools/impact_index.rs`), built on
+    /// the first `impact` and dropped with everything else `finalize` derives.
+    impact: std::sync::OnceLock<Arc<crate::tools::impact_index::ImpactIndex>>,
 }
 
 /// A graph as one worktree sees it: shared data, plus the worktree's own root and label (the only
@@ -311,6 +314,7 @@ impl ViewGraph {
             swift_types: Arc::default(),
             words: std::sync::OnceLock::new(),
             ppr: std::sync::OnceLock::new(),
+            impact: std::sync::OnceLock::new(),
         };
         g.reindex();
         for f in 0..g.files.len() as u32 {
@@ -588,6 +592,7 @@ impl GraphData {
     fn finalize(&mut self, prior: Option<&GraphData>) {
         let n = self.files.len();
         self.ppr = std::sync::OnceLock::new();
+        self.impact = std::sync::OnceLock::new();
         self.importers = vec![Vec::new(); n];
         for (i, r) in self.res.iter().enumerate() {
             for &t in &r.edges {
@@ -711,6 +716,10 @@ impl GraphData {
 
     pub(crate) fn ppr_graph(&self) -> &ppr::PprGraph {
         self.ppr.get_or_init(|| Arc::new(ppr::build(self)))
+    }
+
+    pub(crate) fn impact_index(&self) -> &crate::tools::impact_index::ImpactIndex {
+        self.impact.get_or_init(|| Arc::new(crate::tools::impact_index::ImpactIndex::build(self)))
     }
 
     // ---- resolution --------------------------------------------------------------------
