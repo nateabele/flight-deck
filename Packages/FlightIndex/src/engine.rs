@@ -14,6 +14,7 @@ use crate::git::{self, FileRef, Overlay, View, ViewLabel, MAX_FILE_BYTES};
 use crate::graph::{facts_bytes, FileChange, Share, ViewGraph};
 use crate::lang;
 use crate::names::NamePool;
+use crate::peer::{FactKey, FactSource};
 use crate::resolve::{Resolved, Resolver};
 use crate::store::{GcStats, ParsedBlob, Reader, Writer};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -61,7 +62,28 @@ pub struct BuildReport {
     pub changed_during_build: usize,
     /// Files in the priority slice (requested files plus their direct imports).
     pub priority_files: usize,
+    /// Blobs whose facts came from the peer (`set_peer`) instead of the parser.
+    pub fetched: usize,
+    /// Bytes read from the peer for them.
+    pub fetched_bytes: u64,
     pub elapsed: Duration,
+}
+
+/// What fetching from the peer has done since the engine opened (`status`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerStats {
+    /// The peer, as `FactSource::describe` puts it; `None` when there is none.
+    pub peer: Option<String>,
+    pub fetches: u64,
+    /// Blobs stored from the peer.
+    pub fetched: u64,
+    /// Keys the peer did not hold (parsed instead).
+    pub missing: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    /// Fetches that failed part-way or outright; their remaining keys were parsed.
+    pub failures: u64,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -122,6 +144,9 @@ pub struct Engine {
     /// The cache entry (key and stamp) and label of the complete graph last served for each
     /// worktree, so `held_graph` can hand it out again without git, the store or a build.
     served: Mutex<HashMap<PathBuf, (GraphKey, String, ViewLabel)>>,
+    /// Where missing blob facts are fetched from before they are parsed (spec §7 item 3).
+    peer: Mutex<Option<Arc<dyn FactSource>>>,
+    peer_stats: Mutex<PeerStats>,
 }
 
 struct BuildSlot<'a>(&'a (Mutex<usize>, Condvar));
@@ -259,6 +284,8 @@ impl Engine {
             heap_limit: AtomicUsize::new(0),
             builds: (Mutex::new(0), Condvar::new()),
             last_build_bytes: AtomicUsize::new(64 << 20),
+            peer: Mutex::new(None),
+            peer_stats: Mutex::new(PeerStats::default()),
         })
     }
 
@@ -315,6 +342,16 @@ impl Engine {
             }
         }
         Some(derived)
+    }
+
+    /// Fetch the facts of missing blobs from `peer` before parsing them; `None` parses everything.
+    pub fn set_peer(&self, peer: Option<Arc<dyn FactSource>>) {
+        self.peer_stats.lock().unwrap().peer = peer.as_ref().map(|p| p.describe());
+        *self.peer.lock().unwrap() = peer;
+    }
+
+    pub fn peer_stats(&self) -> PeerStats {
+        self.peer_stats.lock().unwrap().clone()
     }
 
     /// Total blobs parsed (extractor calls) by this engine since it opened. Tests assert on deltas.
@@ -521,6 +558,16 @@ impl Engine {
             return Ok(report);
         }
 
+        // Facts a peer already holds are fetched, not parsed (spec §7 item 3). All at once and
+        // before the priority slice: one round trip, and on tessera the whole view arrives in less
+        // time than the slice takes to parse.
+        if self.fetch_from_peer(&writer, &files, &mut pending, &mut done, &mut report, total, &mut progress) {
+            self.mark_complete(view);
+            progress(Progress { phase: Phase::Done, done, total });
+            report.elapsed = started.elapsed();
+            return Ok(report);
+        }
+
         // Priority slice: requested files, then their direct imports (known only from facts, so
         // the requested files must be stored first).
         let overlay_paths: HashMap<&str, &FileRef> = view
@@ -579,6 +626,66 @@ impl Engine {
         if let Some(c) = &view.label.base_commit {
             self.complete.lock().unwrap().insert((view.label.repo.clone(), c.clone()));
         }
+    }
+
+    /// Store whatever the peer holds of `pending`, in the batches it arrives in. Returns true when
+    /// nothing is left to parse. A peer failure is logged in `peer_stats` and costs only the keys
+    /// not yet delivered, which the caller parses; the build itself never fails for it.
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_from_peer(
+        &self,
+        writer: &Arc<Mutex<Writer>>,
+        files: &[FileRef],
+        pending: &mut HashMap<Key, Vec<usize>>,
+        done: &mut usize,
+        report: &mut BuildReport,
+        total: usize,
+        progress: &mut impl FnMut(Progress),
+    ) -> bool {
+        let Some(peer) = self.peer.lock().unwrap().clone() else { return false };
+        // Unique pending keys in file order, so a fetch is deterministic.
+        let mut seen: HashSet<&Key> = HashSet::new();
+        let mut keys: Vec<FactKey> = Vec::new();
+        for f in files {
+            let key = Key { blob_id: f.blob_id.clone(), language: f.language };
+            if let Some((k, _)) = pending.get_key_value(&key)
+                && seen.insert(k)
+                && let Some(l) = lang::by_id(f.language)
+            {
+                keys.push(FactKey { blob_id: f.blob_id.clone(), language: l.id(), parser_version: l.parser_version() });
+            }
+        }
+        drop(seen);
+        if keys.is_empty() {
+            return pending.is_empty();
+        }
+        let mut stored = 0usize;
+        let outcome = peer.fetch(&keys, &mut |batch: Vec<ParsedBlob>| {
+            writer.lock().unwrap().put_facts(&batch)?;
+            for p in &batch {
+                *done += pending.remove(&Key { blob_id: p.blob_id.clone(), language: p.language }).map(|v| v.len()).unwrap_or(0);
+            }
+            stored += batch.len();
+            progress(Progress { phase: Phase::Priority, done: *done, total });
+            Ok(())
+        });
+        report.fetched += stored;
+        let mut st = self.peer_stats.lock().unwrap();
+        st.fetches += 1;
+        st.fetched += stored as u64;
+        match outcome {
+            Ok(f) => {
+                report.fetched_bytes += f.bytes_in;
+                st.missing += f.missing as u64;
+                st.bytes_in += f.bytes_in;
+                st.bytes_out += f.bytes_out;
+            }
+            Err(e) => {
+                st.failures += 1;
+                st.last_error = Some(e.to_string());
+            }
+        }
+        pending.is_empty()
     }
 
     /// Parse the still-pending blobs among `indexes` in batches: read, parse on the pool, then

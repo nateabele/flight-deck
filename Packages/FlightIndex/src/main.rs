@@ -3,6 +3,7 @@
 //! ```text
 //! fdindex daemon [--foreground] [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N]   run the index daemon (RSS target, default 1536)
 //!                [--watch-hours N] [--no-watch]                              (keep the views of worktrees active in the last N hours; default 6)
+//!                [--peer-socket PATH]                                        (fetch missing blob facts from the daemon on PATH before parsing)
 //! fdindex status [--json] | stop                                            ask it, or stop it
 //! fdindex mcp [--no-start]                                                  stdio MCP server (a client of the daemon)
 //! fdindex service install|uninstall|start|stop|status|restart [--label L]   keep it running at login
@@ -68,6 +69,7 @@ struct Cli {
     build_wait_ms: Option<u64>,
     watch_hours: Option<f64>,
     no_watch: bool,
+    peer_socket: Option<PathBuf>,
     verb: String,
     positional: Vec<String>,
     args: Map<String, Value>,
@@ -85,6 +87,7 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
         build_wait_ms: None,
         watch_hours: None,
         no_watch: false,
+        peer_socket: None,
         verb: String::new(),
         positional: Vec::new(),
         args: Map::new(),
@@ -120,6 +123,7 @@ fn parse(argv: Vec<String>) -> std::result::Result<Cli, String> {
             ("memory_mb", Some(v)) => cli.memory_mb = Some(v.parse().map_err(|_| "--memory-mb takes a number")?),
             ("watch_hours", Some(v)) => cli.watch_hours = Some(v.parse().map_err(|_| "--watch-hours takes a number")?),
             ("no_watch", _) => cli.no_watch = true,
+            ("peer_socket", Some(v)) if cli.verb == "daemon" => cli.peer_socket = Some(PathBuf::from(v)),
             ("build_wait_ms", Some(v)) if cli.verb == "daemon" => cli.build_wait_ms = Some(v.parse().map_err(|_| "--build-wait-ms takes a number")?),
             (k, None) => {
                 cli.args.insert(k.to_string(), Value::Bool(true));
@@ -175,7 +179,7 @@ fn run() -> Result<i32> {
     cli.store = std::path::absolute(&cli.store).map_err(|e| Error::Msg(format!("--store: {e}")))?;
     cli.socket = cli.socket.as_deref().map(std::path::absolute).transpose().map_err(|e| Error::Msg(format!("--socket: {e}")))?;
     const USAGE: &str = "usage: fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <verb> [args] [--flags]\n\
-  verbs: daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]\n\
+  verbs: daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch] [--peer-socket PATH]\n\
          mcp | service <install|uninstall|start|stop|restart|status> | status | start | stop | restart\n\
          map | find | grep | read | outline | deps | stats | impact | refs | calls | build | gc | add_root\n\
          guard | session-start | switchover [--dry-run|--apply|--rollback|--list-old-dbs]\n\
@@ -207,6 +211,7 @@ fn run() -> Result<i32> {
             config.watch.active_for = Duration::from_secs_f64(h * 3600.0);
         }
         config.watch.enabled = !cli.no_watch;
+        config.peer_socket = cli.peer_socket.as_deref().map(std::path::absolute).transpose().map_err(|e| Error::Msg(format!("--peer-socket: {e}")))?;
         let _ = cli.foreground; // the daemon always logs to its file; there is no terminal mode to enter
         daemon::run(daemon::Options { paths, config })?;
         return Ok(0);

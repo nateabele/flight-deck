@@ -141,6 +141,17 @@ fn serve(stream: UnixStream, svc: Arc<Service>, gate: Arc<Gate>, socket: &Path) 
                 continue;
             }
         };
+        if req.tool == crate::peer::socket::UPGRADE_TOOL {
+            // From here the connection carries fact frames, not JSON lines (`peer`). The reader
+            // goes on as it is: it may already hold the first frame's bytes.
+            let resp = crate::peer::socket::upgrade_reply(req.id, req.args.get("format").and_then(Value::as_u64));
+            let accepted = resp.ok;
+            if write_response(&mut out, &resp).is_err() || !accepted {
+                return;
+            }
+            svc.serve_peer(&mut reader, &mut out);
+            return;
+        }
         if req.tool == "shutdown" {
             let _ = write_response(&mut out, &Response::text(req.id, "shutting down".into()));
             log::info("shutdown requested");

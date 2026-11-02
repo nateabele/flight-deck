@@ -56,6 +56,8 @@ pub struct Config {
     /// Cap on the estimated size of cached graphs; `None` is everything the memory target allows.
     pub graph_budget: Option<usize>,
     pub watch: WatchConfig,
+    /// A peer daemon's socket to fetch missing blob facts from before parsing (`--peer-socket`).
+    pub peer_socket: Option<PathBuf>,
 }
 
 impl Config {
@@ -68,7 +70,7 @@ impl Config {
     }
 
     pub fn new(store: impl Into<PathBuf>) -> Config {
-        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, memory_target: DEFAULT_MEMORY_TARGET, graph_budget: None, watch: WatchConfig::default() }
+        Config { store: store.into(), build_wait: DEFAULT_BUILD_WAIT, memory_target: DEFAULT_MEMORY_TARGET, graph_budget: None, watch: WatchConfig::default(), peer_socket: None }
     }
 }
 
@@ -147,6 +149,8 @@ pub struct Service {
     started: Instant,
     requests: AtomicU64,
     errors: AtomicU64,
+    /// What this daemon has served to peers asking for facts (`peer_facts` connections).
+    served: crate::peer::serve::ServeCounters,
 }
 
 impl Drop for Service {
@@ -160,6 +164,9 @@ impl Service {
         let engine = Engine::open(&cfg.store)?;
         engine.set_heap_limit(heap_limit_for(cfg.memory_target));
         engine.set_graph_budget(cfg.graph_budget.unwrap_or(heap_limit_for(cfg.memory_target)));
+        if let Some(sock) = &cfg.peer_socket {
+            engine.set_peer(Some(Arc::new(crate::peer::socket::SocketPeer::new(sock))));
+        }
         let svc = Arc::new_cyclic(|me: &std::sync::Weak<Service>| {
             // The refs callback runs on the watcher's own thread, after the service exists.
             let me = me.clone();
@@ -185,6 +192,7 @@ impl Service {
                 started: Instant::now(),
                 requests: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
+                served: Default::default(),
             }
         });
         svc.watch_known_repos();
@@ -332,6 +340,14 @@ impl Service {
             w.watch_repo(&view.label.repo);
         }
         Ok(view)
+    }
+
+    /// Answer a connection that asked to become a fact stream (`peer_facts`), until the asker
+    /// closes it. Reads only the store's files, never the writer: a fetch never waits on a build.
+    pub fn serve_peer(&self, r: &mut impl std::io::Read, w: &mut impl std::io::Write) {
+        if let Err(e) = crate::peer::serve::serve_stream(&self.cfg.store, r, w, &self.served) {
+            log::info(&format!("peer fact stream ended: {e}"));
+        }
     }
 
     /// Answer one request. Never panics out: a bug in a tool costs that request, not the daemon.
@@ -879,7 +895,8 @@ impl Service {
             }));
             let finished = match result {
                 Ok(Ok(report)) => {
-                    log::info(&format!("built {} in {:?}: {} files, {} parsed", view.label.worktree.display(), report.elapsed, report.total_files, report.parsed));
+                    let fetched = if report.fetched > 0 { format!(", {} fetched from the peer ({} bytes)", report.fetched, report.fetched_bytes) } else { String::new() };
+                    log::info(&format!("built {} in {:?}: {} files, {} parsed{fetched}", view.label.worktree.display(), report.elapsed, report.total_files, report.parsed));
                     Ok(())
                 }
                 Ok(Err(e)) => {
@@ -1146,6 +1163,16 @@ impl Service {
         let mut data = data;
         data["packages"] = json!({"parsed": p.packages, "names": p.names, "missing_docs": p.missing_docs});
         data["crates"] = json!({"parsed": p.crates.crates, "names": p.crates.names, "missing": p.crates.missing});
+        // The fact exchange (`peer`): what this daemon fetched from its peer, and served to others.
+        let ps = self.engine.peer_stats();
+        let ld = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        data["peer"] = json!({"peer": ps.peer, "fetches": ps.fetches, "fetched": ps.fetched, "missing": ps.missing, "bytes_in": ps.bytes_in, "bytes_out": ps.bytes_out, "failures": ps.failures, "last_error": ps.last_error});
+        data["peer_served"] = json!({"connections": ld(&self.served.connections), "served": ld(&self.served.served), "missing": ld(&self.served.missing), "bytes_out": ld(&self.served.bytes_out)});
+        let text = match &ps.peer {
+            Some(peer) => format!("{text}
+peer: {peer}; {} blob(s) fetched ({}), {} not held, {} failure(s)", ps.fetched, mb(ps.bytes_in), ps.missing, ps.failures),
+            None => text,
+        };
         let text = format!(
             "{text}\npackages: {} parsed, {} names{}\ncrates: {} parsed, {} names{}",
             p.packages,

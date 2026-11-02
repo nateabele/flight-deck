@@ -23,6 +23,7 @@ pub mod links;
 pub mod listing;
 pub mod mcp;
 pub mod names;
+pub mod peer;
 pub mod pkgview;
 pub mod pkgview_swift;
 pub mod proto;
