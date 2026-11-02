@@ -94,6 +94,22 @@ fn grep_orders_rows_by_file_importance_then_name() {
 }
 
 #[test]
+fn grep_puts_rows_from_a_file_named_after_the_query_first() {
+    let (_d, svc) = service();
+    let r = init_repo();
+    // `hub.ts` is the most imported file; `SessionStore.ts` is named after the word searched.
+    write(&r.root, "hub.ts", "export function session_hub() {}\n");
+    write(&r.root, "SessionStore.ts", "export function session_load() {}\n");
+    for i in 0..5 {
+        write(&r.root, &format!("u{i}.ts"), &format!("import {{ session_hub }} from './hub';\nexport function u{i}() {{ session_hub(); }}\n"));
+    }
+    commit_all(&r.root, "init");
+    let t = ok(&svc, &r.root, "grep", json!({"query": "session"}));
+    let pos = |n: &str| t.lines().position(|l| l.starts_with(&format!("{n} "))).unwrap_or(usize::MAX);
+    assert!(pos("session_hub") != usize::MAX && pos("session_load") < pos("session_hub"), "{t}");
+}
+
+#[test]
 fn calls_header_counts_what_it_shows_of_the_total() {
     let (_d, svc) = service();
     let r = init_repo();

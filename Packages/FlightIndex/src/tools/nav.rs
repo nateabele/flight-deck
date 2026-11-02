@@ -118,21 +118,16 @@ pub fn grep(c: &Ctx) -> ToolResult {
     let re = if regex { compile_regex(&query)? } else { compile_regex(&format!("^{}", regex::escape(query.trim_end_matches('*'))))? };
     let views = c.views();
     let mut hits = views.find_symbols(&NameMatch::Regex(re), kind);
-    // Ranked before the cut: the files the codebase leans on most (PageRank) first, then name,
-    // path and line. Alphabetical order put the first gold mention a median 24-37% down a cut
-    // list; this order lifted File@10 by 1.3 (tessera) and 4.7 (flight-deck) points in the eval.
-    // Putting exact-name matches first cost 1.4 points on tessera, where an Elm `view` or `Model`
-    // is defined in hundreds of modules, so `find` stays the tool for an exact name. A `near` seed
-    // set reorders on top of this (its sort is stable), nearest first.
+    // Ranked before the cut (`grep_order`): rows from a file named after the query first (exact
+    // stem, then stem prefix), each tier by file PageRank, then name, path and line. A regex has
+    // no word to name a file, so it is PageRank alone. A `near` seed set reorders on top of this
+    // (its sort is stable), nearest first.
+    use super::grep_order::{sort, Policy};
     let file_rank = |h: &SymbolHit| views.graph(h.view).file_rank.get(h.id.file as usize).copied().unwrap_or(0.0);
-    hits.sort_by(|a, b| {
-        file_rank(b)
-            .partial_cmp(&file_rank(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then(a.path.cmp(&b.path))
-            .then(a.start_line.cmp(&b.start_line))
-    });
+    let policy = if regex { Policy::PageRank } else { Policy::StemTiers };
+    #[cfg(feature = "eval")]
+    let policy = c.args.str(&["order_eval"]).and_then(|s| Policy::parse(&s)).unwrap_or(policy);
+    sort(&mut hits, &query, policy, file_rank);
     let history = super::history::section(c, &query, hits.is_empty());
     if hits.is_empty() {
         let mut out = match (!regex).then(|| super::ranked::prefix_fallback(c, &query, kind)).flatten() {

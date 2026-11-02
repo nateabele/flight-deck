@@ -12,6 +12,7 @@ mod calltree;
 mod impact;
 pub(crate) mod impact_index;
 pub mod args;
+mod grep_order;
 mod history;
 pub mod caps;
 pub mod mutate;

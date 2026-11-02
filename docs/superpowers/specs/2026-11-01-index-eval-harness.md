@@ -52,6 +52,8 @@ The output files are `<out>/<label>-summary.json` (repo → strategy → means) 
 1. **Behind a tool argument.** Add the variant to the tool behind a new argument, such as `map`'s `ppr: true`. Then run `--only map_terms --args 'map_terms={"ppr":true}' --label ppr --compare <out>/baseline-summary.json`. `--args` merges the JSON into every tool call that the strategy makes. `--compare` prints each score with its delta from the earlier summary.
 2. **As a function.** Write `examples/eval_<name>.rs` with `required-features = ["eval"]`. It calls `flightindex::eval::main_with(vec![("<name>".into(), Arc::new(|p, t| { … Some(ranking) }))])`. The new strategy runs next to the built-ins, and the same flags apply.
 
+`examples/eval_grep_order.rs` does both: it scores each ordering of `grep`'s prefix rows (`src/tools/grep_order.rs`, chosen with the eval-only argument `order_eval`) as a strategy `grep_<policy>`, all over one graph per task.
+
 Run the variant from your own worktree's build against the same `--store` and `--out`. The cached tasks and parsed blobs are reused, so the only cost of a rerun is the per-commit graph and the strategies.
 
 ## Known limits (first version)

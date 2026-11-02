@@ -60,3 +60,7 @@ tempfile = "3"
 
 [profile.release]
 lto = "thin"
+
+[[example]]
+name = "eval_grep_order"
+required-features = ["eval"]

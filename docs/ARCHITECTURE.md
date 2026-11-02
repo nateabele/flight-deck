@@ -918,6 +918,11 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   co-change at its HEAD (itself computed once per repository and HEAD). On tessera the `impact` tool
   went from 1.5 / 2.3 ms to 0.45 / 1.2 ms (TS / Elm file, p50 in the daemon) with its output byte
   for byte the same over 63 answers.
+- **Result order.** Every list tool ranks its rows before a cap cuts them (the contract's "Rank,
+  then cut"). `grep`'s prefix rows (`src/tools/grep_order.rs`) put a file named after the query
+  first (exact stem, then stem prefix, case-insensitive), then file PageRank; a `near` seed set
+  reorders on top. Measured per term on 200 + 200 commits, File@1/5/10 went from 3.0/5.7/10.7 to
+  7.0/8.6/13.0 (flight-deck) and 3.5/8.3/13.2 to 8.5/9.4/14.1 (tessera).
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.
