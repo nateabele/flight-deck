@@ -917,6 +917,25 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   that `exec`s `fdindex` with the rest of the line. Local like `provider check`: no control socket,
   works with the app closed. `fdindex` is `$FLIGHTDECK_FDINDEX`, else `Contents/MacOS/fdindex`
   beside `flightdeck`, else `PATH`.
+- **Settings → Hosting → Code Index** (`Sources/FlightDeck/CodeIndex/`). The app is one more
+  client: `IndexDaemonClient` sends `status` (no `v`, so a newer daemon still answers) over the
+  default socket (`$FLIGHTDECK_INDEX_SOCKET`, else `$FLIGHTDECK_INDEX_DIR` or
+  `~/Library/Application Support/FlightDeck/index`, plus `/fdindex.sock`, as `Paths::new`) and
+  decodes the fields it shows from `data`: running or not, version, pid and uptime, `rss_bytes`
+  against `memory_target`, the views, the builds in progress, the store size (sum of `stores`)
+  and `last_error`. Every field is optional, so an older daemon costs a line, not the section.
+  `IndexStatusModel` does each blocking socket call (3 s deadline) on a detached task and
+  publishes on the main actor, polled every 2 s only while the tab is on screen, like the hostd
+  admin poll beside it; it never starts the daemon (no socket reads "not running", which is not
+  an error). **Restart Index** runs the bundled `Contents/MacOS/fdindex service restart` (stop
+  over the socket, then `launchctl kickstart` when the unit is installed, or a daemon of its own
+  when not); a read started before the restart cannot overwrite the read-back after it (a
+  generation counter). Without a bundled binary it can only send `shutdown`, and says the next
+  agent query starts the daemon again, because the unit restarts only after a failure. A UITest
+  reset launch and every test get `IndexStatusModel.inert()`: a socket nothing listens on and a
+  restarter that does nothing. Measured on a scratch daemon with two views at load 72-154: a
+  `status` round trip from Python 2.4-3.5 ms median, from the Swift client with decoding 2.8 ms
+  median; the reply is about 2.2 KB.
 
 ## Vendored layout (git-ignored build inputs/outputs)
 

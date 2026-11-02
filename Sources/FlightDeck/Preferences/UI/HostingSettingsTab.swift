@@ -92,6 +92,8 @@ struct HostingSettingsTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            IndexStatusSection(model: controller.index)
         }
         .formStyle(.grouped)
         // `.task` rather than a `Timer.publish`, because it is cancelled when the tab goes

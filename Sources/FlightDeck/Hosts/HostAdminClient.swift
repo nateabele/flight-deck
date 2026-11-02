@@ -91,6 +91,10 @@ final class HostingController: ObservableObject {
         HostStateRoot.default().appendingPathComponent("admin.sock").path
     }
 
+    /// The Code Index section's model: the machine-wide index daemon is the other daemon this
+    /// Mac runs for agents, so its status sits in the same tab (`IndexStatusSection`).
+    let index: IndexStatusModel
+
     private let service: AgentServiceRegistering
     private let adminPath: String
     /// `HostPairingAddresses.current`, injectable so a test lists fixed addresses rather than
@@ -114,7 +118,10 @@ final class HostingController: ObservableObject {
 
     init(service: AgentServiceRegistering = SMAppServiceAgent(plistName: "dev.flightdeck.hostd.plist"),
          adminPath: String, startingGrace: TimeInterval = 5,
-         addresses: @escaping @Sendable (Int) -> [HostPairingAddresses.Entry] = { HostPairingAddresses.current(port: $0) }) {
+         addresses: @escaping @Sendable (Int) -> [HostPairingAddresses.Entry] = { HostPairingAddresses.current(port: $0) },
+         index: IndexStatusModel? = nil) {
+        // Inert unless given one, so a test's controller never reads or restarts the real daemon.
+        self.index = index ?? .inert()
         self.service = service
         self.adminPath = adminPath
         self.addresses = addresses
