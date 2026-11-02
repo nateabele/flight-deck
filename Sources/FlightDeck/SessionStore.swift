@@ -1050,10 +1050,9 @@ final class SessionStore: ObservableObject {
     /// this existed, while a false follow orphans a live conversation and mis-resumes the tab
     /// on the next launch.
     ///
-    /// **Process-lifetime, not persisted.** A relaunch starts it empty (seeded only from the
-    /// restored sessions' own pins), so the scenario above can recur exactly once after a
-    /// restart. Making it durable needs a new persisted field and is deliberately out of this
-    /// plan's scope.
+    /// **Persisted** (`SessionSnapshot.codexThreadsEverPinned`), and reloaded before the
+    /// restore's own pin pass. It used to be process-lifetime only, which let the scenario
+    /// above recur once after every relaunch: on 2026-11-01 it did, to the Visual Companion tab.
     private var codexThreadsEverPinned: Set<UUID> = []
 
     /// Tears down the stack the caller meant, whatever the reason. `stop()` funnels into the
@@ -4813,6 +4812,9 @@ final class SessionStore: ObservableObject {
     ) -> Bool {
         guard repos.isEmpty else { return false }
         guard let snapshot = persistence?.load() else { return false }
+        // Before anything reconciles: the restore's own pin pass must already know every thread
+        // a tab held last run, closed tabs' included.
+        codexThreadsEverPinned.formUnion(snapshot.codexThreadsEverPinned ?? [])
 
         // Above the emptiness guard on purpose. That guard returns early when the last run ended
         // with every session closed, and `SessionStore.init` answers a false return by calling
@@ -5624,6 +5626,8 @@ final class SessionStore: ObservableObject {
         // "this run died and left its children behind".
         snapshot.owner = Self.selfIdentity
         snapshot.selectionHistory = selectionHistory.isEmpty ? nil : selectionHistory
+        snapshot.codexThreadsEverPinned = codexThreadsEverPinned.isEmpty
+            ? nil : codexThreadsEverPinned.sorted { $0.uuidString < $1.uuidString }
         persistence?.save(snapshot)
     }
 

@@ -182,12 +182,14 @@ final class CodexPinReconcileTests: XCTestCase {
     private func makeUnrestoredStore(
         _ sessions: [SessionSnapshot.Entry],
         transport: ThreadListTransport,
-        injector: TextInjecting
+        injector: TextInjecting,
+        everPinned: [UUID]? = nil
     ) -> SessionStore {
         let persistence = FakePersistence()
         persistence.stored = SessionSnapshot(
             sessions: sessions, selectedSessionID: sessions.first?.id, sessionCounter: sessions.count
         )
+        persistence.stored?.codexThreadsEverPinned = everPinned
         let store = SessionStore(provider: NullProvider(), persistence: persistence)
         store.transcriptsRootOverride = projectsRoot
         // Never the user's real `~/.codex/session_index.jsonl`.
@@ -617,6 +619,28 @@ final class CodexPinReconcileTests: XCTestCase {
 
         t.release()
         _ = await creating.value
+    }
+
+    /// A closed tab's thread stays off-limits across a relaunch. 2026-11-01: after a test tab
+    /// in flight-deck's directory was closed, the first pass of the next launch moved the
+    /// Visual Companion tab onto the test tab's newer thread, because the remembered set
+    /// restarted from the open tabs' pins alone.
+    func testAThreadAClosedTabHeldLastRunIsNotTakenAfterARelaunch() async {
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 9_000, path: "/r/live.jsonl", name: "the closed tab's"),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+        let store = makeUnrestoredStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a")], transport: t,
+            injector: NullInjector(), everPinned: [live]
+        )
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+        await store.reconcileCodexPins()
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), stale)
     }
 
     // MARK: - 9b. That refusal, when the pass being refused is the restore's own

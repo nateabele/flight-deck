@@ -173,6 +173,12 @@ struct SessionSnapshot: Codable, Equatable {
     /// decodes an optional with `decodeIfPresent`, so every existing `sessions.json` still
     /// decodes. Written `nil` when both stacks are empty, so the common file stays readable.
     var selectionHistory: SelectionHistory?
+    /// `SessionStore.codexThreadsEverPinned`, so a relaunch still refuses to hand a closed
+    /// codex tab's thread to a neighbour. Without it the set restarts from the open tabs'
+    /// pins, and on 2026-11-01 the first pass after a relaunch moved the Visual Companion tab
+    /// onto a closed test tab's newer thread. Optional, so every existing `sessions.json` still
+    /// decodes; written `nil` when empty.
+    var codexThreadsEverPinned: [UUID]?
     /// Entries for agents an older build cannot decode, set aside on the way to disk so that
     /// build still reads every other tab — see `AgentForwardCompatibility`. Always nil in
     /// memory: `load` merges it back and `save` recomputes it.
