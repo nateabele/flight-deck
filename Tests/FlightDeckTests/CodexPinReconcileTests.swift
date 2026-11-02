@@ -42,14 +42,23 @@ final class CodexPinReconcileTests: XCTestCase {
         /// Fired the moment a withheld request arrives, so the test can wait for the
         /// suspension it needs rather than guessing at it.
         var onWithheld: (() -> Void)?
-        private var held: [Int] = []
+        private var held: [(id: Int, method: String, line: String)] = []
 
         /// Answers everything `withholding` parked, in arrival order, so the suspended caller
         /// can finish and the test does not leak a task.
         func release() {
             let pending = held
             held.removeAll()
-            for id in pending { onLine?(#"{"id":\#(id),"result":{}}"#) }
+            for request in pending { onLine?(#"{"id":\#(request.id),"result":{}}"#) }
+        }
+
+        /// Answers the parked requests for `method` as an unparked one would have been, with
+        /// `thread/list` reading `threads` as it stands now, and leaves the rest parked.
+        func release(_ method: String) {
+            withholding.remove(method)
+            let pending = held.filter { $0.method == method }
+            held.removeAll { $0.method == method }
+            for request in pending { send(request.line) }
         }
 
         func forgetRecording() {
@@ -62,7 +71,7 @@ final class CodexPinReconcileTests: XCTestCase {
                   let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
             methods.append(method)
             guard !withholding.contains(method) else {
-                held.append(id)
+                held.append((id, method, line))
                 onWithheld?()
                 return
             }
@@ -568,6 +577,44 @@ final class CodexPinReconcileTests: XCTestCase {
 
         // Let the creation fail out on its own terms (an empty `thread/start` result), so
         // nothing is left suspended past the end of the test.
+        t.release()
+        _ = await creating.value
+    }
+
+    /// The same window entered from the other side: the pass is already waiting on
+    /// `thread/list` when the creation starts, and the answer it gets back already lists the
+    /// thread the new tab is being born on. 2026-11-01: a test tab created in
+    /// flight-deck's directory this way moved the Visual Companion tab's pin onto the test
+    /// tab's thread, and its title with it, while its terminal kept driving its own thread.
+    func testAPassThatACreationOvertakesDuringItsRoundTripMovesNothing() async {
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        let store = await makeStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a")], transport: t
+        )
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 9_000, path: "/r/live.jsonl", name: "the new tab's"),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+
+        let listing = expectation(description: "the pass is waiting on thread/list")
+        t.onWithheld = { listing.fulfill() }
+        t.withholding = ["thread/list"]
+        let pass = Task { await store.reconcileCodexPins() }
+        await fulfillment(of: [listing], timeout: 5)
+
+        let starting = expectation(description: "the creation reached the app-server")
+        t.onWithheld = { starting.fulfill() }
+        t.withholding.insert("thread/start")
+        let creating = Task { await store.createSession(agent: .codex, in: "/w/a") }
+        await fulfillment(of: [starting], timeout: 5)
+
+        t.release("thread/list")
+        await pass.value
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), stale,
+                       "an answer that arrives while a creation is uncommitted is not acted on")
+
         t.release()
         _ = await creating.value
     }

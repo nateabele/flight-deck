@@ -5441,6 +5441,11 @@ final class SessionStore: ObservableObject {
             // Re-read after the await: the tab may have been closed, moved, or re-pinned by
             // the restore path while this round trip was in flight.
             guard let session = self.session(for: tabID) else { continue }
+            // And the creation guard again: one that began during the round trip may already
+            // have its thread in `threads`, with no tab in `repos` and nothing in
+            // `codexThreadsEverPinned` to say so. On 2026-11-01 that moved the Visual Companion
+            // tab onto a test tab's brand-new thread.
+            guard codexCreationsInFlight[group.instance.account, default: 0] == 0 else { continue }
             let pinned = session.pinnedConversationID
 
             // Every pin held by a *different* live tab, whatever agent it runs. Built here
