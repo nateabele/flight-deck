@@ -94,9 +94,11 @@ pub fn list_dbs(store_root: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
     out
 }
 
-/// Delete a repository's database and its WAL files.
+/// Delete a repository's database and its WAL files, and its trigram index.
 pub fn remove_repo_db(store_root: &Path, repo: &Path) {
-    remove_db_files(&db_path(store_root, repo));
+    let db = db_path(store_root, repo);
+    remove_db_files(&db);
+    crate::trigram::index::forget(&crate::trigram::dir_for_db(&db));
 }
 
 /// Bytes a repository's database occupies on disk: main file plus WAL.

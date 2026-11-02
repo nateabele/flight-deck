@@ -34,6 +34,7 @@ pub mod sweep;
 pub mod switchover;
 pub mod textedit;
 pub mod tools;
+pub mod trigram;
 pub mod watch;
 pub mod words;
 pub mod refresh;

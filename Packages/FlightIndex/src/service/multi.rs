@@ -25,6 +25,7 @@ use super::{check_indexable, Readiness, Service};
 use crate::git::{self, FileRef, Overlay, View};
 use crate::lang;
 use crate::tools::{self, args::Args, multigrep, ToolError};
+use crate::trigram;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +35,9 @@ const DEFAULT_LIMIT: usize = 200;
 
 /// A refreshed worktree's view and whether its build is still running, or why it could not be read.
 type Refreshed = std::result::Result<(View, bool), String>;
+
+/// A worktree to search: root, base tree, overlay, and the base commit (keys the tree's ordinals).
+type Found = (PathBuf, Arc<Vec<FileRef>>, Vec<Overlay>, Option<String>);
 
 /// A worktree answered from the store: its HEAD, and when its row was last written.
 struct Recorded {
@@ -190,8 +194,9 @@ impl Service {
         let refreshed_count = refreshed.len();
         let refresh_took = planned.elapsed();
 
-        let mut worktrees: Vec<(PathBuf, Arc<Vec<FileRef>>, Vec<Overlay>)> = vec![(root.clone(), caller.base.clone(), caller.overlay.clone())];
-        worktrees.extend(current.into_iter().map(|(r, base, overlay)| (r.root, base, overlay)));
+        let mut worktrees: Vec<Found> =
+            vec![(root.clone(), caller.base.clone(), caller.overlay.clone(), caller.label.base_commit.clone())];
+        worktrees.extend(current.into_iter().map(|(r, base, overlay)| (r.root, base, overlay, Some(r.head))));
         let mut building: Vec<PathBuf> = caller_building.map(|_| root.clone()).into_iter().collect();
         for (t, got) in refreshed {
             match got {
@@ -199,7 +204,8 @@ impl Service {
                     if b {
                         building.push(t.clone());
                     }
-                    worktrees.push((t, v.base.clone(), v.overlay));
+                    let commit = v.label.base_commit.clone();
+                    worktrees.push((t, v.base.clone(), v.overlay, commit));
                 }
                 Err(e) => skipped.push((t, e)),
             }
@@ -207,22 +213,44 @@ impl Service {
         worktrees.sort_by(|a, b| a.0.cmp(&b.0));
         let roots: Vec<PathBuf> = worktrees.iter().map(|w| w.0.clone()).collect();
         let labels = multigrep::labels(&roots);
-        let worktrees: Vec<multigrep::Worktree> =
-            worktrees.into_iter().zip(labels).map(|((root, base, overlay), label)| multigrep::Worktree { root, label, base, overlay }).collect();
+        // The trigram index: the plan, its candidates, and each tree's ordinals. A pattern the
+        // planner cannot read plans to "every blob"; the matcher then reports the error.
+        let tri_started = std::time::Instant::now();
+        let tri = trigram::for_dir(&trigram::dir_for_db(reader.path()));
+        let snap = tri.snapshot();
+        let plan = trigram::plan(&pattern).unwrap_or(trigram::Query::All);
+        let candidates = if snap.blobs() > 0 { snap.candidates(&plan) } else { None };
+        let worktrees: Vec<multigrep::Worktree> = worktrees
+            .into_iter()
+            .zip(labels)
+            .map(|((root, base, overlay, commit), label)| {
+                let ords = (snap.blobs() > 0).then(|| tri.tree(&snap, commit.as_deref(), &base));
+                multigrep::Worktree { root, label, base, overlay, ords }
+            })
+            .collect();
+        let tri_took = tri_started.elapsed();
 
         let mut symbols = |id: &str, language: &'static str| {
             let v = lang::by_id(language).map(|l| l.parser_version()).unwrap_or(0);
             reader.get_symbols(id, language, v)
         };
-        let out = multigrep::search(&worktrees, &pattern, kind, &root, &mut symbols)?;
+        let out = multigrep::search(&worktrees, &pattern, kind, &root, candidates.as_ref(), &mut symbols)?;
+        // Committed blobs the index lacks are indexed in the background, from the repository's
+        // object store; this search has already read them.
+        tri.enqueue(&repo, out.not_indexed.clone());
         // One line per search, so its cost can be read off a running daemon: where the time went
         // is what decides whether freshness or reading dominates on a given machine.
         super::log::info(&format!(
-            "grep across {} worktrees: caller view {caller_took:?}, plan {:?} (store {:?}, stat {:?} for {stat_checked}), refresh {refresh_took:?} ({refreshing}: views {viewed_took:?}, {to_build} built), scan {:?} ({} blobs, {} from git), facts {:?}, total {:?}",
+            "grep across {} worktrees: caller view {caller_took:?}, plan {:?} (store {:?}, stat {:?} for {stat_checked}), refresh {refresh_took:?} ({refreshing}: views {viewed_took:?}, {to_build} built), trigrams {tri_took:?} ({} of {} blobs indexed, {} candidates, {} ruled out, {} queued), scan {:?} ({} blobs, {} from git), facts {:?}, total {:?}",
             worktrees.len(),
             planned.duration_since(started) - caller_took,
             loaded.duration_since(started) - caller_took,
             planned.duration_since(loaded),
+            snap.blobs(),
+            snap.blobs() as usize + out.not_indexed.len(),
+            candidates.as_ref().map(|c| c.len().to_string()).unwrap_or_else(|| "all".into()),
+            out.ruled_out,
+            out.not_indexed.len(),
             out.scan_took,
             out.blobs,
             out.from_git,
@@ -238,6 +266,9 @@ impl Service {
             out.blobs,
             refreshed_count
         );
+        if out.ruled_out > 0 {
+            summary.push_str(&format!(", {} ruled out by the trigram index", out.ruled_out));
+        }
         if out.from_git > 0 {
             summary.push_str(&format!(", {} read from git", out.from_git));
         }
