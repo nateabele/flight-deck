@@ -15,6 +15,7 @@
 //! hash to the blob the index parsed is refused, never spliced into shifted lines.
 
 mod doc;
+pub mod external;
 mod relocate;
 mod rename;
 

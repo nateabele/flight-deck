@@ -912,6 +912,15 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   what stayed live. On tessera with about 90 worktrees queried in turn: 1.8 GB RSS under the old
   1.5 GB budget, 1.43 GB under the new default; with 30 busy clients 2.6 GB became 1.66 GB (the
   contract spec has the table, and the latency price of a smaller cache).
+- **Mutators across linked views.** A rename, move, safe_delete or rename_file whose symbol or
+  file another view uses (`formula-editor` importing `tessera/designer/src` through `elm.json`)
+  is refused unless the agent names those views in `views`; then each named view's share is
+  planned from the sites `links::Views` finds there (`src/tools/mutate/external.rs`), the write
+  gates of every view involved are taken sorted by path before the first look (so two such
+  mutators cannot deadlock), every file of every view is written by one
+  `edit::apply_change_sets` (all or none, with rollback across views), and every view is
+  re-indexed before the answer (`src/service/xview.rs`). A view the agent did not name is never
+  written.
 - **Shared blocks.** The graphs of one repository share each file's resolution (imports,
   reference targets, file edges) as an `Arc` block, hash-consed by content in a per-repository
   table (`src/graph/blocks.rs`), with file indices from a per-repository numbering so that blocks

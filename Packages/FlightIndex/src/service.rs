@@ -38,6 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 mod multi;
+mod xview;
 
 /// A request never waits on a build longer than this, whatever it asks for: an agent blocked on
 /// the index is worse off than one told "building" (spec §6 puts the ceiling at the 30 s lock
@@ -533,8 +534,10 @@ impl Service {
         let wait = self.wait_bound(&args);
         let located = git::locate(&anchor)?;
         check_indexable(&located, &anchor)?;
-        let gate = self.gate(&located.root);
-        let _writing = gate.write().unwrap_or_else(|e| e.into_inner());
+        // The write gates of every worktree this call may write, taken in path order (see `xview`).
+        let writable = self.writable_roots(tool, &args, &located.root)?;
+        let gates: Vec<Arc<RwLock<()>>> = writable.iter().map(|r| self.gate(r)).collect();
+        let _writing: Vec<_> = gates.iter().map(|g| g.write().unwrap_or_else(|e| e.into_inner())).collect();
 
         let mut attempt = 0;
         let (view, mut plan) = loop {
@@ -557,7 +560,7 @@ impl Service {
                 Err(e) => return Err(self.explain_linked_definition(tool, &args, &view, &graph, &req.cwd, wait, e)),
             }
         };
-        self.refuse_cross_view(tool, &args, &view, &mut plan, &req.cwd)?;
+        let sides = self.cross_view(tool, &args, &view, &mut plan, &req.cwd, &writable)?;
 
         // An agent that named a path in another checkout asked for that checkout, but the answer
         // must still say so: an edit landing somewhere unexpected, unlabelled, is the failure to avoid.
@@ -575,15 +578,20 @@ impl Service {
                 out.push_str(&format!("\nwarning: {w}"));
             }
         };
-        if plan.changes.is_empty() {
+        if plan.changes.is_empty() && sides.is_empty() {
             out.push_str(&format!("\nno change: {} would not alter any file", plan.summary));
             return Ok(out);
         }
+        let files = plan.changes.len() + sides.iter().map(|s| s.plan.changes.len()).sum::<usize>();
+        let in_views = if sides.is_empty() { String::new() } else { format!(" in {} view(s)", 1 + sides.len()) };
         if !apply {
-            out.push_str(&format!("\npreview: {} ({} file(s)); nothing written, pass apply=true to write", plan.summary, plan.changes.len()));
+            out.push_str(&format!("\npreview: {} ({files} file(s){in_views}); nothing written, pass apply=true to write", plan.summary));
             lists(&mut out, &plan);
+            for s in &sides {
+                lists(&mut out, &s.plan);
+            }
             let mut diff = String::new();
-            for c in &plan.changes {
+            for c in plan.changes.iter().chain(sides.iter().flat_map(|s| s.plan.changes.iter())) {
                 let text = |b: &Option<Vec<u8>>| b.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
                 diff.push_str(&edit::unified_diff(&c.path, text(&c.before).as_deref(), text(&c.after).as_deref()));
             }
@@ -593,35 +601,37 @@ impl Service {
         }
 
         let parsed_before = self.engine.parse_count();
-        edit::apply_changes(&view.label.worktree, &plan.changes).map_err(ToolError::failed)?;
-        log::info(&format!("{tool}: wrote {} file(s) in {}", plan.changes.len(), view.label.worktree.display()));
+        let mut sets: Vec<(&Path, &[edit::Change])> = vec![(view.label.worktree.as_path(), &plan.changes[..])];
+        sets.extend(sides.iter().map(|s| (s.root.as_path(), &s.plan.changes[..])));
+        edit::apply_change_sets(&sets).map_err(ToolError::failed)?;
+        log::info(&format!("{tool}: wrote {files} file(s) in {}{}", view.label.worktree.display(), sides.iter().map(|s| format!(", {}", s.root.display())).collect::<String>()));
+        // Each other view is re-indexed too, so the next query from that checkout sees the change.
+        let mut stale: Vec<String> = Vec::new();
+        for s in &sides {
+            let v = self.view(&s.root)?;
+            let written: Vec<PathBuf> = s.plan.changes.iter().filter(|c| c.after.is_some()).map(|c| c.path.clone()).collect();
+            self.ensure_built(&v, &written, false, Some(MAX_BUILD_WAIT))?;
+            stale.extend(self.not_reflected(&v, &s.plan)?);
+        }
 
         // Re-index before answering: the next query from this cwd must see the change, so look at
         // the worktree again now (the writes are on disk) and make its graph.
         let view = self.view(&anchor)?;
         let written: Vec<PathBuf> = plan.changes.iter().filter(|c| c.after.is_some()).map(|c| c.path.clone()).collect();
         self.ensure_built(&view, &written, false, Some(MAX_BUILD_WAIT))?;
-        let graph = self.engine.graph(&view)?;
-        let stale: Vec<String> = plan
-            .changes
-            .iter()
-            .filter(|c| match &c.after {
-                Some(b) => graph.file_idx(&c.path).is_none_or(|i| graph.file(i).blob_id != git::blob_id(b)) && tools::mutate::indexable(&c.path),
-                None => graph.file_idx(&c.path).is_some(),
-            })
-            .map(|c| c.path.display().to_string())
-            .collect();
+        stale.splice(0..0, self.not_reflected(&view, &plan)?);
 
         let mut out = tools::header(&view.label, view.overlay.len(), None);
         out.push_str(elsewhere.as_deref().unwrap_or(""));
         out.push_str(&format!("\napplied: {}", plan.summary));
-        out.push_str(&format!("\nwrote {} file(s):", plan.changes.len()));
-        for c in &plan.changes {
+        out.push_str(&format!("\nwrote {files} file(s){in_views}:"));
+        for c in plan.changes.iter().chain(sides.iter().flat_map(|s| s.plan.changes.iter())) {
             out.push_str(&format!("\n  {} {}", if c.after.is_none() { "deleted" } else if c.before.is_none() { "created" } else { "modified" }, c.path.display()));
         }
         if stale.is_empty() {
+            let also = if sides.is_empty() { String::new() } else { format!(" in each of the {} views", 1 + sides.len()) };
             out.push_str(&format!(
-                "\nview updated: {} blob(s) re-parsed and the graph recomputed; the next query from {} sees the change",
+                "\nview updated: {} blob(s) re-parsed and the graph recomputed{also}; the next query from {} sees the change",
                 self.engine.parse_count().saturating_sub(parsed_before),
                 req.cwd
             ));
@@ -629,7 +639,25 @@ impl Service {
             out.push_str(&format!("\nwarning: the index does not yet reflect {} (a concurrent edit changed it again); the next query re-reads it", stale.join(", ")));
         }
         lists(&mut out, &plan);
+        for s in &sides {
+            lists(&mut out, &s.plan);
+        }
         Ok(out)
+    }
+
+    /// The files of `plan` that `view`'s graph does not yet show as written (a concurrent edit
+    /// changed one again between the write and the re-index).
+    fn not_reflected(&self, view: &View, plan: &tools::mutate::Plan) -> std::result::Result<Vec<String>, ToolError> {
+        let graph = self.engine.graph(view)?;
+        Ok(plan
+            .changes
+            .iter()
+            .filter(|c| match &c.after {
+                Some(b) => graph.file_idx(&c.path).is_none_or(|i| graph.file(i).blob_id != git::blob_id(b)) && tools::mutate::indexable(&c.path),
+                None => graph.file_idx(&c.path).is_some(),
+            })
+            .map(|c| c.path.display().to_string())
+            .collect())
     }
 
     // ---- linked views -------------------------------------------------------------------------
@@ -719,75 +747,14 @@ impl Service {
             return e;
         }
         let mut m = format!(
-            "refusing: '{name}' is not defined in your view {}, but a linked view defines it; {tool} never writes into a linked view unless you name a path inside it, so nothing was changed. To change it there, pass file_path=<one of these>:\n",
+            "refusing: '{name}' is not defined in your view {}, but a linked view defines it; {tool} never writes into a linked view unless you name a path inside it, so nothing was changed. To change it there, pass file_path=<one of these> (and views=[\"{}\"] to rewrite your view's uses too):\n",
+            view.label.worktree.display(),
             view.label.worktree.display()
         );
         for h in hits {
             m.push_str(&format!("  {} {} [L{}-L{}] in {}\n", h.kind.as_str(), h.path.display(), h.start_line, h.end_line, views.tag(h.view).unwrap_or_default()));
         }
         ToolError::failed(m.trim_end().to_string())
-    }
-
-    /// A rename, move, delete or file rename in `view` that views depending on it would not
-    /// follow: refused, with the sites in both views. A mutator writes into one view, so applying
-    /// it would leave every importer elsewhere pointing at a name or path that is gone. The
-    /// alternative (also rewriting the other checkout) would edit a view the agent did not name,
-    /// which the spec rules out (§5.5); the safe first cut is to say what to change in each.
-    fn refuse_cross_view(self: &Arc<Self>, tool: &str, args: &Args, view: &View, plan: &mut tools::mutate::Plan, cwd: &str) -> std::result::Result<(), ToolError> {
-        use tools::mutate::{self, MutCtx};
-        if !matches!(tool, "rename" | "move" | "safe_delete" | "rename_file") {
-            return Ok(());
-        }
-        let planned = self.plan_members(view, cwd, true);
-        if planned.is_empty() {
-            return Ok(());
-        }
-        let member_gates: Vec<Arc<RwLock<()>>> = planned.iter().map(|p| self.gate(&p.root)).collect();
-        let _reading: Vec<_> = member_gates.iter().filter_map(|g| read_unless_blocked(g)).collect();
-        let roots: Vec<PathBuf> = planned.iter().map(|p| p.root.clone()).collect();
-        let begun = self.begin_members(planned, cwd);
-        let members = self.finish_members(begun, MAX_BUILD_WAIT);
-        let unchecked: Vec<String> = roots.iter().filter(|r| !members.iter().any(|m| m.graph.label.worktree == **r)).map(|r| r.display().to_string()).collect();
-        let graph = self.engine.graph(view)?;
-        let views = crate::links::Views::new(&graph, &members);
-        let ctx = MutCtx { graph: &graph, args };
-        let (file, name, mut sites) = match mutate::symbol_keys(tool) {
-            Some(keys) => {
-                let h = mutate::select(&ctx, keys)?;
-                let uses = views.references(&h).into_iter().filter(|(v, _)| *v != 0).map(|(v, r)| (v, r.path, r.line)).collect::<Vec<_>>();
-                (h.id.file, Some(h.name), uses)
-            }
-            None => match args.path(&["from", "old_path", "file_path"]).and_then(|p| graph.file_idx(&p)) {
-                Some(f) => (f, None, Vec::new()),
-                None => return Ok(()),
-            },
-        };
-        sites.extend(views.import_sites(0, file, name.as_deref()));
-        sites.sort();
-        sites.dedup();
-        if sites.is_empty() {
-            if !unchecked.is_empty() {
-                plan.warnings.push(format!("views that link into this one were not indexed, so their uses were not checked: {}", unchecked.join(", ")));
-            }
-            return Ok(());
-        }
-        let mut m = format!("refusing: {} would break views that use it; nothing was changed.\n", plan.summary);
-        m.push_str(&format!("in this view ({}), it would change {} file(s):\n", crate::tools::view_tag(&graph.label), plan.changes.len()));
-        for c in &plan.changes {
-            m.push_str(&format!("  {}\n", c.path.display()));
-        }
-        let mut by_view: std::collections::BTreeMap<usize, Vec<(&PathBuf, u32)>> = Default::default();
-        for (v, p, l) in &sites {
-            by_view.entry(*v).or_default().push((p, *l));
-        }
-        for (v, rows) in by_view {
-            m.push_str(&format!("in {} it is used at {} site(s) that would no longer resolve:\n", views.tag(v).unwrap_or_default(), rows.len()));
-            for (p, l) in rows {
-                m.push_str(&format!("  {}:{l}\n", p.display()));
-            }
-        }
-        m.push_str(&format!("A {tool} writes into one view only and never into a linked one. Make the change in each view, starting with the dependent one(s), or drop it."));
-        Err(ToolError::failed(m))
     }
 
     /// The default `near` seeds of a view: its changed files, then what was read last.

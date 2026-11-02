@@ -18,7 +18,7 @@ use crate::tools::ToolError;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-fn is_ts(lang: &str) -> bool {
+pub(super) fn is_ts(lang: &str) -> bool {
     matches!(lang, "typescript" | "tsx" | "javascript")
 }
 
@@ -50,7 +50,7 @@ pub fn remove_from_module_exposing(d: &mut Doc, name: &str) -> Option<String> {
 }
 
 /// The text the module header uses for `name`, if it lists it (`Msg(..)`, `view`).
-fn module_exposing_item(d: &Doc, name: &str) -> Option<String> {
+pub(super) fn module_exposing_item(d: &Doc, name: &str) -> Option<String> {
     let (items, _) = header_list(d)?;
     items.iter().find(|i| i.base == name).map(|i| d.src.text[i.start..i.end].to_string())
 }
@@ -92,7 +92,7 @@ fn elm_manifest(file: &Path) -> Option<PathBuf> {
 
 /// The module a file at `to` declares, from the source directory that holds it. With no
 /// `elm.json`, the directory is the old file's own root (its path minus its module path).
-fn elm_module_at(old_file: &Path, old_module: &str, to: &Path) -> Result<String, ToolError> {
+pub(super) fn elm_module_at(old_file: &Path, old_module: &str, to: &Path) -> Result<String, ToolError> {
     let roots = elm_roots(old_file).unwrap_or_else(|| {
         let suffix = format!("{}.elm", old_module.replace('.', "/"));
         let s = old_file.to_string_lossy();
@@ -124,7 +124,7 @@ const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
 
 /// How a file imported as `old_spec` is spelled once it lives at `to`, seen from `importer_dir`:
 /// the extension is kept only if the old specifier had one, and `.js` stays `.js` for a `.ts` file.
-fn new_specifier(old_spec: &str, importer_dir: &Path, to: &Path) -> String {
+pub(super) fn new_specifier(old_spec: &str, importer_dir: &Path, to: &Path) -> String {
     let mut rel = relative_path(importer_dir, to);
     let old_ext = old_spec.rsplit_once('.').map(|(_, e)| e).filter(|e| TS_EXTS.contains(e) && old_spec.contains('/'));
     let to_ext = to.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -162,7 +162,7 @@ fn lexical(p: &Path) -> PathBuf {
 }
 
 /// Replace the string literal `old` inside the statement byte range `[s, e)` with `new`.
-fn replace_literal(d: &mut Doc, s: usize, e: usize, old: &str, new: &str) -> bool {
+pub(super) fn replace_literal(d: &mut Doc, s: usize, e: usize, old: &str, new: &str) -> bool {
     let raw = d.src.text[s..e].to_string();
     for q in ['\'', '"', '`'] {
         let needle = format!("{q}{old}{q}");
@@ -277,19 +277,7 @@ fn rename_file_elm(w: &mut Work, fi: u32, from: &Path, to: &Path, sites: &mut us
             continue;
         }
         let d = w.doc(gi)?;
-        // Unaliased, the module's full name is how the file refers to it everywhere (`Old.Name.f`),
-        // so every code occurrence changes; aliased, only the import line names it.
-        let occurrences = d.dotted_tokens(&old_module);
-        for t in occurrences {
-            let on_import_line = rewrites.iter().any(|&ii| {
-                let (a, b) = d.extent(imports[ii].line as usize);
-                let (s, e) = d.lines_bytes(a, b);
-                t >= s && t < e && d.masked[s..t].trim_start().starts_with("import")
-            });
-            if plain || on_import_line {
-                *sites += d.replace_token(t, old_module.len(), &new_module) as usize;
-            }
-        }
+        *sites += rewrite_elm_importer(d, &imports, &rewrites, plain, &old_module, &new_module);
     }
     if let Some(manifest) = elm_manifest(from).filter(|m| edit::check_within(&g.root, m).is_ok()) {
         let d = w.doc_at(&manifest, "json")?;
@@ -470,8 +458,8 @@ fn rename_file_rust(w: &mut Work, fi: u32, from: &Path, to: &Path, sites: &mut u
 // ---- move -------------------------------------------------------------------------------------
 
 /// An import statement to add to a file.
-struct NewImport {
-    text: String,
+pub(super) struct NewImport {
+    pub(super) text: String,
 }
 
 fn lang_of_path(to: &Path) -> Option<&'static str> {
@@ -846,21 +834,21 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
     w.finish(format!("move {} ({}) to {}", t.name, t.kind.as_str(), to.display()))
 }
 
-struct RelocCx<'a> {
-    g: &'a ViewGraph,
-    t_name: &'a str,
-    lang: &'a str,
-    sfile_rel: &'a str,
-    from_path: &'a Path,
-    to: &'a Path,
-    elm: Option<&'a (String, String)>,
-    elm_item: Option<&'a str>,
-    rust_to: Option<&'a str>,
+pub(super) struct RelocCx<'a> {
+    pub(super) g: &'a ViewGraph,
+    pub(super) t_name: &'a str,
+    pub(super) lang: &'a str,
+    pub(super) sfile_rel: &'a str,
+    pub(super) from_path: &'a Path,
+    pub(super) to: &'a Path,
+    pub(super) elm: Option<&'a (String, String)>,
+    pub(super) elm_item: Option<&'a str>,
+    pub(super) rust_to: Option<&'a str>,
 }
 
 /// Where a new import statement goes: for Elm in alphabetical place among the imports (elm-format
 /// keeps them sorted), elsewhere after the last one.
-fn import_line(d: &Doc, imports: &[Import], stmt: &str) -> usize {
+pub(super) fn import_line(d: &Doc, imports: &[Import], stmt: &str) -> usize {
     if d.elm()
         && let Some(name) = stmt.strip_prefix("import ").and_then(|r| r.split_whitespace().next())
         && let Some(next) = imports.iter().filter(|i| i.specifier.as_str() > name).min_by(|a, b| a.specifier.cmp(&b.specifier))
@@ -1009,90 +997,13 @@ fn register_rust_module(w: &mut Work, to: &Path) -> Result<(), ToolError> {
 
 /// The edits one file needs because the symbol left the source. Returns the import statements to
 /// add (the caller dedupes and places them).
-fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps: &[usize], is_dest: bool, sites: &mut usize) -> Result<Vec<NewImport>, ToolError> {
+pub(super) fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps: &[usize], is_dest: bool, sites: &mut usize) -> Result<Vec<NewImport>, ToolError> {
     let g = cx.g;
     let node = g.file(gi);
     let mut add: Vec<NewImport> = Vec::new();
     let name = cx.t_name;
-    let mut removed_item: Option<String> = None;
-    let mut had_named = false;
-
     // 1. Take the name out of imports of the source file.
-    for &ii in imps {
-        let imp = &node.facts.imports[ii];
-        if !imp.names.iter().any(|n| n.name == name) {
-            continue;
-        }
-        had_named = true;
-        let (a, b) = d.extent(imp.line as usize);
-        let (s, e) = d.lines_bytes(a, b);
-        match cx.lang {
-            "elm" => {
-                if let Some(ex) = d.masked[s..e].find("exposing").map(|i| s + i)
-                    && let Some(open) = d.masked[ex..e].find('(').map(|i| ex + i)
-                    && let Some((items, close)) = list_items(&d.src.text, &d.masked, open)
-                    && let Some(idx) = items.iter().position(|i| i.base == name)
-                {
-                    removed_item = Some(d.src.text[items[idx].start..items[idx].end].to_string());
-                    if items.len() == 1 {
-                        let from = d.masked[..ex].trim_end().len();
-                        d.edits.replace(from, close + 1, "");
-                    } else {
-                        remove_item(&mut d.edits, &items, idx);
-                    }
-                    *sites += 1;
-                }
-            }
-            l if is_ts(l) => {
-                let reexport = imp.kind == ImportKind::Reexport;
-                let item = imp.names.iter().find(|n| n.name == name).map(|n| match &n.alias {
-                    Some(al) => format!("{name} as {al}"),
-                    None => name.to_string(),
-                });
-                removed_item = item.clone();
-                let others = imp.names.iter().filter(|n| n.name != name).count() + imp.alias.is_some() as usize;
-                if others == 0 {
-                    d.edits.replace(s, e, "");
-                } else if let Some(open) = d.masked[s..e].find('{').map(|i| s + i)
-                    && let Some((items, _)) = list_items(&d.src.text, &d.masked, open)
-                    && items.len() > 1
-                    && let Some(idx) = items.iter().position(|i| i.base == name)
-                {
-                    remove_item(&mut d.edits, &items, idx);
-                } else {
-                    // The only named entry sits beside a default or namespace binding: rebuild the statement.
-                    let default = imp.names.iter().find(|n| n.name == "default").and_then(|n| n.alias.clone());
-                    let mut parts: Vec<String> = default.into_iter().collect();
-                    parts.extend(imp.alias.iter().map(|a| format!("* as {a}")));
-                    let raw = d.src.text[s..e].trim_end().to_string();
-                    let semi = if raw.ends_with(';') { ";" } else { "" };
-                    let kw = if reexport { "export" } else { "import" };
-                    d.edits.replace(s, e, format!("{kw} {} from '{}'{semi}{}", parts.join(", "), imp.specifier, d.nl()));
-                }
-                *sites += 1;
-            }
-            "rust" => {
-                let braces = d.masked[s..e].find('{').map(|i| s + i);
-                match braces.and_then(|o| list_items(&d.src.text, &d.masked, o)) {
-                    Some((items, _)) if items.len() > 1 => {
-                        if let Some(idx) = items.iter().position(|i| i.base == name) {
-                            removed_item = Some(d.src.text[items[idx].start..items[idx].end].to_string());
-                            remove_item(&mut d.edits, &items, idx);
-                        }
-                    }
-                    _ => {
-                        removed_item = imp.names.iter().find(|n| n.name == name).map(|n| match &n.alias {
-                            Some(al) => format!("{name} as {al}"),
-                            None => name.to_string(),
-                        });
-                        d.edits.replace(s, e, "");
-                    }
-                }
-                *sites += 1;
-            }
-            _ => {}
-        }
-    }
+    let (removed_item, had_named) = drop_from_imports(d, g, gi, imps, name, cx.lang, sites);
 
     if is_dest {
         // The destination refers to it locally now: qualified uses lose their qualifier.
@@ -1218,4 +1129,107 @@ fn rewrite_user(d: &mut Doc, cx: &RelocCx, gi: u32, uses: &[(usize, bool)], imps
         _ => {}
     }
     Ok(add)
+}
+
+/// Take `name` out of the import statements `imps` of file `gi` (an Elm `exposing` entry, a
+/// TypeScript `{ … }` entry or the whole statement, a Rust `use` entry). Returns the text of the
+/// removed entry, and whether any statement named it.
+pub(super) fn drop_from_imports(d: &mut Doc, g: &ViewGraph, gi: u32, imps: &[usize], name: &str, lang: &str, sites: &mut usize) -> (Option<String>, bool) {
+    let node = g.file(gi);
+    let mut removed_item: Option<String> = None;
+    let mut had_named = false;
+    for &ii in imps {
+        let imp = &node.facts.imports[ii];
+        if !imp.names.iter().any(|n| n.name == name) {
+            continue;
+        }
+        had_named = true;
+        let (a, b) = d.extent(imp.line as usize);
+        let (s, e) = d.lines_bytes(a, b);
+        match lang {
+            "elm" => {
+                if let Some(ex) = d.masked[s..e].find("exposing").map(|i| s + i)
+                    && let Some(open) = d.masked[ex..e].find('(').map(|i| ex + i)
+                    && let Some((items, close)) = list_items(&d.src.text, &d.masked, open)
+                    && let Some(idx) = items.iter().position(|i| i.base == name)
+                {
+                    removed_item = Some(d.src.text[items[idx].start..items[idx].end].to_string());
+                    if items.len() == 1 {
+                        let from = d.masked[..ex].trim_end().len();
+                        d.edits.replace(from, close + 1, "");
+                    } else {
+                        remove_item(&mut d.edits, &items, idx);
+                    }
+                    *sites += 1;
+                }
+            }
+            l if is_ts(l) => {
+                let reexport = imp.kind == ImportKind::Reexport;
+                let item = imp.names.iter().find(|n| n.name == name).map(|n| match &n.alias {
+                    Some(al) => format!("{name} as {al}"),
+                    None => name.to_string(),
+                });
+                removed_item = item.clone();
+                let others = imp.names.iter().filter(|n| n.name != name).count() + imp.alias.is_some() as usize;
+                if others == 0 {
+                    d.edits.replace(s, e, "");
+                } else if let Some(open) = d.masked[s..e].find('{').map(|i| s + i)
+                    && let Some((items, _)) = list_items(&d.src.text, &d.masked, open)
+                    && items.len() > 1
+                    && let Some(idx) = items.iter().position(|i| i.base == name)
+                {
+                    remove_item(&mut d.edits, &items, idx);
+                } else {
+                    // The only named entry sits beside a default or namespace binding: rebuild the statement.
+                    let default = imp.names.iter().find(|n| n.name == "default").and_then(|n| n.alias.clone());
+                    let mut parts: Vec<String> = default.into_iter().collect();
+                    parts.extend(imp.alias.iter().map(|a| format!("* as {a}")));
+                    let raw = d.src.text[s..e].trim_end().to_string();
+                    let semi = if raw.ends_with(';') { ";" } else { "" };
+                    let kw = if reexport { "export" } else { "import" };
+                    d.edits.replace(s, e, format!("{kw} {} from '{}'{semi}{}", parts.join(", "), imp.specifier, d.nl()));
+                }
+                *sites += 1;
+            }
+            "rust" => {
+                let braces = d.masked[s..e].find('{').map(|i| s + i);
+                match braces.and_then(|o| list_items(&d.src.text, &d.masked, o)) {
+                    Some((items, _)) if items.len() > 1 => {
+                        if let Some(idx) = items.iter().position(|i| i.base == name) {
+                            removed_item = Some(d.src.text[items[idx].start..items[idx].end].to_string());
+                            remove_item(&mut d.edits, &items, idx);
+                        }
+                    }
+                    _ => {
+                        removed_item = imp.names.iter().find(|n| n.name == name).map(|n| match &n.alias {
+                            Some(al) => format!("{name} as {al}"),
+                            None => name.to_string(),
+                        });
+                        d.edits.replace(s, e, "");
+                    }
+                }
+                *sites += 1;
+            }
+            _ => {}
+        }
+    }
+    (removed_item, had_named)
+}
+
+/// An Elm file that imports a renamed module: its `import` lines, and, if one of them is
+/// unaliased (`plain`), every qualified use, since the module's full name is how the file refers
+/// to it everywhere (`Old.Name.f`); aliased, only the import line names it.
+pub(super) fn rewrite_elm_importer(d: &mut Doc, imports: &[Import], rewrites: &[usize], plain: bool, old_module: &str, new_module: &str) -> usize {
+    let mut n = 0;
+    for t in d.dotted_tokens(old_module) {
+        let on_import_line = rewrites.iter().any(|&ii| {
+            let (a, b) = d.extent(imports[ii].line as usize);
+            let (s, e) = d.lines_bytes(a, b);
+            t >= s && t < e && d.masked[s..t].trim_start().starts_with("import")
+        });
+        if plain || on_import_line {
+            n += d.replace_token(t, old_module.len(), new_module) as usize;
+        }
+    }
+    n
 }
