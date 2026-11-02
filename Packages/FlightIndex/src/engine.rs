@@ -154,10 +154,13 @@ type BaseListing = Arc<Vec<FileRef>>;
 const MAX_KNOWN_BASES: usize = 64;
 
 /// What the budget charges for `bytes` of estimated graph. The estimate counts struct sizes and
-/// string payloads but not allocator rounding or hash-table slack; measured against the daemon's
-/// RSS on tessera it runs about a fifth low, so the budget is charged 5/4 of it.
+/// string payloads but not allocator rounding or hash-table slack, and the heap limit (which counts
+/// those) is what catches the difference. The estimate used to be charged 5/4 over, a margin for
+/// what it left out, chiefly kept views; with those down from 130 MB to 18 MB the margin only
+/// caused evictions: a 117-graph sweep evicted on every request at 5/4 and not once at face
+/// value, with the live heap at 1063 MB under the 1120 MB limit.
 fn charged(estimate: usize) -> usize {
-    estimate / 4 * 5
+    estimate
 }
 
 /// A blob's facts as held weakly by the shared cache, with their estimated size.
@@ -186,9 +189,9 @@ pub const fn target_for_heap(heap: usize) -> usize {
 }
 
 /// Default budget for resolved graphs: the whole heap allowance of the default target. The
-/// estimate charged against it (5/4 of the counted structures) runs above the real heap, so the
-/// budget is reached before the heap limit in a steady state and the limit catches what is not
-/// charged (kept views, builds in flight, plans of mutators).
+/// estimate charged against it (the counted structures, at face value) runs below the real heap, so
+/// the heap limit is reached first in a steady state and catches what is not charged (kept views,
+/// builds in flight, plans of mutators, allocator slack).
 pub const DEFAULT_GRAPH_BUDGET: usize = heap_limit_for(DEFAULT_MEMORY_TARGET);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -220,7 +223,7 @@ struct GraphCache {
 pub struct GraphCacheStats {
     pub graphs: usize,
     /// Estimated bytes of every cached graph plus the distinct facts still held by anything, as
-    /// charged against the budget (the raw estimate scaled to RSS).
+    /// charged against the budget.
     pub bytes: usize,
     /// The distinct facts part of the estimate, unscaled.
     pub facts_bytes: usize,
