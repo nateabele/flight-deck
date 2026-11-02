@@ -910,6 +910,22 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
   incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
   before, 0.81 GB after.
+- **Overlay layers.** A dirty worktree's graph (`with_changes` on its base commit's) shares more
+  than blocks: its name and incoming-reference indexes are *layers* over the base's, holding only
+  the entries of the files whose facts (names) or resolution (incoming) differ and masking the
+  base's entries for those files; a lookup merges the two runs by file, so answers and their order
+  are a flat index's. One level only (never a layer over a layer), and past a quarter of the files
+  masked the index is flat again. The path index, the resolver's path set, importers,
+  ref-dependents and Elm module table are the base's own `Arc`s when they came out equal (the path
+  index and path set whenever no path was added or removed). `fingerprint` covers the indexes, so
+  every overlay-equals-full-rebuild test checks them. Exact live heap per dirty tessera overlay
+  graph: 6.5 MB before, 1.1 MB after a body edit and 2.3 MB after one that adds a file (what is
+  left is the file table and PageRank).
+- **Compact kept views.** A kept view's base index (`refresh::BaseIndex`) and stat snapshot
+  (`sweep::Snapshot`) search the commit's shared listing (`src/listing.rs`, binary search, with a
+  sorted permutation only for a listing not already in byte order) instead of copying every path
+  into maps of their own; the snapshot keeps a 40-byte stat per base file by position and a map
+  only for files outside the base tree. 1.24 MB a tessera worktree before, 0.17 MB after.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

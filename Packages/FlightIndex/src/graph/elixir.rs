@@ -11,7 +11,8 @@ impl GraphData {
     /// The one module symbol called `full`; `None` when no Elixir file in the view defines it
     /// (a package such as `Logger`) or when two files claim it and picking one would be a guess.
     fn elixir_module(&self, full: &str) -> Option<SymId> {
-        let mut hits = self.named(full)?.iter().copied().filter(|id| {
+        let named = self.named(full)?;
+        let mut hits = named.iter().copied().filter(|id| {
             self.files[id.file as usize].language == "elixir" && matches!(self.symbol(*id).kind, SymbolKind::Module | SymbolKind::Trait)
         });
         let first = hits.next()?;

@@ -276,7 +276,7 @@ impl ViewGraph {
         let mut out: Vec<RefHit> = self
             .incoming
             .get(&id)
-            .unwrap_or(&[])
+            .unwrap_or_default()
             .iter()
             .map(|&(fi, ri)| {
                 let f = self.file(fi);
@@ -307,7 +307,7 @@ impl ViewGraph {
             let mut step: Vec<(SymId, u32, Confidence)> = Vec::new();
             match dir {
                 Direction::In => {
-                    for &(fi, ri) in self.incoming.get(&cur).unwrap_or(&[]) {
+                    for &(fi, ri) in self.incoming.get(&cur).unwrap_or_default().iter() {
                         let f = self.file(fi);
                         let r = &f.facts.refs[ri as usize];
                         if r.kind == RefKind::Type {

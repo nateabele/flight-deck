@@ -64,7 +64,7 @@ impl ViewGraph {
         if !touched {
             return self.clone();
         }
-        g.finalize(Some(&self.data));
+        g.finalize(Some(&self.data), Some(&self.data));
         ViewGraph { label: self.label.clone(), root: self.root.clone(), data: Arc::new(g) }
     }
 }

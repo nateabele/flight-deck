@@ -132,7 +132,7 @@ pub fn rename(c: &MutCtx) -> Result<Plan, ToolError> {
     // Reference sites: file -> line -> the qualifiers recorded there.
     let mut sites: BTreeMap<u32, BTreeMap<u32, Vec<Option<String>>>> = BTreeMap::new();
     for id in &targets {
-        for &(fi, ri) in g.incoming.get(id).unwrap_or(&[]) {
+        for &(fi, ri) in g.incoming.get(id).unwrap_or_default().iter() {
             let r = &g.file(fi).facts.refs[ri as usize];
             if g.name(r.name) == old {
                 sites.entry(fi).or_default().entry(r.line).or_default().push(g.qualifier(r).map(String::from));

@@ -613,7 +613,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
 
     // Uses of the moved code from what stays behind.
     let uses_after = moved.iter().any(|&l| {
-        g.incoming.get(&SymId { file: sf, local: l }).unwrap_or(&[]).iter().any(|&(fi, ri)| {
+        g.incoming.get(&SymId { file: sf, local: l }).unwrap_or_default().iter().any(|&(fi, ri)| {
             let r = &g.file(fi).facts.refs[ri as usize];
             fi == sf && !(in_block(r.line) || r.enclosing().is_some_and(&inside))
         })
@@ -792,7 +792,7 @@ pub fn move_symbol(c: &MutCtx) -> Result<Plan, ToolError> {
         // References in this file to the moved symbols, outside the moved block.
         let mut uses: Vec<(usize, bool)> = Vec::new(); // (ref index, qualified)
         for &l in &moved {
-            for &(fi, ri) in g.incoming.get(&SymId { file: sf, local: l }).unwrap_or(&[]) {
+            for &(fi, ri) in g.incoming.get(&SymId { file: sf, local: l }).unwrap_or_default().iter() {
                 if fi != gi {
                     continue;
                 }

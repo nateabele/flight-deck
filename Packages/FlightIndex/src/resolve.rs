@@ -42,7 +42,8 @@ pub enum Resolved {
 
 pub struct Resolver {
     root: PathBuf,
-    paths: HashSet<String>,
+    /// Every path of the view. An `Arc`: an overlay that adds or removes no file shares its base's.
+    paths: Arc<HashSet<String>>,
     /// Rust crate name -> its `src/lib.rs`, from every `Cargo.toml` next to a `src/lib.rs`.
     rust_crates: HashMap<String, String>,
     /// elm.json directory (relative to root, "" = root) -> that project.
@@ -68,7 +69,11 @@ const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
 
 impl Resolver {
     pub fn new(root: &Path, files: &[crate::git::FileRef]) -> Resolver {
-        let paths: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
+        Resolver::with_paths(root, Arc::new(files.iter().map(|f| f.path.clone()).collect()))
+    }
+
+    /// A resolver for the view under `root` whose files are `paths` (another resolver's, shared).
+    pub fn with_paths(root: &Path, paths: Arc<HashSet<String>>) -> Resolver {
         let mut rust_crates = HashMap::new();
         for p in paths.iter().filter(|p| *p == "src/lib.rs" || p.ends_with("/src/lib.rs")) {
             let dir = p.trim_end_matches("src/lib.rs").trim_end_matches('/');
@@ -84,6 +89,11 @@ impl Resolver {
     /// Did any resolution look outside the worktree (whether or not it found anything)?
     pub fn probed_outside(&self) -> bool {
         self.probed_outside.load(Ordering::Relaxed)
+    }
+
+    /// The view's paths, to share with a resolver of the same files elsewhere (`with_paths`).
+    pub fn paths(&self) -> &Arc<HashSet<String>> {
+        &self.paths
     }
 
     pub fn has_path(&self, p: &str) -> bool {
