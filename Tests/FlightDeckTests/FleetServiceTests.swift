@@ -182,6 +182,35 @@ final class FleetServiceTests: XCTestCase {
         )
     }
 
+    /// **A phone tap on an agent with no account launches THAT agent.** The Mac's menu gives
+    /// such an agent a flat built-in row (index 0, no account name). Before it did, the tap's
+    /// `(agent, 0)` resolved to nothing and the handler fell back to the project's default
+    /// agent — so tapping "New Codex Session" opened a claude tab. Through the socket, because
+    /// the row-to-launch translation lives in the wire handler.
+    func testANewSessionFromThePhoneForAnAgentWithNoAccountLaunchesThatAgent() async throws {
+        let (store, _, key, port) = try await standUpWithALogin()   // claude only; codex has none
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let target = try XCTUnwrap(store.repos.first { $0.url.path == "/w/target" })
+        let before = Set(target.sessions.map(\.id))
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: target.id, agent: "codex", accountIndex: 0))
+            }
+            if case .session = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        let after = try XCTUnwrap(store.repos.first { $0.url.path == "/w/target" })
+        let added = after.sessions.filter { !before.contains($0.id) }
+        XCTAssertEqual(added.map(\.agent), [.codex], "the agent tapped, not the project's default")
+        XCTAssertEqual(added.first?.accountID, nil, "no account to name: its built-in home")
+    }
+
     func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() async throws {
         let (_, key, port) = try await standUp()
         let refused = expectation(description: "err")

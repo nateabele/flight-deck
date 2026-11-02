@@ -700,6 +700,11 @@ struct SessionSidebar: View {
                                   flat: true, modifiers: chords[.account(account)])
             case .pool(let agent, let label):
                 newSessionMenuRow(agent: agent, pool: label, flat: true, modifiers: chords[.pool(agent)])
+            case .builtIn(let agent):
+                // A flat no-account row is the flat pool row's twin: "New <Agent> Session",
+                // launched with no account named, so it runs in the agent's built-in home.
+                newSessionMenuRow(agent: agent, pool: agent.displayName, flat: true,
+                                  modifiers: chords[.builtIn(agent)])
             case .submenu(let agent, let rows):
                 Menu("New \(agent.displayName) Session") {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
@@ -709,7 +714,7 @@ struct SessionSidebar: View {
                                               flat: false, modifiers: chords[.account(account)])
                         case .pool(let agent, let label):
                             newSessionMenuRow(agent: agent, pool: label, flat: false, modifiers: chords[.pool(agent)])
-                        case .submenu:
+                        case .builtIn, .submenu:
                             EmptyView()
                         }
                     }

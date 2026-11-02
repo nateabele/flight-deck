@@ -4,7 +4,7 @@ import Foundation
 /// The desktop's New Session menu, described for a phone — and read back when one is tapped.
 ///
 /// **Both directions go through `NewSessionAffordance.menu`, and that is the whole point.** The
-/// rules with edges live there: an agent with no live account contributes no row, order decides
+/// rules with edges live there: an agent with no live account gets a built-in-home row, order decides
 /// the ⌘N ladder, one account is a flat row and several are a submenu, and the tick marks the
 /// resolved account only inside a submenu. A second implementation of any of those drifts the
 /// first time one moves, so this file translates that function's output and never restates it.
@@ -41,6 +41,12 @@ enum NewSessionOptionsProjection {
                     agent: agent.rawValue, agentName: agent.displayName,
                     index: 0, accountName: nil, isDefault: true
                 )]
+            case .builtIn(let agent):
+                // No account at all: the agent's built-in home, with no login to name.
+                return [WireNewSessionOption(
+                    agent: agent.rawValue, agentName: agent.displayName,
+                    index: 0, accountName: nil, isDefault: true
+                )]
             case .submenu(let agent, let rows):
                 return rows.enumerated().compactMap { index, row in
                     switch row {
@@ -55,7 +61,7 @@ enum NewSessionOptionsProjection {
                             agent: agent.rawValue, agentName: agent.displayName,
                             index: index, accountName: label, isDefault: true
                         )
-                    case .submenu:
+                    case .builtIn, .submenu:
                         return nil
                     }
                 }
@@ -79,12 +85,13 @@ enum NewSessionOptionsProjection {
             switch row {
             case .agent(_, let account, _): .account(account)
             case .pool: .pool
+            case .builtIn: .builtIn
             case .submenu: nil
             }
         }
         for entry in entries where entry.agent.rawValue == agent {
             switch entry {
-            case .agent, .pool:
+            case .agent, .pool, .builtIn:
                 // A flat row is an agent's only account, so the only index that can mean
                 // anything is 0. Anything else is a menu that has changed shape underneath the
                 // phone — an account added since the fetch — and is refused rather than guessed.
@@ -102,5 +109,7 @@ enum NewSessionOptionsProjection {
     enum Choice: Equatable {
         case account(UUID)
         case pool
+        /// The agent has no account: launch with none named, in its built-in home.
+        case builtIn
     }
 }

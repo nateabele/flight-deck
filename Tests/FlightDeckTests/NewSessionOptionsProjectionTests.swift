@@ -44,7 +44,7 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
             .pool(AccountPool(id: "team", label: "Team", agent: .claude, members: [work, personal])),
         ])
         store.preferences.storedProjectSettings = [project: ProjectSettings(accounts: [.claude: .pool("team")])]
-        let options = rows(store)
+        let options = rows(store).filter { $0.agent == "claude" }
         XCTAssertEqual(options.map(\.accountName), ["Team", "Work", "Personal"])
         XCTAssertEqual(options.map(\.isDefault), [true, false, false])
         XCTAssertEqual(NewSessionOptionsProjection.account(forAgent: "claude", index: 0, in: entries(store)), .pool)
@@ -64,7 +64,7 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
     /// and no tick, because a sole account is a choice that was never offered.
     func testASingleAccountIsAFlatRow() {
         let store = preferences([account(.claude, "Work")])
-        let options = rows(store)
+        let options = rows(store).filter { $0.agent == "claude" }
         XCTAssertEqual(options.count, 1)
         XCTAssertEqual(options[0].agent, "claude")
         XCTAssertEqual(options[0].agentName, "Claude")
@@ -76,26 +76,30 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
     /// resolved one marked.
     func testSeveralAccountsBecomeNumberedRows() {
         let store = preferences([account(.claude, "Work"), account(.claude, "Personal")])
-        let options = rows(store)
+        let options = rows(store).filter { $0.agent == "claude" }
         XCTAssertEqual(options.count, 2)
         XCTAssertEqual(options.map(\.index), [0, 1])
         XCTAssertEqual(options.compactMap(\.accountName), ["Work", "Personal"])
         XCTAssertEqual(options.filter(\.isDefault).count, 1, "exactly one account is resolved")
     }
 
-    /// **An agent with no live account contributes nothing** — the rule the affordance already
-    /// enforces, asserted here so the translation cannot quietly reintroduce a dead row.
-    func testAnAgentWithNoAccountHasNoRow() {
+    /// **An agent with no live account still has a row** — a flat one, naming no account, that
+    /// launches in the agent's built-in home. Without it an install whose accounts predate an
+    /// agent never offered that agent on the phone at all.
+    func testAnAgentWithNoAccountHasABuiltInRow() {
         let store = preferences([account(.claude, "Work")])
-        XCTAssertTrue(rows(store).allSatisfy { $0.agent == "claude" },
-                      "codex has no login and must not appear")
+        let codex = rows(store).filter { $0.agent == "codex" }
+        XCTAssertEqual(codex.count, 1)
+        XCTAssertNil(codex.first?.accountName, "no account to name")
+        XCTAssertEqual(codex.first?.index, 0)
+        XCTAssertEqual(NewSessionOptionsProjection.account(forAgent: "codex", index: 0, in: entries(store)),
+                       .builtIn)
     }
 
-    /// **A project with nothing signed in answers with no rows at all**, which is a real answer
-    /// and not an absent one: the phone greys its `+` out rather than offering a row that
-    /// cannot launch.
-    func testNothingSignedInProducesAnEmptyAnswer() {
-        XCTAssertTrue(rows(preferences([])).isEmpty)
+    /// **A project with nothing signed in still offers every agent**, one built-in row each.
+    func testNothingSignedInOffersEveryAgent() {
+        let store = preferences([])
+        XCTAssertEqual(rows(store).map(\.agent), store.agentOrder(forProject: project).map(\.id.rawValue))
     }
 
     /// **Order is the ⌘N ladder**, so it is preserved rather than sorted — asserted rather than
@@ -129,7 +133,7 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
         let store = preferences([account(.claude, "Work"), account(.claude, "Personal")])
         XCTAssertNil(
             NewSessionOptionsProjection.account(forAgent: "codex", index: 1, in: entries(store)),
-            "codex has no rows here; index 1 must not be read as claude's"
+            "codex has only its flat built-in row; index 1 must not be read as claude's"
         )
     }
 

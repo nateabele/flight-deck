@@ -71,9 +71,11 @@ enum NewSessionAffordance {
     ///
     /// Deliberately separate from `slots(for:)`: shortcuts bind to *agent* position, and never
     /// move when an account is merely chosen from here — choosing "Work" over the project's
-    /// default is a mouse-only act, not a rebind. An agent absent from `accounts` entirely
-    /// (nothing logged in yet) contributes no row at all, rather than a dead one nothing can
-    /// launch.
+    /// default is a mouse-only act, not a rebind. An agent absent from `accounts` entirely still
+    /// gets a row: a `.builtIn` one, which launches with no account named and so runs in the
+    /// agent's built-in home — what File ▸ New Session's plain row for it always did. Without
+    /// it, an install whose accounts were seeded before grok, gemini and opencode existed
+    /// (`migrateAccountsIfNeeded` seeds a fresh install only) never offered them here at all.
     ///
     /// An agent the project bills to a POOL leads with a `.pool` row, which launches with no
     /// account named so `AccountResolver` leases the member with headroom. It is always the
@@ -83,6 +85,8 @@ enum NewSessionAffordance {
     enum MenuEntry: Equatable {
         case agent(AgentID, account: UUID, isResolved: Bool)
         case pool(AgentID, label: String)
+        /// The agent has no live account: launch it with none named, in its built-in home.
+        case builtIn(AgentID)
         indirect case submenu(AgentID, [MenuEntry])
 
         /// Which agent this row (or submenu) belongs to, regardless of case — lets callers
@@ -91,15 +95,17 @@ enum NewSessionAffordance {
             switch self {
             case .agent(let agent, _, _): return agent
             case .pool(let agent, _): return agent
+            case .builtIn(let agent): return agent
             case .submenu(let agent, _): return agent
             }
         }
     }
 
-    /// A row that can wear a chord: one account, or an agent's pool.
+    /// A row that can wear a chord: one account, an agent's pool, or an agent with no account.
     enum Leaf: Hashable {
         case account(UUID)
         case pool(AgentID)
+        case builtIn(AgentID)
     }
 
     /// `pools` names, per agent, the pool the project bills it to (its label). Such an agent's
@@ -108,9 +114,9 @@ enum NewSessionAffordance {
         agents: [AgentSettings], accounts: [AgentAccount], resolved: [AgentID: UUID],
         pools: [AgentID: String] = [:]
     ) -> [MenuEntry] {
-        agents.compactMap { settings in
+        agents.map { settings in
             let mine = accounts.filter { $0.agent == settings.id }
-            guard !mine.isEmpty else { return nil }
+            guard !mine.isEmpty else { return .builtIn(settings.id) }
             let pool = pools[settings.id]
             let rows = mine.map {
                 MenuEntry.agent(settings.id, account: $0.id,
@@ -151,6 +157,7 @@ enum NewSessionAffordance {
         for row in rows {
             switch row {
             case .pool(let agent, _): return .pool(agent)
+            case .builtIn(let agent): return .builtIn(agent)
             case .agent(_, let account, true): return .account(account)
             default: continue
             }
@@ -187,6 +194,8 @@ enum NewSessionAffordance {
                 result[.account(account)] = modifiers
             case .pool(let agent, _):
                 result[.pool(agent)] = modifiers
+            case .builtIn(let agent):
+                result[.builtIn(agent)] = modifiers
             case .submenu(_, let rows):
                 if let leaf = shortcutLeaf(in: rows) { result[leaf] = modifiers }
             }

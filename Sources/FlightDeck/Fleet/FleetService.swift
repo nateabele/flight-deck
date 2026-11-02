@@ -1369,7 +1369,8 @@ final class FleetService: ObservableObject {
         if let agent, let accountIndex, let picked = AgentID(rawValue: agent),
            let choice = NewSessionOptionsProjection.account(forAgent: agent, index: accountIndex,
                                                             in: menuEntries(forProjectAt: path)) {
-            // A pool row names no account: the project's pool leases one, as ⌘N does.
+            // A pool row names no account (the project's pool leases one, as ⌘N does), and
+            // neither does a built-in row (the agent has no account: its built-in home runs).
             var account: UUID?
             if case .account(let id) = choice { account = id }
             // `selecting: false`: a client's `+` must not move the desk's selection.

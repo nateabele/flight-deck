@@ -41,7 +41,7 @@ enum NewSessionMenuModel {
                     case .agent(let rowAgent, let account, let isResolved):
                         let name = preferences.account(id: account)?.displayName ?? rowAgent.displayName
                         return .item(title: name, agent: rowAgent, account: account, checked: isResolved, chord: chords[.account(account)])
-                    case .submenu:
+                    case .builtIn, .submenu:
                         return nil
                     }
                 })

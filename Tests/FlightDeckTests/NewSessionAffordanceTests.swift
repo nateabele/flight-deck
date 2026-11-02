@@ -199,8 +199,29 @@ final class NewSessionAffordanceTests: XCTestCase {
         XCTAssertTrue(chords.values.allSatisfy { NewSessionAffordance.slots(for: agents).map(\.modifiers).contains($0) })
     }
 
-    /// An agent with no account contributes no row, so it contributes no chord either.
-    func testChordsAreEmptyWithoutAccounts() {
+    /// No entries, no chords.
+    func testChordsAreEmptyWithoutEntries() {
         XCTAssertTrue(NewSessionAffordance.chords(for: [], agents: two).isEmpty)
+    }
+
+    /// An agent with no live account still gets a row — `.builtIn`, launching in its built-in
+    /// home — in its list position, and wears that position's chord. Before this, an install
+    /// whose accounts were seeded before grok/gemini/opencode never offered them in the sidebar.
+    func testAnAgentWithNoAccountGetsABuiltInRowAndItsChord() {
+        let one = AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a"))
+        let entries = NewSessionAffordance.menu(agents: two, accounts: [one], resolved: [.claude: one.id])
+        XCTAssertEqual(entries, [.agent(.claude, account: one.id, isResolved: true), .builtIn(.codex)])
+        XCTAssertEqual(NewSessionAffordance.chords(for: entries, agents: two),
+                       [.account(one.id): [.command], .builtIn(.codex): [.command, .shift]])
+    }
+
+    /// A removed account is not a live one: the agent falls back to its built-in row.
+    func testAnAgentWhoseOnlyAccountIsRemovedGetsABuiltInRow() {
+        var removed = AgentAccount(agent: .codex, displayName: "Gone", home: URL(fileURLWithPath: "/g"))
+        removed.removedAt = Date()
+        var preferences = Preferences()
+        preferences.accounts = [removed]
+        XCTAssertEqual(NewSessionAffordance.menu(agents: two, preferences: preferences, resolved: [:]),
+                       [.builtIn(.claude), .builtIn(.codex)])
     }
 }
