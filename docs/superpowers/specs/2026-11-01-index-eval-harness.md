@@ -59,3 +59,21 @@ Run the variant from your own worktree's build against the same `--store` and `-
 - `grep search_bodies` and `read` read from the worktree on disk, which is not the parent tree. No built-in strategy uses them.
 - `impact` is not scored yet.
 - Tasks run one after another. Each graph takes 0.3 s (flight-deck) to about 1 s (tessera) at load 10–16.
+
+## Agent-level A/B
+The strategies above score a tool's ranked text. [`scripts/agent_ab.py`](../../../Packages/FlightIndex/scripts/agent_ab.py) scores what an agent answers through the tools, and what it spends on the way: headless Claude Code (`claude -p --model sonnet --strict-mcp-config --setting-sources "" --no-session-persistence --tools Read`) gets one mined task's commit subject in a worktree at the parent commit, and must name the files and functions to change, using only one MCP server's tools plus Read. The mutators are disallowed. Two arms run on the same tasks, interleaved, so machine load falls on both alike.
+
+- **Gold.** The harness's gold files, plus its gold symbols, which only exist while it runs: [`examples/eval_gold.rs`](../../../Packages/FlightIndex/examples/eval_gold.rs) adds a strategy `gold` that writes them to the JSONL file named by `FDINDEX_EVAL_GOLD_OUT`.
+- **Worktrees.** One per task, made with `git worktree add --detach` from a scratch `git clone --shared` of each repository, so the real repository is only read. `prep` indexes each worktree for both arms before any run, so no arm's wall time includes a cold build.
+- **Scores.** File top-1 (the first answered file is gold), file recall@5 (over min(5, |gold|)), function recall (bare gold names among the first 15 answered names, over the distinct gold names; tasks without gold symbols are skipped), tool calls, input tokens (uncached + cache writes + cache reads), output tokens, wall time and dollars per task, from the run's `stream-json` result.
+- **Intervals.** 95% percentile bootstrap over tasks, with reps averaged per task first; the B − A column is the paired difference. `report` also breaks file recall@5 down by repository, language of the gold files, number of gold files and the subject's conventional-commit prefix.
+- **Budget.** `run --budget` reads every earlier run's cost from the results file and starts no run once fewer than `--reserve` dollars remain.
+
+```
+FDINDEX_EVAL_GOLD_OUT=<w>/gold.jsonl ./target/release/examples/eval_gold --repo … --tasks 100 --only gold --store <w>/store --out <w>/out
+scripts/agent_ab.py select --tasks <w>/out/tasks-*.json --gold <w>/gold.jsonl --per-repo 30 --out <w>/sel.json
+scripts/agent_ab.py prep --sel <w>/sel.json --work <w> --clone tessera=<w>/repos/tessera --clone fd=<w>/repos/fd --fdindex <bin> --store <w>/fdstore --socket <sock>
+scripts/agent_ab.py run --sel <w>/sel.json --work <w> --fdindex <bin> --store <w>/fdstore --socket <sock> --budget 60 --jobs 4
+scripts/agent_ab.py report --sel <w>/sel.json --work <w>
+```
+Arm A is the old qartez (`qartez.orig`, a scratch `--db-path` per worktree and a scratch HOME); arm B is the `fdindex mcp` shim on a scratch daemon (`--no-start`). The first run's results are in [the A/B findings](../research/findings/2026-11-01-agent-ab-qartez.md). The pure parts (answer parsing, scoring, statistics) have tests: `python3 -m unittest discover -s Packages/FlightIndex/scripts -p 'test_*.py'`.
