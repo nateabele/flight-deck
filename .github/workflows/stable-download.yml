@@ -1,4 +1,4 @@
-# Gives every release a copy of its macOS zip under a fixed name, so the site can link
+# Gives every release a copy of its macOS zip under a fixed name, so the website (the flight-deck-site repo) can link
 # releases/latest/download/FlightDeck-macOS-arm64.zip and never needs editing per release.
 name: Stable download asset
 
