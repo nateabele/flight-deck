@@ -208,7 +208,20 @@ default:
     break
 }
 
-runner.run()
+// A codex command runs in the account's shared daemon, so it has no FLIGHT_DECK_SESSION_ID
+// of its own; the app knows its tab from the CODEX_THREAD_ID in the hello. Asked only when
+// `self` is named, so no other verb pays the round trip.
+let namesSelf: Bool = {
+    switch invocation.command {
+    case .accountList(session: "self"), .accountSwitch(session: "self", _): return true
+    default: return CommandLine.arguments.dropFirst().contains("self")
+    }
+}()
+if context.selfID == nil, namesSelf, env["CODEX_THREAD_ID"].flatMap(UUID.init(uuidString:)) != nil {
+    PeerToolEntry.whoami(environment: env) { runner.run(selfID: $0) }
+} else {
+    runner.run()
+}
 withExtendedLifetime(interruptSources) {
     dispatchMain()
 }

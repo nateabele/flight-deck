@@ -332,8 +332,15 @@ final class PeerMessagingService {
         }
     }
     func request(_ request: WirePeerRequest, caller: ControlCaller) async throws -> String {
-        guard ["list", "send", "receive"].contains(request.operation), request.after >= 0 else {
+        guard ["list", "send", "receive", "whoami"].contains(request.operation), request.after >= 0 else {
             throw PeerFailure.invalid("invalid peer operation or cursor")
+        }
+        // The tab the caller runs in, as the app resolved it. A codex command cannot know this
+        // itself: its environment is the shared daemon's (see `ControlCallerHello`), so the CLI
+        // asks here before it can resolve `self`.
+        if request.operation == "whoami" {
+            guard case .session(let id) = caller else { throw PeerFailure.invalid("not running inside a Flight Deck tab") }
+            return String(decoding: try PeerJSON.data(["tabId": id.uuidString]), as: UTF8.self)
         }
         let sourceID: UUID?
         switch caller {

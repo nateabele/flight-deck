@@ -43,7 +43,7 @@ final class CLIRunner {
 
     private let invocation: CLIInvocation
     private let transport: CLITransport
-    private let context: CLIContext
+    private var context: CLIContext
     private let out: (String) -> Void
     private let err: (String) -> Void
     private let onFinish: (Int32) -> Void
@@ -105,6 +105,12 @@ final class CLIRunner {
         // A test that passes neither still sees run output, as text, beside everything else.
         self.write = write ?? { _, data in out(String(decoding: data, as: UTF8.self)) }
         self.execReal = execReal ?? { argv0, _ in err("exec \(argv0)"); finish(0) }
+    }
+
+    /// `run()` with `self` resolved by the app, for a caller that cannot know its own tab.
+    func run(selfID: UUID?) {
+        if let selfID { context.selfID = selfID }
+        run()
     }
 
     func run() {

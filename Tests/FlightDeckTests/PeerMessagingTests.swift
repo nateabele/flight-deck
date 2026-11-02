@@ -54,6 +54,8 @@ final class PeerMessagingTests: XCTestCase {
         XCTAssertTrue(ControlScope.permits(send, level: .full, caller: caller))
         XCTAssertFalse(ControlScope.permits(send, level: .full, caller: .invalid))
         XCTAssertTrue(ControlScope.permits(.peer(.init(operation: "receive")), level: .readOnly, caller: caller))
+        XCTAssertTrue(ControlScope.permits(.peer(.init(operation: "whoami")), level: .readOnly, caller: caller))
+        XCTAssertFalse(ControlScope.permits(.peer(.init(operation: "whoami")), level: .readOnly, caller: .invalid))
     }
     func testSkillRefreshPreservesUserEditsAndDeletion() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -20,8 +20,20 @@ enum PeerToolEntry {
         }
     }
 
+    /// The tab this process runs in, as the app resolves it from the caller hello: what `self`
+    /// names in a codex command, whose environment carries no `FLIGHT_DECK_SESSION_ID` of its
+    /// own. `nil` when the app does not know (the CLI then reports "self" as unresolvable).
+    static func whoami(environment: [String: String], completion: @escaping (UUID?) -> Void) {
+        invoke(WirePeerRequest(operation: "whoami"), environment: environment, timeout: 5) { result in
+            guard case .success(let json) = result,
+                  let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+            else { return completion(nil) }
+            completion((object["tabId"] as? String).flatMap(UUID.init(uuidString:)))
+        }
+    }
+
     private static func invoke(_ request: WirePeerRequest, environment: [String: String],
-                               completion: @escaping (Result<String, Error>) -> Void) {
+                               timeout: Double = 15, completion: @escaping (Result<String, Error>) -> Void) {
         let state = environment["FLIGHT_DECK_STATE_DIR"] ?? NSHomeDirectory() + "/Library/Application Support/Flight Deck"
         let path = environment["FLIGHT_DECK_CONTROL_SOCKET"] ?? state + "/control.sock"
         let client = FleetClient(localCaller: ControlCallerHello.compose(environment: environment))
@@ -40,7 +52,7 @@ enum PeerToolEntry {
             }
         }
         client.onDisconnect = { error in finish(.failure(error ?? CLIUsageError("cannot reach Flight Deck at \(path)"))) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { finish(.failure(CLIUsageError("peer request timed out"))) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { finish(.failure(CLIUsageError("peer request timed out"))) }
         client.connect(toLocal: path, lastSeq: 0)
     }
 
