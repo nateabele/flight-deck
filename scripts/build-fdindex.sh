@@ -47,10 +47,17 @@ if [ "${FD_FDINDEX_DRY_RUN:-}" = 1 ]; then
   exit 0
 fi
 
+# Panic locations and C debug strings embed source paths. Map the builder's home folder and this
+# checkout to fixed names, so a shipped binary names no user or folder on the machine it came from.
+ROOT=$(pwd -P)
+RUSTFLAGS="--remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME/.rustup=/rustup --remap-path-prefix=$ROOT=/src"
+CFLAGS="-ffile-prefix-map=$HOME/.cargo=/cargo -ffile-prefix-map=$ROOT=/src"
+
 built=()
 for a in $ARCH_LIST; do
   t=$(triple "$a")
   env -i HOME="$HOME" PATH="$CARGO_PATH" DEVELOPER_DIR="$DEV" MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}" \
+    RUSTFLAGS="$RUSTFLAGS" CFLAGS="$CFLAGS" \
     "$cargo_bin" build --release --locked --quiet --target "$t" --manifest-path "$PKG/Cargo.toml"
   built+=("$PKG/target/$t/release/fdindex")
 done

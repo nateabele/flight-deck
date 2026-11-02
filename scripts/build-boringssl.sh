@@ -27,6 +27,9 @@ cd "$(dirname "$0")/.."
 SRC="$(pwd)/vendor/boringssl"
 OUT="vendor/boringssl-artifacts"
 WORK="$(mktemp -d)"
+# OPENSSL_PUT_ERROR records __FILE__, so without this the archive (and every app linking it)
+# carries this checkout's absolute path, builder's home folder included.
+PREFIX_MAP="-ffile-prefix-map=$SRC=boringssl -ffile-prefix-map=$WORK=build"
 
 trap 'rm -rf "$WORK"' EXIT
 
@@ -75,7 +78,8 @@ build_slice() {
     -DCMAKE_OSX_ARCHITECTURES="$arch" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$deploy" \
     -DCMAKE_MACOSX_BUNDLE=OFF \
-    -DBUILD_SHARED_LIBS=OFF
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_C_FLAGS="$PREFIX_MAP" -DCMAKE_CXX_FLAGS="$PREFIX_MAP"
   cmake --build "$WORK/build-$name" --target crypto
 }
 

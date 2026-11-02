@@ -105,6 +105,11 @@ chmod +x "$SHIM_DIR/xcrun"
 
 # --- Step 3: build libghostty -----------------------------------------------
 
+# Zig fetches dependencies (highway, among others) into its global cache and compiles them from
+# there, so their __FILE__ strings name that cache. The default is ~/.cache/zig, which puts the
+# builder's home folder into the shipped app; a fixed path outside home keeps it anonymous. The real path, not /tmp: Zig spawns build tools by a path relative to this directory, and the /tmp symlink makes that path wrong.
+ZIG_GLOBAL_CACHE=/private/tmp/flightdeck-zig-cache
+
 echo "==> Building libghostty (GhosttyKit.xcframework)..."
 (
   cd "$GHOSTTY_DIR"
@@ -118,7 +123,8 @@ echo "==> Building libghostty (GhosttyKit.xcframework)..."
   # app. ReleaseFast is what upstream ships.
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
     PATH="$SHIM_DIR:$PATH" \
-    "$ZIG_BIN" build -Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native
+    "$ZIG_BIN" build --global-cache-dir "$ZIG_GLOBAL_CACHE" \
+      -Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native
 )
 
 # --- Step 4: stage the artifact out of the submodule ------------------------
