@@ -898,6 +898,17 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   2000 at a time with the writer released between chunks, then free pages 256 at a time and a WAL
   truncate. A repository whose common dir is gone has its database deleted. `fdindex status`
   reports the last collection, bytes reclaimed and free pages.
+- **Trigram index.** `grep search_bodies=true worktrees=…` narrows the blobs it reads with a
+  blob-keyed trigram index per repository (`src/trigram/`, Cox's design): dense `u32` ordinals per
+  committed blob, ASCII-folded trigram postings (delta varints or a Roaring bitmap, whichever is
+  smaller) in immutable memory-mapped segment files in `<repo>.tri/` beside the `.db`, new blobs
+  appended as delta segments by a background writer (`git cat-file`) and merged into one base past
+  eight segments, per-commit ordinal arrays and Roaring bitmaps in memory, and a `regex-syntax` HIR
+  planner. The plan is a necessary condition, so candidates are verified by the same matcher and
+  the rows never change; overlay files and blobs not yet indexed are always read. A blob's trigrams
+  never go stale, so there is nothing to invalidate; the directory is deleted with its database.
+  Measured on tessera (108 worktrees, 9,459 distinct blobs, 209 MB): 22.1 MB of index, built in
+  10 to 15 s at load 230 to 550.
 - **Memory.** `fdindex daemon --memory-mb N` (default 1536) is a target for the process's RSS. What
   the daemon can free is heap, and RSS follows it only loosely on macOS (about 1.2 times the heap
   plus 130 to 190 MB that is not graphs; freed pages stay resident until the kernel wants them,

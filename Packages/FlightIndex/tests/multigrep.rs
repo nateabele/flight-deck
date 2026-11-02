@@ -173,3 +173,23 @@ fn a_path_that_is_no_worktree_of_the_repository_is_named_as_skipped() {
     assert!(t.contains(&format!("skipped: {} (another repository)", stranger.root.display())), "{t}");
     assert!(!t.contains("x.ts"), "{t}");
 }
+
+#[test]
+fn a_warm_search_reads_only_the_blobs_the_trigram_index_cannot_rule_out() {
+    let (_d, svc) = service_with(false);
+    let f = fixture();
+    let wts = json!([f.main.root.to_string_lossy(), f.other.to_string_lossy()]);
+    let q = json!({"query": r"return needle \+ 1", "regex": true, "search_bodies": true, "worktrees": wts});
+    let cold = ok(&svc, &f.main.root, "grep", q.clone());
+    assert!(!cold.contains("ruled out"), "nothing is indexed before the first search: {cold}");
+    // The first search queued the committed blobs it met for the background writer.
+    flightindex::trigram::index::settle_all();
+    let warm = ok(&svc, &f.main.root, "grep", q);
+    // Four committed blobs; only `shared.ts` holds the text. `other`'s uncommitted edit is read
+    // directly, never indexed.
+    assert!(warm.lines().nth(1).unwrap().contains("2 distinct blob(s) scanned"), "{warm}");
+    assert!(warm.lines().nth(1).unwrap().contains("3 ruled out by the trigram index"), "{warm}");
+    assert_eq!(multi_rows(&warm), multi_rows(&cold), "{warm}");
+    let edit = ok(&svc, &f.main.root, "grep", json!({"query": "needle * 2", "search_bodies": true, "worktrees": wts}));
+    assert!(edit.contains("[1 worktree: other]\nweb/edit.ts:L2 in edit (function): return needle * 2;"), "{edit}");
+}

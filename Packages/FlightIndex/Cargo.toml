@@ -60,6 +60,8 @@ zstd = { version = "0.13", default-features = false }
 hashbrown = { version = "0.15", default-features = false }
 # Inflates the compressed `Docs` chunk of Elixir `.beam` files (`hexview::beam`).
 miniz_oxide = "0.8"
+roaring = "0.11"
+regex-syntax = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

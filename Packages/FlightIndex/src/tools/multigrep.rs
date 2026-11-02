@@ -16,11 +16,17 @@
 //!
 //! Which worktree, path and blob are current is the caller's job (`service::multi`); this module
 //! takes the effective file lists as given and does the reading, matching and grouping.
+//!
+//! With the trigram index (`crate::trigram`) the caller also passes the candidate ordinals and
+//! each base tree's ordinals: an indexed blob outside the candidates is dropped before the blob
+//! table is even built, so neither its bytes nor its 40-character id are touched.
 
 use super::nav::is_body;
 use super::ToolError;
 use crate::facts::{Symbol, SymbolKind};
 use crate::git::{self, FileRef, Overlay, MAX_FILE_BYTES};
+use crate::trigram::{TreeOrdinals, NOT_INDEXED};
+use roaring::RoaringBitmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -32,16 +38,25 @@ pub struct Worktree {
     pub label: String,
     pub base: Arc<Vec<FileRef>>,
     pub overlay: Vec<Overlay>,
+    /// The trigram index's ordinal of each `base` file, when the search has an index.
+    pub ords: Option<Arc<TreeOrdinals>>,
 }
 
 impl Worktree {
-    /// Every effective file, with whether it came from the overlay (working-tree content that may
-    /// not be in git's object store).
-    fn files(&self) -> impl Iterator<Item = (&FileRef, bool)> {
+    /// Every effective file: its trigram ordinal (`NOT_INDEXED` for overlay files and blobs the
+    /// index lacks), and whether it came from the overlay (working-tree content that may not be in
+    /// git's object store).
+    fn files(&self) -> impl Iterator<Item = (u32, &FileRef, bool)> {
         let shadowed: HashSet<&str> = self.overlay.iter().map(|o| o.path()).collect();
-        let base = self.base.iter().filter(move |f| !shadowed.contains(f.path.as_str())).map(|f| (f, false));
+        let ords = self.ords.as_ref().filter(|o| o.ords.len() == self.base.len());
+        let base = self
+            .base
+            .iter()
+            .enumerate()
+            .filter(move |(_, f)| !shadowed.contains(f.path.as_str()))
+            .map(move |(i, f)| (ords.map(|o| o.ords[i]).unwrap_or(NOT_INDEXED), f, false));
         let over = self.overlay.iter().filter_map(|o| match o {
-            Overlay::Present(f) => Some((f, true)),
+            Overlay::Present(f) => Some((NOT_INDEXED, f, true)),
             Overlay::Deleted(_) => None,
         });
         base.chain(over)
@@ -68,6 +83,11 @@ pub struct Outcome {
     pub groups: Vec<Group>,
     /// Distinct blobs scanned.
     pub blobs: usize,
+    /// Distinct indexed blobs the trigram index ruled out: never read.
+    pub ruled_out: u64,
+    /// Committed blobs (of a base tree, so in git's object store) the trigram index lacks: what
+    /// the caller queues for indexing.
+    pub not_indexed: Vec<String>,
     /// Blobs no worktree's file matched any more (edited since it was recorded), read from git.
     pub from_git: usize,
     /// Blobs that could be read neither from a worktree nor from git: working-tree content that
@@ -168,12 +188,14 @@ pub type SymbolSource<'a> = dyn FnMut(&str, &'static str) -> crate::error::Resul
 /// Search `trees` for `pattern` (already a regex; escape a plain query first). `symbols(blob,
 /// language)` gives a blob's stored symbols, `None` when it has no facts; it is asked only about
 /// blobs with matching lines, one at a time. `git_dir` is where `git cat-file` finds the
-/// repository's objects.
+/// repository's objects. `candidates`, from the trigram index, are the ordinals that may hold a
+/// match: an indexed blob outside them is skipped unread (`None`: read every blob).
 pub fn search(
     trees: &[Worktree],
     pattern: &str,
     kind: Option<SymbolKind>,
     git_dir: &Path,
+    candidates: Option<&RoaringBitmap>,
     symbols: &mut SymbolSource,
 ) -> Result<Outcome, ToolError> {
     use rayon::prelude::*;
@@ -184,8 +206,17 @@ pub fn search(
     let mut ordinal: HashMap<(&str, &'static str), u32> = HashMap::new();
     let mut blobs: Vec<(&str, &'static str)> = Vec::new();
     let mut holders: Vec<Vec<(u32, &str, bool)>> = Vec::new();
+    let mut ruled_out = RoaringBitmap::new();
+    let mut not_indexed: HashSet<&str> = HashSet::new();
     for (w, t) in trees.iter().enumerate() {
-        for (f, over) in t.files() {
+        for (ord, f, over) in t.files() {
+            if ord != NOT_INDEXED && candidates.is_some_and(|c| !c.contains(ord)) {
+                ruled_out.insert(ord);
+                continue;
+            }
+            if ord == NOT_INDEXED && !over {
+                not_indexed.insert(f.blob_id.as_str());
+            }
             let o = *ordinal.entry((f.blob_id.as_str(), f.language)).or_insert_with(|| {
                 blobs.push((f.blob_id.as_str(), f.language));
                 holders.push(Vec::new());
@@ -220,7 +251,7 @@ pub fn search(
             None
         })
         .collect();
-    let mut out = Outcome { blobs: blobs.len(), ..Default::default() };
+    let mut out = Outcome { blobs: blobs.len(), ruled_out: ruled_out.len(), not_indexed: not_indexed.into_iter().map(String::from).collect(), ..Default::default() };
     let mut hits: Vec<(usize, Vec<(u32, String)>)> = Vec::new();
     let mut missing: Vec<usize> = Vec::new();
     for (b, s) in scanned.into_iter().enumerate() {
