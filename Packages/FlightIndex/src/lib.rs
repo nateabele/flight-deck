@@ -24,6 +24,7 @@ pub mod listing;
 pub mod mcp;
 pub mod names;
 pub mod pkgview;
+pub mod pkgview_swift;
 pub mod proto;
 pub mod query;
 pub mod resolve;

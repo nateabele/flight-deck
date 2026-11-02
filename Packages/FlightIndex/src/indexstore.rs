@@ -31,7 +31,7 @@ impl StrRef {
             return "";
         }
         // SAFETY: libIndexStore hands out (pointer, length) views valid for the callback's duration.
-        let b = unsafe { std::slice::from_raw_parts(self.data as *const u8, self.len) };
+        let b = unsafe { std::slice::from_raw_parts(self.data.cast::<u8>(), self.len) };
         std::str::from_utf8(b).unwrap_or("")
     }
 }
@@ -218,6 +218,11 @@ impl PreciseIndex {
         self.files.is_empty()
     }
 
+    /// Does the layer hold `path` (a Swift file unchanged since the build)?
+    pub fn covers(&self, path: &str) -> bool {
+        self.files.contains_key(path)
+    }
+
     /// The declarations the compiler says the reference named `name` on `line` of `path` means;
     /// empty when they are all outside the repository.
     pub fn lookup(&self, path: &str, line: u32, name: &str) -> Option<&[DefSite]> {
@@ -250,10 +255,53 @@ pub fn read(store: &Path, worktree: &Path) -> Result<PreciseIndex, String> {
         };
         return Err(msg);
     }
-    let out = read_store(lib, st, store, worktree, t0);
+    let out = read_store(lib, st, store, worktree, t0, None);
     // SAFETY: created above, disposed once.
     unsafe { (lib.store_dispose)(st) };
     Ok(out)
+}
+
+/// (line, base name) -> the USR of the declaration outside the repository, per file.
+type ExternalUsrs = HashMap<String, HashMap<(u32, String), String>>;
+
+/// The index store as an answer key: the precise layer plus, for every reference the compiler
+/// resolves outside the repository, the USR of what it means (`s:10Foundation4UUIDV`,
+/// `c:objc(cs)NSFileManager`), which says whether a package binding named the right declaration.
+/// For measurement (`examples/swiftres.rs`): the USRs cost memory the daemon's layer does not keep.
+#[derive(Debug, Default)]
+pub struct AnswerKey {
+    pub precise: PreciseIndex,
+    pub stats: ReadStats,
+    external: ExternalUsrs,
+}
+
+impl AnswerKey {
+    /// The USR the compiler resolved the reference named `name` on `line` of `path` to, when it
+    /// lies outside the repository.
+    pub fn external_usr(&self, path: &str, line: u32, name: &str) -> Option<&str> {
+        self.external.get(path)?.get(&(line, name.to_string())).map(String::as_str)
+    }
+}
+
+/// `read`, keeping the USRs of references outside the repository (see `AnswerKey`).
+pub fn read_with_external(store: &Path, worktree: &Path) -> Result<AnswerKey, String> {
+    let t0 = Instant::now();
+    let lib = lib().ok_or("libIndexStore.dylib not found")?;
+    let cpath = CString::new(store.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+    let mut err: P = std::ptr::null_mut();
+    // SAFETY: valid C string; on failure `err` is set and the result is null.
+    let st = unsafe { (lib.store_create)(cpath.as_ptr(), &mut err) };
+    if st.is_null() {
+        if !err.is_null() {
+            unsafe { (lib.error_dispose)(err) };
+        }
+        return Err("cannot open index store".into());
+    }
+    let mut external = ExternalUsrs::new();
+    let precise = read_store(lib, st, store, worktree, t0, Some(&mut external));
+    // SAFETY: created above, disposed once.
+    unsafe { (lib.store_dispose)(st) };
+    Ok(AnswerKey { stats: precise.stats.clone(), precise, external })
 }
 
 extern "C" fn unit_cb(ctx: P, name: StrRef) -> bool {
@@ -320,7 +368,7 @@ extern "C" fn occ_cb(ctx: P, o: P) -> bool {
     true
 }
 
-fn read_store(lib: &Lib, st: P, store: &Path, worktree: &Path, t0: Instant) -> PreciseIndex {
+fn read_store(lib: &Lib, st: P, store: &Path, worktree: &Path, t0: Instant, mut external: Option<&mut ExternalUsrs>) -> PreciseIndex {
     let mut idx = PreciseIndex::default();
     let mut units: Vec<String> = Vec::new();
     // SAFETY: ctx outlives the call.
@@ -393,7 +441,19 @@ fn read_store(lib: &Lib, st: P, store: &Path, worktree: &Path, t0: Instant) -> P
         idx.stats.occurrences += ctx.count;
         unsafe { (lib.record_reader_dispose)(r) };
     }
-    drop(usrs);
+    let usr_names: Vec<String> = match external {
+        Some(_) => {
+            let mut v = vec![String::new(); usrs.len()];
+            for (u, id) in usrs {
+                v[id as usize] = u;
+            }
+            v
+        }
+        None => {
+            drop(usrs);
+            Vec::new()
+        }
+    };
     // Declared in some record of this worktree, fresh or stale. A reference to anything else
     // resolves outside the repository (the SDK, a package checkout): the compiler says it has no
     // repository target, which outranks a same-named guess.
@@ -414,7 +474,12 @@ fn read_store(lib: &Lib, st: P, store: &Path, worktree: &Path, t0: Instant) -> P
         }
         let sites = match def_of.get(&usr) {
             Some(s) => s.as_slice(),
-            None if !declared_here.contains(&usr) => &[],
+            None if !declared_here.contains(&usr) => {
+                if let Some(ext) = external.as_deref_mut() {
+                    ext.entry(paths[file as usize].to_string()).or_default().entry((line, name.clone())).or_insert_with(|| usr_names[usr as usize].clone());
+                }
+                &[]
+            }
             // Declared only in a file edited since the build: its line is not to be trusted.
             None => continue,
         };

@@ -164,8 +164,9 @@ impl GraphData {
 
     /// Package symbols named `name` (`map`) or `Module.name` (`List.map`, `Json.Decode.field`)
     /// in the dependencies of the view's Elm projects, the npm modules its TypeScript and JavaScript
-    /// files import (`ecma_pkg`) and the crate symbols of `find_rust_package_symbols`,
-    /// deduplicated, sorted by display name.
+    /// files import (`ecma_pkg`), the crate symbols of `find_rust_package_symbols` and the SDK
+    /// symbols its Swift files can name (`UUID`, `FileManager.default`), deduplicated, sorted by
+    /// display name.
     pub fn find_package_symbols(&self, query: &str) -> Vec<Arc<PkgSymbol>> {
         let (module, name) = match query.rfind('.') {
             // `List.::`-style operators are not looked up qualified; `(::)` would need parsing.
@@ -186,7 +187,7 @@ impl GraphData {
             }
         }
         self.find_npm_symbols(query, &mut out);
-        for s in self.find_rust_package_symbols(query) {
+        for s in self.find_rust_package_symbols(query).into_iter().chain(self.find_swift_package_symbols(query)) {
             if !out.iter().any(|o| **o == *s) {
                 out.push(s);
             }

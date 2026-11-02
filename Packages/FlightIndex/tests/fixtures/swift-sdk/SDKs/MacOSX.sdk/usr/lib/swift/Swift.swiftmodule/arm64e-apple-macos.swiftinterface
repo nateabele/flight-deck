@@ -1,0 +1,23 @@
+// swift-interface-format-version: 1.0
+// A cut-down standard library for the package-view tests.
+@frozen public struct String : Swift.Equatable {
+  public var count: Swift.Int {
+    get
+  }
+}
+@frozen public struct Int : Swift.Equatable {
+}
+public protocol Equatable {
+}
+public protocol Sequence {
+  associatedtype Element
+}
+extension Swift.Sequence {
+  @inlinable public func map<T>(_ transform: (Self.Element) throws -> T) rethrows -> [T] {
+    var result = [T]()
+    return result
+  }
+}
+@frozen public struct Array<Element> : Swift.Sequence {
+}
+public func print(_ items: Any..., separator: Swift.String = " ", terminator: Swift.String = "\n")

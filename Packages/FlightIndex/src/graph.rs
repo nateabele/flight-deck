@@ -46,6 +46,7 @@ pub mod rank;
 mod rust_pkg;
 mod surface;
 mod swift;
+mod swift_pkg;
 mod swift_types;
 
 pub use blocks::Share;
@@ -1096,6 +1097,7 @@ impl GraphData {
             }
             s
         });
+        let swift_scope = swift_keys.as_ref().and_then(|_| self.swift_pkg_scope(f));
         let mut pkg_refs = elm_pkg::PkgRefs::default();
         for (ri, r) in facts.refs.iter().enumerate() {
             let mut rr = match &swift_keys {
@@ -1105,6 +1107,15 @@ impl GraphData {
                     None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
                 },
             };
+            // A Swift name nothing in the repository declares: the SDK's, if it declares one.
+            if let Some(scope) = &swift_scope
+                && rr.target.is_none()
+                && let Some(sym) = self.swift_pkg_ref(f, r, scope)
+            {
+                pkg_refs.push(ri as u32, sym);
+                refs.push(RefRes { target: None, confidence: Confidence::Package, external: None });
+                continue;
+            }
             // Nothing in the view, or only a unique-name guess: a package name beats both.
             let unbound = rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none();
             let hit = match (&pkg_scope, &ex_scope) {

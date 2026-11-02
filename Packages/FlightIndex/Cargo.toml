@@ -33,6 +33,10 @@ required-features = ["eval"]
 name = "eval_history"
 required-features = ["eval"]
 
+[[example]]
+name = "eval_nosdk"
+required-features = ["eval"]
+
 [dependencies]
 tree-sitter = "0.25"
 tree-sitter-language = "0.1"

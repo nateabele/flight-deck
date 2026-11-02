@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const MAILER: &str = "final class Mailer {\n    func send(_ s: String) {}\n    func send(_ i: Int, to: String) {}\n    func advanced(by n: Int) {}\n}\n";
-const USE: &str = "func go(m: Mailer, xs: [Int]) {\n    m.send(1, to: \"x\")\n    _ = xs.reversed().first!.advanced(by: 1)\n}\n";
+const USE: &str = "func go(m: Mailer, xs: [Int]) {\n    m.send(1, to: \"x\")\n    _ = xs.reversed().first!.advanced(by: 1)\n    print(xs)\n}\n";
 
 /// Compile the fixture with indexing on, as `swift build` would, into `.build/debug/index/store`.
 /// `None` when this machine has no Swift compiler or no libIndexStore: the layer is optional.
@@ -99,4 +99,23 @@ fn a_reference_the_compiler_resolves_outside_the_repository_has_no_target() {
     assert_eq!(target_of(&e.graph(&v).unwrap(), &r, "advanced"), (Some(4), Confidence::Fallback));
     let (g, _) = e.precise_graph(&v).unwrap().unwrap();
     assert_eq!(target_of(&g, &r, "advanced"), (None, Confidence::Precise), "the standard library's `Int.advanced(by:)`");
+}
+
+#[test]
+fn an_sdk_binding_the_compiler_confirms_keeps_its_package_symbol() {
+    let Some(r) = indexed_fixture() else { return };
+    if flightindex::pkgview_swift::sdk().is_none() {
+        eprintln!("skipped: no SDK");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path().join("store")).unwrap();
+    let v = e.view_for_path(&r.root).unwrap();
+    e.build(&v, &[], |_| {}).unwrap();
+    let (g, _) = e.precise_graph(&v).unwrap().unwrap();
+    let f = g.file_idx(&r.root.join("Sources/App/Use.swift")).unwrap();
+    let i = g.file(f).facts.refs.iter().position(|x| g.name(x.name) == "print").unwrap();
+    // The store says "outside the repository", which the package symbol already says, and more.
+    assert_eq!(g.resolution(f).refs[i].confidence, Confidence::Package);
+    assert_eq!(g.package_target(f, i as u32).map(|s| s.module.to_string()).as_deref(), Some("Swift"));
 }

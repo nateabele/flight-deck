@@ -1,0 +1,5 @@
+// swift-interface-format-version: 1.0
+import Foundation
+import Swift
+@_exported import XCTest
+public func XCTAssertEqual<T>(_ expression1: @autoclosure () throws -> T, _ expression2: @autoclosure () throws -> T) where T : Swift.Equatable
