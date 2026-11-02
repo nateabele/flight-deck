@@ -122,7 +122,7 @@ final class PlanTableParseTests: XCTestCase {
         XCTAssertEqual(squeezed, [150, 150], "when even the words don't fit, all shrink together")
     }
 
-    func testNatesTableWrapsInsideItsCells() throws {
+    func testADecisionTableWrapsInsideItsCells() throws {
         let source = """
         | Area | First-release decision | Acceptance boundary |
         |---|---|---|
