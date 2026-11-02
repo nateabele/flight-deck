@@ -56,8 +56,16 @@ The output files are `<out>/<label>-summary.json` (repo → strategy → means) 
 
 Run the variant from your own worktree's build against the same `--store` and `--out`. The cached tasks and parsed blobs are reused, so the only cost of a rerun is the per-commit graph and the strategies.
 
+## Scoring `near` with leak-free seeds
+[`examples/eval_near.rs`](../../../Packages/FlightIndex/examples/eval_near.rs) scores `find`, `grep`, `refs` and `impact` with `near` off and on. A seed must be something an agent could hold at the start of the task, so no seed may come from the task's own diff. `Probe::tool_recent` hands the seeds to the tool as `Ctx::recent`, the service's default seed set, so a cell scores the tool's default behaviour, not an explicit `near`.
+- **`auth1`, `auth3`** (`eval::seeds::author_files`): the files touched by the same author's previous 1 or 3 non-merge commits among the parent's ancestors (looking back 200 commits), newest first. This stands in for "what the agent was just working on". Every task is answered; an author with no earlier commit gets no seed, which is the `off` answer.
+- **`open`**: the first gold file, on tasks with 2 or more gold files, left out of the ranking and the gold set. `openoff` is the same task set and exclusion with no seed.
+- **`impact`** asks about the first gold file (2+ gold files, that file excluded), with co-change from the parent's history. `impact_*` reads the whole main text, `impactrad_*` only the `Direct importers` and `Transitive blast radius` lists, and `impact_{auth3,open}x` pass the seeds as an explicit `near`.
+
+The results and the per-tool defaults they set are in the tool contract, under "near". Compare cells pairwise per task (each `on` cell against its `off` cell on the same commits) from `<label>-tasks.jsonl`; the means alone hide how many tasks moved.
+
 ## Known limits (first version)
 - `map` skips test files unless `all_files` is set, so a gold test file is never found by `map`. The scores keep this, because it is the tool's real behaviour.
 - `grep search_bodies` and `read` read from the worktree on disk, which is not the parent tree. No built-in strategy uses them.
-- `impact` is not scored yet.
+- `impact` is scored by `examples/eval_impact.rs` and `examples/eval_near.rs`, not by a built-in strategy.
 - Tasks run one after another. Each graph takes 0.3 s (flight-deck) to about 1 s (tessera) at load 10–16.
