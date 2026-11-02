@@ -114,11 +114,11 @@ impl SwiftTypes {
         self.lineage(ty).into_iter().find_map(|t| map.get(&(t, name.to_string())).cloned())?
     }
 
-    fn prop(&self, ty: &str, name: &str) -> Option<String> {
+    pub(super) fn prop(&self, ty: &str, name: &str) -> Option<String> {
         self.lookup(&self.props, ty, name)
     }
 
-    fn ret(&self, ty: &str, name: &str) -> Option<String> {
+    pub(super) fn ret(&self, ty: &str, name: &str) -> Option<String> {
         self.lookup(&self.rets, ty, name)
     }
 
@@ -182,9 +182,9 @@ pub(super) fn mentions(pool: &NamePool, f: &InternedFacts, names: &HashSet<Strin
 /// One segment of a receiver: `name`, `name(...)` (or a trailing closure), generic arguments and
 /// `?`/`!` dropped.
 #[derive(Debug, PartialEq)]
-struct Seg<'a> {
-    name: &'a str,
-    call: bool,
+pub(super) struct Seg<'a> {
+    pub(super) name: &'a str,
+    pub(super) call: bool,
 }
 
 /// Skip a balanced group opening at `s[i]`; returns the index after its close. Angle brackets
@@ -216,7 +216,7 @@ fn skip_group(s: &[u8], mut i: usize) -> Option<usize> {
 }
 
 /// `a.b(x).c?.d` as segments; `None` for anything else (a subscript, an operator, a literal).
-fn segments(q: &str) -> Option<Vec<Seg<'_>>> {
+pub(super) fn segments(q: &str) -> Option<Vec<Seg<'_>>> {
     let mut q = q.trim();
     for p in ["try? ", "try! ", "try ", "await "] {
         while let Some(rest) = q.strip_prefix(p) {
@@ -266,6 +266,11 @@ impl GraphData {
     pub(super) fn swift_receiver_type(&self, f: u32, q: &str, line: u32, enclosing: Option<u32>) -> Option<String> {
         let ty = self.swift_eval(f, q, line, enclosing, &mut Vec::new())?;
         (!ty.starts_with('[')).then_some(ty)
+    }
+
+    /// `swift_receiver_type` with array types kept (`[Item]`): the SDK's `Array` members apply.
+    pub(super) fn swift_receiver_type_any(&self, f: u32, q: &str, line: u32, enclosing: Option<u32>) -> Option<String> {
+        self.swift_eval(f, q, line, enclosing, &mut Vec::new())
     }
 
     /// The nearest type (or extension) around symbol `enclosing` in file `f`.
@@ -342,7 +347,7 @@ impl GraphData {
     }
 
     /// Does a Swift file of the view declare a type (not an extension) named `ty`?
-    fn swift_is_repo_type(&self, ty: &str) -> bool {
+    pub(super) fn swift_is_repo_type(&self, ty: &str) -> bool {
         self.named(ty).into_iter().flatten().any(|id| {
             let f = &self.files[id.file as usize];
             f.language == "swift"

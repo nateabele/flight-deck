@@ -1168,6 +1168,13 @@ impl Service {
             p.names,
             if p.missing_docs.is_empty() { String::new() } else { format!("; no docs.json: {}", p.missing_docs.join(", ")) }
         );
+        // Swift package views (`pkgview_swift`): the SDK, and its modules parsed so far.
+        let sw = crate::pkgview_swift::stats();
+        data["swift_sdk"] = json!({"sdk": sw.sdk, "modules": sw.modules, "names": sw.names, "not_in_sdk": sw.missing});
+        let text = match &sw.sdk {
+            Some(sdk) => format!("{text}\nswift sdk: {sdk}, {} modules parsed, {} names", sw.modules, sw.names),
+            None => format!("{text}\nswift sdk: none (no xcrun); SDK names stay unresolved"),
+        };
         Response { ok: true, text: Some(text), data: Some(data), ..Default::default() }
     }
 }

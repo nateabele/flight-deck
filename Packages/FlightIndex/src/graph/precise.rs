@@ -42,6 +42,10 @@ impl ViewGraph {
             for (ri, r) in node.facts.refs.iter().enumerate() {
                 let Some(sites) = p.lookup(&node.path, r.line, names.resolve(r.name)) else { continue };
                 if sites.is_empty() {
+                    // Outside the repository: a package symbol already says so, and which one.
+                    if res.refs[ri].confidence == Confidence::Package {
+                        continue;
+                    }
                     res.refs[ri] = RefRes { target: None, confidence: Confidence::Precise, external: None };
                     changed = true;
                     continue;

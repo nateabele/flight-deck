@@ -910,6 +910,15 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
   incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
   before, 0.81 GB after.
+- **Package views.** References into a dependency bind to the dependency's own declaration
+  (`Confidence::Package`, never ranked, no file edge): Elm packages from `~/.elm` (`src/pkgview.rs`)
+  and, for Swift, the active Apple SDK (`src/pkgview_swift/`, `src/graph/swift_pkg.rs`), read from
+  each module's `.swiftinterface` and its framework headers plus API notes, once per process and
+  SDK version (59 modules for flight-deck: 0.3 s CPU, 14 to 29 MB RSS; a full graph then takes
+  1.4 s CPU instead of 1.0 s). On flight-deck the SDK views took Swift's unresolved references
+  from 134,317 to 35,400 at 0.995 precision against the Xcode index store;
+  `swift-symbolgraph-extract` would be exact but took 113 s and 1.2 GB for Foundation alone. `src/indexstore.rs` reads that index store (libIndexStore, `dlopen`ed) as a precise layer
+  and as the answer key `examples/swiftres.rs` scores the heuristics with.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

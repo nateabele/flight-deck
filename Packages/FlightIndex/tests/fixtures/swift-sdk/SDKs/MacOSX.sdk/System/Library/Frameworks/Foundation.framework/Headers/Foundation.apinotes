@@ -1,0 +1,5 @@
+---
+Name: Foundation
+Classes:
+- Name: NSFileManager
+  SwiftName: FileManager
