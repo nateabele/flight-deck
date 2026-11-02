@@ -969,6 +969,14 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   on this repository from 23,843 to 13,405 (nearly all of the rest are method calls,
   which need the receiver's type); loading std, core and alloc costs about two CPU seconds
   once per daemon, the crates a repository reaches about 10 to 16 MB of heap.
+- **Package views.** A reference into a dependency resolves to a symbol of that package version
+  (`Confidence::Package`, no target, never ranked), read only from what is already on disk and
+  parsed once per process: Elm from `$ELM_HOME`'s `docs.json` (`src/pkgview.rs`); Elixir's
+  standard library from the installed release's `.beam` files (EEP-48 `Docs` chunk, else the
+  export table) and Mix dependencies at their `mix.lock` versions from `deps/` sources plus a
+  matching `_build` (`src/hexview/`). Elixir `use` is followed into `__using__` (and ExUnit's
+  `using do`): what it imports and aliases reach the using file (`src/graph/elixir_pkg.rs`). On
+  tessera, Elixir unresolved references went from 31,883 to 958.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

@@ -28,7 +28,8 @@ pub mod npm;
 /// One package at one version, as a package manager names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackageId {
-    /// `elm`, `npm`, `cargo` (crates and std/core/alloc, see `cargo`); `hex`, `swiftpm` later.
+    /// `elm`, `npm`, `cargo` (crates and std/core/alloc, see `cargo`); `elixir` (the standard
+    /// library) and `hex` / `git` (Mix dependencies, see `hexview`); `swiftpm` later.
     pub manager: &'static str,
     /// `elm/core`
     pub name: String,
@@ -60,12 +61,14 @@ pub enum PkgKind {
     Member,
     /// Rust: a trait.
     Trait,
-    /// Rust: an exported `macro_rules!`.
+    /// A macro: a Rust exported `macro_rules!`, or an Elixir macro (`assert`, `Kernel.then`).
     Macro,
     /// Rust: a function of an `impl` or `trait` block; its module ends with the type's name.
     Method,
     /// Rust: a `const` or `static`.
     Const,
+    /// An Elixir module (`MapSet`, `Phoenix.Socket`): `module` is its full name.
+    Module,
 }
 
 impl PkgKind {
@@ -86,6 +89,7 @@ impl PkgKind {
             PkgKind::Macro => "macro",
             PkgKind::Method => "method",
             PkgKind::Const => "const",
+            PkgKind::Module => "module",
         }
     }
 }
@@ -105,9 +109,10 @@ impl PkgSymbol {
     /// `elm/core@1.0.5 List.map`, `std@1.96.0 collections::hash::map::HashMap::new`: what
     /// `find`/`refs` print. A Rust crate-root item has no module (`serde_json@1.0.140 json`).
     pub fn display(&self) -> String {
-        match (self.package.manager, self.module.is_empty()) {
-            ("cargo", true) => format!("{} {}", self.package, self.name),
-            ("cargo", false) => format!("{} {}::{}", self.package, self.module, self.name),
+        match (self.package.manager, self.kind, self.module.is_empty()) {
+            (_, PkgKind::Module, _) => format!("{} {}", self.package, self.module),
+            ("cargo", _, true) => format!("{} {}", self.package, self.name),
+            ("cargo", _, false) => format!("{} {}::{}", self.package, self.module, self.name),
             _ => format!("{} {}.{}", self.package, self.module, self.name),
         }
     }
@@ -120,6 +125,8 @@ impl PkgSymbol {
             PkgKind::Namespace => "/",
             PkgKind::Method => "().",
             PkgKind::Macro => "!",
+            // A namespace descriptor: `hex jason 1.4.4 Jason/`.
+            PkgKind::Module => return format!("{} {} {} {}/", self.package.manager, self.package.name, self.package.version, self.module.replace('.', "/")),
             _ => ".",
         };
         let p = &self.package;

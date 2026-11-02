@@ -62,6 +62,8 @@ pub struct Resolver {
     rust_packages: Mutex<HashMap<String, Option<Arc<RustDeps>>>>,
     /// The crates a Rust file outside every Cargo package can name: std alone.
     rust_std_only: OnceLock<Arc<RustDeps>>,
+    /// The Elixir project (standard library and `mix.lock` dependencies) above each directory.
+    elixir_projects: crate::hexview::ProjectCache,
 }
 
 /// A bare specifier's package module, or none (no declarations installed).
@@ -94,7 +96,7 @@ impl Resolver {
             }
         }
         let swift_modules = swift::swift_module_names(paths.iter());
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, npm: Mutex::new(HashMap::new()), rust_packages: Mutex::new(HashMap::new()), rust_std_only: OnceLock::new() }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, npm: Mutex::new(HashMap::new()), rust_packages: Mutex::new(HashMap::new()), rust_std_only: OnceLock::new(), elixir_projects: Default::default() }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -168,6 +170,11 @@ impl Resolver {
     pub fn elm_packages(&self, from: &str) -> Option<Arc<ProjectPackages>> {
         let p = self.elm_project(from)?;
         Some(p.packages.get_or_init(|| Arc::new(crate::pkgview::elm_project_packages(&p.manifest, crate::pkgview::elm_home().as_deref()))).clone())
+    }
+
+    /// The Elixir packages a file at `from` can call (see `hexview`).
+    pub fn elixir_packages(&self, from: &str) -> Option<Arc<crate::hexview::ExProject>> {
+        self.elixir_projects.for_file(&self.root, from)
     }
 
     fn elm_module(&self, from: &str, module: &str) -> Resolved {

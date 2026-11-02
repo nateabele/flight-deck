@@ -37,6 +37,7 @@ pub mod blocks;
 mod compact;
 mod ecma_pkg;
 mod elixir;
+mod elixir_pkg;
 mod elm_pkg;
 mod precise;
 pub(crate) mod ppr;
@@ -543,10 +544,12 @@ impl GraphData {
                     }
                 };
                 for (fr, rr) in f.facts.refs.iter().zip(&r.refs) {
-                    // A package reference is not soft: the scope that found it is consulted only after
-                    // the file's own imports and before any fallback, so no name appearing in another
-                    // file can take it over.
-                    if (rr.target.is_none() && rr.confidence != Confidence::Package) || rr.confidence == Confidence::Fallback || f.language == "swift" {
+                    // An Elm package reference is not soft: the scope that found it is consulted only
+                    // after the file's own imports and before any fallback, so no name appearing in
+                    // another file can take it over. An Elixir one is: `Jason.encode!` turns into a
+                    // repository reference as soon as some file defines `Jason`, import or not.
+                    let package = rr.confidence == Confidence::Package;
+                    if (rr.target.is_none() && !package) || rr.confidence == Confidence::Fallback || f.language == "swift" || (package && f.language == "elixir") {
                         let name = self.name(fr.name);
                         push(name);
                         if let Some(q) = self.qualifier(fr) {
@@ -1082,16 +1085,35 @@ impl GraphData {
             "typescript" | "tsx" | "javascript" => ecma_pkg::EcmaPkgScope::new(&facts.imports, &imports).map(rust_pkg::PkgScope::Ecma),
             _ => None,
         };
+        // Elixir: the package scope, and the repository imports that `use` brings.
+        let ex_scope = (lang == "elixir").then(|| self.elixir_scope(f)).flatten().map(|(s, b)| {
+            globs.extend(b.globs);
+            for (n, r) in b.locals {
+                locals.entry(n.clone()).or_insert((r, n));
+            }
+            for t in b.files {
+                add_edge(&mut edges, t);
+            }
+            s
+        });
         let mut pkg_refs = elm_pkg::PkgRefs::default();
         for (ri, r) in facts.refs.iter().enumerate() {
             let mut rr = match &swift_keys {
                 Some(keys) => self.swift_ref(f, r, keys),
-                None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
+                None => match ex_scope.as_ref().and_then(|s| self.elixir_aliased_ref(s, r)) {
+                    Some(rr) => rr,
+                    None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
+                },
             };
             // Nothing in the view, or only a unique-name guess: a package name beats both.
-            if (rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none())
-                && let Some(sym) = pkg_scope.as_ref().and_then(|scope| scope.lookup(self.name(r.name), self.qualifier(r), r.kind))
-            {
+            let unbound = rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none();
+            let hit = match (&pkg_scope, &ex_scope) {
+                _ if !unbound => None,
+                (Some(scope), _) => scope.lookup(self.name(r.name), self.qualifier(r), r.kind),
+                (_, Some(scope)) => self.elixir_package_ref(scope, r),
+                _ => None,
+            };
+            if let Some(sym) = hit {
                 pkg_refs.push(ri as u32, sym);
                 rr = RefRes { target: None, confidence: Confidence::Package, external: None };
             }

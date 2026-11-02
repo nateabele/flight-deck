@@ -19,7 +19,9 @@ pub fn candidates(c: &Ctx, name: &str, repo_hits: usize) -> Vec<Arc<PkgSymbol>> 
     if repo_hits > 0 && !name.contains('.') && !name.contains("::") {
         return Vec::new();
     }
-    c.graph.find_package_symbols(name)
+    let mut out = c.graph.find_package_symbols(name);
+    out.extend(c.graph.find_elixir_package_symbols(name));
+    out
 }
 
 /// One `find` match block.

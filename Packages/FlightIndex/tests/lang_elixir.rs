@@ -166,7 +166,36 @@ fn struct_literals_are_type_references_to_the_expanded_module() {
 fn kernel_and_unknown_local_calls_are_not_recorded() {
     let f = facts();
     assert!(!f.refs.iter().any(|r| r.name == "is_integer"));
-    assert!(!f.refs.iter().any(|r| r.name == "unknown_local"), "not defined here, nor imported by name");
+    // SRC has `use GenServer`, which may import anything; without a `use` or a wholesale import
+    // a bare call nobody defines or imports by name is dropped.
+    let src = "defmodule Q do\n  import Enum, only: [map: 2]\n  def f, do: unknown_local()\nend\n";
+    let q = lang::by_id("elixir").unwrap().extract(src);
+    assert!(!q.refs.iter().any(|r| r.name == "unknown_local"), "not defined here, nor imported by name");
+}
+
+#[test]
+fn a_use_keeps_bare_calls_because_its_using_may_import_them() {
+    let f = facts();
+    assert!(has_ref(&f, None, "unknown_local", RefKind::Call), "`use GenServer` may have imported it");
+}
+
+#[test]
+fn a_case_template_using_block_is_a_using_macro_holding_its_imports() {
+    let src = "defmodule App.Case do\n  use ExUnit.CaseTemplate\n\n  using do\n    quote do\n      import App.Case\n    end\n  end\n\n  def helper, do: 1\nend\n";
+    let f = lang::by_id("elixir").unwrap().extract(src);
+    let u = sym(&f, "__using__");
+    assert_eq!((u.kind, u.parent, u.start_line, u.end_line), (SymbolKind::Macro, Some(sym(&f, "App.Case").local_id), 4, 8));
+    let imp = f.imports.iter().find(|i| i.specifier == "App.Case").unwrap();
+    assert!(imp.line >= u.start_line && imp.line <= u.end_line);
+}
+
+#[test]
+fn import_of_the_unquoted_module_inside_a_quote_imports_the_defining_module() {
+    let src = "defmodule Props do\n  defmacro __using__(_) do\n    quote do\n      import unquote(__MODULE__)\n    end\n  end\nend\n";
+    let f = lang::by_id("elixir").unwrap().extract(src);
+    let imp = f.imports.iter().find(|i| i.line == 4).expect("an import on line 4");
+    assert_eq!((imp.specifier.as_str(), imp.names.len()), ("Props", 1));
+    assert_eq!(imp.names[0].name, "*");
 }
 
 #[test]

@@ -1183,6 +1183,16 @@ impl Service {
             p.crates.names,
             if p.crates.missing.is_empty() { String::new() } else { format!("; not read: {}", p.crates.missing.join(", ")) }
         );
+        // Elixir's (`hexview`): standard-library applications and Mix dependencies parsed, and
+        // locked versions with no matching `deps/` copy.
+        let x = crate::hexview::stats();
+        data["elixir_packages"] = json!({"parsed": x.packages, "names": x.names, "missing": x.missing});
+        let text = format!(
+            "{text}\nelixir packages: {} parsed, {} names{}",
+            x.packages,
+            x.names,
+            if x.missing.is_empty() { String::new() } else { format!("; not found: {}", x.missing.join(", ")) }
+        );
         Response { ok: true, text: Some(text), data: Some(data), ..Default::default() }
     }
 }
