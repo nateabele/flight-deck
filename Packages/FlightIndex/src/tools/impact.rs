@@ -58,8 +58,7 @@ pub struct Partner {
 
 /// Partners of any seed, by the best confidence `P(partner changed | seed changed)` over the seeds,
 /// then by support, then by path. Seeds are not their own partners. `impact` reads the lists
-/// through `impact_index`; this is the plain form its tests compare against.
-#[cfg(test)]
+/// through `impact_index`; this is the plain form its tests compare against and `analyze` uses.
 pub fn ranked_partners(co: &crate::cochange::CoChange, seeds: &[&str], min_support: u32) -> Vec<Partner> {
     rank_partner_lists(seeds.iter().map(|s| (*s, co.touches(s), co.partners_of(s, min_support).into_iter())), seeds)
 }

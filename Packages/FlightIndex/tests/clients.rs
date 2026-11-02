@@ -90,7 +90,7 @@ fn the_shim_answers_tool_calls_from_the_daemon_with_the_callers_cwd() {
     let init = s.rpc("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}));
     assert_eq!(init["result"]["serverInfo"]["name"], "flightdeck-index");
     writeln!(s.stdin, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
-    assert_eq!(s.rpc("tools/list", json!({}))["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(s.rpc("tools/list", json!({}))["result"]["tools"].as_array().unwrap().len(), 20);
 
     let (err, text) = s.call("qartez_find", json!({"name": "entry"}));
     assert!(!err && text.starts_with("view: ") && text.contains("entry (function)"), "{text}");

@@ -12,6 +12,7 @@
 //! fdindex <tool> [first-arg] [--flag value]...                              query it
 //!
 //! tools: map find grep read outline deps stats impact refs calls
+//!        analyze <report> (unused cochange context hierarchy diff_impact hotspots; `analyze help`)
 //! mutators (preview unless --apply): replace_symbol insert_before_symbol insert_after_symbol
 //!        rename move safe_delete rename_file
 //!        build <path> | gc [path] [--now] | add_root <path>   (admin: index a view now, collect, hint)
@@ -144,6 +145,7 @@ fn positional_param(tool: &str, first: &str) -> Option<&'static str> {
         "find" | "calls" => "name",
         "refs" => "symbol",
         "grep" => "query",
+        "analyze" => "report",
         "outline" | "deps" | "impact" | "stats" | "build" | "gc" | "add_root" | "workspace" => "file_path",
         // `read src/x.rs` reads a file; `read parse_config` reads a symbol.
         "read" if first.contains('/') || std::path::Path::new(first).is_file() => "file_path",

@@ -70,6 +70,7 @@ fn tool_and_parameter_names_stay_the_qartez_set() {
         ("qartez_rename_file", vec!["apply", "from", "to"]),
         ("qartez_add_root", vec!["alias", "path", "persist", "watch"]),
         ("qartez_workspace", vec!["action", "alias", "path"]),
+        ("qartez_analyze", vec!["file_path", "files", "limit", "report", "symbol", "terms", "token_budget"]),
     ]);
     let got: BTreeMap<String, Vec<String>> = tools()
         .iter()
@@ -124,7 +125,8 @@ fn descriptions_claim_only_what_fdindex_does() {
     for t in tools() {
         for (at, d) in all_descriptions(&t) {
             // fdindex has no FTS5 table or tree-sitter call analysis, and exposes none of these tools.
-            for wrong in ["FTS5", "tree-sitter", "qartez_hierarchy", "qartez_unused", "qartez_context", "qartez_health", "reject_mermaid"] {
+            // The analysis tier is one tool, `qartez_analyze report=…`, not qartez's tool per report.
+            for wrong in ["FTS5", "tree-sitter", "qartez_hierarchy", "qartez_unused", "qartez_context", "qartez_cochange", "qartez_diff_impact", "qartez_hotspots", "qartez_health", "reject_mermaid"] {
                 assert!(!d.contains(wrong), "{at} mentions {wrong}: {d}");
             }
         }
@@ -148,7 +150,35 @@ fn instructions_route_each_question_to_a_tool() {
     for must in ["Flight Deck", "machine-wide", "absolute", "view:", "index: building", "state: UNAVAILABLE", "rg"] {
         assert!(s.contains(must), "instructions lack {must:?}");
     }
+    assert!(s.contains("qartez_analyze") && s.contains("report=help"), "instructions do not route the analysis tier: {s}");
     // A routing line per question, e.g. "Who uses symbol X? qartez_refs".
     assert!(s.contains("Who uses"), "{s}");
     assert!(s.len() <= 1_400, "instructions are {} chars", s.len());
+}
+
+#[test]
+fn analyze_is_one_tool_whose_report_enum_names_every_analysis() {
+    let t = tool("qartez_analyze");
+    assert_eq!(t["inputSchema"]["required"], json!(["report"]));
+    let reports: Vec<&str> = t["inputSchema"]["properties"]["report"]["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    for r in flightindex::tools::analyze::REPORTS.iter().chain(&["help"]) {
+        assert!(reports.contains(r), "report enum lacks {r}");
+    }
+    let d = desc("qartez_analyze");
+    assert!(d.contains("report=help"), "{d}");
+    assert_eq!(t["annotations"]["readOnlyHint"], true);
+}
+
+/// Every session pays for the tool list. Measured with `claude -p` (input tokens with the server
+/// minus without it, sonnet): 9,814 tokens for the 19 tools before the analysis tier, 7,631 with
+/// the boilerplate below dropped, 8,155 with `qartez_analyze` added (20,811 bytes serialized). The
+/// bytes track that cost, so these checks keep the boilerplate out and the list near that size.
+#[test]
+fn the_tool_list_stays_compact() {
+    let list = tools();
+    let text = serde_json::to_string(&list).unwrap();
+    for (bloat, why) in [("\"$schema\"", "a $schema key"), ("\"null\"", "a null type"), ("\"default\":null", "a null default"), ("\"uint32\"", "a uint32 format"), ("\"$defs\"", "a $defs table")] {
+        assert!(!text.contains(bloat), "the tool list carries {why}");
+    }
+    assert!(text.len() <= 21_000, "the tool list is {} bytes", text.len());
 }

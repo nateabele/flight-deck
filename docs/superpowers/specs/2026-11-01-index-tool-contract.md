@@ -35,6 +35,70 @@ Every MCP tool is named `qartez_<verb>`, so existing skills, hooks and habits ke
 | refs | symbol | transitive, include_tests (true), format, token_budget | The importing files and their reference sites, grouped by importer, nearest the definition first. `transitive=true` adds the dependent chain (30 rows, ranked). |
 | calls | name | direction (callers\|callees\|both; default both), depth (1, max 10, 0 = target only), file_path, kind, include_tests (false), limit (50), format (incl. mermaid), token_budget | If the name matches more than one function-like definition and no `file_path` or `kind` is given, refuse and list the candidates. `depth>=2` prints a signature-only tree. Rows are ranked per depth by directory proximity to the target. |
 
+## Analysis tier (`qartez_analyze`)
+
+One tool, not qartez's tool per analysis. `report` (required) picks the analysis; the schema lists
+only the parameters several reports share (`file_path`, `files`, `terms`, `symbol`, `limit`,
+`token_budget`). `report=help` returns every report's parameters, including the ones only one report
+reads (`direction`, `depth`, `min_support`, `kind`, `include_tests`); the tool accepts those though
+the schema does not list them. The shim answers `report=help` itself, so it works while the daemon
+is down; the daemon answers it too (`fdindex analyze help`) without locating a view. An unknown or
+missing `report` is `BAD_REQUEST` naming the reports.
+
+| report | reads | output |
+|---|---|---|
+| unused | file_path (a file or directory to narrow to), kind, include_tests (false), limit (50) | `Unused exports: N (…)`, then `  - name (kind) <path>:Lstart-Lend`. An exported function, type, constant or macro (not a method, field, constructor or module) that no reference and no import names, in the answering view or a linked view. Matching is by name, so a reference the resolver could not bind still counts as a use. Survivors are then searched for as a word in every source file of those views, outside their own definition and outside line comments: the extractors record calls and type uses, not a Rust macro's arguments or a plain read of a Swift or Python constant. Left out as runtime entry points: `main`, Python dunders, OTP and LiveView callbacks, a Rust `extern "C"` function, a Swift `@main` type and a type alias nested in a type (a protocol witness). Ends with a note that callers outside these views are not seen. |
+| cochange | file_path or files (one required), min_support (2), limit (20) | `Co-change seeds: …` with each seed's commit count, then `Co-change partners (N; …):` rows `<path>  together/of (pct%)`, `with <seed>` when there are several seeds. Ranked as `impact` ranks its partners (best confidence over the seeds, then support), from the same per-repository table (last 2000 non-merge commits, commits touching more than 40 files skipped); only files the view has. |
+| context | files, terms (default seeds: the changed and recently read files) | `Related files (N):` rows `<path>  score (matches A, B; imports S; imported by S)`. Personalized PageRank restarting at the given files (weight 1) and at the files of the best BM25 matches for the terms (weight 1/(1+rank), top 10); a file whose symbols match a term is boosted x5 after the walk, as `map` boosts. Given files are not listed; matched files are. |
+| hierarchy | symbol (required), direction (up\|down\|both; both), depth (5, max 10), limit (50) | `Type hierarchy of T (kind) @ <path>:L`, then `Supertypes (N):` and `Subtypes (N):` rows `<path>:L  Name (kind) implements\|extends Parent [depth d]`, from the type-relation facts (`extends`, `implements`; Rust `impl Trait for T`, Swift conformances, TS `extends`/`implements`, Python bases, Elixir protocols) of the view and its linked views, matched by last name segment. A supertype not defined in the views is still listed, without a path. |
+| diff_impact | files (another seed set instead of the diff), include_tests (false), limit (30) | `Diff impact: N changed file(s): …`, then `Ranked impact (…):` interleaving the transitive importers of every changed file (nearest seed's depth, then PageRank) with the co-change partners of any of them, each with its reasons, then `Tests (N):` (changed tests, then name matches, test importers, test partners, as `impact`'s group). A clean worktree answers `no uncommitted changes`. |
+| hotspots | file_path (a file or directory to narrow to), include_tests (false), limit (15) | `Hotspots (…; score = commits x lines):` rows `<path>  score = C commits x L lines; longest function f Ls-Le (n lines)`. Churn is the co-change table's commit count per file. |
+
+**Why one tool.** Every tool an MCP server lists is paid for in every session's context. Measured
+as the input-token difference between `claude -p` with the shim and with no MCP server (sonnet,
+`--tools ""`, the same trivial prompt), the tool list and instructions cost:
+
+| tool list | tokens |
+|---|---|
+| master before this tier (19 tools) | 9,814 (8,625 at the description audit; parameters added since) |
+| the same 19, schema boilerplate dropped (below) | 7,631 |
+| + `qartez_analyze` (shipped) | 8,155 |
+| + `qartez_analyze` with only `report` in its schema (lazy discovery) | 7,929 |
+| + the six analyses folded into map/deps/refs/impact as modes | 7,925 |
+| + six separate qartez-style tools | 9,190 |
+
+The boilerplate: the `$schema` key, `"null"` in type unions and `anyOf`, `default: null`,
+`format: uint32` and `minimum: 0`, and the shared `$defs` (`Format`, `WorkspaceAction`), inlined as
+the same enums. Names, types, enums, required lists and annotations are unchanged; the shim still
+drops a null argument before it reaches the daemon. The "Aliases: …" sentences left the parameter
+descriptions too (the daemon accepts the aliases; an agent calls by the schema's names).
+
+**Analysis tier A/B.** Headless `claude -p --strict-mcp-config --tools ""` (sonnet), each arm a
+stub MCP server serving that arm's tool list and instructions and forwarding calls to one scratch
+daemon (`qartez_analyze` underneath, so every arm got the same answers), on a scratch clone of
+flight-deck with one uncommitted edit. Eight analysis tasks (two unused, cochange, two hierarchy,
+diff_impact, hotspots, context) x 2 reps, and three plain navigation tasks (callers, outline,
+importers) x 1 rep; recall is the gold names in the final answer. Load average 200-500 throughout
+(the machine is shared); nothing timed is CPU-bound.
+
+| arm | session tokens | analysis recall | right tool | calls/task | errors | input tokens/task |
+|---|---|---|---|---|---|---|
+| master (no tier; 1 rep) | 9,814 | 0.74 | — | 10.8 | 3 | 184k |
+| one `qartez_analyze` (shipped) | 8,155 | 0.91 | 16/16 | 2.0 | 0 | 66k |
+| lazy (`report` only; help for the rest) | 7,929 | 0.91 | 16/16 | 2.5 | 5 | 78k |
+| folded into existing tools as modes | 7,925 | 0.89 | 14/16 | 2.1 | 1 | 67k |
+| six separate tools (qartez's way) | 9,190 | 0.89 | 16/16 | 1.9 | 0 | 65k |
+
+Navigation tasks scored 1.00 at 1.3 calls in every arm, so neither the new tool nor the schema
+compaction disturbed the choice of the existing tools. Six separate tools break the budget (over
+8,625). The lazy arm saves 226 tokens a session, but agents called `report=hierarchy` without the
+`symbol` it does not advertise and retried (5 BAD_REQUEST, +0.5 calls and ~12k input tokens per
+analysis task), which outweighs the saving once one session in about fifty uses the tier. Folding
+changes four existing schemas, and no agent found `context` as a mode of `map`. The one tool with
+the common parameters in its schema had no errors and the fewest calls of the arms within budget.
+The weak task in every arm was `context` (recall 0.2-0.4 against a history-derived gold set):
+generic task words (`account`, `usage`, `limit`) match thousands of symbols, test methods among them.
+
 ## Mutators (preview by default; `apply=true` writes)
 | tool | required | optional |
 |---|---|---|
@@ -164,16 +228,16 @@ Newline-delimited JSON over a Unix socket (mode 0600). Default path: `<store>/fd
 
 ## CLI
 
-`fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <tool> [first-arg] [--flag value]…`. Flags become arguments as written (`--file-path x` is `file_path`, `--build-wait-ms` is `build_wait_ms`). A flag without a value is `true`; the boolean flags (`--regex`, `--transitive`, `--pending`, `--include-tests`, `--all-files`, `--search-bodies`, `--rank`, `--refresh`, …) never consume the next word. A repeated flag becomes a list. The first positional argument fills `name` (find, calls), `symbol` (refs), `query` (grep), `file_path` (outline, deps, impact, stats, build, gc, add_root); `read` takes a file if the argument contains `/` or is a file, else a symbol. If no daemon answers, the CLI starts `fdindex daemon` detached and retries. `fdindex status`, `fdindex stop` (returns when the daemon has exited) and `fdindex daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]` manage it (`--watch-hours`, default 6: how long an idle worktree keeps its in-memory view; `--no-watch`: every request reads `git status` and no ref watcher runs).
+`fdindex [--store DIR] [--socket PATH] [--cwd DIR] [--json] <tool> [first-arg] [--flag value]…`. Flags become arguments as written (`--file-path x` is `file_path`, `--build-wait-ms` is `build_wait_ms`). A flag without a value is `true`; the boolean flags (`--regex`, `--transitive`, `--pending`, `--include-tests`, `--all-files`, `--search-bodies`, `--rank`, `--refresh`, …) never consume the next word. A repeated flag becomes a list. The first positional argument fills `name` (find, calls), `symbol` (refs), `query` (grep), `report` (analyze), `file_path` (outline, deps, impact, stats, build, gc, add_root); `read` takes a file if the argument contains `/` or is a file, else a symbol. If no daemon answers, the CLI starts `fdindex daemon` detached and retries. `fdindex status`, `fdindex stop` (returns when the daemon has exited) and `fdindex daemon [--memory-mb N] [--graph-budget-mb N] [--build-wait-ms N] [--watch-hours N] [--no-watch]` manage it (`--watch-hours`, default 6: how long an idle worktree keeps its in-memory view; `--no-watch`: every request reads `git status` and no ref watcher runs).
 
 Management verbs (top level, and `fdindex service <verb>`): `status` (the daemon's report, exit 3 when it is not running; **never starts it**, unlike every query verb; `--json` prints the raw reply), `stop`, `start`, `restart`, `install`, `uninstall`. `fdindex mcp [--no-start]` is the MCP shim.
 
 ## MCP shim (`fdindex mcp`)
 
-A stdio MCP server, newline-delimited JSON-RPC 2.0 (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`; empty answers for `resources/list`, `prompts/list`). It holds no index and opens no database. Server name `flightdeck-index`; its `instructions` say, truthfully, that this is Flight Deck's machine-wide index, which tool answers which question (where is X defined: `find`, or `grep` for part of a name or body text; show code: `read`, `outline`; who uses X: `refs`, or `calls` for call edges and chains; what could break: `impact`, or `deps` for direct imports; a new repo: `map`, `stats`), that edits preview unless `apply=true`, that paths may be absolute or relative to the launch directory, that results carry a `view:` line, and that `state: UNAVAILABLE` means fall back to `rg`.
+A stdio MCP server, newline-delimited JSON-RPC 2.0 (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`; empty answers for `resources/list`, `prompts/list`). It holds no index and opens no database. Server name `flightdeck-index`; its `instructions` say, truthfully, that this is Flight Deck's machine-wide index, which tool answers which question (where is X defined: `find`, or `grep` for part of a name or body text; show code: `read`, `outline`; who uses X: `refs`, or `calls` for call edges and chains; what could break: `impact`, or `deps` for direct imports; a new repo: `map`, `stats`; dead exports, co-change, task context, type hierarchy, diff impact and hotspots: `analyze report=…`, with `report=help` for the parameters), that edits preview unless `apply=true`, that paths may be absolute or relative to the launch directory, that results carry a `view:` line, and that `state: UNAVAILABLE` means fall back to `rg`.
 
 - **cwd and seq.** The shim's launch directory is sent as `cwd` on every daemon request, with a `seq` that grows by one per `tools/call`. Under the `qartez` name, `--root DIR` sets that directory instead.
-- **Tools.** The qartez v0.11.0 names and JSON schemas, captured from the installed binary over MCP: `qartez_map, find, grep, read, outline, deps, stats, impact, refs, calls`; the mutators `qartez_replace_symbol, insert_before_symbol, insert_after_symbol, rename, move, safe_delete, rename_file`; and the build hints `qartez_add_root`, `qartez_workspace`. Not exposed (not in the first cut): `qartez_tools` and the 23 analysis, meta and refactor tools outside this list. Schemas are in `src/mcp_tools.json`. Tool names, parameter names, types, defaults and annotations are qartez's, except that `add_root` / `workspace` make `path` / `alias` optional (so `add_root` requires nothing, `workspace` requires `action`). The descriptions are fdindex's own (research proposal #2): each tool says in its first sentence what it returns, then which sibling to use instead (`find` vs `grep` vs `refs`; `refs` vs `calls`; `impact` vs `deps`; `read` vs `outline`), and nothing it does not do (no FTS5, no tree-sitter, no qartez tools fdindex lacks, no `query` alias on `find`, `with_health` ignored). Each parameter description says its meaning and default in one line; that path parameters take absolute or launch-relative paths is said once, in the instructions. `tests/mcp_descriptions.rs` holds the names to the qartez set and the descriptions to those rules: tool descriptions at most 360 characters, parameter descriptions at most 140, all of them together at most 9,000 (qartez's were 19,698).
+- **Tools.** The qartez v0.11.0 names and JSON schemas, captured from the installed binary over MCP: `qartez_map, find, grep, read, outline, deps, stats, impact, refs, calls`; the mutators `qartez_replace_symbol, insert_before_symbol, insert_after_symbol, rename, move, safe_delete, rename_file`; and the build hints `qartez_add_root`, `qartez_workspace`. Plus fdindex's own `qartez_analyze` (the analysis tier, above), which takes the place of qartez's `unused`, `cochange`, `context`, `hierarchy`, `diff_impact` and `hotspots` tools. Not exposed: `qartez_tools` and qartez's other analysis, meta and refactor tools. Schemas are in `src/mcp_tools.json`, without JSON-schema boilerplate (see "Why one tool"). Tool names, parameter names, types and annotations are qartez's, except that `add_root` / `workspace` make `path` / `alias` optional (so `add_root` requires nothing, `workspace` requires `action`). The descriptions are fdindex's own (research proposal #2): each tool says in its first sentence what it returns, then which sibling to use instead (`find` vs `grep` vs `refs`; `refs` vs `calls`; `impact` vs `deps`; `read` vs `outline`), and nothing it does not do (no FTS5, no tree-sitter, no qartez tools fdindex lacks, no `query` alias on `find`, `with_health` ignored). Each parameter description says its meaning and default in one line; that path parameters take absolute or launch-relative paths is said once, in the instructions. `tests/mcp_descriptions.rs` holds the names to the qartez set (plus `qartez_analyze`) and the descriptions to those rules: tool descriptions at most 360 characters, parameter descriptions at most 140, all of them together at most 9,800 (qartez's were 19,698), and the serialized list to no boilerplate and at most 21,000 bytes.
 - **Results.** A daemon answer is one text content block (the `view:` header included). A refusal is the same block with `isError: true`, reading `state: <STATE>` then the message. An unknown tool name is a JSON-RPC `-32602` error.
 - **Daemon down.** If the daemon cannot be reached and cannot be started, the call returns `isError: true` and `state: UNAVAILABLE` plus one line of reason, e.g. `the index daemon is not running (…) and auto-start is disabled`. After a failed start, further calls answer the same at once for 5 s instead of each waiting out a start. `--no-start` (or `FLIGHTDECK_INDEX_NO_START`) disables the start; the default is to start the daemon, as every client does.
 - **Reconnect.** A dead connection (the daemon restarted or was killed) is replaced and the call sent again. An applied edit (`apply=true` on a mutator) is never replayed: the shim first asks the daemon `hello` on the existing connection, so a stale one is found before the edit is sent, and a connection lost after the edit was sent is reported as UNAVAILABLE with a note that the file may have been written.

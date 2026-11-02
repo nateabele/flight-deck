@@ -4,9 +4,12 @@
 //! returns `state: UNAVAILABLE` with the reason (spec §6), never an answer from a private index.
 //!
 //! MCP over stdio is newline-delimited JSON-RPC 2.0. Requests are answered one at a time, in order.
-//! The tool list (`mcp_tools.json`) keeps the qartez v0.11.0 tool and parameter names and schema
-//! shapes, so agent habits keep working. The descriptions are fdindex's own: what each tool does and
-//! which sibling to use instead, tersely (tests/mcp_descriptions.rs holds them to that).
+//! The tool list (`mcp_tools.json`) keeps the qartez v0.11.0 tool and parameter names and types, so
+//! agent habits keep working, without JSON-schema boilerplate (null unions, `$schema`, `$defs`):
+//! every session pays for the list. The analysis tier is one tool, `qartez_analyze`, whose `report`
+//! picks the analysis, not a tool per analysis (`tools/analyze.rs`). The descriptions are
+//! fdindex's own: what each tool does and which sibling to use instead, tersely
+//! (tests/mcp_descriptions.rs holds them to that).
 
 use crate::client::{connect_only, connect_or_start, Client};
 use crate::error::Result;
@@ -41,6 +44,7 @@ Which tool:\n\
 - Who uses symbol X? qartez_refs (every reference). Callers or callees, or a call chain: qartez_calls.\n\
 - What could break if file F changes? qartez_impact. F's direct imports and importers only: qartez_deps.\n\
 - New to the repo: qartez_map (files by importance); qartez_stats for counts.\n\
+- Dead exports, co-change partners, files for a task, type hierarchy, what the whole diff could break, hotspots: qartez_analyze report=… (report=help lists each report's parameters).\n\
 - Edits (rename, move, replace_symbol, insert_*, safe_delete, rename_file) preview unless apply=true.\n\
 Paths: absolute, or relative to the directory this server started in; results print absolute paths.\n\
 Each result starts with a `view:` line: the worktree, repository, base commit and dirty state that answered. `index: building` there means ask again shortly.\n\
@@ -109,6 +113,10 @@ impl Shim {
         }
         // Qartez schemas allow null for an unset optional; the daemon reads absent as unset.
         let args: Map<String, Value> = params["arguments"].as_object().map(|a| a.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+        // The analysis tier's parameter docs need no daemon: answer them here, even when it is down.
+        if name == "qartez_analyze" && args.get("report").and_then(Value::as_str).is_some_and(|r| r.trim().eq_ignore_ascii_case("help")) {
+            return Ok(json!({"content": [{"type": "text", "text": crate::tools::analyze::HELP}], "isError": false}));
+        }
         let (text, is_error) = match self.send(name, args) {
             Ok(r) if r.ok => (r.text.unwrap_or_default(), false),
             Ok(r) => (format!("state: {}\n{}", r.state.unwrap_or_else(|| state::ERROR.into()), r.error.unwrap_or_default()), true),
@@ -246,11 +254,11 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for n in [
             "map", "find", "grep", "read", "outline", "deps", "stats", "impact", "refs", "calls", "replace_symbol", "insert_before_symbol", "insert_after_symbol", "rename", "move",
-            "safe_delete", "rename_file", "add_root", "workspace",
+            "safe_delete", "rename_file", "add_root", "workspace", "analyze",
         ] {
             assert!(names.contains(&format!("qartez_{n}").as_str()), "missing {n}");
         }
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 20);
         let find = tools.iter().find(|t| t["name"] == "qartez_find").unwrap();
         assert_eq!(find["inputSchema"]["required"], json!(["name"]));
     }

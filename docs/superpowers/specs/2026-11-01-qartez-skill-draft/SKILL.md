@@ -30,6 +30,7 @@ file range you are about to `Edit`, and when a result says `state: UNAVAILABLE`.
 | imports and importers | `qartez_deps` |
 | who uses a symbol | `qartez_refs`, `qartez_calls` |
 | risk before editing | `qartez_impact` |
+| dead code, co-change, type hierarchy, diff impact, hotspots | `qartez_analyze report=…` |
 
 Infra-as-code is code only to the extent the languages are supported (Elm, Rust, TypeScript and
 JavaScript, Elixir, Swift, Python). For YAML, HCL, Dockerfiles and other manifests use `rg` and
@@ -52,12 +53,29 @@ Edit (preview unless `apply=true`): `qartez_replace_symbol`, `qartez_insert_befo
 
 Hints (accepted, they only start a build early): `qartez_add_root`, `qartez_workspace`.
 
-**Not available yet** (the analysis tier): `qartez_context`, `qartez_unused`, `qartez_diff_impact`,
-`qartez_hotspots`, `qartez_clones`, `qartez_health`, `qartez_refactor_plan`, `qartez_boundaries`,
-`qartez_hierarchy`, `qartez_trend`, `qartez_blame`, `qartez_security`, `qartez_semantic`,
-`qartez_path`, `qartez_project`, `qartez_wiki`, `qartez_tools`. Calling one is an error. Use `git`,
-`rg` and the project's own build and test commands instead. `qartez_impact` already includes the
-co-change partners (from git history) that `qartez_cochange` used to give.
+Analysis (one tool): `qartez_analyze report=<name>`. Each report is a mode of that tool, not a tool
+of its own, so the whole tier costs one small schema per session:
+
+| Question | Call |
+|---|---|
+| Which exports does nothing use? | `qartez_analyze report=unused` (`file_path` narrows to a file or directory) |
+| Which files change together with F (or a set)? | `report=cochange file_path=F` (or `files=[…]`) |
+| Which files matter for this task? | `report=context files=[…] terms=[…]` |
+| What implements, extends or conforms to T? What does T derive from? | `report=hierarchy symbol=T` (`direction=up/down`, `depth`) |
+| What could my uncommitted changes break; which tests to run? | `report=diff_impact` |
+| Where are the churn x size hotspots? | `report=hotspots` |
+
+`report=help` returns every report's parameters (`direction`, `depth`, `min_support`, `kind`,
+`include_tests`, `limit`); the tool accepts them although the schema lists only the common ones.
+Call it when a report needs more than `file_path`, `files`, `terms`, `symbol` or `limit`. It is
+answered without the daemon, so it works even when the index is down.
+
+**Not available** (qartez tools with no fdindex report): `qartez_clones`, `qartez_health`,
+`qartez_refactor_plan`, `qartez_boundaries`, `qartez_trend`, `qartez_blame`, `qartez_security`,
+`qartez_semantic`, `qartez_path`, `qartez_project`, `qartez_wiki`, `qartez_tools`. The old
+per-report names (`qartez_unused`, `qartez_cochange`, `qartez_context`, `qartez_hierarchy`,
+`qartez_diff_impact`, `qartez_hotspots`) do not exist either; use the reports above. For the rest
+use `git`, `rg` and the project's own build and test commands.
 
 ---
 
@@ -120,7 +138,7 @@ signal to use rg, not an error to work around.
 ## 6. Operating modes
 
 **Explore (read-only):** `qartez_map`, `qartez_find`, `qartez_grep`, `qartez_read`,
-`qartez_outline`, `qartez_refs`, `qartez_calls`, `qartez_deps`, `qartez_stats`.
+`qartez_outline`, `qartez_refs`, `qartez_calls`, `qartez_deps`, `qartez_stats`, `qartez_analyze`.
 
 **Change (edit-authorised):** `qartez_impact` first, then a mutator.
 
@@ -138,7 +156,9 @@ changes inside one symbol, after a `Read` of the range.
 - Debug: `qartez_find -> qartez_calls -> qartez_refs -> qartez_read -> qartez_deps`
 - Review before edit: `qartez_outline -> qartez_impact -> qartez_deps`
 - Refactor: `qartez_find -> qartez_refs -> qartez_impact -> qartez_rename/move (preview, then apply) -> re-run qartez_refs`
-- Pre-merge: `git diff --stat`, then `qartez_impact` on each changed load-bearing file
+- Pre-merge: `qartez_analyze report=diff_impact` (every changed file at once, with the tests to
+  run), then `qartez_impact` on each changed load-bearing file
+- Clean-up: `qartez_analyze report=unused` -> `qartez_refs` on each hit -> `qartez_safe_delete`
 
 ---
 
@@ -180,6 +200,6 @@ Missing_capability: <text or none>
 - `references/subagent-contract.md`
 - `references/host-matrix.md`
 - `references/confidence-model.md`
-- `references/doctrine-explore.md`, `doctrine-debug.md`, `doctrine-review.md`, `doctrine-refactor.md`, `doctrine-premerge.md` (these name analysis-tier tools that are not available yet; see Section 2)
+- `references/doctrine-explore.md`, `doctrine-debug.md`, `doctrine-review.md`, `doctrine-refactor.md`, `doctrine-premerge.md` (these name qartez's per-analysis tools; in fdindex they are `qartez_analyze` reports, and the rest are not available; see Section 2)
 - `references/tools.md`
 - `references/guard.md`
