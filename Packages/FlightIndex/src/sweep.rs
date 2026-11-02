@@ -40,6 +40,7 @@
 
 use crate::git::View;
 use crate::lang;
+use crate::listing::Listing;
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
@@ -54,20 +55,23 @@ const RACY_SECS: f64 = 2.0;
 /// beats asking about each path.
 const MAX_CANDIDATES: usize = 4096;
 
+/// Times are nanoseconds since the epoch (an `i64` holds them until 2262): 40 bytes a file, which
+/// matters because a snapshot holds one per indexed file and the daemon one snapshot per kept view.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Stat {
     ino: u64,
     size: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
+    mtime: i64,
+    ctime: i64,
     /// Old enough that an unchanged stat means unchanged content.
     settled: bool,
 }
 
 fn stat(path: &Path, now: f64, racy: f64) -> Option<Stat> {
     let m = std::fs::symlink_metadata(path).ok()?;
+    let ns = |s: i64, n: i64| s.saturating_mul(1_000_000_000).saturating_add(n);
     let ctime = m.ctime() as f64 + m.ctime_nsec() as f64 / 1e9;
-    Some(Stat { ino: m.ino(), size: m.size(), mtime: (m.mtime(), m.mtime_nsec()), ctime: (m.ctime(), m.ctime_nsec()), settled: now - ctime > racy })
+    Some(Stat { ino: m.ino(), size: m.size(), mtime: ns(m.mtime(), m.mtime_nsec()), ctime: ns(m.ctime(), m.ctime_nsec()), settled: now - ctime > racy })
 }
 
 /// Did it change since `old` was recorded? An unsettled `new` counts as changed: it may change
@@ -108,8 +112,13 @@ impl Changes {
 /// The stat of everything a worktree's view depends on, as of the last sweep.
 pub struct Snapshot {
     root: PathBuf,
-    /// Indexed files of the base tree and of the overlay, by path relative to the root.
-    files: HashMap<String, Option<Stat>>,
+    /// The base tree's files: the view's shared listing, and the stat of each by position in it.
+    /// A base path stays here when the file goes (its stat becomes `None`).
+    base: Listing,
+    base_stats: Vec<Option<Stat>>,
+    /// Indexed files outside the base tree (the overlay's new files, candidates being decided),
+    /// by path relative to the root.
+    extra: HashMap<String, Option<Stat>>,
     /// Directories git would not ignore ("" is the root).
     dirs: HashMap<String, Option<Stat>>,
     /// Ignore files by content: they are few and small, so they are read each sweep rather than
@@ -200,12 +209,18 @@ impl Snapshot {
         let root = view.label.worktree.clone();
         let t = now();
         let (dirs, _, gitignores) = walk(&root, None);
-        let mut paths: BTreeSet<String> = view.base.iter().map(|f| f.path.clone()).collect();
-        paths.extend(view.overlay.iter().filter(|o| matches!(o, crate::git::Overlay::Present(_))).map(|o| o.path().to_string()));
-        let files = paths.into_par_iter().map(|p| (root.join(&p), p)).map(|(abs, p)| (p, stat(&abs, t, racy))).collect();
+        let base = Listing::new(view.base.clone());
+        let base_stats = base.files().par_iter().map(|f| stat(&root.join(&f.path), t, racy)).collect();
+        let extra: Vec<String> = view
+            .overlay
+            .iter()
+            .filter(|o| matches!(o, crate::git::Overlay::Present(_)) && base.find(o.path()).is_none())
+            .map(|o| o.path().to_string())
+            .collect();
+        let extra = extra.into_par_iter().map(|p| (root.join(&p), p)).map(|(abs, p)| (p, stat(&abs, t, racy))).collect();
         let dirs = dirs.into_iter().map(|d| (stat(&root.join(&d), t, racy), d)).map(|(s, d)| (d, s)).collect();
         let ignores = gitignores.into_iter().chain(fixed_ignores(common)).map(|p| (ignore_hash(&p), p)).map(|(h, p)| (p, h)).collect();
-        Snapshot { root, files, dirs, ignores, known_ignored: HashSet::new(), racy }
+        Snapshot { root, base, base_stats, extra, dirs, ignores, known_ignored: HashSet::new(), racy }
     }
 
     /// What changed since the last sweep. Records the new stats first, so a path that changes
@@ -226,8 +241,22 @@ impl Snapshot {
         }
 
         let (root, racy) = (self.root.clone(), self.racy);
+        let files = self.base.files();
+        let changed: Vec<(usize, Option<Stat>)> = files
+            .par_iter()
+            .zip(self.base_stats.par_iter())
+            .enumerate()
+            .filter_map(|(i, (f, old))| {
+                let new = stat(&root.join(&f.path), t, racy);
+                differs(*old, new).then_some((i, new))
+            })
+            .collect();
+        for (i, new) in changed {
+            out.paths.insert(root.join(&files[i].path));
+            self.base_stats[i] = new;
+        }
         let changed: Vec<(String, Option<Stat>)> = self
-            .files
+            .extra
             .par_iter()
             .filter_map(|(p, old)| {
                 let new = stat(&root.join(p), t, racy);
@@ -236,7 +265,7 @@ impl Snapshot {
             .collect();
         for (p, new) in changed {
             out.paths.insert(root.join(&p));
-            self.files.insert(p, new);
+            self.extra.insert(p, new);
         }
 
         let changed_dirs: Vec<(String, Option<Stat>)> = self
@@ -267,8 +296,8 @@ impl Snapshot {
                     if name != ".git" && !self.dirs.contains_key(&rel) {
                         new_dirs.push(rel);
                     }
-                } else if lang::for_path(Path::new(&rel)).is_some() && !self.files.contains_key(&rel) && !self.known_ignored.contains(&rel) {
-                    self.files.insert(rel.clone(), stat(&root.join(&rel), t, racy));
+                } else if lang::for_path(Path::new(&rel)).is_some() && !self.has_file(&rel) && !self.known_ignored.contains(&rel) {
+                    self.extra.insert(rel.clone(), stat(&root.join(&rel), t, racy));
                     out.paths.insert(root.join(&rel));
                 }
             }
@@ -284,8 +313,8 @@ impl Snapshot {
                 self.dirs.entry(sub.clone()).or_insert_with(|| stat(&root.join(&sub), t, racy));
             }
             for f in files {
-                if !self.files.contains_key(&f) && !self.known_ignored.contains(&f) {
-                    self.files.insert(f.clone(), stat(&root.join(&f), t, racy));
+                if !self.has_file(&f) && !self.known_ignored.contains(&f) {
+                    self.extra.insert(f.clone(), stat(&root.join(&f), t, racy));
                     out.paths.insert(root.join(&f));
                 }
             }
@@ -313,13 +342,19 @@ impl Snapshot {
             if in_base(&rel) || present.contains(rel.as_str()) {
                 continue;
             }
-            if self.files.remove(&rel).flatten().is_some() {
+            if self.extra.remove(&rel).flatten().is_some() {
                 self.known_ignored.insert(rel);
             }
         }
     }
 
+    /// Whether the snapshot follows the file at `rel`.
+    fn has_file(&self, rel: &str) -> bool {
+        self.base.find(rel).is_some() || self.extra.contains_key(rel)
+    }
+
+    /// Files and directories followed.
     pub fn counts(&self) -> (usize, usize) {
-        (self.files.len(), self.dirs.len())
+        (self.base_stats.len() + self.extra.len(), self.dirs.len())
     }
 }

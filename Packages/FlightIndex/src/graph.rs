@@ -185,18 +185,22 @@ pub struct GraphData {
     /// The root the resolver read manifests under when this data was built.
     pub(crate) root: PathBuf,
     pub(crate) files: Vec<FileNode>,
-    pub(crate) index: HashMap<String, u32>,
+    /// Path -> file index of every live file. Shared with the base when an overlay adds or removes
+    /// no path (an `Arc`, copied on write by `with_changes`).
+    pub(crate) index: Arc<HashMap<String, u32>>,
     pub(crate) res: Vec<Arc<FileRes>>,
-    pub(crate) importers: Vec<Vec<u32>>,
+    /// The `Arc`s from here to `elm_modules` are the base's own when an overlay's came out equal,
+    /// and the two reference indexes are layers over the base's (see `compact`).
+    pub(crate) importers: Arc<Vec<Vec<u32>>>,
     /// target file -> files with a resolved reference into it that do not import it: a qualified
     /// Rust path (`a::m::f()` records no import), or a re-export followed through a barrel
     /// (`import { helper } from './lib'` lands in `lib/impl.ts`). `with_changes` re-resolves these
     /// next to `importers`, or their references keep a target whose local id has moved.
-    pub(crate) ref_dependents: Vec<Vec<u32>>,
+    pub(crate) ref_dependents: Arc<Vec<Vec<u32>>>,
     /// Every definition (but `impl` blocks) by name; look up with `named`.
-    name_index: NameIndex,
+    name_index: Arc<NameIndex>,
     /// target symbol -> (file, index into that file's `refs`) of every resolved reference to it
-    pub(crate) incoming: Incoming,
+    pub(crate) incoming: Arc<Incoming>,
     /// External file (relative to the root, as in `Resolved::External`) -> (file, index into that
     /// file's `refs`) of every reference that may land in it.
     pub(crate) external_refs: HashMap<PathBuf, Vec<(u32, u32)>>,
@@ -211,7 +215,7 @@ pub struct GraphData {
     /// How the file and symbol ranks were solved (sweeps, warm or cold).
     pub rank_stats: [rank::SolveStats; 2],
     resolver: Arc<Resolver>,
-    elm_modules: HashMap<String, Vec<u32>>,
+    elm_modules: Arc<HashMap<String, Vec<u32>>>,
     /// The repository's shared numbering and block table, if the graph was built with one; the
     /// blocks and name tables are then charged there, once, not to each graph.
     share: Option<Arc<Share>>,
@@ -294,11 +298,11 @@ impl ViewGraph {
             root: root.clone(),
             res: vec![empty_res; files.len()],
             files,
-            index: HashMap::new(),
-            importers: Vec::new(),
-            ref_dependents: Vec::new(),
-            name_index: NameIndex::default(),
-            incoming: Incoming::default(),
+            index: Arc::default(),
+            importers: Arc::default(),
+            ref_dependents: Arc::default(),
+            name_index: Arc::default(),
+            incoming: Arc::default(),
             external_refs: HashMap::new(),
             external_importers: HashMap::new(),
             location_sensitive: false,
@@ -306,7 +310,7 @@ impl ViewGraph {
             symbol_rank: Vec::new(),
             rank_stats: Default::default(),
             resolver: Arc::new(Resolver::new(Path::new(""), &[])),
-            elm_modules: HashMap::new(),
+            elm_modules: Arc::default(),
             share,
             names,
             resolved: 0,
@@ -316,14 +320,14 @@ impl ViewGraph {
             ppr: std::sync::OnceLock::new(),
             impact: std::sync::OnceLock::new(),
         };
-        g.reindex();
+        g.reindex(None);
         for f in 0..g.files.len() as u32 {
             if g.files[f as usize].alive {
                 g.res[f as usize] = g.intern(g.resolve_file(f));
             }
         }
         g.resolved = g.files.iter().filter(|f| f.alive).count();
-        g.finalize(near.map(|n| &*n.data));
+        g.finalize(near.map(|n| &*n.data), None);
         ViewGraph { label, root, data: Arc::new(g) }
     }
 
@@ -391,13 +395,13 @@ impl ViewGraph {
                             new_members.extend(swift_members(&node));
                             g.files.push(node);
                             let i = g.files.len() as u32 - 1;
-                            g.index.insert(f.path.clone(), i);
+                            Arc::make_mut(&mut g.index).insert(f.path.clone(), i);
                             changed.insert(i);
                         }
                     }
                 }
                 FileChange::Remove(path) => {
-                    if let Some(i) = g.index.remove(&path) {
+                    if let Some(i) = Arc::make_mut(&mut g.index).remove(&path) {
                         structural = true;
                         note_module(&g.files[i as usize]);
                         old_names.extend(names_of(&g.files[i as usize]));
@@ -411,7 +415,7 @@ impl ViewGraph {
         }
         g.res.resize(g.files.len(), Arc::default());
         let changed_names: HashSet<String> = old_names.symmetric_difference(&new_names).cloned().collect();
-        g.reindex();
+        g.reindex(Some((&self.data, &changed, structural)));
         // Receivers typed through a table entry an edit changed must be typed again, wherever
         // they are: one file's `let item: Car` types `h.item` in every other file.
         let type_change = match swift_types::SwiftTypes::changed_names(&self.data.swift_types, &g.swift_types) {
@@ -499,7 +503,7 @@ impl ViewGraph {
                 g.resolved += 1;
             }
         }
-        g.finalize(Some(&self.data));
+        g.finalize(Some(&self.data), Some(&self.data));
         ViewGraph { root: label.worktree.clone(), label, data: Arc::new(g) }
     }
 }
@@ -554,68 +558,131 @@ impl GraphData {
         })
     }
 
-    /// Rebuild the path index, resolver and name/module indexes from `files`.
-    fn reindex(&mut self) {
-        self.index = self.files.iter().enumerate().filter(|(_, f)| f.alive).map(|(i, f)| (f.path.clone(), i as u32)).collect();
-        let refs: Vec<FileRef> = self
-            .files
-            .iter()
-            .filter(|f| f.alive)
-            .map(|f| FileRef { path: f.path.clone(), blob_id: f.blob_id.clone(), language: f.language })
-            .collect();
-        self.resolver = Arc::new(Resolver::new(&self.root, &refs));
-        self.elm_modules.clear();
+    /// Rebuild the path index, resolver and name/module indexes from `files`. With `base` (the
+    /// graph `with_changes` derives this one from, the files it changed, and whether a path came
+    /// or went), what the change cannot have touched is the base's: the path index (`with_changes`
+    /// keeps it up to date itself) and, with no path added or removed, the resolver's path set;
+    /// the name index becomes a layer over the base's with the changed files masked.
+    fn reindex(&mut self, base: Option<(&GraphData, &HashSet<u32>, bool)>) {
+        if base.is_none() {
+            self.index = Arc::new(self.files.iter().enumerate().filter(|(_, f)| f.alive).map(|(i, f)| (f.path.clone(), i as u32)).collect());
+        }
+        self.resolver = Arc::new(match base {
+            Some((b, _, false)) => Resolver::with_paths(&self.root, b.resolver.paths().clone()),
+            _ => {
+                let refs: Vec<FileRef> = self
+                    .files
+                    .iter()
+                    .filter(|f| f.alive)
+                    .map(|f| FileRef { path: f.path.clone(), blob_id: f.blob_id.clone(), language: f.language })
+                    .collect();
+                Resolver::new(&self.root, &refs)
+            }
+        });
+        let mut elm_modules: HashMap<String, Vec<u32>> = HashMap::new();
         let mut defs: Vec<SymId> = Vec::new();
+        let masked: Option<Vec<u32>> = base.map(|(_, changed, _)| {
+            let mut m: Vec<u32> = changed.iter().copied().collect();
+            m.sort_unstable();
+            m
+        });
         for (fi, f) in self.files.iter().enumerate().filter(|(_, f)| f.alive) {
-            for s in &f.facts.symbols {
-                if s.kind != SymbolKind::Impl {
-                    defs.push(SymId { file: fi as u32, local: s.local_id });
+            // A layer holds only the changed files' definitions; the base answers for the rest.
+            if masked.as_ref().is_none_or(|m| m.binary_search(&(fi as u32)).is_ok()) {
+                for s in &f.facts.symbols {
+                    if s.kind != SymbolKind::Impl {
+                        defs.push(SymId { file: fi as u32, local: s.local_id });
+                    }
                 }
             }
             if let Some(m) = &f.facts.module_name {
-                self.elm_modules.entry(m.clone()).or_default().push(fi as u32);
+                elm_modules.entry(m.clone()).or_default().push(fi as u32);
             }
         }
+        self.elm_modules = match base {
+            Some((b, _, _)) if *b.elm_modules == elm_modules => b.elm_modules.clone(),
+            _ => Arc::new(elm_modules),
+        };
         let files = &self.files;
-        self.name_index = NameIndex::build(defs, |id| files[id.file as usize].symbol(id.local).name.as_str());
+        let name_of = |id: SymId| files[id.file as usize].symbol(id.local).name.as_str();
+        // As for the incoming index (`finalize`): a layer pays while it masks a small part.
+        let layered = match (base, masked) {
+            (Some((b, _, _)), Some(m)) if m.len() * 4 <= files.len() => NameIndex::over(&b.name_index, m, defs.clone(), name_of),
+            _ => None,
+        };
+        self.name_index = Arc::new(match layered {
+            Some(ix) => ix,
+            None if base.is_some() => {
+                // The base is itself a layer, or most files changed: index every file.
+                let all = files.iter().enumerate().filter(|(_, f)| f.alive).flat_map(|(fi, f)| f.facts.symbols.iter().filter(|s| s.kind != SymbolKind::Impl).map(move |s| SymId { file: fi as u32, local: s.local_id })).collect();
+                NameIndex::build(all, name_of)
+            }
+            None => NameIndex::build(defs, name_of),
+        });
         let swift = self.files.iter().filter(|f| f.alive && f.language == "swift").map(|f| &*f.facts);
         self.swift_types = Arc::new(swift_types::SwiftTypes::build(swift));
     }
 
     /// Every definition named `name` (but `impl` blocks), in file then source order.
-    pub(crate) fn named(&self, name: &str) -> Option<&[SymId]> {
+    pub(crate) fn named(&self, name: &str) -> Option<std::borrow::Cow<'_, [SymId]>> {
         self.name_index.get(name, |id| self.symbol(id).name.as_str())
     }
 
     /// Everything derived from `files` + `res`: importers, the incoming-reference index, ranks
-    /// (warm-started from `prior` when given).
-    fn finalize(&mut self, prior: Option<&GraphData>) {
+    /// (warm-started from `prior` when given). With `base` (the graph `with_changes` derives this
+    /// one from), indexes that came out equal are the base's, and the incoming-reference index is
+    /// a layer over the base's that masks only the files whose resolution differs from it.
+    fn finalize(&mut self, prior: Option<&GraphData>, base: Option<&GraphData>) {
         let n = self.files.len();
         self.ppr = std::sync::OnceLock::new();
         self.impact = std::sync::OnceLock::new();
-        self.importers = vec![Vec::new(); n];
+        let mut importers = vec![Vec::new(); n];
         for (i, r) in self.res.iter().enumerate() {
             for &t in &r.edges {
-                self.importers[t as usize].push(i as u32);
+                importers[t as usize].push(i as u32);
             }
         }
+        // Files whose resolution is not the base's block (by pointer, or by content for a graph
+        // built without a share): only their references can differ from the base's.
+        let masked: Option<Vec<u32>> = base.map(|b| {
+            (0..n as u32)
+                .filter(|&i| match b.res.get(i as usize) {
+                    Some(old) => !Arc::ptr_eq(old, &self.res[i as usize]) && **old != *self.res[i as usize],
+                    None => true,
+                })
+                .collect()
+        });
+        // A layer pays when it masks a small part of the graph; past a quarter, index it all.
+        let masked = masked.filter(|m| m.len() * 4 <= n && base.is_some_and(|b| !b.incoming.is_layer()));
         let mut pairs: Vec<(SymId, (u32, u32))> = Vec::new();
-        self.ref_dependents = vec![Vec::new(); n];
+        let mut ref_dependents = vec![Vec::new(); n];
         for (fi, r) in self.res.iter().enumerate() {
             let fi = fi as u32;
+            let own = masked.as_ref().is_none_or(|m| m.binary_search(&fi).is_ok());
             for (ri, rr) in r.refs.iter().enumerate() {
                 if let Some(t) = rr.target {
-                    pairs.push((t, (fi, ri as u32)));
+                    if own {
+                        pairs.push((t, (fi, ri as u32)));
+                    }
                     // `importers[t]` is sorted (filled in file order above), so this check is a
                     // binary search; `deps.last()` dedups because one file's refs are visited together.
-                    let deps = &mut self.ref_dependents[t.file as usize];
-                    if t.file != fi && deps.last() != Some(&fi) && self.importers[t.file as usize].binary_search(&fi).is_err() {
+                    let deps = &mut ref_dependents[t.file as usize];
+                    if t.file != fi && deps.last() != Some(&fi) && importers[t.file as usize].binary_search(&fi).is_err() {
                         deps.push(fi);
                     }
                 }
             }
         }
-        self.incoming = Incoming::build(pairs);
+        let same = |mine: Vec<Vec<u32>>, theirs: Option<&Arc<Vec<Vec<u32>>>>| match theirs {
+            Some(t) if **t == mine => t.clone(),
+            _ => Arc::new(mine),
+        };
+        self.importers = same(importers, base.map(|b| &b.importers));
+        self.ref_dependents = same(ref_dependents, base.map(|b| &b.ref_dependents));
+        self.incoming = Arc::new(match (base, masked) {
+            (Some(b), Some(m)) => Incoming::over(&b.incoming, m, pairs).expect("checked: the base is not a layer"),
+            _ => Incoming::build(pairs),
+        });
         self.external_refs.clear();
         self.external_importers.clear();
         for (fi, r) in self.res.iter().enumerate() {
@@ -703,6 +770,21 @@ impl ViewGraph {
                     rr.external,
                     r.pkg_refs.get(ri as u32).map(|s| s.scip())
                 ));
+            }
+            // The indexes queries read, which an overlay layers over its base's (`compact`).
+            let paths = |v: &[u32]| -> Vec<&str> {
+                let mut p: Vec<&str> = v.iter().map(|&j| self.files[j as usize].path.as_str()).collect();
+                p.sort();
+                p
+            };
+            out.push(format!("{} importers={:?} dependents={:?}", f.path, paths(&self.importers[i]), paths(&self.ref_dependents[i])));
+            for s in &f.facts.symbols {
+                let id = SymId { file: i as u32, local: s.local_id };
+                let mut named: Vec<String> = self.named(&s.name).unwrap_or_default().iter().map(|&d| sym(d)).collect();
+                named.sort();
+                let mut incoming: Vec<String> = self.incoming.get(&id).unwrap_or_default().iter().map(|&(fi, ri)| format!("{}:{ri}", self.files[fi as usize].path)).collect();
+                incoming.sort();
+                out.push(format!("{} named {} -> {named:?}; incoming {incoming:?}", sym(id), s.name));
             }
         }
         out.sort();
@@ -1240,37 +1322,54 @@ impl GraphData {
     /// Estimated heap bytes this graph owns beyond the (shared) facts of its files, and beyond the
     /// blocks and name tables its `Share` holds when it has one.
     pub fn own_bytes(&self) -> usize {
+        self.own_bytes_parts().iter().map(|(_, n)| n).sum()
+    }
+
+    /// `own_bytes`, part by part, for measuring where a graph's memory goes.
+    pub fn own_bytes_parts(&self) -> Vec<(&'static str, usize)> {
         use std::mem::size_of;
         const ALLOC: usize = 16;
         let shared = self.share.is_some();
-        let mut n = self.files.len() * size_of::<FileNode>() + self.res.len() * size_of::<Arc<FileRes>>();
+        let mut parts = Vec::new();
+        let mut files = self.files.len() * size_of::<FileNode>() + self.res.len() * size_of::<Arc<FileRes>>();
         for f in &self.files {
-            n += f.path.len() + f.blob_id.len() + 2 * ALLOC;
+            files += f.path.len() + f.blob_id.len() + 2 * ALLOC;
             if !shared {
-                n += name_map_bytes(&f.names);
+                files += name_map_bytes(&f.names);
             }
         }
-        n += self.index.len() * (size_of::<String>() + 4 + ALLOC + 8) + self.index.keys().map(|k| k.len()).sum::<usize>();
+        parts.push(("files", files));
+        // A part shared with another graph (an overlay's, equal to its base's) is charged to the
+        // graph it was built for: the one cached first, which held it alone when it was counted.
+        let alone = |n: usize| -> usize { if n == 1 { 1 } else { 0 } };
+        let index = self.index.len() * (size_of::<String>() + 4 + ALLOC + 8) + self.index.keys().map(|k| k.len()).sum::<usize>();
+        parts.push(("path index", index * alone(Arc::strong_count(&self.index))));
         if !shared {
-            n += self.res.iter().map(|r| blocks::block_bytes(r)).sum::<usize>();
+            parts.push(("blocks", self.res.iter().map(|r| blocks::block_bytes(r)).sum::<usize>()));
         }
-        n += self.importers.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
-        n += self.ref_dependents.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
-        n += self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>();
-        n += self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>();
-        n += self.name_index.bytes() + self.incoming.bytes();
-        n += self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>();
-        n += self.ppr.get().map(|p| p.bytes()).unwrap_or(0);
-        n += self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>();
+        let adj = |v: &Vec<Vec<u32>>| v.iter().map(|v| size_of::<Vec<u32>>() + v.len() * 4).sum::<usize>();
+        parts.push(("importers", adj(&self.importers) * alone(Arc::strong_count(&self.importers)) + adj(&self.ref_dependents) * alone(Arc::strong_count(&self.ref_dependents))));
+        parts.push((
+            "external",
+            self.external_refs.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 8).sum::<usize>()
+                + self.external_importers.iter().map(|(k, v)| k.as_os_str().len() + 2 * ALLOC + v.len() * 4).sum::<usize>(),
+        ));
+        parts.push(("name index", self.name_index.bytes()));
+        parts.push(("incoming", self.incoming.bytes()));
+        parts.push(("ranks", self.file_rank.len() * 8 + self.symbol_rank.iter().map(|v| size_of::<Vec<f64>>() + v.len() * 8).sum::<usize>()));
+        parts.push(("ppr", self.ppr.get().map(|p| p.bytes()).unwrap_or(0)));
+        parts.push(("elm modules", self.elm_modules.iter().map(|(k, v)| k.len() + 3 * ALLOC + v.len() * 4).sum::<usize>() * alone(Arc::strong_count(&self.elm_modules))));
         // Only once built (lazily, on the first overlay derived from this graph): about 1-2 MB on
         // tessera (15k keys, 144k entries).
-        if let Some(idx) = self.soft_index.get() {
-            n += idx.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<u32>>() + ALLOC + v.len() * 4 + 8).sum::<usize>();
-        }
-        n += self.words_if_built().map_or(0, |w| w.bytes());
+        parts.push((
+            "soft index",
+            self.soft_index.get().map_or(0, |idx| idx.iter().map(|(k, v)| size_of::<String>() + k.len() + ALLOC + size_of::<Vec<u32>>() + ALLOC + v.len() * 4 + 8).sum::<usize>()),
+        ));
+        parts.push(("words", self.words_if_built().map_or(0, |w| w.bytes())));
         // The resolver keeps every path of the view in a set.
-        n += self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
-        n
+        let paths = self.files.iter().filter(|f| f.alive).map(|f| f.path.len() + size_of::<String>() + ALLOC + 8).sum::<usize>();
+        parts.push(("resolver", paths * alone(Arc::strong_count(self.resolver.paths()))));
+        parts
     }
 }
 

@@ -400,7 +400,7 @@ fn safe_delete(c: &MutCtx) -> Result<Plan, ToolError> {
     let targets: Vec<u32> = file.facts.symbols.iter().filter(|x| inside(x.local_id)).map(|x| x.local_id).collect();
     let mut live: Vec<String> = Vec::new();
     for &local in &targets {
-        for &(fi, ri) in g.incoming.get(&SymId { file: tf, local }).unwrap_or(&[]) {
+        for &(fi, ri) in g.incoming.get(&SymId { file: tf, local }).unwrap_or_default().iter() {
             let r = &g.file(fi).facts.refs[ri as usize];
             let own = fi == tf && r.enclosing().is_some_and(&inside);
             if !own {

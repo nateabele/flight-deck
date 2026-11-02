@@ -84,8 +84,8 @@ impl GraphData {
         // Definitions of this name in visible modules, with how near their module is (0 = own).
         let cands: Vec<(SymId, usize)> = self
             .named(name)
-            .into_iter()
-            .flatten()
+            .unwrap_or_default()
+            .iter()
             .filter(|id| self.files[id.file as usize].language == "swift")
             .filter_map(|id| {
                 let key = swift_module_key(&self.files[id.file as usize].path);
@@ -142,8 +142,8 @@ impl GraphData {
             }
             let pool: Vec<SymId> = self
                 .named(name)
-                .into_iter()
-                .flatten()
+                .unwrap_or_default()
+                .iter()
                 .copied()
                 .filter(|id| id.file != f && self.files[id.file as usize].language == "swift" && sym(*id).kind != SymbolKind::Extension && sym(*id).parent.is_none())
                 .collect();

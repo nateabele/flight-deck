@@ -343,7 +343,7 @@ impl GraphData {
 
     /// Does a Swift file of the view declare a type (not an extension) named `ty`?
     fn swift_is_repo_type(&self, ty: &str) -> bool {
-        self.named(ty).into_iter().flatten().any(|id| {
+        self.named(ty).unwrap_or_default().iter().any(|id| {
             let f = &self.files[id.file as usize];
             f.language == "swift"
                 && matches!(f.symbol(id.local).kind, SymbolKind::Class | SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias)
