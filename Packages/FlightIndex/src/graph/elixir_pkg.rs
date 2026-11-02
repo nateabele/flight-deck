@@ -26,6 +26,17 @@ use std::sync::Arc;
 /// How deep `use` is followed: `use App.Case` -> `use ExUnit.Case` -> its imports is two.
 const USE_DEPTH: u32 = 4;
 
+impl GraphData {
+    /// Reads the standard library and the locked dependencies the view's Elixir files can call,
+    /// while the other languages' packages load: the first Elixir file asks for them, and the
+    /// answer is kept per Mix project.
+    pub(super) fn preload_elixir_packages(&self) {
+        if let Some(node) = self.files.iter().find(|n| n.alive && n.language == "elixir") {
+            self.resolver.elixir_packages(&node.path);
+        }
+    }
+}
+
 /// The package names one Elixir file can use.
 pub(super) struct ExPkgScope {
     project: Arc<ExProject>,

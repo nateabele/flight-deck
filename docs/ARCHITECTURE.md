@@ -1024,8 +1024,14 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   no target, so it adds no edge, rank or rename site (`src/graph/elm_pkg.rs`,
   `src/graph/rust_pkg.rs`). On tessera Rust unresolved references went from 23,481 to 11,425 and
   on this repository from 23,843 to 13,405 (nearly all of the rest are method calls,
-  which need the receiver's type); loading std, core and alloc costs about two CPU seconds
-  once per daemon, the crates a repository reaches about 10 to 16 MB of heap.
+  which need the receiver's type). Loading std, core and alloc used to cost about two CPU seconds
+  once per daemon (and 150 MB of transient memory), nearly all of it core's `stdarch` intrinsics:
+  15,800 of core's 21,600 names, pulled in by a `#[path]` outside core's source directory. A
+  module reached that way is built as a view of its own on the first lookup into it (under the
+  same module paths), function bodies are blanked before parsing (a view holds names and
+  signatures), and a first graph build reads in parallel the crates its Rust files name, the npm
+  modules its TypeScript files import and the Elixir project, instead of one file at a time
+  (`preload_*` in `src/graph/`). The crates a repository reaches take about 10 to 16 MB of heap.
 - **Package views.** A reference into a dependency resolves to a symbol of that package version
   (`Confidence::Package`, no target, never ranked), read only from what is already on disk and
   parsed once per process: Elm from `$ELM_HOME`'s `docs.json` (`src/pkgview.rs`); Elixir's

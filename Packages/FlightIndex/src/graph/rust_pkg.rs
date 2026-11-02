@@ -16,7 +16,7 @@ use crate::facts::{Import, ImportKind, RefKind};
 use crate::pkgview::cargo::{RustDeps, Target};
 use crate::pkgview::PkgSymbol;
 use crate::resolve::Resolved;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// The package names one file can use, by language.
@@ -137,6 +137,31 @@ impl RustPkgScope {
 }
 
 impl GraphData {
+    /// Reads, all at once, the crates the view's Rust files name: the first segment of a `use`
+    /// and of a reference's qualifier, and std with core and alloc, which the prelude reaches.
+    /// Resolution asks for the same crates one file at a time, each a parse of its whole source
+    /// tree, so a first build otherwise waits for them in series (26 crates and std took
+    /// seconds of one thread's time for tessera). A name that is no dependency costs a map miss.
+    pub(super) fn preload_rust_crates(&self) {
+        use rayon::prelude::*;
+        let mut wanted: HashMap<*const RustDeps, (Arc<RustDeps>, BTreeSet<String>)> = HashMap::new();
+        for node in self.files.iter().filter(|n| n.alive && n.language == "rust") {
+            let Some(deps) = self.resolver.rust_packages(&node.path) else { continue };
+            let (_, names) = wanted.entry(Arc::as_ptr(&deps)).or_insert_with(|| (deps, ["std", "core", "alloc"].map(String::from).into()));
+            let imports = node.facts.imports.iter().map(|i| i.specifier.as_str());
+            let qualifiers = node.facts.refs.iter().filter_map(|r| r.qualifier().map(|q| self.names.resolve(q)));
+            for spec in imports.chain(qualifiers) {
+                if let Some(first) = segments(spec).next().filter(|f| !matches!(*f, "crate" | "self" | "super" | "Self")) {
+                    names.insert(first.to_string());
+                }
+            }
+        }
+        let tasks: Vec<(&Arc<RustDeps>, &String)> = wanted.values().flat_map(|(d, names)| names.iter().map(move |n| (d, n))).collect();
+        tasks.par_iter().for_each(|(deps, name)| {
+            deps.krate(name);
+        });
+    }
+
     /// Crate symbols `find`/`refs` can show for `query` (`HashMap::new`, `serde_json::json`,
     /// `Value`): a path through a dependency or std's prelude, and every crate symbol the view's
     /// Rust files reference whose path ends with the query.
