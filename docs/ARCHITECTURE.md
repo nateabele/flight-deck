@@ -861,6 +861,13 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   sends its launch directory as `cwd` on every call, reconnects when the daemon restarts, and
   answers `state: UNAVAILABLE` when it cannot reach or start the daemon. Started as `qartez`
   (a symlink, installed at switch-over) it is the qartez alias with the same tool names.
+  The tool list is the 19 first-cut tools under their qartez names plus one `qartez_analyze`, whose
+  `report` enum selects the analysis tier (`unused`, `cochange`, `context`, `hierarchy`,
+  `diff_impact`, `hotspots`; `src/tools/analyze.rs`) and whose `report=help` documents the
+  per-report parameters on demand. Every listed schema costs every session context, so the tier is
+  one small schema instead of qartez's tool per analysis, and the schemas carry no JSON-schema
+  boilerplate: 9,814 tokens per session before the tier, 8,155 with it (tool contract, "Analysis
+  tier").
   `--no-start` (or `FLIGHTDECK_INDEX_NO_START`) forbids starting the daemon for every client verb.
   **Codex needs the socket allowed.** Under `codex exec -s read-only` or `-s workspace-write` the
   macOS seatbelt refuses `connect()` to a Unix socket with EPERM (measured). A client that gets

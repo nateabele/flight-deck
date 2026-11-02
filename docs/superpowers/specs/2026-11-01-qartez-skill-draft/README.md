@@ -13,7 +13,10 @@ What changed from the qartez-era skill, and why:
   `state: BUILDING | UNAVAILABLE | BAD_REQUEST | VERSION_MISMATCH | ERROR`. `fdindex status`
   describes the daemon.
 - **Tool tiers are gone.** There is no `qartez_tools` and nothing to unlock. The first cut is the
-  ten read tools and seven mutators; the analysis tier does not exist yet and the skill says so.
+  ten read tools and seven mutators. The analysis tier is one tool, `qartez_analyze`, whose
+  `report` picks the analysis (`unused`, `cochange`, `context`, `hierarchy`, `diff_impact`,
+  `hotspots`) and whose `report=help` documents each report's parameters, instead of qartez's tool
+  per analysis: the tool list costs every session the same whether the agent uses it or not.
 - **Absolute paths and worktrees are first-class.** Any path resolves to the view that holds it.
   The old advice to start in the project root, register roots, and avoid worktrees is withdrawn.
 - **Mutators preview by default** (`apply=true` writes) and write only into one view.

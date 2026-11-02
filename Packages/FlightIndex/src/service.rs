@@ -389,6 +389,11 @@ impl Service {
         }
         let args = Args::new(req.args.clone(), PathBuf::from(&req.cwd));
         let (format, token_budget) = tools::common_params(tool, &args)?;
+        // `analyze report=help` is documentation: no view, no index. A bad report fails here, before
+        // a view is located or built.
+        if tool == "analyze" && tools::analyze::report(&args)? == "help" {
+            return Ok(tools::analyze::HELP.to_string());
+        }
         let wait = self.wait_bound(&args);
         // One body search over many worktrees of the repository (`multi.rs`): no graph, no gate.
         if tool == "grep" && args.has(&["worktrees"]) {

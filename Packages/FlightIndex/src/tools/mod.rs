@@ -8,6 +8,7 @@
 //! a pure function of a graph that tests can drive without a daemon.
 
 mod analysis;
+pub mod analyze;
 mod calltree;
 mod impact;
 pub mod args;
@@ -34,7 +35,7 @@ use std::sync::Arc;
 
 pub use pending::Baseline;
 
-pub const TOOLS: &[&str] = &["map", "find", "grep", "read", "outline", "deps", "stats", "impact", "refs", "calls"];
+pub const TOOLS: &[&str] = &["map", "find", "grep", "read", "outline", "deps", "stats", "impact", "refs", "calls", "analyze"];
 
 /// Default `token_budget`. A token is counted as four characters, which is close enough for a
 /// bound whose job is to stop a tool flooding a context window.
@@ -159,6 +160,7 @@ pub fn uses_links(tool: &str, args: &Args) -> bool {
     match tool {
         "find" | "refs" | "calls" | "deps" | "impact" => true,
         "grep" => !args.flag(&["search_bodies"], false),
+        "analyze" => analyze::uses_links(args),
         "read" => !args.has(args::FILE) && (args.has(args::SYMBOL) || args.has(&["symbols"])),
         _ => false,
     }
@@ -176,6 +178,7 @@ pub fn run(tool: &str, c: &Ctx) -> ToolResult {
         "impact" => analysis::impact(c),
         "refs" => analysis::refs(c),
         "calls" => analysis::calls(c),
+        "analyze" => analyze::analyze(c),
         other => Err(ToolError::bad(format!("unknown tool '{other}'"))),
     }?;
     Ok(text)
