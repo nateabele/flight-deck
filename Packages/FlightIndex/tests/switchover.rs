@@ -292,13 +292,14 @@ fn apply_survives_a_writer_rewriting_the_file_all_the_while() {
             }
         })
     };
-    // The edit gives up with "run --apply again when it is quiet" if the writer lands between its
-    // write and its check; on a loaded machine (this suite shares one with other builds) that
-    // window can open several times in a row, so the test asks again, as the message says. It
-    // still demands that some run succeeds and that the final file is right.
+    // The edit gives up with "... again when it is quiet" (after its attempts, or when its check
+    // finds the writer undid it) if the writer lands between its write and its check; on a loaded
+    // machine (this suite shares one with other builds) that window can open several times in a
+    // row, so the test asks again, as the message says. It still demands that some run succeeds
+    // and that the final file is right.
     let mut out = h.run(&["--apply"]);
     for _ in 0..4 {
-        if out.status.success() || !String::from_utf8_lossy(&out.stderr).contains("run --apply again") {
+        if out.status.success() || !String::from_utf8_lossy(&out.stderr).contains("again when it is quiet") {
             break;
         }
         out = h.run(&["--apply"]);
