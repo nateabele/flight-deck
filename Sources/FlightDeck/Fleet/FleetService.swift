@@ -877,10 +877,14 @@ final class FleetService: ObservableObject {
         case .accountList(let session):
             // A read, so a phone may ask too: its session sheet shows the tab's account, usage
             // and context, and moves the tab by typing `/switch-account <id>` into it.
-            guard let choices = store.accountChoices(for: session) else {
-                return reply(.err(cid: cid, code: "unknown_session"))
+            // A `Task`: a codex, grok, gemini or opencode tab's context is read from its agent's
+            // files (and OpenCode's server) at ask time, which is not a main-actor job.
+            Task { @MainActor in
+                guard let choices = await store.accountChoicesWithContext(for: session) else {
+                    return reply(.err(cid: cid, code: "unknown_session"))
+                }
+                reply(.accountChoices(cid: cid, choices))
             }
-            reply(.accountChoices(cid: cid, choices))
         case .accountSwitch(let session, let target):
             guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
             // Answered synchronously, and the move starts only after this reply (the store

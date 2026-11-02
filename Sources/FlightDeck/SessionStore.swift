@@ -1668,6 +1668,62 @@ final class SessionStore: ObservableObject {
         return choices
     }
 
+    /// `accountChoices`, with the context of a tab whose agent has no status line read from
+    /// that agent's own files (`AgentContextReader`). Async: the file and database reads run
+    /// off the main actor, and OpenCode's window is a question to its server.
+    func accountChoicesWithContext(for id: UUID) async -> WireAccountChoices? {
+        guard var choices = accountChoices(for: id) else { return nil }
+        if choices.context == nil { choices.context = await agentContext(for: id) }
+        return choices
+    }
+
+    /// The context fill of a codex, grok, gemini or opencode tab, or nil (claude's comes from
+    /// `contextUsage`).
+    func agentContext(for id: UUID) async -> WireContextUsage? {
+        guard let session = session(for: id) else { return nil }
+        let recorded = session.transcriptPath.map { URL(fileURLWithPath: $0) }
+        switch session.agent {
+        case .claude:
+            return nil
+        case .codex:
+            guard let rollout = recorded else { return nil }
+            return await Task.detached(priority: .utility) {
+                CodexRolloutFile.tail(rollout).flatMap(AgentContextReader.codex(rolloutTail:))
+            }.value
+        case .grok:
+            guard let transcript = recorded ?? adapter(for: instance(for: session)).binding(for: session).transcriptURL
+            else { return nil }
+            let signals = GrokSessionFiles.sibling(AgentContextReader.grokSignalsName, of: transcript)
+            return await Task.detached(priority: .utility) {
+                guard let data = try? Data(contentsOf: signals) else { return nil }
+                return AgentContextReader.grok(signals: data, readAt: AgentContextReader.modified(signals) ?? Date())
+            }.value
+        case .gemini:
+            let transcript = recorded ?? geminiPaths.transcript(session.pinnedConversationID)
+            let store = GeminiPaths.conversation(ofTranscript: transcript).map { $0.paths.stepStore($0.id) }
+                ?? geminiPaths.stepStore(session.pinnedConversationID)
+            return await Task.detached(priority: .utility) { AgentContextReader.gemini(store: store) }.value
+        case .opencode:
+            guard let sessionID = OpenCodeIdentity.sessionID(fromTranscript: recorded) else { return nil }
+            let account = instance(for: session).account
+            let stack = openCodeStacks[account]
+            guard let database = stack?.server.databaseURL
+                    ?? OpenCodeMirror.databaseURL(home: home(ofAccount: account, agent: .opencode))
+            else { return nil }
+            guard let tokens = await Task.detached(priority: .utility, operation: {
+                AgentContextReader.openCodeTokens(database: database, session: sessionID)
+            }).value,
+                let client = try? stack?.adapter.client(),
+                let (status, body) = try? await client.http.send(OpenCodeRequest(
+                    method: "GET", path: "/config/providers", query: ["directory": session.transcriptDirectory])),
+                (200..<300).contains(status),
+                let window = AgentContextReader.openCodeWindow(
+                    providers: body, providerID: tokens.providerID, modelID: tokens.modelID)
+            else { return nil }
+            return AgentContextReader.openCode(tokens, window: window)
+        }
+    }
+
     /// The refusals shared by every tab that cannot move right now, or nil when it can.
     private func accountSwitchRefusal(for session: Session) -> String? {
         let id = session.id
