@@ -30,7 +30,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Manifest names looked for in every directory of a view that holds source.
-const MANIFESTS: &[&str] = &["elm.json", "tsconfig.json", "package.json", "mix.exs", "Cargo.toml"];
+/// `(file name, kind)`: the kind says how it is parsed and is what `via` shows. Vite and Nx keep
+/// `paths` in a `tsconfig.app.json` or `tsconfig.base.json` beside a `tsconfig.json` that only
+/// references it, so those common names are read as tsconfigs too.
+const MANIFESTS: &[(&str, &str)] = &[
+    ("elm.json", "elm.json"),
+    ("tsconfig.json", "tsconfig.json"),
+    ("tsconfig.app.json", "tsconfig.json"),
+    ("tsconfig.base.json", "tsconfig.json"),
+    ("tsconfig.lib.json", "tsconfig.json"),
+    ("package.json", "package.json"),
+    ("mix.exs", "mix.exs"),
+    ("Cargo.toml", "Cargo.toml"),
+];
 
 // ---- discovery --------------------------------------------------------------------------------
 
@@ -153,10 +165,10 @@ fn find_manifests(view: &View) -> Vec<(String, &'static str)> {
     let root = &view.label.worktree;
     let mut out = Vec::new();
     for d in &dirs {
-        for name in MANIFESTS {
+        for (name, kind) in MANIFESTS {
             let rel = if d.is_empty() { name.to_string() } else { format!("{d}/{name}") };
             if root.join(&rel).is_file() {
-                out.push((rel, *name));
+                out.push((rel, *kind));
             }
         }
     }
@@ -597,6 +609,39 @@ impl<'a> Views<'a> {
         }
         out.sort_by(|a, b| b.1.rank.partial_cmp(&a.1.rank).unwrap_or(std::cmp::Ordering::Equal).then(a.1.path.cmp(&b.1.path)));
         out
+    }
+
+    /// The edges that cross between the answering view and member `view` (1-based, as in
+    /// `graph`), in the direction the link runs: from the answering view into a linked view, from
+    /// a dependent view into the answering one. `(file imports, references)`: an import counts
+    /// once per importing file and target file; a reference counts when the symbol it names is
+    /// found in the other view. What `stats` reports, and how link resolution is measured.
+    pub fn crossing(&self, view: usize) -> (usize, usize) {
+        let (from, to) = match self.members[view - 1].role {
+            Role::Linked => (0, view),
+            Role::Dependent => (view, 0),
+        };
+        let g = self.graphs[from];
+        let mut imports = 0;
+        for (rel, files) in &g.external_importers {
+            if self.locate(&g.external_abs(rel)).is_some_and(|(v, _)| v == to) {
+                imports += files.len();
+            }
+        }
+        let mut refs = 0;
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        for entries in g.external_refs.values() {
+            for &(fi, ri) in entries {
+                if !seen.insert((fi, ri)) {
+                    continue;
+                }
+                let Some(ext) = &g.res[fi as usize].refs[ri as usize].external else { continue };
+                if self.resolve_external(from, ext).iter().any(|(v, _)| *v == to) {
+                    refs += 1;
+                }
+            }
+        }
+        (imports, refs)
     }
 
     /// The import lines (file and line) in other views that bring in `file` of `view`, and, if

@@ -232,6 +232,17 @@ fn a_dependent_view_that_was_seen_before_answers_for_the_view_it_links_into() {
     assert!(impact.contains(&w.app.join("src/Main.elm").display().to_string()), "{impact}");
 }
 
+#[test]
+fn stats_counts_what_crosses_each_link() {
+    let (_d, svc) = service();
+    let w = world();
+    let text = ok(&svc, &w.app, "stats", json!({}));
+    // Main.elm imports Node.elm; it names `toString` and `Leaf` (through `Node(..)`) in it.
+    assert!(text.contains(&format!("  {} via elm.json: 1 import(s), 2 reference(s) into it", tag(&w.lib))), "{text}");
+    let file = ok(&svc, &w.app, "stats", json!({"file_path": "src/Main.elm"}));
+    assert!(!file.contains("linked view") && !file.contains("cross"), "a file's stats use one view: {file}");
+}
+
 // ---- building, memory, literal paths ---------------------------------------------------------------
 
 #[test]

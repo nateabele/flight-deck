@@ -986,6 +986,13 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   from 134,317 to 35,400 at 0.995 precision against the Xcode index store;
   `swift-symbolgraph-extract` would be exact but took 113 s and 1.2 GB for Foundation alone. `src/indexstore.rs` reads that index store (libIndexStore, `dlopen`ed) as a precise layer
   and as the answer key `examples/swiftres.rs` scores the heuristics with.
+- **Links.** A manifest that names a directory outside the repository (`elm.json` source
+  directories, Cargo and mix path dependencies, `package.json` `file:`/`link:` and workspaces,
+  tsconfig `paths`) links the worktree there (`src/links.rs`, discovery and cross-view queries).
+  Imports through those manifests resolve in `src/resolve/links.rs`: a Cargo crate name, an npm
+  package name, a tsconfig alias or an Elixir module of a path dependency lands on a file, inside
+  the view (workspace packages) or as an `External` path that `links::Views` follows into the
+  linked view for `refs`, `calls`, `deps` and `impact`. `stats` counts what crosses each link.
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

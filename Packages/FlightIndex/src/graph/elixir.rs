@@ -2,7 +2,7 @@
 //! `Shop.Order` need not live in `shop/order.ex`), so a module name is looked up among the module
 //! symbols of the view instead of through the resolver.
 
-use super::{RefRes, SymId, GraphData};
+use super::{ExtTarget, RefRes, SymId, GraphData};
 use crate::facts::{Import, RefSite, SymbolKind};
 use crate::resolve::Resolved;
 use std::collections::HashMap;
@@ -53,6 +53,11 @@ impl GraphData {
     pub(super) fn elixir_ref(&self, r: &RefSite, qualifiers: &HashMap<String, Resolved>) -> Option<RefRes> {
         let exact = |id: SymId| RefRes { target: Some(id), confidence: super::Confidence::Exact, external: None };
         let none = RefRes { target: None, confidence: super::Confidence::Exact, external: None };
+        // A module no file of the view defines may be one of a mix path dependency's: the linked
+        // view says which symbol it is.
+        let linked = |module: &str, name: &str| {
+            self.resolver.elixir_external(module).map(|path| RefRes { target: None, confidence: super::Confidence::Exact, external: Some(Box::new(vec![ExtTarget { path, name: name.to_string() }])) })
+        };
         let name = self.name(r.name);
         let qualifier = self.qualifier(r);
         if name.starts_with(|c: char| c.is_uppercase()) {
@@ -60,13 +65,16 @@ impl GraphData {
                 Some(q) => format!("{q}.{}", name),
                 None => name.to_string(),
             };
-            return Some(self.elixir_module(&full).map(exact).unwrap_or(none));
+            return Some(self.elixir_module(&full).map(exact).or_else(|| linked(&full, &full)).unwrap_or(none));
         }
         let q = qualifier?;
         let file = qualifiers
             .get(q)
             .and_then(|res| self.file_of(res))
             .or_else(|| self.elixir_module(q).map(|id| id.file));
-        Some(file.and_then(|t| self.member_of(t, q, name)).map(exact).unwrap_or(none))
+        match file {
+            Some(t) => Some(self.member_of(t, q, name).map(exact).unwrap_or(none)),
+            None => Some(linked(q, name).unwrap_or(none)),
+        }
     }
 }

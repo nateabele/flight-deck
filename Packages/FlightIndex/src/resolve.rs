@@ -14,6 +14,7 @@
 //! of them; each worktree makes it absolute against its own root (`absolute`). `links.rs` turns
 //! that path into a file of the linked view.
 
+mod links;
 mod python;
 mod swift;
 
@@ -64,6 +65,8 @@ pub struct Resolver {
     rust_std_only: OnceLock<Arc<RustDeps>>,
     /// The Elixir project (standard library and `mix.lock` dependencies) above each directory.
     elixir_projects: crate::hexview::ProjectCache,
+    /// What imports through Cargo/npm/tsconfig/mix links need, read on first use (`links.rs`).
+    links: links::LinkState,
 }
 
 /// A bare specifier's package module, or none (no declarations installed).
@@ -96,7 +99,7 @@ impl Resolver {
             }
         }
         let swift_modules = swift::swift_module_names(paths.iter());
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, npm: Mutex::new(HashMap::new()), rust_packages: Mutex::new(HashMap::new()), rust_std_only: OnceLock::new(), elixir_projects: Default::default() }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, npm: Mutex::new(HashMap::new()), rust_packages: Mutex::new(HashMap::new()), rust_std_only: OnceLock::new(), elixir_projects: Default::default(), links: Default::default() }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -260,7 +263,13 @@ impl Resolver {
 
     fn ts_specifier(&self, from: &str, spec: &str) -> Resolved {
         if !(spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..") {
-            return self.npm_module(from, spec);
+            // A tsconfig alias, a baseUrl path or a linked workspace package comes first, so a
+            // package view never claims a name the repository's own links own; what they leave
+            // unresolved may be an installed package.
+            return match self.ts_bare(from, spec) {
+                Resolved::Unresolved => self.npm_module(from, spec),
+                linked => linked,
+            };
         }
         let base = normalize_rel(&join_rel(Path::new(from).parent().unwrap_or(Path::new("")), spec));
         let Some(base) = base else { return self.ts_external(from, spec) };
@@ -397,8 +406,12 @@ impl Resolver {
                 }
             }
             other => {
-                if let Some(lib) = self.rust_crates.get(other) {
-                    (lib.clone(), &segs[1..])
+                if let Some(lib) = self.rust_crates.get(other).cloned().or_else(|| self.rust_linked_inside(other)) {
+                    (lib, &segs[1..])
+                } else if let Some((ext, _)) = self.rust_external(segs) {
+                    // A Cargo path dependency outside the worktree. The unresolved tail is lost
+                    // here; callers that need it ask `rust_external` themselves.
+                    return Resolved::External(ext);
                 } else {
                     // 2018 relative path: `use child::item` where `child` is a module of this file.
                     let dir = rust_child_dir(from);
