@@ -15,7 +15,6 @@
 //! few (100% precision, 11% recall, as cited in ReAssert, arXiv 2011.09784), so name matches come
 //! first, then tests that import the seed, then tests that co-change with it.
 
-use crate::cochange::CoChange;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -58,16 +57,23 @@ pub struct Partner {
 }
 
 /// Partners of any seed, by the best confidence `P(partner changed | seed changed)` over the seeds,
-/// then by support, then by path. Seeds are not their own partners.
-pub fn ranked_partners(co: &CoChange, seeds: &[&str], min_support: u32) -> Vec<Partner> {
+/// then by support, then by path. Seeds are not their own partners. `impact` reads the lists
+/// through `impact_index`; this is the plain form its tests compare against.
+#[cfg(test)]
+pub fn ranked_partners(co: &crate::cochange::CoChange, seeds: &[&str], min_support: u32) -> Vec<Partner> {
+    rank_partner_lists(seeds.iter().map(|s| (*s, co.touches(s), co.partners_of(s, min_support).into_iter())), seeds)
+}
+
+/// `ranked_partners` from each seed's partner list as (seed, touches(seed), partners with their
+/// shared commits): the caller decides where the lists come from (`impact_index` memoises them).
+pub fn rank_partner_lists<'a, P: Iterator<Item = (&'a str, u32)>>(lists: impl Iterator<Item = (&'a str, u32, P)>, seeds: &[&str]) -> Vec<Partner> {
     // Best confidence over the seeds, not the sum: scored with the eval harness (an agent that
     // edited one gold file asks about another), summing and putting the asked file's partners
     // first were within a point of it at P@5 and R@10 on tessera and flight-deck, and the best
     // seed's fraction is the one a row can show.
     let mut best: HashMap<&str, Partner> = HashMap::new();
-    for seed in seeds {
-        let of = co.touches(seed);
-        for (path, together) in co.partners_of(seed, min_support) {
+    for (seed, of, partners) in lists {
+        for (path, together) in partners {
             if seeds.contains(&path) {
                 continue;
             }
@@ -205,6 +211,7 @@ pub fn order_tests<K: Clone + Eq + Hash>(name_matches: &[K], importers: &[(K, u3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cochange::CoChange;
 
     #[test]
     fn interleave_alternates_dedupes_and_lets_the_longer_list_fill() {

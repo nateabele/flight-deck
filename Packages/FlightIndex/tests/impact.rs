@@ -131,3 +131,31 @@ fn co_change_is_seeded_by_the_worktree_diff_as_well_as_the_file_asked_about() {
     assert!(section(&t, &r.root, "Ranked impact").iter().all(|(p, _)| p != "src/buddy.ts"), "{t}");
     assert!(!t.contains("Seeds:"), "{t}");
 }
+
+#[test]
+fn what_impact_keeps_with_a_graph_follows_the_worktree_and_head() {
+    // `impact` keeps its name tables and co-change partners with the graph it answered from
+    // (`tools/impact_index.rs`). Ask once, then edit the worktree and commit: each answer must
+    // describe the files and history as they are, not as the first graph saw them.
+    let (_d, svc) = service();
+    let r = hub_repo();
+    let t = impact(&svc, &r.root, json!({"file_path": "src/hub.ts"}));
+    assert!(section(&t, &r.root, "Tests (").is_empty(), "{t}");
+    // An uncommitted test named for hub: the overlay graph has it, the first graph did not.
+    write(&r.root, "tests/hub.test.ts", "export const t = 0;\n");
+    let t = impact(&svc, &r.root, json!({"file_path": "src/hub.ts", "seed_diff": false}));
+    assert_eq!(section(&t, &r.root, "Tests ("), [("tests/hub.test.ts".to_string(), "name match".to_string())], "{t}");
+    // Committed with hub twice more: the new HEAD's co-change counts it as a partner.
+    commit_all(&r.root, "hub's test");
+    for n in 0..2 {
+        write(&r.root, "src/hub.ts", &format!("export function hub() {{ return {}; }}\n", 20 + n));
+        write(&r.root, "tests/hub.test.ts", &format!("export const t = {};\n", 20 + n));
+        commit_all(&r.root, &format!("hub with its test {n}"));
+    }
+    let t = impact(&svc, &r.root, json!({"file_path": "src/hub.ts"}));
+    assert_eq!(section(&t, &r.root, "Tests ("), [("tests/hub.test.ts".to_string(), "name match; co-changed 2/6".to_string())], "{t}");
+    // A second source named hub makes the name ambiguous: the match goes, the co-change stays.
+    write(&r.root, "lib/hub.ts", "export const other = 0;\n");
+    let t = impact(&svc, &r.root, json!({"file_path": "src/hub.ts", "seed_diff": false}));
+    assert_eq!(section(&t, &r.root, "Tests ("), [("tests/hub.test.ts".to_string(), "co-changed 2/6".to_string())], "{t}");
+}
