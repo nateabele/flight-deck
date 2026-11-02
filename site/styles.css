@@ -2818,6 +2818,8 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 .hl-title { margin: 16px 0 6px; font-size: 17px; font-weight: 620; letter-spacing: -0.015em; }
 .hl-blurb { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--fg-secondary); }
+.hl-kicker { margin: -2px 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--glow-cyan); }
+.hl-explainer { margin: 0 0 8px; font-size: 14.5px; line-height: 1.55; color: var(--fg); }
 
 /* The stage: every detail sits in the same grid cell; only the active one shows. */
 .hl-stage {
