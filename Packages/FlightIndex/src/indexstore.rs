@@ -30,7 +30,8 @@ impl StrRef {
         if self.data.is_null() {
             return "";
         }
-        // SAFETY: libIndexStore hands out (pointer, length) views valid for the callback's duration.
+        // SAFETY: libIndexStore hands out (pointer, length) views valid for the callback's duration. `c_char` is
+        // `u8` on arm64 Linux and `i8` on macOS, hence a cast rather than `as`.
         let b = unsafe { std::slice::from_raw_parts(self.data.cast::<u8>(), self.len) };
         std::str::from_utf8(b).unwrap_or("")
     }

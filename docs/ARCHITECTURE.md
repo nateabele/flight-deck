@@ -897,7 +897,18 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   the ref watcher (macOS, one FSEvents stream over every known repository's common dir): a
   commit, checkout or rebase re-reads the branch heads and prepares the new base tree of each kept
   worktree before anyone asks (listing derived from the old tree with `git diff-tree`, only unseen
-  blobs parsed). Linux has no ref watcher yet; nothing depends on it.
+  blobs parsed). On Linux the same watcher runs on inotify (`src/watch/inotify.rs`), which
+  watches single directories, so each repository costs one watch per directory that can hold a
+  ref it acts on: the common dir, `refs`, every directory under `refs/heads`, `worktrees` and each
+  `worktrees/<name>` (tags and remote-tracking refs are not watched; a fresh clone is 3 watches).
+  New branch folders are watched as their creation is read. At most 256 watches per repository
+  and 8,192 (or a quarter of `max_user_watches`) in all; a folder past the bound is a late
+  warm-up, never a wrong answer. Measured in a Debian container on an 80-commit clone of this
+  repository (2,647 files, 883 differing between the two commits checked out): the first query
+  after a checkout (4 s after it) took 34 to 92 ms without the watcher and 5 to 13 ms with it once
+  both commits had been seen, and 874 to 955 against 438 to 475 ms for the first checkout of the
+  older commit (two runs each); an idle daemon used at most one CPU tick in 30 s either way (load
+  average 75 to 310 on a shared machine).
 - **Retention.** A blob's facts live while a tree of a live worktree's HEAD, an overlay or a branch
   head names the blob; every view a request answers from is recorded in the store, which is what
   makes it a root. The daemon collects hourly, after a worktree's directory disappears (noticed
@@ -1034,7 +1045,18 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   daemon's socket as `port.open` pipes one to a TCP port (not wired yet).
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
-  Flight Deck app; without the unit, the first client starts the daemon.
+  Flight Deck app; without the unit, the first client starts the daemon. The systemd path has run
+  under a real user manager (Debian trixie container, systemd as PID 1, a lingering user):
+  install, the `$XDG_RUNTIME_DIR/fdindex.sock` default socket, a query with `--no-start`, a
+  SIGKILL restarted within `RestartSec`, `stop` staying stopped, `start`, a second install left
+  alone, and uninstall leaving no unit, socket or process.
+- **Linux.** `scripts/test-fdindex-linux.sh` runs `cargo test` and `cargo clippy --all-targets` in
+  `rust:1.96.0-slim-trixie` as an ordinary user (two tests rely on permission bits that root
+  ignores); all 476 tests pass there. The Linux hostd release
+  tarball (`scripts/build-hostd-linux.sh`) carries `fdindex` beside `flightdeck-hostd`, built in
+  `rust:1.96.0-slim-bookworm` (glibc 2.36, older than hostd's noble); `hostd-install.sh` installs
+  it to `~/.local/bin/fdindex` and does not start it, and `scripts/test-hostd-install.sh` runs a
+  query through it on Ubuntu 24.04.
 - **`flightdeck index …`.** A verb of the `flightdeck` CLI (`Sources/FlightDeckCLI/IndexCommand.swift`)
   that `exec`s `fdindex` with the rest of the line. Local like `provider check`: no control socket,
   works with the app closed. `fdindex` is `$FLIGHTDECK_FDINDEX`, else `Contents/MacOS/fdindex`

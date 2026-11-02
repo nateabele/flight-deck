@@ -12,9 +12,11 @@
 //! event that arrives late costs a late warm-up, never a wrong answer: every request compares the
 //! HEAD it finds on disk with the one its view was built on (`git::read_head`).
 //!
-//! The platform part (`fsevents`) only turns notifications into `Raw` events; the meaning of a
-//! path lives here and is the same everywhere. Without a platform backend (Linux today) there is
-//! no `Watcher`, branch heads are read at each collection instead, and nothing else changes.
+//! The platform part (`fsevents` on macOS, `inotify` on Linux) only turns notifications into `Raw`
+//! events; the meaning of a path lives here and is the same everywhere. inotify watches single
+//! directories, so on Linux `ref_dir` also says which directories of a common dir are worth a
+//! watch. Without a platform backend (other systems) there is no `Watcher`, branch heads are read
+//! at each collection instead, and nothing else changes.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -24,6 +26,8 @@ use std::time::{Duration, SystemTime};
 
 #[cfg(target_os = "macos")]
 mod fsevents;
+#[cfg(target_os = "linux")]
+mod inotify;
 
 #[derive(Debug, Clone)]
 pub struct WatchConfig {
@@ -62,8 +66,27 @@ pub(crate) trait Backend: Send + Sync {
 fn new_backend(_sink: Sink) -> Option<Box<dyn Backend>> {
     #[cfg(target_os = "macos")]
     return fsevents::FsEvents::new(_sink).ok().map(|b| Box::new(b) as Box<dyn Backend>);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return inotify::Inotify::new(_sink).ok().map(|b| Box::new(b) as Box<dyn Backend>);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     return None;
+}
+
+/// Whether `dir`, inside the common dir `common`, can hold a ref the watcher acts on: the common
+/// dir itself (`HEAD`, `packed-refs`), `refs`, anything under `refs/heads`, `worktrees` and each
+/// `worktrees/<name>`. Tags and remote-tracking refs are left out: `on_refs` reads only branch
+/// heads and worktree HEADs. Used where watches are per directory (inotify).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn ref_dir(common: &Path, dir: &Path) -> bool {
+    let Ok(rel) = dir.strip_prefix(common) else { return false };
+    let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    match parts.as_slice() {
+        [] => true,
+        [first] => *first == "refs" || *first == "worktrees",
+        [first, second, ..] if *first == "refs" => *second == "heads",
+        [first, _] => *first == "worktrees",
+        _ => false,
+    }
 }
 
 #[derive(Default)]
@@ -293,6 +316,18 @@ mod tests {
         assert!(!dirty(&st));
         st.route(&changed("/w/app/.git/worktrees/x/HEAD"));
         assert!(dirty(&st));
+    }
+
+    #[test]
+    fn per_directory_watches_cover_branch_heads_and_worktree_heads_only() {
+        let c = Path::new("/w/app/.git");
+        for yes in ["", "refs", "refs/heads", "refs/heads/team/x", "worktrees", "worktrees/wt1"] {
+            assert!(ref_dir(c, &c.join(yes)), "{yes}");
+        }
+        for no in ["objects", "objects/ab", "refs/tags", "refs/remotes/origin", "worktrees/wt1/logs", "modules/sub", "logs/refs/heads"] {
+            assert!(!ref_dir(c, &c.join(no)), "{no}");
+        }
+        assert!(!ref_dir(c, Path::new("/w/other/.git/refs")));
     }
 
     #[test]

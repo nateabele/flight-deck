@@ -76,6 +76,8 @@ fetch "$ASSET_BASE/$TARBALL" "$TARBALL" || die "could not download $ASSET_BASE/$
 grep "  $TARBALL\$" SHA256SUMS > want || die "SHA256SUMS has no entry for $TARBALL"
 sha256sum -c --status want || die "checksum mismatch — refusing to install"
 tar -xzf "$TARBALL" flightdeck-hostd
+# The code index, from releases that ship it; an older tarball has only hostd.
+tar -xzf "$TARBALL" fdindex 2>/dev/null || true
 
 BIN_DIR=$HOME/.local/bin
 BIN=$BIN_DIR/flightdeck-hostd
@@ -87,6 +89,15 @@ cp flightdeck-hostd "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
 say "installed $BIN"
+# The code index ships in the same tarball (an older release's has none). Installed beside hostd
+# the same way, and not started: the first agent that asks starts its daemon, and
+# `fdindex service install` keeps one running at login.
+if [ -f fdindex ]; then
+  cp fdindex "$BIN_DIR/fdindex.new"
+  chmod 755 "$BIN_DIR/fdindex.new"
+  mv -f "$BIN_DIR/fdindex.new" "$BIN_DIR/fdindex"
+  say "installed $BIN_DIR/fdindex"
+fi
 
 if [ "$SYSTEMD" = 0 ]; then
   say "start it with: $BIN serve — then run: $BIN pair"

@@ -103,7 +103,7 @@ fn an_in_place_edit_of_a_clean_tracked_file_is_found_with_nothing_flagged_before
 fn replace_by_rename_deletion_creation_and_directory_moves_agree_with_git_status() {
     let mut r = rig();
     r.edit("printf 'module A exposing (a)\\n\\na = 1\\n' > $R/src/A.elm.tmp && mv $R/src/A.elm.tmp $R/src/A.elm");
-    r.edit("sed -i '' 's/a = 1/a = 2/' $R/src/A.elm");
+    r.edit("perl -pi -e 's/a = 1/a = 2/' $R/src/A.elm");
     r.edit("rm $R/src/B.elm");
     r.edit("printf 'module C exposing (c)\\n\\nc = 1\\n' > $R/src/C.elm");
     r.edit("printf 'export const n = 1;\\n' > $R/brand/new.ts 2>/dev/null || (mkdir -p $R/brand/deeper && printf 'export const n = 1;\\n' > $R/brand/deeper/new.ts)");
@@ -165,7 +165,7 @@ fn a_hundred_mixed_external_edits_are_each_found_by_the_next_sweep() {
         let script = match i % 5 {
             0 => format!("printf 'pub fn m{i}() {{}}\\n' >> $R/{rel}"),
             1 => format!("printf 'pub fn m{i}() {{}}\\n' > $R/{rel}.tmp && mv $R/{rel}.tmp $R/{rel}"),
-            2 => format!("printf 'pub fn m{i}() {{}}\\n' >> $R/{rel}; sed -i '' 's/pub fn/pub  fn/' $R/{rel}"),
+            2 => format!("printf 'pub fn m{i}() {{}}\\n' >> $R/{rel}; perl -pi -e 's/pub fn/pub  fn/' $R/{rel}"),
             3 => format!("printf 'pub fn m{i}() {{}}\\n' >> $R/{rel}"),
             _ => format!("rm -f $R/{rel}"),
         };
