@@ -95,7 +95,7 @@ fn every_external_write_is_in_the_very_next_answer() {
         let script = match i % 4 {
             0 => format!("printf 'pub fn {name}() {{}}\\n' >> {}", file.display()),
             1 => format!("printf 'pub fn {name}() {{}}\\n' > {f}.tmp && mv {f}.tmp {f}", f = file.display()),
-            2 => format!("printf 'pub fn {name}() {{}}\\n' >> {f}; sed -i '' 's/pub fn/pub fn/' {f}", f = file.display()),
+            2 => format!("printf 'pub fn {name}() {{}}\\n' >> {f}; perl -pi -e 's/pub fn/pub fn/' {f}", f = file.display()),
             _ => format!("rm -f {}", file.display()),
         };
         sh(&script);

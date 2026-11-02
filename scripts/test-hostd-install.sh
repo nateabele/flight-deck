@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 SUMS=$(shasum -a 256 build/hostd-release/SHA256SUMS | cut -d' ' -f1)
 docker run --rm --platform linux/arm64 -e SUMS="$SUMS" -v "$PWD/build/hostd-release:/rel:ro" \
   ubuntu:24.04 bash -euo pipefail -c '
-  apt-get update -qq && apt-get install -y -qq curl python3 >/dev/null
+  apt-get update -qq && apt-get install -y -qq curl python3 git >/dev/null
   (cd /rel && python3 -m http.server 8000 >/dev/null 2>&1 &)
   until curl -fsS -o /dev/null 2>/dev/null http://127.0.0.1:8000/SHA256SUMS; do sleep 0.2; done
 
@@ -35,6 +35,17 @@ docker run --rm --platform linux/arm64 -e SUMS="$SUMS" -v "$PWD/build/hostd-rele
     usage=$(~/.local/bin/flightdeck-hostd 2>&1 || true)
     grep -q "usage: flightdeck-hostd serve" <<<"$usage"
     if grep -n HostDaemonLinux <<<"$usage"; then exit 1; fi
+
+    # 1b. The code index came with it, and its daemon answers on this distribution: a scratch
+    #     store and socket, started by the query, stopped after.
+    test "$(stat -c %a ~/.local/bin/fdindex)" = 755
+    mkdir -p ~/proj && cd ~/proj && git init -q && git config user.email t@example.com && git config user.name t
+    printf "pub fn indexed_here() {}\n" > lib.rs && git add -A && git commit -qm init
+    fdi() { ~/.local/bin/fdindex --store ~/fdi --socket ~/fdi.sock "$@"; }
+    out=$(fdi find indexed_here); grep -q "indexed_here (function)" <<<"$out"
+    out=$(fdi status); grep -q "refs of 1 repository" <<<"$out"
+    out=$(fdi stop); grep -q stopped <<<"$out"
+    cd ~
 
     # 2. It serves and pairs.
     ~/.local/bin/flightdeck-hostd serve --port 47410 </dev/null >~/serve.log 2>&1 &

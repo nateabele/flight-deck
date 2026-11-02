@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # scripts/build-hostd-linux.sh — the Linux hostd release assets, in build/hostd-release/:
-#   flightdeck-hostd-linux-<arch>.tar.gz   one static-stdlib binary per architecture
+#   flightdeck-hostd-linux-<arch>.tar.gz   per architecture: flightdeck-hostd (static Swift stdlib)
+#                                          and fdindex, the code index (Packages/FlightIndex)
 #   hostd-install.sh                       the installer, with this release's URL baked in
 #   SHA256SUMS                             the digest of every asset above
 #   installer.xcconfig                     FD_HOSTD_INSTALLER_SHA256 (the digest of SHA256SUMS)
 #                                          for the Release app build to embed
 #
 # Usage: ./scripts/build-hostd-linux.sh [aarch64|x86_64 ...]   (default: both)
-# Builds in swift:6.3-noble under Docker; x86_64 runs emulated on Apple silicon and is slow.
+# Builds in swift:6.3-noble (hostd) and rust:1.96.0-slim-bookworm (fdindex, glibc 2.36, older than
+# noble's, so it runs wherever hostd does) under Docker; x86_64 runs emulated on Apple silicon and
+# is slow.
 # Publishing the assets as a GitHub release is a separate, manual step — nothing here uploads.
 #
 # FD_HOSTD_RELEASE_BASE_URL overrides where the installer and the app look for the assets.
@@ -45,14 +48,25 @@ for ARCH in "${ARCHES[@]}"; do
   # A scratch path per architecture, apart from the debug .build the test scripts share: the
   # two architectures' manifests and build databases would otherwise overwrite each other.
   # The tarball is made inside the container because macOS tar adds AppleDouble `._` entries.
+  # fdindex first, into a staging directory the hostd container then tars beside its own binary.
+  # Its own target directory per architecture, apart from the macOS build's. The crate reads
+  # docs/ at compile time (the skill it installs), hence the whole checkout is mounted.
+  STAGE_ABS="$OUT_ABS/.stage-$ARCH"
+  mkdir -p "$STAGE_ABS"
+  docker run --rm --platform "$PLATFORM" -v "$PWD:/src" -v "$STAGE_ABS:/stage" \
+    -v "fdindex-cargo-registry-$ARCH:/usr/local/cargo/registry" -w /src/Packages/FlightIndex rust:1.96.0-slim-bookworm bash -euo pipefail -c "
+      cargo build --release --locked --quiet --target-dir target/hostd-linux-$ARCH
+      cp target/hostd-linux-$ARCH/release/fdindex /stage/fdindex
+      strip /stage/fdindex"
   docker run --rm --platform "$PLATFORM" -v "$PWD:/src" -v "$ARTIFACTS:$ARTIFACTS" -v "$OUT_ABS:/out" \
     -w /src/Packages/HostDaemonLinux swift:6.3-noble bash -euo pipefail -c "
       SCRATCH=.build/release-$ARCH
       swift build -c release --static-swift-stdlib --product HostDaemonLinux --scratch-path \$SCRATCH
-      STAGE=\$(mktemp -d)
+      STAGE=/out/.stage-$ARCH
       cp \"\$(swift build -c release --static-swift-stdlib --scratch-path \$SCRATCH --show-bin-path)/HostDaemonLinux\" \$STAGE/flightdeck-hostd
       strip \$STAGE/flightdeck-hostd
-      tar -C \$STAGE --owner=0 --group=0 -czf /out/flightdeck-hostd-linux-$ARCH.tar.gz flightdeck-hostd"
+      tar -C \$STAGE --owner=0 --group=0 -czf /out/flightdeck-hostd-linux-$ARCH.tar.gz flightdeck-hostd fdindex"
+  rm -rf "$STAGE_ABS"
 done
 
 sed "s|@FD_HOSTD_ASSET_BASE@|$BASE|" scripts/hostd-install.sh > "$OUT/hostd-install.sh"

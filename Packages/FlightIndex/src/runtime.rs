@@ -105,8 +105,11 @@ pub fn wait_until_stopped(pidfile: &Path, timeout: std::time::Duration) -> bool 
 pub fn rss_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
+        // `statm` counts pages, and a page is 16 KB or 64 KB on some arm64 kernels, not 4 KB.
         let pages: u64 = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse().ok()).unwrap_or(0);
-        pages * 4096
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        pages * if page > 0 { page as u64 } else { 4096 }
     }
     #[cfg(target_os = "macos")]
     {
@@ -185,4 +188,17 @@ pub fn vm_info() -> VmInfo {
 #[cfg(not(target_os = "macos"))]
 pub fn vm_info() -> VmInfo {
     VmInfo { resident: rss_bytes(), ..VmInfo::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resident_size_agrees_with_what_the_kernel_reports_in_kilobytes() {
+        let rss = super::rss_bytes();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let kb: u64 = status.lines().find_map(|l| l.strip_prefix("VmRSS:")).and_then(|v| v.split_whitespace().next()?.parse().ok()).unwrap();
+        // Read a moment apart, so allow a little drift either way.
+        assert!(rss.abs_diff(kb * 1024) < 8 << 20, "statm says {rss} bytes, status says {kb} kB");
+    }
 }
