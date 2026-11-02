@@ -21,6 +21,7 @@ pub mod near;
 pub mod links;
 pub mod mcp;
 pub mod names;
+pub mod peer;
 pub mod pkgview;
 pub mod proto;
 pub mod query;

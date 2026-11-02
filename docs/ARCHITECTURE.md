@@ -910,6 +910,18 @@ same way. It is a Rust crate, **never in the Xcode project**; the app build only
   of nearby commits compare equal. Per graph remain the block pointers, sorted-array name and
   incoming indexes (`src/graph/compact.rs`) and PageRank. 44 cached tessera graphs: 1.81 GB RSS
   before, 0.81 GB after.
+- **Facts from a peer.** `fdindex daemon --peer-socket PATH` fetches the facts of the blobs a
+  build lacks from another daemon before parsing them (spec §7 item 3, `src/peer/`). Facts are
+  keyed by blob id, language and parser version, so they are valid on any machine with the same
+  parser. The peer's socket takes a `peer_facts` request line and then carries binary frames:
+  the asker's wanted keys, the holder's q17 chunks with reference names renumbered into a table
+  scoped to the connection (store name ids mean nothing outside their file), and a done count.
+  The holder answers from any repository database in its store; a missing key, a dead peer or a
+  broken stream only means those blobs are parsed. On tessera master a second daemon fetched all
+  2,960 blobs in 0.40 to 0.52 s against 1.18 to 1.71 s of parsing, 0.6 s of CPU on both ends
+  against 6.3 s, 3.7 MB moved, and its store came out byte-identical. The frames are an opaque
+  byte stream, so a HostKit link carries them by piping a `ChannelMux` channel to the host
+  daemon's socket as `port.open` pipes one to a TCP port (not wired yet).
 - **Supervision.** `fdindex service install` writes a launchd user agent (a systemd user unit on
   Linux) that runs `fdindex daemon` at login and restarts it after a crash. Nothing here needs the
   Flight Deck app; without the unit, the first client starts the daemon.

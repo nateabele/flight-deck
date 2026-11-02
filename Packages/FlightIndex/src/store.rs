@@ -624,7 +624,12 @@ impl Reader {
     /// Open an existing database read-only. Fails if it is absent or has another schema version
     /// (only the writer may rebuild).
     pub fn open(store_root: &Path, repo: &Path) -> Result<Reader> {
-        let path = db_path(store_root, repo);
+        Reader::open_file(db_path(store_root, repo))
+    }
+
+    /// `open` for a database file found by listing the store (`list_dbs`) rather than named by
+    /// its repository: the fact exchange (`peer`) answers from whichever file holds a blob.
+    pub fn open_file(path: PathBuf) -> Result<Reader> {
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         match read_version(&conn)? {
@@ -703,6 +708,13 @@ impl Reader {
     /// by `load_names` from this store); `Ok(None)` if absent. One row and one chunk, whose
     /// vectors come out of the decoder exactly sized.
     pub fn get_interned(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<InternedFacts>> {
+        Ok(self.get_stored(blob_id, language, parser_version)?.map(|(_, f)| f))
+    }
+
+    /// `get_interned`, saying also whether the blob was parsed (`true`) or recorded as skipped
+    /// (not UTF-8), which `get_interned` folds into empty facts. The fact exchange needs the
+    /// difference: a peer told "skipped" records the blob skipped instead of reading it again.
+    pub fn get_stored(&self, blob_id: &str, language: &str, parser_version: u32) -> Result<Option<(bool, InternedFacts)>> {
         let row = self
             .conn
             .prepare_cached(
@@ -717,11 +729,11 @@ impl Reader {
         let Some((status, module_name, line_count, data, types)) = row else { return Ok(None) };
         let mut facts = InternedFacts { module_name, line_count, ..Default::default() };
         if status != 0 {
-            return Ok(Some(facts));
+            return Ok(Some((false, facts)));
         }
         // A parsed blob without a chunk cannot happen (both are written in one transaction); read
         // it as empty rather than failing every graph of the repository.
-        let Some(data) = data else { return Ok(Some(facts)) };
+        let Some(data) = data else { return Ok(Some((true, facts))) };
         let d = chunk::decode(&data)?;
         if let Some(t) = types {
             facts.types = TypeFacts::decode(&t);
@@ -731,7 +743,7 @@ impl Reader {
         facts.imports = d.imports;
         facts.refs = d.refs;
         facts.hierarchy = d.hierarchy;
-        Ok(Some(facts))
+        Ok(Some((true, facts)))
     }
 
     pub fn has_tree(&self, commit: &str) -> Result<bool> {
