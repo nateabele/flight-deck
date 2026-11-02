@@ -56,7 +56,14 @@ pub(crate) fn internal() {}
 
 const LIBRARY: &[(&str, &str)] = &[
     // core's own tests name std, which depends on core: following that would deadlock.
-    ("core/src/lib.rs", "pub mod option;\npub mod result;\npub mod mem;\npub mod prelude;\n#[macro_use]\nmod macros;\n\n#[cfg(test)]\nmod tests {\n    use std::vec::Vec;\n}\n"),
+    (
+        "core/src/lib.rs",
+        "pub mod option;\npub mod result;\npub mod mem;\npub mod prelude;\npub mod arch;\n#[path = \"../../stdarch/crates/core_arch/src/mod.rs\"]\nmod core_arch;\n#[macro_use]\nmod macros;\n\n#[cfg(test)]\nmod tests {\n    use std::vec::Vec;\n}\n",
+    ),
+    // core pulls in stdarch from outside its own `src`: built apart, on the first lookup into it.
+    ("core/src/arch.rs", "pub use crate::core_arch::arch::*;\n"),
+    ("stdarch/crates/core_arch/src/mod.rs", "pub mod arch {\n    pub use crate::core_arch::simd::*;\n}\npub mod simd;\n"),
+    ("stdarch/crates/core_arch/src/simd.rs", "pub fn simd_add() {}\n"),
     ("core/src/option.rs", "pub enum Option<T> {\n    None,\n    Some(T),\n}\n\nimpl<T> Option<T> {\n    pub fn is_some(&self) -> bool {\n        true\n    }\n}\n"),
     ("core/src/result.rs", "pub enum Result<T, E> {\n    Ok(T),\n    Err(E),\n}\n"),
     ("core/src/mem.rs", "pub fn drop<T>(_x: T) {}\n"),
@@ -76,6 +83,7 @@ const LIBRARY: &[(&str, &str)] = &[
 pub use core::option;
 pub use core::result;
 pub use core::mem;
+pub use core::arch;
 pub use alloc_crate::vec;
 pub use alloc_crate::string;
 pub use core::assert_eq;
@@ -197,6 +205,7 @@ fn main() {
     let items = vec![1, 2];
     util::helper();
     drop(o);
+    std::arch::simd_add();
 }
 
 fn show(f: &mut fmt::Formatter) {}
@@ -313,6 +322,8 @@ fn std_names_resolve_through_imports_the_prelude_and_re_exports_of_core_and_allo
     assert_pkg(&g, "assert_eq", "assert_eq!", "core@0.0.0-test assert_eq");
     assert_pkg(&g, "println", "println!", "std@0.0.0-test println");
     assert_pkg(&g, "vec", "vec![", "alloc@0.0.0-test vec");
+    // A module core takes from outside its source directory (`core::arch`'s intrinsics).
+    assert_pkg(&g, "simd_add", "simd_add()", "core@0.0.0-test core_arch::simd::simd_add");
     // A module imported by `use std::fmt;` qualifies nothing the fixture's std defines.
     assert_unresolved(&g, "Formatter", "fmt::Formatter");
 }

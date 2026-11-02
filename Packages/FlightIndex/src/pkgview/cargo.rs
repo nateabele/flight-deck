@@ -322,7 +322,19 @@ struct Scope {
 const DEPTH: u32 = 8;
 
 /// A crate's way to its dependencies, kept by its view for the lazy paths.
-type Loader = Box<dyn Fn(&str) -> Option<Arc<CrateView>> + Send + Sync>;
+type Loader = Arc<dyn Fn(&str) -> Option<Arc<CrateView>> + Send + Sync>;
+
+/// A module whose file lies outside the crate's own source directory (`#[path =
+/// "../../stdarch/…"]`: core pulls in the `core_arch` intrinsics, 170 files and 15,800 of core's
+/// 21,600 names, 1.8 of its 2.1 parse seconds and 150 MB of transient memory). It is built as a
+/// view of its own, on the first lookup that reaches into it, and named by the same paths.
+struct Detached {
+    root: PathBuf,
+    id: PackageId,
+    /// The module's path in the crate that declares it (`core_arch`), and its name there.
+    prefix: String,
+    name: String,
+}
 
 /// Type name -> (the module its members are named under, member name -> symbol).
 type Members = HashMap<String, Vec<(u32, HashMap<String, Arc<PkgSymbol>>)>>;
@@ -333,17 +345,39 @@ struct Deps {
     /// `load`'s answer per name, once: a lookup through std's prelude follows a path into core
     /// for nearly every name, and `load` costs a stat and two locks.
     loaded: Vec<OnceLock<Option<Arc<CrateView>>>>,
+    /// Pseudo-crates standing for detached modules, by their (non-identifier) name.
+    detached: HashMap<String, Detached>,
 }
 
 impl Deps {
     fn new(names: Vec<String>, load: Loader) -> Deps {
         let loaded = names.iter().map(|_| OnceLock::new()).collect();
-        Deps { names, load, loaded }
+        Deps { names, load, loaded, detached: HashMap::new() }
     }
 
     fn get(&self, name: &str) -> Option<Arc<CrateView>> {
         let i = self.names.iter().position(|n| n == name)?;
-        self.loaded[i].get_or_init(|| (self.load)(name)).clone()
+        self.loaded[i]
+            .get_or_init(|| match self.detached.get(name) {
+                Some(d) => {
+                    let names = self.names.iter().filter(|n| !self.detached.contains_key(*n)).cloned().collect();
+                    load(&d.root, d.id.clone(), Deps::new(names, self.load.clone()), Some(d))
+                }
+                None => (self.load)(name),
+            })
+            .clone()
+    }
+
+    /// Register the detached module `name` of module path `prefix`, rooted at file `root`, as a
+    /// pseudo-crate; returns the name that reaches it.
+    fn detach(&mut self, id: &PackageId, root: PathBuf, prefix: &str, name: &str) -> String {
+        let key = format!("#{prefix}");
+        if !self.detached.contains_key(&key) {
+            self.names.push(key.clone());
+            self.loaded.push(OnceLock::new());
+            self.detached.insert(key.clone(), Detached { root, id: id.clone(), prefix: prefix.to_string(), name: name.to_string() });
+        }
+        key
     }
 }
 
@@ -555,7 +589,7 @@ pub fn stats() -> CrateStats {
 /// The view of the crate rooted at `root`, built on first use. Two threads asking for one crate
 /// wait for one parse (std, core and alloc take about two CPU seconds); a crate that could not
 /// be read is not remembered, so one downloaded later is picked up.
-fn load(root: &Path, id: PackageId, deps: Deps) -> Option<Arc<CrateView>> {
+fn load(root: &Path, id: PackageId, deps: Deps, detached: Option<&Detached>) -> Option<Arc<CrateView>> {
     // A crate this thread is already building: "unknown" rather than waiting on ourselves. (A
     // build follows no dependency, so only a bug could get here.)
     thread_local! {
@@ -575,8 +609,11 @@ fn load(root: &Path, id: PackageId, deps: Deps) -> Option<Arc<CrateView>> {
     let cell: Cell = cache().lock().unwrap().crates.entry(root.to_path_buf()).or_default().clone();
     let v = cell
         .get_or_init(|| {
-            let v = Arc::new(build(root, id, deps)?);
-            cache().lock().unwrap().by_id.insert((*v.package).clone(), v.clone());
+            let v = Arc::new(build(root, id, deps, detached)?);
+            // A detached module shares its crate's package id and is reached only through it.
+            if detached.is_none() {
+                cache().lock().unwrap().by_id.insert((*v.package).clone(), v.clone());
+            }
             Some(v)
         })
         .clone();
@@ -602,8 +639,8 @@ pub fn sysroot_crate(name: &str) -> Option<Arc<CrateView>> {
         return None;
     }
     let id = PackageId { manager: "cargo", name: name.to_string(), version };
-    let deps = Deps::new(sysroot_deps(name).iter().map(|s| s.to_string()).collect(), Box::new(sysroot_crate));
-    load(&root, id, deps)
+    let deps = Deps::new(sysroot_deps(name).iter().map(|s| s.to_string()).collect(), Arc::new(sysroot_crate));
+    load(&root, id, deps, None)
 }
 
 /// The sysroot crates each one may name. Only downwards: core's and alloc's test modules
@@ -640,8 +677,8 @@ fn registry_crate(lock: &Arc<CargoLock>, i: usize) -> Option<Arc<CrateView>> {
     let externs = extern_map(lock, p, &manifest);
     let names = externs.keys().cloned().chain(["std", "core", "alloc"].map(String::from)).collect();
     let lock = lock.clone();
-    let deps = Deps::new(names, Box::new(move |name: &str| sysroot_crate(name).or_else(|| externs.get(name).and_then(|&j| registry_crate(&lock, j)))));
-    load(&root, id, deps)
+    let deps = Deps::new(names, Arc::new(move |name: &str| sysroot_crate(name).or_else(|| externs.get(name).and_then(|&j| registry_crate(&lock, j)))));
+    load(&root, id, deps, None)
 }
 
 // ---- one Cargo package's dependencies --------------------------------------------------------
@@ -693,7 +730,9 @@ impl RustDeps {
         self.prelude
             .get_or_init(|| {
                 let module = if self.edition.as_str() >= "2024" { "rust_2024" } else { "rust_2021" };
-                let p = self.krate("std")?.root().child("prelude")?.child(module)?;
+                // The prelude reaches core and alloc, and the three parse independently.
+                let (std, _) = rayon::join(|| self.krate("std"), || rayon::join(|| self.krate("core"), || self.krate("alloc")));
+                let p = std?.root().child("prelude")?.child(module)?;
                 let mut names = BTreeSet::new();
                 p.names(0, &mut Vec::new(), &mut names);
                 Some(names.into_iter().filter_map(|n| Some((n.clone(), p.child(&n)?))).collect())
@@ -757,12 +796,29 @@ struct Builder {
     extern_aliases: HashMap<String, Lazy>,
     deps: Deps,
     files: usize,
+    /// The directory of the root file: a `#[path]` module beyond it is detached.
+    src_dir: PathBuf,
 }
 
-fn build(root: &Path, id: PackageId, deps: Deps) -> Option<CrateView> {
+/// `p` with `.` and `..` folded away, without touching the file system.
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn build(root: &Path, id: PackageId, deps: Deps, detached: Option<&Detached>) -> Option<CrateView> {
     let mut b = Builder {
         id: Arc::new(id),
-        modules: vec![Module { scope: Some(Box::default()), ..Default::default() }],
+        modules: vec![Module { path: Arc::from(detached.map_or("", |d| d.prefix.as_str())), scope: Some(Box::default()), ..Default::default() }],
         uses: Vec::new(),
         impls: Vec::new(),
         type_homes: HashMap::new(),
@@ -770,7 +826,12 @@ fn build(root: &Path, id: PackageId, deps: Deps) -> Option<CrateView> {
         extern_aliases: HashMap::new(),
         deps,
         files: 0,
+        src_dir: normalize(root.parent().unwrap_or(Path::new(""))),
     };
+    if let Some(d) = detached {
+        // The module's own paths (`crate::core_arch::x86`) name it from inside the crate it left.
+        b.scope(0).mods.insert(d.name.clone(), 0);
+    }
     b.load_file(0, root, true, 0);
     if b.files == 0 {
         return None;
@@ -880,6 +941,194 @@ fn sanitize(src: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(String::from_utf8(b).unwrap_or(text))
 }
 
+/// `src` with every function body emptied (`fn f() { … }` becomes `fn f() {}`): a view holds
+/// names and signatures, and bodies are most of a crate's text and a third of the time
+/// tree-sitter takes to parse it. (Comments are left: removing them changes how tree-sitter
+/// recovers inside item macros such as std's `cfg_select!`.) Found by a lexer, not a grammar:
+/// comments, strings (raw ones included) and character literals are skipped so their braces do
+/// not count. A `fn` it does not understand (a function pointer type, `fn $name` in a macro)
+/// keeps its body, as does anything after a signature it cannot end; the parse is then merely
+/// slower.
+fn strip_fn_bodies(src: &str) -> std::borrow::Cow<'_, str> {
+    let b = src.as_bytes();
+    let mut out: Option<Vec<u8>> = None;
+    let mut copied = 0; // `out` holds src[..copied] when it exists
+    let mut cut = |from: usize, to: usize, with: &[u8]| {
+        let o = out.get_or_insert_with(|| Vec::with_capacity(b.len()));
+        o.extend_from_slice(&b[copied..from]);
+        o.extend_from_slice(with);
+        copied = to;
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = line_end(b, i),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = block_comment_end(b, i),
+            b'"' | b'\'' | b'r' | b'b' | b'c' if i == 0 || !is_ident(b[i - 1]) => match literal_end(b, i) {
+                Some(end) => i = end,
+                None => i += 1,
+            },
+            b'f' if b[i..].starts_with(b"fn") && (i == 0 || !is_ident(b[i - 1])) && b.get(i + 2).is_some_and(|c| c.is_ascii_whitespace()) => {
+                i += 2;
+                if let Some((open, close)) = fn_body(b, i) {
+                    cut(open + 1, close, b"");
+                    i = close + 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    match out {
+        None => std::borrow::Cow::Borrowed(src),
+        Some(mut o) => {
+            o.extend_from_slice(&b[copied..]);
+            std::borrow::Cow::Owned(String::from_utf8(o).unwrap_or_else(|_| src.to_string()))
+        }
+    }
+}
+
+fn is_ident(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+fn line_end(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && b[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Past the (nesting) block comment starting at `i`.
+fn block_comment_end(b: &[u8], mut i: usize) -> usize {
+    let mut depth = 0;
+    while i < b.len() {
+        if b[i..].starts_with(b"/*") {
+            depth += 1;
+            i += 2;
+        } else if b[i..].starts_with(b"*/") {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Past the string or character literal starting at `i` (`"…"`, `b"…"`, `c"…"`, `r#"…"#`,
+/// `br"…"`, `'x'`, `b'x'`), or `None` when what starts there is not one (a lifetime, an
+/// identifier).
+fn literal_end(b: &[u8], i: usize) -> Option<usize> {
+    let mut j = i;
+    if matches!(b[j], b'b' | b'c') {
+        j += 1;
+    }
+    let raw = b.get(j) == Some(&b'r');
+    if raw {
+        j += 1;
+    }
+    let mut hashes = 0;
+    while raw && b.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    match b.get(j)? {
+        b'"' => {
+            j += 1;
+            while j < b.len() {
+                if b[j] == b'"' && (!raw || b[j + 1..].iter().take(hashes).filter(|&&c| c == b'#').count() == hashes) {
+                    return Some(j + 1 + hashes);
+                }
+                j += if b[j] == b'\\' && !raw { 2 } else { 1 };
+            }
+            Some(b.len())
+        }
+        b'\'' if !raw && b[i] != b'c' => {
+            // `'a'`, `'\n'`, `'\u{1F600}'` are characters; `'a` and `'static` are lifetimes.
+            let k = j + 1;
+            if b.get(k) == Some(&b'\\') {
+                let mut e = k + 2;
+                while e < b.len() && b[e] != b'\'' {
+                    e += 1;
+                }
+                return Some((e + 1).min(b.len()));
+            }
+            let width = match b.get(k)? {
+                c if *c < 0x80 => 1,
+                c if *c >= 0xF0 => 4,
+                c if *c >= 0xE0 => 3,
+                _ => 2,
+            };
+            (b.get(k + width) == Some(&b'\'')).then_some(k + width + 1)
+        }
+        _ => None,
+    }
+}
+
+/// The braces of the body of the function whose `fn` keyword ends at `i`: the first `{` outside
+/// parentheses and brackets, with its match; `None` for a signature ended by `;` (a trait
+/// method, an extern function) and for a `fn` that is not an item (`fn(u8) -> u8` has no name).
+fn fn_body(b: &[u8], mut i: usize) -> Option<(usize, usize)> {
+    while b.get(i)?.is_ascii_whitespace() {
+        i += 1;
+    }
+    if !(b[i].is_ascii_alphabetic() || b[i] == b'_') {
+        return None;
+    }
+    let mut depth = 0i32;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = line_end(b, i),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = block_comment_end(b, i),
+            b'"' | b'\'' | b'r' | b'b' | b'c' if i == 0 || !is_ident(b[i - 1]) => match literal_end(b, i) {
+                Some(end) => i = end,
+                None => i += 1,
+            },
+            b'(' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' | b']' => {
+                depth -= 1;
+                i += 1;
+            }
+            b';' if depth <= 0 => return None,
+            b'{' if depth <= 0 => {
+                let open = i;
+                let mut braces = 0;
+                while i < b.len() {
+                    match b[i] {
+                        b'/' if b.get(i + 1) == Some(&b'/') => i = line_end(b, i),
+                        b'/' if b.get(i + 1) == Some(&b'*') => i = block_comment_end(b, i),
+                        b'"' | b'\'' | b'r' | b'b' | b'c' if !is_ident(b[i - 1]) => match literal_end(b, i) {
+                            Some(end) => i = end,
+                            None => i += 1,
+                        },
+                        b'{' => {
+                            braces += 1;
+                            i += 1;
+                        }
+                        b'}' => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return Some((open, i));
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                return None;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// The end of a macro 2.0 item whose name ends at `at`: an optional `(..)` then a `{..}`.
 fn decl_macro_end(s: &[u8], mut at: usize) -> Option<usize> {
     let skip_ws = |at: &mut usize| {
@@ -966,6 +1215,7 @@ impl Builder {
 
     fn source(&mut self, m: u32, src: &str, child_dir: &Path, file_dir: &Path, depth: u32, macro_depth: u32) {
         let src = sanitize(src);
+        let src = strip_fn_bodies(&src);
         let Some(tree) = parse(&tree_sitter_rust::LANGUAGE.into(), &src) else { return };
         self.items(m, tree.root_node(), &src, child_dir, file_dir, depth, macro_depth);
     }
@@ -1033,7 +1283,17 @@ impl Builder {
                         }
                         None => {
                             if let Some(p) = attrs.iter().find_map(|a| path_attr(a)) {
-                                self.load_file(child, &file_dir.join(p), true, depth + 1);
+                                let file = file_dir.join(p);
+                                let file = normalize(&file);
+                                if file.starts_with(&self.src_dir) || !file.is_file() {
+                                    self.load_file(child, &file, true, depth + 1);
+                                } else {
+                                    let key = self.deps.detach(&self.id, file, &self.modules[child as usize].path.clone(), name);
+                                    self.scope(m).lazy.insert(name.to_string(), Lazy { krate: Arc::from(key.as_str()), path: Vec::new() });
+                                    if public {
+                                        self.modules[m as usize].lazy.insert(name.to_string(), Lazy { krate: Arc::from(key.as_str()), path: Vec::new() });
+                                    }
+                                }
                             } else {
                                 let flat = child_dir.join(format!("{name}.rs"));
                                 let nested = child_dir.join(name).join("mod.rs");
@@ -1430,6 +1690,28 @@ mod tests {
         assert!(out.contains("#[fd_decl_macro_pub] macro_rules! assert_matches {}"), "{out}");
         assert!(out.contains(" macro_rules! hidden {}") && !out.contains("pub] macro_rules! hidden"), "{out}");
         assert!(out.contains("macro_rules! assert { () => {} }"), "{out}");
+    }
+
+    #[test]
+    fn function_bodies_are_emptied_whatever_braces_they_hold() {
+        let src = concat!(
+            "pub fn a(x: u8) -> u8 { let s = \"}\"; let c = '}'; let q = '\\''; /* } */ x } // {\n",
+            "pub fn b<'a>(x: &'a str) -> &'a str where F: Fn(u8) -> u8 { let r = r#\"}\"}\"#; x }\n",
+            "pub trait T { fn m(&self); fn d(&self) { loop {} } }\n",
+            "pub struct S { f: fn(u8) -> u8 }\n",
+            "impl S { pub const fn c() -> Self { S { f: |x| { x } } } }\n",
+            "macro_rules! m { ($n:ident) => { fn $n() { 1 } } }\n",
+        );
+        let out = strip_fn_bodies(src);
+        let want = concat!(
+            "pub fn a(x: u8) -> u8 {} // {\n",
+            "pub fn b<'a>(x: &'a str) -> &'a str where F: Fn(u8) -> u8 {}\n",
+            "pub trait T { fn m(&self); fn d(&self) {} }\n",
+            "pub struct S { f: fn(u8) -> u8 }\n",
+            "impl S { pub const fn c() -> Self {} }\n",
+            "macro_rules! m { ($n:ident) => { fn $n() { 1 } } }\n",
+        );
+        assert_eq!(out, want);
     }
 
     #[test]
