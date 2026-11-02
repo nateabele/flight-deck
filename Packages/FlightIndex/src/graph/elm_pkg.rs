@@ -163,7 +163,8 @@ impl GraphData {
     }
 
     /// Package symbols named `name` (`map`) or `Module.name` (`List.map`, `Json.Decode.field`)
-    /// in the dependencies of the view's Elm projects, deduplicated, sorted by display name.
+    /// in the dependencies of the view's Elm projects, and in the npm modules its TypeScript and
+    /// JavaScript files import (`ecma_pkg`), deduplicated, sorted by display name.
     pub fn find_package_symbols(&self, query: &str) -> Vec<Arc<PkgSymbol>> {
         let (module, name) = match query.rfind('.') {
             // `List.::`-style operators are not looked up qualified; `(::)` would need parsing.
@@ -183,6 +184,7 @@ impl GraphData {
                 }
             }
         }
+        self.find_npm_symbols(query, &mut out);
         out.sort_by_key(|s| (s.display(), s.kind.as_str()));
         out
     }

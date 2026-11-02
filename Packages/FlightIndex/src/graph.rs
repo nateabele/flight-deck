@@ -35,6 +35,7 @@
 
 pub mod blocks;
 mod compact;
+mod ecma_pkg;
 mod elixir;
 mod elm_pkg;
 mod precise;
@@ -983,6 +984,7 @@ impl GraphData {
             .flatten()
             .filter(|p| !p.modules.is_empty())
             .map(|p| elm_pkg::ElmPkgScope::new(&p, &facts.imports, &imports));
+        let ecma_scope = matches!(lang, "typescript" | "tsx" | "javascript").then(|| ecma_pkg::EcmaPkgScope::new(&facts.imports, &imports)).flatten();
         let mut pkg_refs = elm_pkg::PkgRefs::default();
         for (ri, r) in facts.refs.iter().enumerate() {
             let mut rr = match &swift_keys {
@@ -990,9 +992,12 @@ impl GraphData {
                 None => self.resolve_ref(f, r, lang, &qualifiers, &locals, &subs_types, &globs),
             };
             // Nothing in the view, or only a unique-name guess: a package name beats both.
-            if let Some(scope) = &pkg_scope
-                && (rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none())
-                && let Some(sym) = scope.lookup(self.name(r.name), self.qualifier(r), r.kind)
+            if (rr.confidence == Confidence::Fallback || rr.target.is_none() && rr.external.is_none())
+                && let Some(sym) = match (&pkg_scope, &ecma_scope) {
+                    (Some(scope), _) => scope.lookup(self.name(r.name), self.qualifier(r), r.kind),
+                    (_, Some(scope)) => scope.lookup(self.name(r.name), self.qualifier(r), r.kind),
+                    _ => None,
+                }
             {
                 pkg_refs.push(ri as u32, sym);
                 rr = RefRes { target: None, confidence: Confidence::Package, external: None };

@@ -21,10 +21,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+pub mod npm;
+
 /// One package at one version, as a package manager names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackageId {
-    /// `elm` today; `cargo`, `hex`, `npm`, `swiftpm` later.
+    /// `elm`, `npm`; `cargo`, `hex`, `swiftpm` later.
     pub manager: &'static str,
     /// `elm/core`
     pub name: String,
@@ -46,6 +48,14 @@ pub enum PkgKind {
     TypeAlias,
     Constructor,
     Operator,
+    /// TypeScript declarations (`npm`): a class, an interface, a `const`/`let`/`var`, a
+    /// namespace, an enum, and a member of a class, interface or enum.
+    Class,
+    Interface,
+    Variable,
+    Namespace,
+    Enum,
+    Member,
 }
 
 impl PkgKind {
@@ -56,6 +66,12 @@ impl PkgKind {
             PkgKind::TypeAlias => "type_alias",
             PkgKind::Constructor => "constructor",
             PkgKind::Operator => "operator",
+            PkgKind::Class => "class",
+            PkgKind::Interface => "interface",
+            PkgKind::Variable => "variable",
+            PkgKind::Namespace => "namespace",
+            PkgKind::Enum => "enum",
+            PkgKind::Member => "member",
         }
     }
 }
@@ -80,7 +96,8 @@ impl PkgSymbol {
     /// The SCIP symbol string: `elm elm/core 1.0.5 List/map.` (a type descriptor ends `#`).
     pub fn scip(&self) -> String {
         let suffix = match self.kind {
-            PkgKind::Type | PkgKind::TypeAlias => "#",
+            PkgKind::Type | PkgKind::TypeAlias | PkgKind::Class | PkgKind::Interface | PkgKind::Enum => "#",
+            PkgKind::Namespace => "/",
             _ => ".",
         };
         format!("{} {} {} {}/{}{suffix}", self.package.manager, self.package.name, self.package.version, self.module.replace('.', "/"), self.name)
@@ -113,6 +130,10 @@ pub struct ModuleExports {
     pub types: HashMap<String, Arc<PkgSymbol>>,
     /// Union type -> its constructors, for `exposing (Maybe(..))`.
     pub ctors_of: HashMap<String, Vec<String>>,
+    /// Value name -> what `name.member` reaches (npm: a namespace's declarations, a class's
+    /// members, the members of a constant's declared type). Empty for Elm, whose qualified names
+    /// are module names.
+    pub members: HashMap<String, Arc<ModuleExports>>,
 }
 
 /// Two views of one module are the same module: identity is (package, module), never contents.
@@ -198,10 +219,11 @@ pub struct PackageStats {
 }
 
 pub fn stats() -> PackageStats {
+    let (npm_packages, npm_names) = npm::stats();
     let c = cache().lock().unwrap();
     PackageStats {
-        packages: c.loaded.len(),
-        names: c.loaded.values().flat_map(|m| m.values()).map(|m| m.values.len() + m.types.len()).sum(),
+        packages: c.loaded.len() + npm_packages,
+        names: c.loaded.values().flat_map(|m| m.values()).map(|m| m.values.len() + m.types.len()).sum::<usize>() + npm_names,
         missing_docs: c.missing.iter().cloned().collect(),
     }
 }
@@ -240,7 +262,7 @@ pub fn parse_docs(text: &str, id: &Arc<PackageId>) -> Option<PkgModules> {
     for m in json.as_array()? {
         let Some(mname) = s(m, "name") else { continue };
         let module: Arc<str> = Arc::from(mname.as_str());
-        let mut ex = ModuleExports { package: id.clone(), name: module.clone(), values: HashMap::new(), types: HashMap::new(), ctors_of: HashMap::new() };
+        let mut ex = ModuleExports { package: id.clone(), name: module.clone(), values: HashMap::new(), types: HashMap::new(), ctors_of: HashMap::new(), members: HashMap::new() };
         let sym = |name: &str, kind: PkgKind, signature: Option<String>| {
             Arc::new(PkgSymbol { package: id.clone(), module: module.clone(), name: name.to_string(), kind, signature })
         };

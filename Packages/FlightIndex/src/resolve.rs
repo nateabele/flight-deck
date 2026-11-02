@@ -1,7 +1,8 @@
 //! Import resolution: which file does this import specifier land on?
 //!
 //! Everything here is a function of the view's *set of paths* plus a few manifests read from the
-//! worktree (`elm.json`, `Cargo.toml`), never of parsed facts. That is deliberate: the build
+//! worktree (`elm.json`, `Cargo.toml`) and the package caches (`ELM_HOME`, `node_modules`, see
+//! `pkgview`), never of parsed facts. That is deliberate: the build
 //! orchestrator needs "the direct imports of the requested file" to decide parse order *before*
 //! the rest of the repository has facts, and the graph needs exactly the same answer afterwards.
 //! One resolver serves both, so they cannot disagree.
@@ -53,7 +54,12 @@ pub struct Resolver {
     probed_outside: AtomicBool,
     /// Swift module name -> the module keys (directories) bearing it.
     swift_modules: HashMap<String, Vec<String>>,
+    /// (importing directory, bare specifier) -> the npm package module it names (`pkgview::npm`).
+    npm: Mutex<HashMap<(String, String), NpmHit>>,
 }
+
+/// A bare specifier's package module, or none (no declarations installed).
+type NpmHit = Option<Arc<ModuleExports>>;
 
 /// One `elm.json`.
 struct ElmProject {
@@ -78,7 +84,7 @@ impl Resolver {
             }
         }
         let swift_modules = swift::swift_module_names(paths.iter());
-        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules }
+        Resolver { root: root.to_path_buf(), paths, rust_crates, elm_projects: Mutex::new(HashMap::new()), probed_outside: AtomicBool::new(false), swift_modules, npm: Mutex::new(HashMap::new()) }
     }
 
     /// Did any resolution look outside the worktree (whether or not it found anything)?
@@ -188,7 +194,7 @@ impl Resolver {
 
     fn ts_specifier(&self, from: &str, spec: &str) -> Resolved {
         if !(spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..") {
-            return Resolved::Unresolved; // a package; tsconfig `paths` come with step 7
+            return self.npm_module(from, spec);
         }
         let base = normalize_rel(&join_rel(Path::new(from).parent().unwrap_or(Path::new("")), spec));
         let Some(base) = base else { return self.ts_external(from, spec) };
@@ -197,6 +203,23 @@ impl Resolver {
             Some(path) => Resolved::File { path, rest: vec![] },
             None => Resolved::Unresolved,
         }
+    }
+
+    /// A bare specifier: the package module whose declarations the nearest `node_modules` holds
+    /// (see `pkgview::npm`), once per directory and specifier. `node_modules` is read where it
+    /// is, under this worktree's root, and never above it.
+    fn npm_module(&self, from: &str, spec: &str) -> Resolved {
+        if spec.is_empty() || spec.starts_with('/') || spec.contains(':') && !spec.starts_with("node:") {
+            return Resolved::Unresolved;
+        }
+        let dir = Path::new(from).parent().unwrap_or(Path::new("")).to_string_lossy().to_string();
+        let key = (dir, spec.to_string());
+        if let Some(m) = self.npm.lock().unwrap().get(&key) {
+            return m.clone().map_or(Resolved::Unresolved, Resolved::Package);
+        }
+        let m = crate::pkgview::npm::resolve(&self.root, &self.root.join(&key.0), spec);
+        self.npm.lock().unwrap().insert(key, m.clone());
+        m.map_or(Resolved::Unresolved, Resolved::Package)
     }
 
     /// A relative import that climbs out of the worktree (`../../shared/util`): a file of the
