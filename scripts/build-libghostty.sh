@@ -49,7 +49,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GHOSTTY_DIR="$REPO_ROOT/vendor/ghostty"
-ARTIFACTS_DIR="$REPO_ROOT/vendor/ghostty-artifacts"
+# FD_GHOSTTY_ARTIFACTS_DIR stages somewhere else, to check a build before replacing the one in use.
+ARTIFACTS_DIR="${FD_GHOSTTY_ARTIFACTS_DIR:-$REPO_ROOT/vendor/ghostty-artifacts}"
 ZIG_TOOLCHAIN_DIR="$REPO_ROOT/vendor/.zig-toolchain"
 ZIG_VERSION="0.15.2"
 ZIG_TARBALL="zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
@@ -105,12 +106,10 @@ chmod +x "$SHIM_DIR/xcrun"
 
 # --- Step 3: build libghostty -----------------------------------------------
 
-# Zig fetches dependencies (highway, among others) into its global cache and compiles them from
-# there, so their __FILE__ strings name that cache. The default is ~/.cache/zig, which puts the
-# builder's home folder into the shipped app; a fixed path outside home keeps it anonymous. The real path, not /tmp: Zig spawns build tools by a path relative to this directory, and the /tmp symlink makes that path wrong.
-ZIG_GLOBAL_CACHE=/private/tmp/flightdeck-zig-cache
-
 echo "==> Building libghostty (GhosttyKit.xcframework)..."
+# Start from a clean submodule: a run that failed part-way leaves a .zig-cache whose half-built
+# pieces a later run links into an incomplete libghostty-fat.a without any error.
+git -C "$GHOSTTY_DIR" clean -xdfq
 (
   cd "$GHOSTTY_DIR"
   # -Doptimize is REQUIRED. Zig's `standardOptimizeOption` defaults to Debug when
@@ -123,8 +122,7 @@ echo "==> Building libghostty (GhosttyKit.xcframework)..."
   # app. ReleaseFast is what upstream ships.
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
     PATH="$SHIM_DIR:$PATH" \
-    "$ZIG_BIN" build --global-cache-dir "$ZIG_GLOBAL_CACHE" \
-      -Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native
+    "$ZIG_BIN" build -Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native
 )
 
 # --- Step 4: stage the artifact out of the submodule ------------------------
@@ -133,6 +131,36 @@ if [[ ! -d "$GHOSTTY_DIR/macos/GhosttyKit.xcframework" ]]; then
   echo "error: build did not produce macos/GhosttyKit.xcframework" >&2
   exit 1
 fi
+
+# An incomplete fat archive still "builds"; it fails only when the app links. Count the API.
+api=$(nm -g "$GHOSTTY_DIR/macos/GhosttyKit.xcframework/macos-arm64/libghostty-fat.a" 2>/dev/null | grep -c ' T _ghostty_' || true)
+if [[ "$api" -lt 50 ]]; then
+  echo "error: libghostty-fat.a exports only $api _ghostty_ symbols; the build is incomplete" >&2
+  exit 1
+fi
+
+# Zig compiles its fetched dependencies (highway, among others) out of ~/.cache/zig, and this
+# checkout's own sources from under $REPO_ROOT, so __FILE__ strings and debug info name the
+# builder's home folder. Overwrite those prefixes in place with neutral text of the same length:
+# offsets inside each object stay put, so the archive is otherwise byte-for-byte what Zig wrote.
+# (Pointing Zig at another cache with --global-cache-dir instead builds a libghostty-fat.a that
+# silently lacks most of its members.)
+python3 - "$GHOSTTY_DIR/macos/GhosttyKit.xcframework" "$HOME/.cache/zig/" "$REPO_ROOT/" <<'PY'
+import os, sys
+root, *prefixes = sys.argv[1:]
+subs = [(p.encode(), (("/" * (len(p) - len("build/"))) + "build/").encode()) for p in prefixes]
+for dirpath, _, files in os.walk(root):
+    for name in files:
+        if not name.endswith(".a"):
+            continue
+        path = os.path.join(dirpath, name)
+        data = open(path, "rb").read()
+        new = data
+        for old, rep in subs:
+            new = new.replace(old, rep)
+        if new != data:
+            open(path, "wb").write(new)
+PY
 
 mkdir -p "$ARTIFACTS_DIR"
 rm -rf "$ARTIFACTS_DIR/GhosttyKit.xcframework"
