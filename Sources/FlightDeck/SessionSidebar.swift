@@ -199,6 +199,14 @@ private struct SessionRow: View {
                     .help("Another tab is on this conversation")
                     .accessibilityIdentifier("session-pin-conflict")
             }
+            if let cloud = store.sessionClouds[session.id] {
+                // A borderless `Button` for the same reason the close button is one: it is the
+                // only clickable construct this row tolerates (see the notes above), and as an
+                // `NSControl` the sidebar's input monitor leaves its clicks alone. Always
+                // present while the session has cloud machines, so unlike the close button it
+                // never shifts the title.
+                SessionCloudIcon(cloud: cloud)
+            }
             // Last before the close button on purpose: flush right at rest, and the button
             // appearing on hover is what slides it left — no offset or hover state of its own.
             // The display tree, not the stored one: only it marks the agent this tab is

@@ -164,6 +164,10 @@ public final class FleetConnector: @unchecked Sendable {
     /// A tab's account choices, usage and context (`account.list`), for the session sheet.
     /// Same reasoning as the tables above.
     private var pendingAccounts: [Int: (Result<WireAccountChoices, FleetRequestError>) -> Void] = [:]
+    /// Outstanding `infra.*` requests, by correlation id: the stream's progress sink and its
+    /// terminal completion. Same exactly-once rule and shared `cid` space as the tables above;
+    /// unlike them an entry survives its `infraProgress` frames and leaves at the terminal one.
+    private var pendingInfra: [Int: (progress: (String) -> Void, completion: (Result<InfraOutcome, InfraRequestError>) -> Void)] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     /// The epoch of the snapshot `fleet` descends from, handed back in every `hello` beside
@@ -494,6 +498,28 @@ public final class FleetConnector: @unchecked Sendable {
         let cid = winner.send(FleetRequest.accountList(session: session))
         guard cid != 0 else { return completion(.failure(.disconnected)) }
         pendingAccounts[cid] = completion
+    }
+
+    /// Send an `infra.*` request (the phone sends `down`, `extend` and `list`). `progress` hears
+    /// each `infraProgress` line as it streams; `then` hears the terminal frame — exactly once,
+    /// `.disconnected` synchronously when there is nothing to ask. A Mac built before the phone
+    /// could ask answers `out_of_scope` or `unsupported`.
+    public func requestInfra(
+        _ request: InfraRequest,
+        progress: @escaping (String) -> Void,
+        then completion: @escaping (Result<InfraOutcome, InfraRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.infra(request))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingInfra[cid] = (progress, completion)
+    }
+
+    private func resolveInfra(_ cid: Int, with result: Result<InfraOutcome, InfraRequestError>) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let entry = pendingInfra.removeValue(forKey: cid) else { return }
+        entry.completion(result)
     }
 
     /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
@@ -838,7 +864,11 @@ public final class FleetConnector: @unchecked Sendable {
         case .fileChunk(let cid, let file):
             resolveFile(cid, with: .success(file))
             return
-        case .err(let cid, let code, _):
+        case .err(let cid, let code, let message):
+            if pendingInfra[cid] != nil {
+                resolveInfra(cid, with: .failure(.server(code: code, message: message)))
+                return
+            }
             // Commands first, then requests. The tables share one `cid` space
             // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
             // them and the order cannot cross an answer — it is stated so a future table is
@@ -943,9 +973,22 @@ public final class FleetConnector: @unchecked Sendable {
             // resume point. (An installed phone from before these tags cannot decode them at
             // all; it is safe because the Mac never sends it one, not because of this arm.)
             return
-        case .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone, .infraBudget:
-            // Cloud infra's replies, which answer only `infra.*` requests the phone never
-            // sends: dropped as strays for the same reasons as the delegation replies above.
+        case .infraProgress(let cid, let line):
+            // A stream's step: unsequenced, and the entry stays filed for the terminal frame.
+            pendingInfra[cid]?.progress(line)
+            return
+        case .infraMachine(let cid, let machine):
+            resolveInfra(cid, with: .success(.machine(machine)))
+            return
+        case .infraList(let cid, let machines, _, _):
+            resolveInfra(cid, with: .success(.list(machines)))
+            return
+        case .infraDone(let cid):
+            resolveInfra(cid, with: .success(.done))
+            return
+        case .infraDoctor, .infraBudget:
+            // Replies to requests the phone never sends: strays, dropped like the delegation
+            // replies above.
             return
         }
         onFleet?(fleet)
@@ -1171,6 +1214,9 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingAccounts = pendingAccounts
         pendingAccounts.removeAll()
         for completion in outstandingAccounts.values { completion(.failure(.disconnected)) }
+        let outstandingInfra = pendingInfra
+        pendingInfra.removeAll()
+        for entry in outstandingInfra.values { entry.completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }

@@ -129,7 +129,7 @@ enum CLIOutput {
         case .sessionRemoved(let id), .sessionMoved(let id, _, _), .renamed(let id, _, _),
              .activityChanged(let id, _, _, _, _, _, _, _, _, _), .unreadChanged(let id, _),
              .apiErrorChanged(let id, _), .planGateChanged(let id, _),
-             .promptExpired(let id, _), .promptTyped(let id, _):
+             .promptExpired(let id, _), .promptTyped(let id, _), .sessionCloudChanged(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed, .projectsReordered,
              .sessionsReordered, .projectIntakes, .projectSwarm:

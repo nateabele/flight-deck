@@ -303,6 +303,10 @@ struct FlightDeckApp: App {
         // Before either socket starts, like delegation below, so no `infra.*` request is ever
         // answered `infra_unavailable` by a fleet that had not been handed its service yet.
         service.infra = infra
+        // Reads only (the registry, the ledger), so it runs under a reset too: a reset run has
+        // no machines and the monitor then does nothing.
+        service.cloudMonitor = SessionCloudMonitor(service: infra, store: store)
+        service.cloudMonitor?.start()
         fleetRef.fleet = service
         // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
         // during a GUI test would be a live service, not a test fixture.
@@ -534,6 +538,8 @@ struct FlightDeckApp: App {
     var body: some Scene {
         RootWindow(store: store, preferences: preferences,
                    phoneActiveSessions: fleet.phoneActiveSessions)
+            .environment(\.sessionCloudActions,
+                         .live(service: infra.service, preferences: preferences))
             .commands {
                 FlightDeckCommands(store: store, preferences: preferences)
             }

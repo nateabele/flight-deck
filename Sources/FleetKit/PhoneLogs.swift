@@ -199,11 +199,15 @@ public enum FleetCapability {
     /// claim about decoding, like `flightControl`: the Mac sends it to no peer without this.
     public static let caughtUp = "caughtUp"
 
+    /// This peer decodes the `session.cloud` event. Withheld from peers without it, for the
+    /// reason `flightControl` gives.
+    public static let cloud = "cloud"
+
     /// Everything this build of FleetKit can answer when asked. Sent verbatim in `hello`.
     ///
     /// Claimed by the FleetKit half rather than by the app, because the frame handling is
     /// what is actually being advertised: a phone whose app forgot to install a log provider
     /// still answers, with `unhandled`, which is a refusal the Mac can print rather than a
     /// request that never comes back.
-    public static let supported = [logs, flightControl, swarm, caughtUp]
+    public static let supported = [logs, flightControl, swarm, caughtUp, cloud]
 }

@@ -16,7 +16,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading, VisualFetching {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, ThreadFetching, IntakeCommanding, FileReading, VisualFetching, InfraCommanding {
     /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
     /// because the in-app attention banner (app level) and the board strip (deep in the stack)
     /// must push onto the same stack the list owns. Observed: the stack binds to it.
@@ -861,6 +861,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         guard let connector else { return .failure(.disconnected) }
         return await withCheckedContinuation { continuation in
             connector.requestAccountChoices(session: session) { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// An `infra.*` request (`extend`, `down`) and its stream, for the cloud pane. Answers
+    /// exactly once, `.disconnected` when there is no Mac to ask.
+    func infra(_ request: InfraRequest, progress: @escaping (String) -> Void) async -> Result<InfraOutcome, InfraRequestError> {
+        guard let connector else { return .failure(.disconnected) }
+        return await withCheckedContinuation { continuation in
+            connector.requestInfra(request, progress: progress) { continuation.resume(returning: $0) }
         }
     }
 

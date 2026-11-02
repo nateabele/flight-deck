@@ -21,6 +21,7 @@ enum FleetEventTag: String, Codable {
     case promptExpired = "prompt.expired"
     case promptTyped = "prompt.typed"
     case apiErrorChanged = "session.apiError"
+    case sessionCloudChanged = "session.cloud"
 }
 
 extension FleetEvent: Codable {
@@ -35,6 +36,7 @@ extension FleetEvent: Codable {
         case intakes, swarm
         case subagents, openPromptAgent
         case openPrompt
+        case cloud
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -125,6 +127,11 @@ extension FleetEvent: Codable {
             // Absent, not `null`, matching `planGateChanged` directly above: a decoder that has
             // never heard of this key must see what a Mac predating the case entirely would send.
             try c.encodeIfPresent(error, forKey: .apiError)
+        case .sessionCloudChanged(let id, let cloud):
+            try c.encode(FleetEventTag.sessionCloudChanged, forKey: .t)
+            try c.encode(id, forKey: .id)
+            // Absent, not `null`, for nil: the `apiErrorChanged` rule.
+            try c.encodeIfPresent(cloud, forKey: .cloud)
         case .projectIntakes(let project, let intakes):
             try c.encode(FleetEventTag.projectIntakes, forKey: .t)
             try c.encode(project, forKey: .project)
@@ -209,6 +216,10 @@ extension FleetEvent: Codable {
             self = .apiErrorChanged(
                 id: try c.decode(UUID.self, forKey: .id),
                 error: try c.decodeIfPresent(SessionAPIError.self, forKey: .apiError))
+        case .sessionCloudChanged:
+            self = .sessionCloudChanged(
+                id: try c.decode(UUID.self, forKey: .id),
+                cloud: try c.decodeIfPresent(WireSessionCloud.self, forKey: .cloud))
         }
     }
 }

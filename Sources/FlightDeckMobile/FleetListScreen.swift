@@ -155,6 +155,12 @@ struct FleetListScreen: View {
                     loadAccounts: { await model.accountChoices(session: $0) }
                 )
             }
+            .navigationDestination(for: CloudRoute.self) { route in
+                // Live, like the session destination above: the pane follows the Mac's
+                // `session.cloud` events and says so when the last machine goes.
+                let session = model.fleet.projects.flatMap(\.sessions).first { $0.id == route.session }
+                SessionCloudScreen(title: session?.title, cloud: session?.cloud, commander: model)
+            }
             .navigationDestination(for: IntakeRoute.self) { route in
                 switch route {
                 case .intake(let id):
@@ -602,7 +608,7 @@ struct FleetListScreen: View {
 
     private func sessionRow(_ session: WireSession, swarm: WireSwarmAgent? = nil) -> some View {
         NavigationLink(value: session.id) {
-            Self.row(session, swarm: swarm)
+            Self.row(session, swarm: swarm, onCloud: { model.path.append(CloudRoute(session: session.id)) })
         }
         .listRowInsets(Self.rowInsets)
         // `allowsFullSwipe: true`, the mirror image of the trailing lane's `false` below —
@@ -751,7 +757,12 @@ struct FleetListScreen: View {
     /// carries `SearchResult.highlightedRanges` when a search result calls this — routed
     /// through `SessionSearchResults.highlighted`, the one place that turns a range into
     /// underline styling, so a session row and a name row agree on what "matched" looks like.
-    static func row(_ session: WireSession, swarm: WireSwarmAgent? = nil, highlighted ranges: [Range<String.Index>] = []) -> some View {
+    ///
+    /// `onCloud` is what the cloud icon does when tapped. Nil (a search result, which has no
+    /// route to push from there) draws the icon as a plain glyph; the icon is drawn at all only
+    /// when the session has live cloud machines.
+    static func row(_ session: WireSession, swarm: WireSwarmAgent? = nil, highlighted ranges: [Range<String.Index>] = [],
+                    onCloud: (() -> Void)? = nil) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
             // Gated on `activity` existing, not just on the flag: a fresh pairing (or a
@@ -799,6 +810,7 @@ struct FleetListScreen: View {
             }
             Spacer()
             SubagentCountBadge(session: session)
+            if let cloud = session.cloud { CloudIcon(cloud: cloud, action: onCloud) }
         }
     }
 

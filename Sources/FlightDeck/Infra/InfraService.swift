@@ -67,6 +67,10 @@ final class InfraService {
     let provenance: ResourceProvenance
     let hosts: HostService
     private let env: InfraEnvironment
+    /// Called after an `infra.*` request (or a `run --on` auto-up) finishes, however it ended:
+    /// `SessionCloudMonitor` refreshes then rather than waiting for its next tick, so the
+    /// sidebar and a phone see a machine appear or go at once.
+    var onOperationFinished: (() -> Void)?
     /// One provisioning task per tool: a second caller awaits the first's download instead of
     /// racing it into the same managed directory (Task 6 has no lock of its own).
     private var resolving: [InfraTool: Task<ResolvedTool, Error>] = [:]
@@ -932,6 +936,9 @@ final class InfraService {
 
     /// The service's clock, so a caller stamps every machine in one answer with the same `now`.
     var now: Date { env.now() }
+
+    /// The monthly dollar cap Settings → Cloud → Budget sets; nil with none.
+    var monthlyCapUSD: Double? { env.budget().monthlyCapUSD }
 
     /// Whole minutes, as `1h12m`; never negative, and `0m` rather than `0s`.
     static func span(_ interval: TimeInterval) -> String {

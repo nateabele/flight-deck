@@ -91,6 +91,15 @@ struct SessionTimelineScreen: View {
         .navigationTitle(session?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let cloud = session?.cloud {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(value: CloudRoute(session: model.sessionID)) {
+                        Image(systemName: CloudStyle.iconName(cloud))
+                    }
+                    .accessibilityLabel(CloudStyle.iconLabel(cloud))
+                    .accessibilityIdentifier("session-cloud-button")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showsInfo = true } label: {
                     Image(systemName: "gauge.with.dots.needle.50percent")
